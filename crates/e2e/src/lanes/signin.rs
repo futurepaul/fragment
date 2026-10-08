@@ -634,7 +634,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
 
     // what a page view costs the registry: a file answers alike for everyone
     // who may see the fragment, so the registry is asked only where it decides
-    let page = ["", "app.js", "style.css", "__fragment.js"];
+    let page = ["", "app.js", "style.css", "__fragment.js", "__fragment.css"];
     let mut costs = vec![];
     for (visibility, view) in [("public", ""), ("link", f_view.as_str()), ("members", "")] {
         api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;

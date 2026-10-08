@@ -22,6 +22,9 @@ pub mod limits {
     pub const OP_ID_MAX_BYTES: usize = 128;
     /// An operation name: `^[a-z][a-z0-9_]{0,63}$`.
     pub const OP_NAME_MAX_BYTES: usize = 64;
+    /// An operation's `description` (its MCP tool's, to a model), in
+    /// characters.
+    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// Operation input is a request, not an upload.
     pub const INPUT_MAX_BYTES: usize = 256 * 1024;
     /// Operation results must fit a Workflows step result.
@@ -32,9 +35,6 @@ pub mod limits {
     pub const MANIFEST_MAX_BYTES: usize = 256 * 1024;
     /// Declared operations per fragment.
     pub const OPERATIONS_MAX: usize = 256;
-    /// An operation's `description`, in characters (it makes the
-    /// operation an MCP tool: `fragment mcp`).
-    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -196,6 +196,22 @@ pub mod limits {
     pub const SEARCH_MESSAGES_MAX: usize = 50;
     /// A hit's snippet of its message.
     pub const SEARCH_SNIPPET_MAX_BYTES: usize = 300;
+    /// A draft (docs/api.md, Drafts): how long it lives unless it is
+    /// claimed, …
+    pub const DRAFT_TTL_MS: i64 = 24 * 3600 * 1000;
+    /// … the drafts one address (an IPv4 address, an IPv6 /64) and the
+    /// whole deployment start in a day (a key's own draft made again
+    /// counts once), …
+    pub const DRAFTS_PER_ADDRESS_PER_DAY: u64 = 10;
+    pub const DRAFTS_PER_DAY: u64 = 10_000;
+    /// … its writes a minute (operations that write, posts, file writes,
+    /// deploys, inbox deliveries, replays), …
+    pub const DRAFT_WRITES_PER_MIN: u32 = 60;
+    /// … its files at `main` in all (it holds no blobs), and its
+    /// supervisor's database (records, runs, events) past which it takes
+    /// no write.
+    pub const DRAFT_FILES_MAX_BYTES: u64 = 2 * 1024 * 1024;
+    pub const DRAFT_STORAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 }
 
 // A person's list keeps every entry one fragment sends it, and room for
@@ -245,12 +261,18 @@ pub fn valid_label(label: &str) -> bool {
 }
 
 /// Words no one may take as a username: the platform's own hosts and paths.
-pub const RESERVED_USERNAMES: [&str; 25] = [
+pub const RESERVED_USERNAMES: [&str; 26] = [
     "www", "api", "app", "apps", "auth", "admin", "root", "system", "platform", "fragment", "fragments", "static", "assets",
     "cdn", "mail", "docs", "blog", "help", "support", "status", "new", "cli", "anonymous", "operator",
     // a computer's origin is `<id>--computer` (computer.rs): never a fragment's host
     "computer",
+    // drafts are `<label>.draft`, made before anyone has an account (`DRAFT_USERNAME`)
+    "draft",
 ];
+
+/// What a draft's name has where a username goes (docs/api.md, Drafts):
+/// no one holds it, and it names fragments all the same.
+pub const DRAFT_USERNAME: &str = "draft";
 
 /// A username: chosen once, a label of 3 to 32 bytes, not reserved.
 pub fn valid_username(username: &str) -> bool {
@@ -260,15 +282,22 @@ pub fn valid_username(username: &str) -> bool {
 }
 
 /// A fragment's name: `<label>.<username>` (decision R16), served at
-/// `<label>--<username>.<suffix>` ([`flat_name`]).
+/// `<label>--<username>.<suffix>` ([`flat_name`]); a draft's is
+/// `<label>.draft`.
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
 }
 
-/// (label, username) of a fragment's name.
+/// (label, username) of a fragment's name (a draft's "username" is `draft`).
 pub fn split_fragment_name(name: &str) -> Option<(&str, &str)> {
     let (label, username) = name.split_once('.')?;
-    (valid_label(label) && valid_username(username)).then_some((label, username))
+    (valid_label(label) && (valid_username(username) || username == DRAFT_USERNAME)).then_some((label, username))
+}
+
+/// Whether a fragment's name is a draft's (made before an account, and
+/// named so for good: a claim keeps it).
+pub fn is_draft_name(name: &str) -> bool {
+    split_fragment_name(name).is_some_and(|(_, username)| username == DRAFT_USERNAME)
 }
 
 /// A fragment's name from its label and its owner's username.
@@ -288,7 +317,7 @@ pub fn flat_name(name: &str) -> Option<String> {
 /// The fragment a flat name (`<label>--<username>`) names.
 pub fn from_flat_name(flat: &str) -> Option<String> {
     let (label, username) = flat.split_once("--")?;
-    (valid_label(label) && valid_username(username)).then(|| fragment_name(label, username))
+    valid_fragment_name(&fragment_name(label, username)).then(|| fragment_name(label, username))
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -409,11 +438,15 @@ pub struct ErrorBody {
 
 /// A member's role in a fragment. `Public` is the floor anyone who can see
 /// the fragment holds; the others are granted. Ordered weakest first.
+/// `Contributor` (the share sheet's "Use") calls the operations and posts
+/// to the channels declared for it, and holds nothing an editor's role
+/// alone opens (files, deploys, secrets, blobs, replay, pause).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Public,
     Viewer,
+    Contributor,
     Editor,
     Owner,
 }
@@ -423,6 +456,7 @@ impl Role {
         match self {
             Role::Public => "public",
             Role::Viewer => "viewer",
+            Role::Contributor => "contributor",
             Role::Editor => "editor",
             Role::Owner => "owner",
         }
@@ -432,6 +466,7 @@ impl Role {
         match s {
             "public" => Some(Role::Public),
             "viewer" => Some(Role::Viewer),
+            "contributor" => Some(Role::Contributor),
             "editor" => Some(Role::Editor),
             "owner" => Some(Role::Owner),
             _ => None,
@@ -536,6 +571,26 @@ pub struct CreateFragment {
     pub title: Option<String>,
 }
 
+/// `POST /api/drafts`: a draft, signed by a key no one holds (docs/api.md,
+/// Drafts). Its name is the platform's, from the key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MakeDraft {
+    /// A template it starts from: `blank`, `todo`, `inbox` or `calories`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// A draft not yet claimed: when it ends, and where it is claimed. Its
+/// maker's `claim` carries the claim code (`?code=`); a link holder's is
+/// the page alone, which asks for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftStatus {
+    pub expires_at: i64,
+    pub claim: String,
+}
+
 /// The answer to a create.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -548,6 +603,9 @@ pub struct Created {
     pub inbox_token: String,
     pub repo: String,
     pub canonical: String,
+    /// A draft's (`POST /api/drafts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -611,6 +669,53 @@ pub struct FragmentStatus {
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_min_bytes: Option<u64>,
+    /// A draft not yet claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftStatus>,
+    /// What the page reported as its last preview card's shot loaded it
+    /// (docs/api.md, Cards); absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageReport>,
+}
+
+/// The errors a page reported as the platform loaded it for its preview
+/// card, as a visitor without an account sees it: as it loaded and in
+/// the second after, with no interaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageReport {
+    /// The live commit the shot loaded.
+    pub live: String,
+    /// When the shot landed (ms).
+    pub at: i64,
+    /// The first it reported, in order (at most `fragment_core::card::ERRORS_MAX`).
+    pub errors: Vec<PageError>,
+    /// How many more it reported past those.
+    pub dropped: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageError {
+    pub kind: PageErrorKind,
+    /// What the page or the browser said (cut to
+    /// `fragment_core::card::ERROR_BYTES_MAX`, as `source` is).
+    pub text: String,
+    /// The script or resource it names (`url`, or `url:line:column`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageErrorKind {
+    /// An uncaught exception or an unhandled rejection (a syntax error too).
+    Exception,
+    /// `console.error`, or a `console.assert` that failed.
+    Console,
+    /// A load that failed: the page itself, a script, an image, a fetch.
+    Network,
+    /// A load the browser refused for its security: a Content Security
+    /// Policy violation, mixed content.
+    Security,
 }
 
 /// A fragment the signer holds a role on.
@@ -647,6 +752,32 @@ pub struct ListedFragment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetArchived {
     pub archived: bool,
+}
+
+/// A client a person connected (docs/api.md, Connected clients): it acts
+/// as them on `resource`, an MCP server of the platform's, until it ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection {
+    /// 16 hex: what `DELETE /api/oauth/connections/{id}` names.
+    pub id: String,
+    /// What the client calls itself.
+    pub client: String,
+    /// Its OAuth client id: a registered client's, or the URL of its
+    /// metadata document.
+    pub client_id: String,
+    pub resource: String,
+    /// Its person let it change things there; else it only reads.
+    pub writes: bool,
+    pub created_at: i64,
+    /// When it ends unless its client renews it (each refresh does).
+    pub expires_at: i64,
+}
+
+/// `GET /api/oauth/connections`: the signer's, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connections {
+    pub connections: Vec<Connection>,
 }
 
 /// Its answer: the fragment, and whether it is archived now.
@@ -1006,8 +1137,9 @@ pub struct OpDecl {
     /// no replay (the same id runs again) and no effects (docs/MODEL.md).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
-    /// What it does, for an agent (1 to `limits::OP_DESCRIPTION_MAX_CHARS`
-    /// characters): an operation with one is a tool `fragment mcp` serves.
+    /// What it does, in words a model reads (1 to
+    /// `limits::OP_DESCRIPTION_MAX_CHARS` characters): an operation with one
+    /// is an MCP tool, of the fragment's `__mcp` and of `fragment mcp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -1391,6 +1523,12 @@ mod tests {
         for not in ["todo", "todo--", "--paul", "a--b--c", "Todo--paul", "todo--pa", "todo.x--paul"] {
             assert_eq!(from_flat_name(not), None, "{not}");
         }
+        // a draft's: no one takes `draft`, and it names fragments all the same
+        assert!(!valid_username(DRAFT_USERNAME));
+        assert!(valid_fragment_name("k3x9.draft") && is_draft_name("k3x9.draft"));
+        assert!(!is_draft_name("todo.paul") && !is_draft_name("draft.paul") && !is_draft_name("draft"));
+        assert_eq!(from_flat_name("k3x9--draft").as_deref(), Some("k3x9.draft"));
+        assert_eq!(flat_name("k3x9.draft").as_deref(), Some("k3x9--draft"));
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));
@@ -1472,8 +1610,8 @@ mod tests {
 
     #[test]
     fn roles_order_weakest_first() {
-        assert!(Role::Public < Role::Viewer && Role::Viewer < Role::Editor && Role::Editor < Role::Owner);
-        for r in [Role::Public, Role::Viewer, Role::Editor, Role::Owner] {
+        assert!(Role::Public < Role::Viewer && Role::Viewer < Role::Contributor && Role::Contributor < Role::Editor && Role::Editor < Role::Owner);
+        for r in [Role::Public, Role::Viewer, Role::Contributor, Role::Editor, Role::Owner] {
             assert_eq!(Role::parse(r.as_str()), Some(r));
             assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
         }

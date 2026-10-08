@@ -17,7 +17,8 @@
 //! (`deleteAll`).
 //!
 //! A delete keeps the life's code.storage repo (made again, the name finds
-//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators)
+//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators),
+//! and an unclaimed draft's end (its repo is its life's alone: drafts.rs),
 //! is the same end with its repo recorded beside it (`ended_repos`), which
 //! the alarm deletes with the rest, retried as the rest are: the life is
 //! cleaned up only once its repo is gone too.
@@ -121,6 +122,8 @@ impl FragmentCell {
         // newer than every change this life sent: each list takes it
         let version = version.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
         let facet = self.app_facet()?;
+        // an unclaimed draft's maker has no list to tell (drafts.rs)
+        let maker = self.draft()?.map(|d| fragment_core::drafts::maker(&d.key)).unwrap_or_default();
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
             "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -131,9 +134,9 @@ impl FragmentCell {
         // removed whose list was not told yet)
         self.exec(
             "INSERT INTO ended_index (incarnation, principal, version, next_at)
-             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox) WHERE true
+             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox) WHERE principal <> ?
              ON CONFLICT (incarnation, principal) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
+            vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now, maker.into()],
         )?;
         // its database goes with the alarm; nothing runs in it from now
         if let Err(e) = js::abort_app_facet(&self.raw, &facet, "the fragment was deleted") {
@@ -150,10 +153,11 @@ impl FragmentCell {
         Ok(Ended { owner })
     }
 
-    /// A wipe's end of this life (docs/api.md, Operators): `end_life`, and
-    /// its repo recorded for the alarm to delete, in the same synchronous
-    /// step (no await): a crash leaves the life whole, or ended with its
-    /// repo's delete recorded. A delete keeps its repo; a wipe never does.
+    /// A wipe's end of this life (docs/api.md, Operators), or an unclaimed
+    /// draft's: `end_life`, and its repo recorded for the alarm to delete,
+    /// in the same synchronous step (no await): a crash leaves the life
+    /// whole, or ended with its repo's delete recorded. A delete keeps its
+    /// repo; a wipe never does, nor a draft's end.
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;

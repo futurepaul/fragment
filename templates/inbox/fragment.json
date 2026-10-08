@@ -1,9 +1,10 @@
 {
   "name": "inbox",
   "operations": {
-    "ingest": { "kind": "job" },
+    "ingest": { "kind": "job", "description": "Handles the inbox's newest delivery: its trigger runs it for each one." },
     "add": {
       "kind": "mutation",
+      "description": "Adds an item to the feed, as a delivery does: its text and where it came from.",
       "input": {
         "type": "object",
         "required": ["text", "source"],
@@ -11,7 +12,12 @@
         "properties": { "text": { "type": "string", "maxLength": 2000 }, "source": { "type": "string", "maxLength": 200 } }
       }
     },
-    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+    "list": {
+      "kind": "query",
+      "role": "public",
+      "description": "The feed's newest 100 items: {items: [{id, text, source, at}]}.",
+      "input": { "type": "object", "additionalProperties": false }
+    }
   },
   "channels": { "feed": { "read": "public" } },
   "triggers": [{ "channel": "inbox", "run": "ingest" }],

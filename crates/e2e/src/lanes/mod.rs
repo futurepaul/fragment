@@ -3,15 +3,19 @@
 mod app;
 mod appfiles;
 mod blobs;
+mod board;
 mod brain;
+mod brief;
 mod chat;
 mod author;
 mod computers;
 mod control;
 mod credentials;
 mod delegation;
+mod drafts;
 mod deliver;
 mod frames;
+mod hook;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -19,6 +23,7 @@ mod keys;
 mod levers;
 mod ledger;
 mod limits;
+mod mcp;
 mod members;
 mod mind;
 mod mind_live;
@@ -30,8 +35,13 @@ mod share;
 mod shell;
 mod signin;
 mod site;
+mod split;
 mod sync;
 mod templates;
+mod wall;
+mod watcher;
+mod when;
+mod wiki;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -54,13 +64,19 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    drafts::drafts,
     levers::levers,
     members::secrets,
     delegation::delegation,
     plane::files,
     plane::deploy,
     templates::templates,
+    when::when,
+    wall::wall,
+    board::board,
+    split::split,
     share::share,
+    mcp::mcp,
     isolation::isolation,
     frames::frames,
     app::ops,
@@ -92,6 +108,10 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     notes::notes,
     brain::brain,
+    watcher::watcher,
+    brief::brief,
+    hook::hook,
+    wiki::wiki,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -122,8 +142,8 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
-    &["chat", "shell-ui", "wipe", "sync", "restart"],
-    &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
+    &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
+    &["when", "wall", "board", "split", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher", "brief", "hook", "wiki"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",

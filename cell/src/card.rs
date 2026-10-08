@@ -11,6 +11,8 @@
 //!   Browser Rendering session driven over CDP, the page opened as a
 //!   visitor without an account sees it (a link fragment's with its share
 //!   link), at 1280×800, as a JPEG; the session closed whatever happens.
+//!   As it loads the page and in the second after, it hears the page's
+//!   errors (`card::Heard`).
 //!   One shot is out per fragment at a time (a Durable Object runs one
 //!   alarm at a time); a deploy meanwhile is shot next, and the shot out
 //!   lands stale (newest wins). A try counts as failed from when it
@@ -20,16 +22,19 @@
 //!   image is checked, stored as one of the fragment's blobs, and made the
 //!   card; a failure is tried again from the alarm with a doubling wait,
 //!   then given up with one `card.failed` event, the card before kept.
+//!   The try that ends a live's tries, having opened the page, makes what
+//!   it heard the page's report (status's `page`), and one `page.errors`
+//!   event when the page reported any.
 //!
 //! Each read-modify-write of the schedule is one synchronous stretch: a
 //! deploy and the alarm interleave at their awaits, never inside one.
 
 use std::time::Duration;
 
-use fragment_core::card::{self, Cards, Next, Outcome, Pace, Skip, Verdict};
+use fragment_core::card::{self, Cards, Heard, Next, Outcome, Pace, Skip, Verdict};
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
-use fragment_proto::{ErrorCode, FragmentKind, Role};
+use fragment_proto::{ErrorCode, FragmentKind, PageErrorKind, Role};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -123,7 +128,7 @@ impl FragmentCell {
         // the life it is billed to and kept in: a delete meanwhile ends it
         let (life, meter) = (self.must(MetaKey::CreatedAt)?, card::meter_ref(&self.meter_key()?, &shot));
         let t0 = js::now_ms();
-        let (closed, image) = take(&self.env, &page).await;
+        let (closed, image, heard) = take(&self.env, &page).await;
         // no session acquired: nothing to bill
         let ms = closed.map_or(0, |closed| card::billed_ms(u64::try_from(js::now_ms() - t0).unwrap_or(0), closed));
         if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
@@ -145,8 +150,9 @@ impl FragmentCell {
             }
             Err(f) => (Outcome::Failed { retry: f.retry }, f.why),
         };
-        let mut cards = self.cards()?;
-        let verdict = cards.landed(&shot, outcome, js::now_ms(), self.card_pace()).map_err(|_| CellError::host("a card's blob is its SHA-256"))?;
+        let (mut cards, now) = (self.cards()?, js::now_ms());
+        let verdict = cards.landed(&shot, outcome, now, self.card_pace()).map_err(|_| CellError::host("a card's blob is its SHA-256"))?;
+        let report = heard.and_then(|heard| cards.report(&verdict, &shot.live, heard, now)).cloned();
         self.keep_cards(&cards)?;
         console_log!("{}", json!({ "card": self.name()?, "attempt": shot.attempt, "ms": ms, "verdict": format!("{verdict:?}") }));
         match verdict {
@@ -157,6 +163,9 @@ impl FragmentCell {
             Verdict::GaveUp { failures } => self.card_failed(failures, &why),
             // a retry and a stale shot are quiet
             Verdict::Retry { .. } | Verdict::Stale => {}
+        }
+        if let Some(report) = report.filter(|r| !r.errors.is_empty()) {
+            self.event("page.errors", &card::summary(&report), json!(report));
         }
         Ok(())
     }
@@ -177,6 +186,10 @@ impl FragmentCell {
             Err(skip) => return Ok(Err(skip)),
         };
         let origin = self.cfg.outside_origin(&self.name()?);
+        // an unclaimed draft's maker pays for nothing (drafts.rs)
+        if self.draft()?.is_some() {
+            return Ok(Err(Skip::OwnerPays));
+        }
         let owner = self.must(MetaKey::Owner)?;
         match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Create, fragment: None, by_owner: true }).await {
             Ok(_) => {}
@@ -228,18 +241,19 @@ impl Failure {
 /// CDP over its WebSocket (`GET /v1/devtools/browser/{id}`), then the
 /// session closed (`DELETE`), as `@cloudflare/puppeteer` speaks to the
 /// binding. Answers whether a session was acquired and then closed
-/// (`None`: none was), and the image or why there is none.
-async fn take(env: &Env, page: &str) -> (Option<bool>, Result<Vec<u8>, Failure>) {
+/// (`None`: none was), the image or why there is none, and what the page
+/// reported (`None` unless it was opened).
+async fn take(env: &Env, page: &str) -> (Option<bool>, Result<Vec<u8>, Failure>, Option<Heard>) {
     let deadline = js::now_ms() + card::SHOT_TIMEOUT_MS as i64;
     let session = match within(deadline, acquire(env)).await {
         Some(Ok(s)) => s,
-        Some(Err(f)) => return (None, Err(f)),
+        Some(Err(f)) => return (None, Err(f), None),
         // a session may have been made that no one will close: billed as one
-        None => return (Some(false), Err(Failure::retry("Browser Rendering gave no session in time"))),
+        None => return (Some(false), Err(Failure::retry("Browser Rendering gave no session in time")), None),
     };
-    let image = within(deadline, drive(env, &session, page, deadline)).await.unwrap_or_else(|| Err(Failure::retry("the shot did not finish in time")));
+    let (image, heard) = within(deadline, drive(env, &session, page, deadline)).await.unwrap_or_else(|| (Err(Failure::retry("the shot did not finish in time")), None));
     let closed = within(js::now_ms() + RELEASE_TIMEOUT_MS, release(env, &session)).await.unwrap_or(false);
-    (Some(closed), image)
+    (Some(closed), image, heard)
 }
 
 /// How long the session's close is waited for.
@@ -289,8 +303,27 @@ async fn release(env: &Env, session: &str) -> bool {
 
 /// The CDP half: a page target at the viewport, the page opened, its load
 /// waited for (at most `LOAD_TIMEOUT_MS`), `SETTLE_MS` more, then a JPEG
-/// at each of `QUALITIES` until one fits.
-async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> Result<Vec<u8>, Failure> {
+/// at each of `QUALITIES` until one fits; and what the page reported
+/// meanwhile, once it was opened.
+async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> (Result<Vec<u8>, Failure>, Option<Heard>) {
+    let ws = match socket(env, session).await {
+        Ok(ws) => ws,
+        Err(f) => return (Err(f), None),
+    };
+    let events = match ws.events() {
+        Ok(events) => events,
+        Err(e) => return (Err(Failure::retry(e.to_string())), None),
+    };
+    let mut cdp = Cdp { ws: &ws, events, next_id: 0, target_session: None, loaded: false, opened: false, heard: Heard::default() };
+    let out = shoot(&mut cdp, page, deadline).await;
+    let heard = cdp.opened.then(|| std::mem::take(&mut cdp.heard));
+    drop(cdp);
+    let _ = ws.close(Some(1000), Some("shot"));
+    (out, heard)
+}
+
+/// The session's CDP socket, accepted.
+async fn socket(env: &Env, session: &str) -> Result<WebSocket, Failure> {
     let headers = Headers::new();
     headers.set("upgrade", "websocket").map_err(|e| Failure::retry(e.to_string()))?;
     let mut init = RequestInit::new();
@@ -300,12 +333,7 @@ async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> Result<Ve
     let status = resp.status_code();
     let ws = resp.websocket().ok_or_else(|| Failure::retry(format!("Browser Rendering answered {status}, not a CDP socket")))?;
     ws.accept().map_err(|e| Failure::retry(e.to_string()))?;
-    let events = ws.events().map_err(|e| Failure::retry(e.to_string()))?;
-    let mut cdp = Cdp { ws: &ws, events, next_id: 0, target_session: None, loaded: false };
-    let out = shoot(&mut cdp, page, deadline).await;
-    drop(cdp);
-    let _ = ws.close(Some(1000), Some("shot"));
-    out
+    Ok(ws)
 }
 
 async fn shoot(cdp: &mut Cdp<'_>, page: &str, deadline: i64) -> Result<Vec<u8>, Failure> {
@@ -315,11 +343,16 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &str, deadline: i64) -> Result<Vec<u8>, 
     cdp.target_session = Some(attached["sessionId"].as_str().ok_or_else(|| Failure::retry("no target session"))?.to_string());
     let viewport = json!({ "width": card::WIDTH, "height": card::HEIGHT, "deviceScaleFactor": card::SCALE, "mobile": false });
     cdp.call("Emulation.setDeviceMetricsOverride", viewport, deadline).await?;
-    cdp.call("Page.enable", json!({}), deadline).await?;
+    for domain in ["Page", "Runtime", "Log"] {
+        cdp.call(&format!("{domain}.enable"), json!({}), deadline).await?;
+    }
     let opened = cdp.call("Page.navigate", json!({ "url": page }), deadline).await?;
+    cdp.opened = true;
     if let Some(e) = opened["errorText"].as_str() {
         // Chrome's net error names no URL (the page's may hold the share link)
-        return Err(Failure::retry(format!("the page did not open: {e}")));
+        let why = format!("the page did not open: {e}");
+        cdp.heard.keep(PageErrorKind::Network, &why, None);
+        return Err(Failure::retry(why));
     }
     let load_by = deadline.min(js::now_ms() + card::LOAD_TIMEOUT_MS as i64);
     cdp.loaded(load_by).await?;
@@ -346,6 +379,9 @@ struct Cdp<'ws> {
     target_session: Option<String>,
     /// The page target fired its load event.
     loaded: bool,
+    /// The page target was sent to the page, and what it reported.
+    opened: bool,
+    heard: Heard,
 }
 
 /// A CDP connection says at most this many things between a command and
@@ -366,8 +402,9 @@ impl Cdp<'_> {
             Either::Left((Some(Ok(WebsocketEvent::Message(m))), _)) => {
                 let text = m.text().or_else(|| m.bytes().map(|b| String::from_utf8_lossy(&b).into_owned())).unwrap_or_default();
                 let v: Value = serde_json::from_str(&text).map_err(|_| Failure::retry("CDP said something that is not JSON"))?;
-                if v["method"] == "Page.loadEventFired" && v["sessionId"].as_str() == self.target_session.as_deref() {
-                    self.loaded = true;
+                if self.target_session.is_some() && v["sessionId"].as_str() == self.target_session.as_deref() {
+                    self.loaded |= v["method"] == "Page.loadEventFired";
+                    self.heard.hear(&v);
                 }
                 Ok(Some(v))
             }

@@ -70,10 +70,36 @@ pub enum Step {
     /// hold them (`{id, principal, data}`, one a socket that shares any).
     #[serde(rename = "presence")]
     Presence {},
+    /// `job.blob(sha256)`: one of the fragment's blobs (a page's upload, a
+    /// chat's attachment), its size and its first `BLOB_READ_MAX_BYTES` as
+    /// text when they are UTF-8 (`blob_read`).
+    #[serde(rename = "blob")]
+    Blob { sha256: String },
 }
 
 /// The identities one `job.people` step names: a page's `__people` limit.
 pub const PEOPLE_MAX: usize = 64;
+
+/// What one `job.blob` step reads of a blob, at most.
+pub const BLOB_READ_MAX_BYTES: usize = 64 * 1024;
+
+/// `job.blob`'s answer for a blob of `size` bytes whose first bytes are
+/// `head` (at most `BLOB_READ_MAX_BYTES`): `{sha256, size, text, cut}`.
+/// `text` is the head as UTF-8, less a last character the cut split, or
+/// null when it is not text (bytes that are not UTF-8, or a NUL); `cut`,
+/// whether the blob goes on past its head.
+pub fn blob_read(sha256: &str, size: u64, head: &[u8]) -> Value {
+    assert!(head.len() <= BLOB_READ_MAX_BYTES, "a blob's head is at most {BLOB_READ_MAX_BYTES} bytes");
+    let cut = size > head.len() as u64;
+    let text = match std::str::from_utf8(head) {
+        Ok(t) => Some(t),
+        // only the cut may leave a character unfinished, at the very end
+        Err(e) if cut && e.error_len().is_none() => std::str::from_utf8(&head[..e.valid_up_to()]).ok(),
+        Err(_) => None,
+    };
+    let text = text.filter(|t| !t.contains('\0'));
+    serde_json::json!({ "sha256": sha256, "size": size, "text": text, "cut": cut })
+}
 
 /// `job.fetch`'s request. Header values may name secrets as `{{NAME}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -321,6 +347,7 @@ impl Step {
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
+            Step::Blob { .. } => "blob",
         }
     }
 }
@@ -400,13 +427,14 @@ mod tests {
             ("members", json!({})),
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
+            ("blob", json!({ "sha256": "ab".repeat(32) })),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 19, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -520,5 +548,21 @@ mod tests {
         let slept: StepResult = serde_json::from_value(json!({ "kind": "sleep", "value": null })).unwrap();
         assert_eq!(slept.outcome, StepOutcome::Value(Value::Null));
         assert!(serde_json::from_value::<StepResult>(json!({ "kind": "call" })).is_err(), "a result names its outcome");
+    }
+
+    /// A blob's head is text when it is UTF-8 with no NUL, less a last
+    /// character its cut split; else null, cut or whole.
+    #[test]
+    fn a_blob_reads_as_text_when_it_is() {
+        let sha = "ab".repeat(32);
+        let read = |size: u64, head: &[u8]| blob_read(&sha, size, head);
+        assert_eq!(read(5, b"hello"), json!({ "sha256": sha, "size": 5, "text": "hello", "cut": false }));
+        let snow = "a☃".as_bytes();
+        assert_eq!(read(100, &snow[..3])["text"], "a", "a character the cut split is dropped");
+        assert_eq!(read(100, &snow[..3])["cut"], true);
+        assert_eq!(read(3, &snow[..3])["text"], Value::Null, "an unfinished character with nothing cut is no text");
+        assert_eq!(read(4, &[0x61, 0xff, 0x62, 0x63])["text"], Value::Null, "bytes that are not UTF-8");
+        assert_eq!(read(3, b"a\0b")["text"], Value::Null, "a NUL is binary's");
+        assert_eq!(read(0, b""), json!({ "sha256": sha, "size": 0, "text": "", "cut": false }));
     }
 }

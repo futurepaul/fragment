@@ -640,6 +640,8 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
         return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[]);
     }
     let (label, ask) = match fragment_proto::split_fragment_name(name) {
+        // a draft's name names no one (its claimer's keeps it)
+        Some((label, fragment_proto::DRAFT_USERNAME)) => (label, "its owner".to_string()),
         Some((label, owner)) => (label, format!("its owner, <b>@{}</b>,", esc(owner))),
         None => (name, "its owner".to_string()),
     };

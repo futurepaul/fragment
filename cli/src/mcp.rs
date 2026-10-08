@@ -3,9 +3,12 @@
 //! server"). JSON-RPC 2.0, one message per line each way. Stdout carries
 //! the protocol's messages and nothing else: a log line goes to stderr.
 //!
-//! A tool is an operation whose `fragment.json` entry has a `description`
-//! and that the caller's role may call: a query always, a mutation or a job
-//! only with `--write`. Its input schema is the operation's. A call is
+//! Its tools are the fragment's own MCP server's (`<origin>/__mcp`, for a
+//! connected client), by the same rules and the same code
+//! (`fragment_core::mcp`): an operation whose `fragment.json` entry has a
+//! `description` and that the caller's role may call, a query always, a
+//! mutation or a job only with `--write` (a connection's "also change
+//! things"). Its arguments are the operation's input. A call is
 //! `POST /api/f/<fragment>/ops/<op>` with a fresh id, through the CLI's own
 //! client: signed with this machine's key, or, inside a computer, named as
 //! its agent for the computer's egress to sign (`FRAGMENT_AS_AGENT`).
@@ -14,8 +17,9 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
 
 use anyhow::Result;
-use fragment_proto::{FragmentStatus, OpCall, OpDecl, OpKind, OpResult};
-use serde_json::{json, Map, Value};
+use fragment_core::mcp::{call_of, called, instructions, not_served, refused, served, tools_of};
+use fragment_proto::{FragmentStatus, OpCall, OpDecl, OpResult, Role};
+use serde_json::{json, Value};
 
 use crate::api::Client;
 
@@ -36,18 +40,14 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
-/// A tool as served: its operation's kind and its MCP definition.
-struct Tool {
-    kind: OpKind,
-    def: Value,
-}
-
-/// The server: the fragment it serves, and the tools it last read.
+/// The server: the fragment it serves, and its operations and the
+/// caller's role there as it last read them.
 pub struct Server<'a> {
     client: &'a Client,
     fragment: String,
     write: bool,
-    tools: BTreeMap<String, Tool>,
+    operations: BTreeMap<String, OpDecl>,
+    role: Role,
 }
 
 /// An error answered as JSON-RPC's `error`.
@@ -65,7 +65,7 @@ impl RpcError {
 /// Serves `fragment`'s tools to the client on `input` and `output` until
 /// the client closes `input`.
 pub fn serve(client: &Client, fragment: &str, write: bool, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
-    let mut server = Server { client, fragment: fragment.to_string(), write, tools: BTreeMap::new() };
+    let mut server = Server { client, fragment: fragment.to_string(), write, operations: BTreeMap::new(), role: Role::Public };
     let mut line = Vec::new();
     loop {
         let answer = match read_line(&mut input, &mut line)? {
@@ -152,18 +152,18 @@ impl Server<'_> {
                 let offered = params.get("protocolVersion").and_then(Value::as_str);
                 let version = offered.filter(|v| VERSIONS.contains(v)).unwrap_or(PROTOCOL_VERSION);
                 self.read_tools()?;
-                let served = if self.write { "queries, mutations and jobs (--write)" } else { "queries only (read-only)" };
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": "fragment", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": format!("These tools are the described operations of the fragment {}: {served}.", self.fragment),
+                    "serverInfo": { "name": "fragment", "title": self.fragment, "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": instructions(&self.fragment, self.write),
                 }))
             }
             "ping" => Ok(json!({})),
             "tools/list" => {
                 self.read_tools()?;
-                Ok(json!({ "tools": self.tools.values().map(|t| t.def.clone()).collect::<Vec<_>>() }))
+                let role = self.role;
+                Ok(json!({ "tools": tools_of(&self.operations, self.write, |d| d.role <= role) }))
             }
             "tools/call" => self.call(params),
             other => Err(RpcError::new(METHOD_NOT_FOUND, format!("no method {other:?}: this server serves tools (initialize, ping, tools/list, tools/call)"))),
@@ -174,88 +174,40 @@ impl Server<'_> {
     fn read_tools(&mut self) -> Result<(), RpcError> {
         let read = self.client.get(&format!("/api/f/{}/status", self.fragment)).and_then(|r| self.client.call_as::<FragmentStatus>(r));
         let status = read.map_err(|e| RpcError::new(INTERNAL_ERROR, format!("reading {}'s operations: {e:#}", self.fragment)))?;
-        self.tools = tools_of(&status, self.write);
+        self.operations = status.code.operations;
+        self.role = status.role;
         Ok(())
     }
 
+    /// A tool's call: a served operation's (`fragment_core::mcp::served`),
+    /// whose refusals (a role, a schema, the app's) are the tool's error, as
+    /// the fragment's own server answers them.
     fn call(&mut self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call names its tool (params.name)"))?;
-        let input = match params.get("arguments") {
-            None | Some(Value::Null) => Value::Object(Map::new()),
-            Some(args @ Value::Object(_)) => args.clone(),
-            Some(_) => return Err(RpcError::new(INVALID_PARAMS, "a tool's arguments are an object")),
-        };
-        // a tool the client knows of and this server does not: deployed since
-        if !self.tools.contains_key(name) {
+        let input = call_of(params.get("arguments").unwrap_or(&Value::Null)).map_err(|why| RpcError::new(INVALID_PARAMS, why))?;
+        // an operation the client knows of and this server does not: deployed since
+        if !self.operations.contains_key(name) {
             self.read_tools()?;
         }
-        let Some(tool) = self.tools.get(name) else {
+        let Some(decl) = self.operations.get(name) else {
             return Err(RpcError::new(INVALID_PARAMS, format!("no tool {name:?} (tools/list lists them)")));
         };
-        assert!(tool.kind == OpKind::Query || self.write, "a tool that writes is served only with --write");
+        if !served(decl, self.write) {
+            return Err(RpcError::new(INVALID_PARAMS, not_served(name, decl, self.write)));
+        }
         // a fresh id: each call is an action of its own (a retry inside the
         // client reuses it, so the call runs once)
-        let id = format!("mcp-{:016x}", rand::random::<u64>());
-        let call = OpCall { id: id.clone(), input };
+        let call = OpCall { id: format!("mcp-{:016x}", rand::random::<u64>()), input };
         let path = format!("/api/f/{}/ops/{name}", self.fragment);
         let answer = self.client.post_json_by_id(&path, &call).and_then(|r| self.client.call_as::<OpResult>(r));
         Ok(match answer {
-            Ok(done) => json!({ "content": [{ "type": "text", "text": text_of(&done.result) }], "isError": false }),
+            Ok(done) => called(&serde_json::to_value(&done).expect("an answer serializes")),
             Err(e) => {
                 let code = e.downcast_ref::<crate::api::CodedError>().map_or("server_error", |c| c.code.as_str());
-                json!({ "content": [{ "type": "text", "text": format!("{e:#} ({code}; operation id {id})") }], "isError": true })
+                refused(code, &format!("{e:#}"))
             }
         })
     }
-}
-
-/// A result as a tool answers it: a `text` the operation rendered (a
-/// mind's view, zoom, date) as it is, anything else as pretty JSON.
-fn text_of(result: &Value) -> String {
-    match result.get("text") {
-        Some(Value::String(text)) => text.clone(),
-        _ => serde_json::to_string_pretty(result).expect("a JSON value serializes"),
-    }
-}
-
-/// The tools a status declares: each described operation the caller's role
-/// may call, a query always and the rest with `write`.
-fn tools_of(status: &FragmentStatus, write: bool) -> BTreeMap<String, Tool> {
-    let mut tools = BTreeMap::new();
-    for (name, op) in &status.code.operations {
-        let Some(description) = &op.description else { continue };
-        if (op.kind != OpKind::Query && !write) || op.role > status.role {
-            continue;
-        }
-        let Some(schema) = input_schema(op) else {
-            eprintln!("fragment mcp: {name} takes no object, and a tool's arguments are one: it is not served");
-            continue;
-        };
-        let mut def = json!({ "name": name, "description": description, "inputSchema": schema });
-        if op.kind == OpKind::Query {
-            def["annotations"] = json!({ "readOnlyHint": true });
-        }
-        tools.insert(name.clone(), Tool { kind: op.kind, def });
-    }
-    tools
-}
-
-/// An operation's input schema as a tool's: an object's (MCP's arguments
-/// are one), `{"type": "object"}` when it declares none, and none when it
-/// declares another type.
-fn input_schema(op: &OpDecl) -> Option<Value> {
-    let Some(Value::Object(schema)) = &op.input else {
-        return Some(json!({ "type": "object" }));
-    };
-    let mut schema = schema.clone();
-    match schema.get("type") {
-        None => {
-            schema.insert("type".into(), "object".into());
-        }
-        Some(Value::String(t)) if t == "object" => {}
-        Some(_) => return None,
-    }
-    Some(Value::Object(schema))
 }
 
 #[cfg(test)]
@@ -370,34 +322,39 @@ mod tests {
                 request(7, "tools/call", json!({ "name": "note", "arguments": { "text": "x" } })),
                 request(8, "tools/call", json!({ "name": "zoom", "arguments": { "id": 9, "n": 1 } })),
                 request(9, "tools/call", json!({ "name": "view" })),
+                request(10, "tools/call", json!({ "name": "fresh" })),
             ],
         );
-        assert_eq!(answers.len(), 9, "every request answered, the notification not: {answers:?}");
+        assert_eq!(answers.len(), 10, "every request answered, the notification not: {answers:?}");
         let init = &answers[0]["result"];
         assert_eq!((answers[0]["jsonrpc"].as_str(), answers[0]["id"].as_i64()), (Some("2.0"), Some(1)));
         assert_eq!(init["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(init["capabilities"], json!({ "tools": { "listChanged": false } }));
         assert_eq!(init["serverInfo"]["name"], "fragment");
-        assert!(init["instructions"].as_str().is_some_and(|i| i.contains("mind.paul") && i.contains("read-only")), "{init}");
+        assert_eq!(init["instructions"], fragment_core::mcp::instructions("mind.paul", false), "the fragment's own server's words");
         assert_eq!(answers[1], json!({ "jsonrpc": "2.0", "id": 2, "result": {} }), "ping");
         assert_eq!(names(&answers[2]), ["search", "view", "zoom"], "described queries the caller may call, whose input is an object");
         let tools = answers[2]["result"]["tools"].as_array().unwrap();
         let view = &tools[1];
         assert_eq!(view["description"], "The rendered view of the whole memory.");
         assert_eq!(view["inputSchema"], json!({ "type": "object" }), "no input schema: any object");
-        assert_eq!(view["annotations"], json!({ "readOnlyHint": true }));
+        assert_eq!(view["annotations"], json!({ "readOnlyHint": true, "openWorldHint": false }));
         assert_eq!(tools[2]["inputSchema"]["required"], json!(["id", "n"]), "the operation's own schema");
         assert_eq!(tools[0]["inputSchema"], json!({ "type": "object", "properties": { "q": { "type": "string" } } }), "an object's schema says so");
+        let ops: BTreeMap<String, OpDecl> = serde_json::from_value(mind_ops()).unwrap();
+        assert_eq!(tools, &fragment_core::mcp::tools_of(&ops, false, |d| d.role <= Role::Editor), "the tools the fragment's own server lists");
         let text = |a: &Value| a["result"]["content"][0]["text"].as_str().unwrap_or("").to_string();
         assert_eq!((text(&answers[3]), &answers[3]["result"]["isError"]), ("<chat>\n0|user: hi\n</chat>".to_string(), &json!(false)), "a result's text, as it is");
         assert_eq!(answers[3]["result"]["content"][0]["type"], "text");
+        assert_eq!(answers[3]["result"]["structuredContent"]["result"]["bytes"], 30, "and the whole answer, structured");
         assert_eq!(text(&answers[4]), "zoomed 3");
         assert_eq!(serde_json::from_str::<Value>(&text(&answers[5])).unwrap(), json!({ "results": [{ "i": 1, "snippet": "hi" }] }), "anything else as JSON");
-        assert!(text(&answers[5]).contains("\n  "), "pretty");
         assert_eq!(answers[6]["error"]["code"], INVALID_PARAMS, "a mutation is no tool without --write: {}", answers[6]);
+        assert!(answers[6]["error"]["message"].as_str().is_some_and(|m| m.contains("may only read")), "{}", answers[6]);
         assert_eq!(answers[7]["result"]["isError"], true, "a refusal is the tool's error");
-        assert!(text(&answers[7]).contains("the app threw: no message 9") && text(&answers[7]).contains("app_failed"), "{}", text(&answers[7]));
+        assert!(text(&answers[7]).starts_with("app_failed: ") && text(&answers[7]).contains("the app threw: no message 9"), "{}", text(&answers[7]));
         assert_eq!(text(&answers[8]), "<chat>\n0|user: hi\n</chat>", "arguments may be left out");
+        assert_eq!(answers[9]["error"]["code"], INVALID_PARAMS, "an operation it does not have");
 
         let seen = seen.lock().unwrap();
         let calls: Vec<&(String, String, Value, Option<String>)> = seen.iter().filter(|r| r.0 == "POST").collect();
@@ -419,11 +376,11 @@ mod tests {
             true,
             &[initialize(1, PROTOCOL_VERSION), request(2, "tools/list", json!({})), request(3, "tools/call", json!({ "name": "note", "arguments": { "text": "x" } }))],
         );
-        assert!(answers[0]["result"]["instructions"].as_str().is_some_and(|i| i.contains("--write")));
+        assert_eq!(answers[0]["result"]["instructions"], fragment_core::mcp::instructions("mind.paul", true));
         assert_eq!(names(&answers[1]), ["note", "search", "suggest", "view", "zoom"]);
         let note = answers[1]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "note").unwrap().clone();
-        assert!(note.get("annotations").is_none(), "a write claims no read-only hint: {note}");
-        assert_eq!(answers[2]["result"]["content"][0]["text"], "{\n  \"i\": 7\n}");
+        assert_eq!(note["annotations"]["readOnlyHint"], false, "a write says it writes: {note}");
+        assert_eq!(answers[2]["result"]["content"][0]["text"], r#"{"i":7}"#);
     }
 
     /// The caller's role bounds the tools: an owner sees the owner's.
@@ -494,13 +451,5 @@ mod tests {
             assert_eq!(a["error"]["code"], INTERNAL_ERROR);
             assert!(a["error"]["message"].as_str().is_some_and(|m| m.contains("nope.paul") && m.contains("no fragment named")), "{a}");
         }
-    }
-
-    #[test]
-    fn a_result_with_text_is_that_text() {
-        assert_eq!(text_of(&json!({ "text": "2026-10-07T09:00:00-05:00" })), "2026-10-07T09:00:00-05:00");
-        assert_eq!(text_of(&json!({ "text": 7 })), "{\n  \"text\": 7\n}", "a text that is no string is data");
-        assert_eq!(text_of(&json!(null)), "null");
-        assert_eq!(text_of(&json!([1])), "[\n  1\n]");
     }
 }

@@ -4,11 +4,31 @@
 // it was made from and down to its message (`node`), and a thread's card
 // opens to its messages (`thread`), each without leaving the screen.
 
-import { F, S, persona, putThread, titleOf } from "./store.js";
-import { ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, when } from "./ui.js";
+import { F, S, blobUrl, filesOf, persona, putThread, titleOf } from "./store.js";
+import { WEB_TOOLS, ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, size, when } from "./ui.js";
 
 /// The widest `context` asks on either side (fragment.json).
 const CONTEXT_MAX = 50;
+/// The images and audio `__blob` serves as themselves (passive media):
+/// shown, and played; anything else downloads.
+const SHOWN_IMAGE = /^image\/(png|jpeg|webp|gif)$/;
+const SHOWN_AUDIO = /^audio\/(webm|ogg|mp4|mpeg|wav)\b/;
+
+/// A message's files (`attachments`): an image shows, audio plays, and any
+/// other is a chip that downloads it, each read at `__blob/<sha256>`.
+export function filesNode(list) {
+  return h(
+    "div.files",
+    null,
+    list.map((a) => {
+      const href = blobUrl(a.sha256);
+      const name = a.name || "a file";
+      if (SHOWN_IMAGE.test(a.type)) return h("a.file-image", { href, target: "_blank", rel: "noopener", title: name }, h("img", { src: href, alt: name, loading: "lazy" }));
+      if (SHOWN_AUDIO.test(a.type)) return h("div.file-audio", { title: name }, icon("file"), h("audio", { controls: true, preload: "metadata", src: href, "aria-label": name }));
+      return h("a.file-chip", { href, download: a.name || a.sha256.slice(0, 12), title: `Download ${name}` }, icon("file"), h("span.file-name", { text: name }), a.size != null ? h("span.file-size", { text: size(a.size) }) : null, icon("download"));
+    }),
+  );
+}
 
 export const go = (path) => {
   if (location.hash !== `#${path}`) location.hash = path;
@@ -66,7 +86,7 @@ export function miniMessage(m, { focus = false, q = "" } = {}) {
     `div.mini.mini-${kind}${focus ? ".focus" : ""}`,
     null,
     h("div.mini-head", null, m.kind === "talk" ? avatar(p, "xs") : null, h("span.mini-who", { text: who(m) }), h("time", { text: when(m.at), datetime: new Date(m.at).toISOString() })),
-    h("div.mini-body", null, body),
+    h("div.mini-body", null, body, filesOf(m.attachments).length ? filesNode(filesOf(m.attachments)) : null),
   );
 }
 
@@ -75,9 +95,11 @@ export function miniMessage(m, { focus = false, q = "" } = {}) {
 export function excerpt(msgs, { focus = null, q = "" } = {}) {
   const out = [];
   let looked = 0;
+  let web = false;
   const flush = () => {
-    if (looked) out.push(h("div.mini-looked", null, icon("layers"), `Looked through memory ×${looked}`));
+    if (looked) out.push(h("div.mini-looked", null, icon(web ? "globe" : "layers"), `${web ? "Looked things up" : "Looked through memory"} ×${looked}`));
     looked = 0;
+    web = false;
   };
   for (const m of msgs) {
     if (m.kind === "tool" || m.kind === "echo") {
@@ -85,7 +107,10 @@ export function excerpt(msgs, { focus = null, q = "" } = {}) {
       if (call?.name === "computer") {
         flush();
         out.push(h("div.mini-looked.hands", null, icon("monitor"), `Handed to the computer: ${firstLine(call.args?.task ?? "", 70)}`));
-      } else if (call) looked++;
+      } else if (call) {
+        looked++;
+        web ||= WEB_TOOLS.has(call.name);
+      }
       continue;
     }
     flush();

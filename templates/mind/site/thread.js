@@ -8,9 +8,12 @@
 // they come, its words as they stream, then its report. The mind's reply
 // streams in as `log`'s draft `turn:<thread>` until its `talk` arrives.
 
-import { avatar, contextView, go, memRow, topicChip } from "./pieces.js";
+import { avatar, contextView, filesNode, go, memRow, topicChip } from "./pieces.js";
 import {
+  EMBED,
   F,
+  FILES_MAX,
+  FILE_MAX_BYTES,
   PENDING_MS,
   S,
   busy,
@@ -29,16 +32,20 @@ import {
   say,
   stop,
 } from "./store.js";
-import { clock, dayLabel, firstLine, greeting, h, icon, iconButton, md, parseTool, plural, reconcile, reportOf, threadId, viewLines, when, copyButton } from "./ui.js";
+import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconButton, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
 
 /// A message's longest text (the log caps at 30 000 characters).
 const TEXT_MAX = 30_000;
 const MEMORY_TOOLS = new Set(["zoom", "search", "date"]);
+/// The most of a web page or a research answer a step shows.
+const WEB_SHOWN = 6000;
 /// Steps a hand-off card shows before "N earlier".
 const CARD_STEPS = 4;
 
 // unsent words, by thread ("" for New chat), kept across screens
 const unsent = new Map();
+// files picked for a thread's next message (File objects), kept the same way
+const unsentFiles = new Map();
 // a persona picked for a thread's next message
 const picked = new Map();
 // what is open in threads: steps rows, hand-off cards, reports
@@ -83,7 +90,8 @@ function personaMenu(anchor, current, onPick) {
 }
 
 /// The composer: a thread's (`thread` an id), or New chat's (null), which
-/// makes the thread with its first message.
+/// makes the thread with its first message. Files come from its paperclip,
+/// a paste, or a drop (`droppable`), and go with the message.
 export function composer(thread, { onSent } = {}) {
   const key = thread ?? "";
   const ta = h("textarea.input", { rows: 1, "aria-label": "Message", maxlength: TEXT_MAX, value: unsent.get(key) ?? "" });
@@ -92,16 +100,67 @@ export function composer(thread, { onSent } = {}) {
   const stopBtn = h("button.round.stop", { type: "button", "aria-label": "Stop", title: "Stop" }, icon("stop"));
   const sendBtn = h("button.round.send", { type: "submit", "aria-label": "Send", title: "Send (Enter)" }, icon("send"));
   const hint = h("span.composer-hint");
-  const form = h("form.composer", null, ta, h("div.composer-row", null, h("div.chip-wrap", null, chip), hint, h("span.grow"), stopBtn, sendBtn));
+  const files = unsentFiles.get(key) ?? [];
+  unsentFiles.set(key, files);
+  const tray = h("div.files.tray", { hidden: !files.length });
+  const picker = h("input", { type: "file", multiple: true, hidden: true, tabindex: "-1", "aria-hidden": "true" });
+  const attach = iconButton("paperclip", "Attach files", () => picker.click(), "attach");
+  const form = h("form.composer", null, tray, ta, h("div.composer-row", null, h("div.chip-wrap", null, chip), attach, hint, h("span.grow"), stopBtn, sendBtn), picker);
 
   const personaId = () => picked.get(key) ?? (thread ? S.threads.get(thread)?.persona : null) ?? currentPersona().id;
   const coarse = matchMedia("(pointer: coarse)").matches;
+  const ready = () => !!ta.value.trim() || files.length > 0;
 
   function grow() {
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 280)}px`;
-    sendBtn.disabled = !ta.value.trim();
+    sendBtn.disabled = !ready();
   }
+  function renderFiles() {
+    // the screen keeps its end in sight as the tray takes room
+    changed();
+    tray.hidden = !files.length;
+    tray.replaceChildren(
+      ...files.map((f) =>
+        h(
+          "span.file-chip",
+          null,
+          icon("file"),
+          h("span.file-name", { text: f.name || "a file" }),
+          h("span.file-size", { text: size(f.size) }),
+          iconButton("x", `Remove ${f.name || "the file"}`, () => {
+            files.splice(files.indexOf(f), 1);
+            renderFiles();
+            grow();
+          }),
+        ),
+      ),
+    );
+  }
+  function addFiles(list) {
+    for (const file of list) {
+      if (files.length >= FILES_MAX) {
+        problem(`A message carries at most ${FILES_MAX} files.`);
+        break;
+      }
+      if (file.size > FILE_MAX_BYTES) problem(`${file.name} is over ${size(FILE_MAX_BYTES)}, the most a message takes.`);
+      else files.push(file);
+    }
+    renderFiles();
+    grow();
+    ta.focus();
+  }
+  picker.addEventListener("change", () => {
+    addFiles([...picker.files]);
+    picker.value = "";
+  });
+  ta.addEventListener("paste", (e) => {
+    const list = [...(e.clipboardData?.files ?? [])];
+    if (!list.length) return;
+    e.preventDefault();
+    addFiles(list);
+  });
+  renderFiles();
   ta.addEventListener("input", () => {
     unsent.set(key, ta.value);
     grow();
@@ -124,20 +183,23 @@ export function composer(thread, { onSent } = {}) {
   stopBtn.addEventListener("click", () => thread && stop(thread));
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    if (!ready()) return;
+    const sending = files.splice(0);
     const text = ta.value.trim();
-    if (!text) return;
     const pid = personaId();
     let id = thread;
     if (!id) {
       id = threadId();
-      putThread({ id, title: firstLine(text, 80), persona: pid, started: Date.now(), last: Date.now(), count: 0, topics: [] });
+      // titled as the mind titles it: its first line, else its first file's name
+      putThread({ id, title: firstLine(text || sending[0]?.name || "", 80), persona: pid, started: Date.now(), last: Date.now(), count: 0, topics: [] });
       S.msgs.set(id, { byI: new Map(), more: false, loaded: true, loading: false });
       S.recent = [id, ...S.recent];
     }
     ta.value = "";
     unsent.delete(key);
+    renderFiles();
     grow();
-    say(id, text, pid);
+    say(id, text, pid, sending);
     onSent?.(id);
   });
 
@@ -150,12 +212,53 @@ export function composer(thread, { onSent } = {}) {
     stopBtn.disabled = S.stopping.has(thread);
     stopBtn.classList.toggle("stopping", S.stopping.has(thread));
     hint.textContent = p.hands && S.status && !S.status.hands ? "No computer yet" : "";
-    sendBtn.disabled = !ta.value.trim();
+    sendBtn.disabled = !ready();
   }
   render();
   // words kept from before size the box once it is on the page
   requestAnimationFrame(grow);
-  return { el: form, render, focus: () => ta.focus(), set: (text) => ((ta.value = text), unsent.set(key, text), grow(), ta.focus()) };
+  return { el: form, render, addFiles, focus: () => ta.focus(), set: (text) => ((ta.value = text), unsent.set(key, text), grow(), ta.focus()) };
+}
+
+/// Files dropped anywhere on `target` (a screen) go to its composer, which
+/// shows it can take them while they are over it.
+function droppable(target, comp) {
+  let over = 0;
+  const has = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+  const leave = () => {
+    over = 0;
+    comp.el.classList.remove("dropping");
+  };
+  target.addEventListener("dragenter", (e) => {
+    if (!has(e)) return;
+    over++;
+    comp.el.classList.add("dropping");
+  });
+  target.addEventListener("dragleave", () => --over <= 0 && leave());
+  target.addEventListener("dragover", (e) => has(e) && e.preventDefault());
+  target.addEventListener("drop", (e) => {
+    leave();
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    comp.addFiles([...e.dataTransfer.files]);
+  });
+}
+
+/// A message's words and its files (a message may be files alone).
+const said = (text, files) => [text ? md(text) : null, files.length ? filesNode(files) : null];
+
+/// A message's files before they are sent: an image's own preview, or a
+/// chip, turning while it uploads.
+function pendingFiles(pnd) {
+  return h(
+    "div.files",
+    null,
+    pnd.files.map((f) => {
+      const up = pnd.uploading && !f.sent;
+      if (f.preview) return h(`span.file-image${up ? ".uploading" : ""}`, null, h("img", { src: f.preview, alt: f.name }));
+      return h(`span.file-chip${up ? ".uploading" : ""}`, null, icon(up ? "loader" : "file", up ? "spin" : ""), h("span.file-name", { text: f.name }), h("span.file-size", { text: size(f.size) }));
+    }),
+  );
 }
 
 // ---- the thread ----
@@ -171,15 +274,35 @@ function stepTitle(call) {
       return `Searched for “${a.q ?? a.query ?? ""}”`;
     case "date":
       return `Checked the date of #${a.id}`;
+    case "web_search":
+      return `Searched the web for “${a.q ?? ""}”`;
+    case "web_fetch":
+      return `Read ${hostOf(a.url) || "a page"}`;
+    case "research":
+      return `Researched “${firstLine(a.question ?? "", 70)}”`;
     default:
       return `${call.name}${a && Object.keys(a).length ? ` ${firstLine(JSON.stringify(a), 80)}` : ""}`;
   }
 }
 
-const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar" };
+const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar", web_search: "globe", web_fetch: "link", research: "sparkles" };
 
-/// A tool's result, readable: search hits and memory lines open in place.
+/// A web search's results (applib/web.mjs `searchText`): `N. title`, then
+/// its URL and its snippet, each on a line indented three spaces.
+function webHits(text) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(/^\d+\. (.+)\n {3}(https?:\/\/\S+)(?:\n {3}(.+))?/gm)) out.push({ title: m[1], url: m[2], snippet: m[3] ?? "" });
+  return out.slice(0, 20);
+}
+
+/// A tool's result, readable: search hits and memory lines open in place;
+/// the web's results are links, its pages and answers markdown.
 function echoView(call, text) {
+  if (call?.name === "web_search") {
+    const hits = webHits(text);
+    if (hits.length) return h("div.web-hits", null, hits.map((x) => h("a.web-hit", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, h("span.web-title", { text: x.title }), h("span.web-host", { text: hostOf(x.url) }), x.snippet ? h("span.web-snippet", { text: x.snippet }) : null)));
+  }
+  if (call && WEB_TOOLS.has(call.name)) return md(text.length > WEB_SHOWN ? `${text.slice(0, WEB_SHOWN)}…` : text, "echo-md");
   if (call?.name === "search") {
     const lines = viewLines(text);
     if (lines.length) {
@@ -220,13 +343,21 @@ function stepsNode(key, items, live) {
   for (const m of items) (m.kind === "tool" ? calls : results).push(m);
   const parsed = calls.map((m) => parseTool(m.text));
   const memory = parsed.every((c) => MEMORY_TOOLS.has(c.name));
-  const label = memory ? (live ? "Looking through memory" : "Looked through memory") : live ? "Working" : "Used tools";
+  const web = parsed.every((c) => WEB_TOOLS.has(c.name));
+  const looked = parsed.every((c) => MEMORY_TOOLS.has(c.name) || WEB_TOOLS.has(c.name));
+  const label = memory
+    ? live ? "Looking through memory" : "Looked through memory"
+    : web
+      ? live ? "Searching the web" : "Searched the web"
+      : looked
+        ? live ? "Looking through memory and the web" : "Looked through memory and the web"
+        : live ? "Working" : "Used tools";
   const isOpen = opened.has(key);
   const node = h(`div.steps${isOpen ? ".open" : ""}${live ? ".live" : ""}`);
   const head = h(
     "button.steps-head",
     { type: "button", "aria-expanded": String(isOpen) },
-    live ? icon("loader", "spin") : icon("layers"),
+    live ? icon("loader", "spin") : icon(web ? "globe" : "layers"),
     h("span", { text: label }),
     parsed.length > 1 ? h("span.times", { text: `×${parsed.length}` }) : null,
     icon("chevron", "chev"),
@@ -354,7 +485,16 @@ function taskNode(id, fallback, report) {
   return h(
     `div.task.task-${phase}`,
     { id: `task-${id}` },
-    h("div.task-head", null, h("span.task-icon", null, icon("monitor")), h("span.task-where", { text: "On your computer" }), h(`span.task-state${asking ? ".asking" : ""}`, null, icon(ic, phase === "running" && !asking ? "spin" : ""), label), elapsed ? h("span.task-time", { text: elapsed }) : null),
+    h(
+      "div.task-head",
+      null,
+      h("span.task-icon", null, icon("monitor")),
+      h("span.task-where", { text: "On your computer" }),
+      // in the shell, its screen opens beside the chat while it works
+      EMBED && phase === "running" ? h("button.task-watch", { type: "button", title: "Watch its screen", onclick: () => document.dispatchEvent(new CustomEvent("mind:screen")) }, icon("monitor"), "Watch") : null,
+      h(`span.task-state${asking ? ".asking" : ""}`, null, icon(ic, phase === "running" && !asking ? "spin" : ""), label),
+      elapsed ? h("span.task-time", { text: elapsed }) : null,
+    ),
     h("div.task-text", { text: text.replace(/\n\n\(task [^)]*\)\s*$/, "") }),
     steps.length
       ? h(
@@ -412,6 +552,8 @@ function reportNode(m, rep, key) {
       h("time", { text: clock(m.at), title: when(m.at) }),
     ),
     md(failed ? rep.text.replace(/^ended: /, "Ended: ") : rep.text),
+    // what the computer made, as goose attached it
+    m.attachments.length ? filesNode(m.attachments) : null,
     h(
       "div.report-foot",
       null,
@@ -514,10 +656,10 @@ function items(id) {
       side = "you";
       // a message that was shown as sent keeps that node
       you = S.landed.get(m.i) || `u:${m.i}`;
-      out.push({ key: you, sig: m.text, make: () => h("div.msg.you", { title: when(m.at) }, md(m.text)) });
+      out.push({ key: you, sig: `${m.text}|${m.attachments.length}`, make: () => h("div.msg.you", { title: when(m.at) }, said(m.text, m.attachments)) });
     } else if (m.kind === "talk") {
       agentSide(p, m.at);
-      out.push({ key: `a:${m.i}`, sig: m.text, quiet: S.landed.has(m.i), make: () => h("div.msg.agent", null, md(m.text), h("div.msg-tools", null, copyButton(m.text, "Copy reply"))) });
+      out.push({ key: `a:${m.i}`, sig: `${m.text}|${m.attachments.length}`, quiet: S.landed.has(m.i), make: () => h("div.msg.agent", null, said(m.text, m.attachments), h("div.msg-tools", null, copyButton(m.text, "Copy reply"))) });
     } else if (m.kind === "note") {
       side = null;
       out.push({ key: `n:${m.i}`, sig: m.text, make: () => h("div.note", null, h("div.note-label", null, icon("note"), "Noted"), md(m.text)) });
@@ -548,12 +690,13 @@ function items(id) {
     lastAt = Math.max(lastAt, pnd.at);
     out.push({
       key: you,
-      sig: String(pnd.failed ?? ""),
+      sig: `${pnd.failed ?? ""}|${!!pnd.uploading}`,
       make: () =>
         h(
           `div.msg.you.pending${pnd.failed ? ".failed" : ""}`,
           null,
-          md(pnd.text),
+          pnd.text ? md(pnd.text) : null,
+          pnd.files.length ? pendingFiles(pnd) : null,
           pnd.failed ? h("div.failed-note", null, icon("alert"), `Not sent (${pnd.failed}). `, h("button.linkish", { type: "button", onclick: () => resend(id, pnd) }, "Try again")) : null,
         ),
     });
@@ -612,6 +755,11 @@ export function threadScreen(id) {
   const comp = composer(id, { onSent: () => (sent = true) });
   const dock = h("div.dock", null, h("div.dock-inner", null, comp.el));
   const el = h("section.screen.thread", null, top, scroll, dock);
+  droppable(el, comp);
+  // a picture that loads after the thread is painted keeps it at its end, if it was there
+  let atEnd = true;
+  scroll.addEventListener("scroll", () => (atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 160));
+  scroll.addEventListener("load", (e) => e.target.tagName === "IMG" && atEnd && (scroll.scrollTop = scroll.scrollHeight), true);
   loadThread(id);
 
   function render() {
@@ -702,6 +850,7 @@ export function newScreen() {
   const ideas = h("div.ideas");
   const stage = h("div.new-stage", null, h("div.hello", null, face, line, head, sub), comp.el, ideas);
   const el = h("section.screen.new", null, topBar(h("span.grow")), h("div.new-scroll", null, stage));
+  droppable(el, comp);
   let sig = "";
 
   function render() {

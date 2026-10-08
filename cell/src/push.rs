@@ -57,6 +57,8 @@ impl FragmentCell {
     /// the fragment (the old runtime's body); a `who` that is an identity
     /// only by that identity.
     pub(crate) fn push_subscribe(&self, body: &Value, principal: &str) -> CellResult<Value> {
+        // a push is a delivery out: a draft makes none (drafts.rs)
+        self.draft_refuses("takes no push subscriptions")?;
         let endpoint = body["endpoint"].as_str().unwrap_or("");
         let who = body["who"].as_str().unwrap_or("");
         if endpoint.len() > ENDPOINT_MAX_BYTES || who.chars().count() > limits::PUSH_WHO_MAX_CHARS {

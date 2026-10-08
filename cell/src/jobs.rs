@@ -816,8 +816,16 @@ impl FragmentCell {
         Ok(json!({ "kept": index }))
     }
 
-    /// Performs one step of `run`.
+    /// Performs one step of `run`. An unclaimed draft reaches nothing
+    /// outside and pays for nothing (drafts.rs): its fetch and AI steps
+    /// fail for good, and a replay after its claim takes them.
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
+        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) {
+            self.draft_refuses("fetches nothing and runs no AI step").map_err(|e| match e.code {
+                ErrorCode::Forbidden => permanent(e.message),
+                _ => StepFail::Retry(e.message),
+            })?;
+        }
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
             Step::Fetch(f) => self.step_fetch(run, index, f).await,
@@ -859,6 +867,7 @@ impl FragmentCell {
                 }
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
+            Step::Blob { sha256 } => self.step_blob(&sha256).await,
         }
     }
 
@@ -958,6 +967,24 @@ impl FragmentCell {
         }
         let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
         Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
+    }
+
+    /// `job.blob(sha256)`: one of this fragment's blobs (a page's upload, a
+    /// chat's attachment), its first `BLOB_READ_MAX_BYTES` read as text when
+    /// they are UTF-8 (`steps::blob_read`). Its bytes are under the
+    /// fragment's own npub, so another fragment's hash is not found.
+    async fn step_blob(&self, sha: &str) -> Result<Value, StepFail> {
+        if !fragment_core::blob::valid_sha(sha) {
+            return Err(permanent("a blob is named by its SHA-256, 64 lowercase hex characters"));
+        }
+        let max = fragment_core::steps::BLOB_READ_MAX_BYTES;
+        let key = self.blob_key(sha).map_err(|e| StepFail::Retry(e.message))?;
+        let found = js::blob_get(&self.env, &key, Some(&format!("bytes=0-{}", max - 1))).await.map_err(|e| StepFail::Retry(e.message))?;
+        let b = found.ok_or_else(|| permanent(format!("this fragment has no blob {sha}")))?;
+        let mut resp = Response::from_body(ResponseBody::Stream(b.body)).map_err(|e| StepFail::Retry(e.to_string()))?;
+        let mut head = resp.bytes().await.map_err(|e| StepFail::Retry(e.to_string()))?;
+        head.truncate(max);
+        Ok(fragment_core::steps::blob_read(sha, b.size, &head))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
@@ -1112,12 +1139,15 @@ impl FragmentCell {
     /// overdraft, each due tick is a blocked run that says why. The
     /// standing is read first, and only when a schedule is due; the due
     /// schedules are read after it, so what fires and what moves them on
-    /// is one turn (a deploy that replaced them meanwhile is seen).
+    /// is one turn (a deploy that replaced them meanwhile is seen). An
+    /// unclaimed draft's skip every tick: a run a minute all day is the one
+    /// start its capped writes do not bound (drafts.rs).
     pub(crate) async fn fire_cron(&self) -> CellResult<()> {
         if self.count_of("SELECT COUNT(*) AS n FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])? == 0 {
             return Ok(());
         }
         let read_only = self.read_only().await?;
+        let draft = self.draft()?.is_some();
         let now = js::now_ms();
         let due = self.rows("SELECT idx, op, cron, next_at FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(now)])?;
         // bounded: one row per declared cron trigger
@@ -1130,7 +1160,7 @@ impl FragmentCell {
             )? > 0;
             if busy {
                 self.event("cron.skipped", &format!("{op} ({expr}): the previous run is still going"), json!({ "op": op }));
-            } else if !self.is_paused(op)? {
+            } else if !draft && !self.is_paused(op)? {
                 self.start_run(NewRun {
                     op,
                     via: Via::Cron,

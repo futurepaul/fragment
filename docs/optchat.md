@@ -65,7 +65,8 @@ Inspiration:
                             │               fresh ACP session per hand-off,
                             │               seeded with the mind's view
                             │
-                            └─ `fragment mcp mind` ─▶ any agent (Claude Code, goose, …)
+                            ├─ mind--<you>.<zone>/__mcp (OAuth) ─▶ claude.ai, ChatGPT, Claude Code, …
+                            └─ `fragment mcp mind` (stdio) ─▶ any agent with a shell (Claude Code, goose, …)
 ```
 
 - **The mind** is the one memory and the main agent. It is a blessed
@@ -75,9 +76,13 @@ Inspiration:
   takes hand-offs as turns through the bridge, and reports back. Each
   hand-off is a fresh goose session whose first message is the mind's
   view, so goose knows what the mind knows.
-- **The MCP server** is the CLI's `fragment mcp <fragment>`. It serves
-  any fragment's described operations as tools. Pointed at your mind,
-  it gives any agent the same view, zoom and search.
+- **The MCP servers** serve any fragment's described operations as
+  tools, by one rule (`fragment_core::mcp`): the fragment's own `__mcp`
+  over HTTP, for a client its person connects with OAuth (issue #232's
+  PRs #238 and #240, merged here), and the CLI's `fragment mcp
+  <fragment>` over stdio. Pointed at your mind, either gives any agent
+  the same view, zoom, date and search, and `note` when you let it
+  write ("Connect another agent", below).
 
 ## The mind template (`templates/mind`)
 
@@ -104,10 +109,13 @@ Inspiration:
 The `operations` are listed below. Its members are the owner and the
 goose agent, an editor. The shell makes it `members` (private).
 
-- **`say`**: the person's messages, `{text, thread, persona?}`, posted
-  by the page (`fragment.post("say", …)`). `thread` is the page's id
-  for the screen, `t_` plus 16 hex. `persona` is the persona chosen for
-  that thread.
+- **`say`**: the person's messages, `{text, thread, persona?,
+  attachments?}`, posted by the page (`fragment.post("say", …)`).
+  `thread` is the page's id for the screen, `t_` plus 16 hex. `persona`
+  is the persona chosen for that thread. `attachments` are files the
+  page uploaded to the mind first (`fragment.blob(file)`), at most 8,
+  each docs/chat-records.md's ATTACHMENT, `{sha256, name, type, size}`
+  ("Attachments", below). A message is words, files, or both.
 - **`log`**: what the mind publishes from its mutations, for pages to
   follow live (below, "Records on `log`"). It has no `post` role, so it
   is never trimmed. The main agent's streaming draft is on `log` too,
@@ -122,7 +130,7 @@ goose agent, an editor. The shell makes it `members` (private).
 ### The log, the tree, the view: OptChat's spec, in SQLite
 
 ```sql
-log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT)
+log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT)  -- attachments: JSON, null with none
 node(l INTEGER, i INTEGER, text TEXT, PRIMARY KEY (l, i))     -- the tree; never rewritten
 thread(id TEXT PRIMARY KEY, title TEXT, persona TEXT, started INTEGER, last INTEGER, first_i INTEGER, last_i INTEGER)
 topic(id TEXT PRIMARY KEY, name TEXT, description TEXT, made INTEGER)
@@ -142,9 +150,15 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
   wrote past twice NODE is cut there.
 - **Prompts:** COMPACT, MASTER, VIEW_DOC and the subagent prompt are
   verbatim from the spec, with "OptChat" replaced by "Mind".
-  - MASTER's "Use subagents only when the user asks" becomes: use
-    `computer` for work that needs a computer (files, shell, browsing,
-    code). Answer everything else yourself.
+  - MASTER's "Use subagents only when the user asks" becomes: check on
+    the web what may have changed or what it is unsure of (`web_search`
+    to find pages, `web_fetch` to read one, `research` for a question
+    that needs several sources), saying where it came from; use
+    `computer` for real computer work (files, code, running programs,
+    anything that needs the user's accounts); the computer has the
+    fragment CLI and its skill, so it makes and updates the user's apps
+    (fragments), and any app they want made or changed is handed to it.
+    Answer everything else yourself.
   - The system prompt is MASTER + VIEW_DOC + the persona's
     instructions + the person's about-me. It is byte-identical across
     turns for one persona, with no dates.
@@ -168,10 +182,11 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
 
 The spec's §7, as a job:
 
-1. `hear`, a mutation: log the message (`user`), touch its thread
-   (making it, titled from the first line, on first use), publish it on
-   `log`, and push it on the queue. If a turn is running, stop there:
-   the running turn takes it next.
+1. `hear`, a mutation: log the message (`user`) with its files (their
+   small text ones read first: "Attachments"), touch its thread (making
+   it, titled from the first line, or the first file's name, on first
+   use), publish it on `log`, and push it on the queue. If a turn is
+   running, stop there: the running turn takes it next.
 2. `turn_begin`, a mutation: take the turn lock (it expires 15 minutes
    after its last touch), then take the queued messages of the oldest
    thread waiting. It answers `tail`: where the turn's view stops, before
@@ -191,9 +206,12 @@ The spec's §7, as a job:
      `[system, user: [view, texts joined]]`, then the turn's steps.
    - Log each reply `talk`, each tool call `tool` (name and JSON input),
      and each result `echo` (capped). Publish each on `log`.
-   - Run the tools: `zoom`, `date` and `search` are queries;
-     `computer` opens a hand-off. At most 8 run per answer; past 24, an
-     answer's calls are dropped (a mutation publishes 64 records).
+   - Run the tools: `zoom`, `date` and `search` are queries; the web's
+     are fetches ("The web"); `computer` opens a hand-off. At most 8 run
+     per answer; past 24, an answer's calls are dropped (a mutation
+     publishes 64 records). Past 512 KiB of conversation, an answer's
+     next tool is answered "this turn has read all it can hold" and the
+     next call is the last.
    - Stop when the model answers with no tool calls.
    - The last call offers no tools (`tool_choice: "none"`): the 40th, or
      one past 512 KiB of conversation (a step's arguments travel in a
@@ -210,11 +228,103 @@ Tools (descriptions verbatim from the spec where it has them):
 - `zoom(id, n)` and `date(id)`, as the spec defines them.
 - `search(q, limit?)`: FTS5 over the log. It answers `id+1|kind:
   snippet` lines, newest first, at most 20.
-- `computer(task)`: hand work to goose on the person's computer. It
-  answers `[<task id>] started` at once. The report arrives later as a
-  `user` message `[<task id>] <report>`, which starts a turn of its own
-  when none runs (MASTER: never wait or poll for it). It is offered only
-  when the persona has `hands` and the mind has an agent member.
+- `web_search(q, limit?)`: numbered results, each `title`, its URL and
+  a snippet (6 unless named, at most 10), then what failed on the way.
+- `web_fetch(url)`: a page's `# title`, its URL, and its readable text
+  (markdown-ish), capped at CAP, head and tail, as every result.
+- `research(question)`: an answer with numbered sources.
+- `computer(task)`: hand work to goose on the person's computer. Its
+  description says it has the fragment CLI and its skill, and makes and
+  updates the user's apps. It answers `[<task id>] started` at once.
+  The report arrives later as a `user` message `[<task id>] <report>`,
+  which starts a turn of its own when none runs (MASTER: never wait or
+  poll for it). It is offered only when the persona has `hands` and the
+  mind has an agent member. The turn's files go with it.
+
+Every persona has `zoom`, `date`, `search` and the web's three.
+
+### The web (`applib/web.mjs`)
+
+The web tools are a few steps of the turn that calls them, all
+`job.fetch` (the app's one way out). Their results are logged as any
+tool's (`tool`, then `echo`, capped); `research`'s own searches and
+reads are its steps, not the log's, as a subagent's are (spec 9).
+
+- **Providers, by the secret that names them.** The owner sets a key as
+  one of the mind's secrets (`fragment secret set <mind> NAME`, or `PUT
+  /api/f/<mind>/secrets/<NAME>`). The app never sees a secret nor which
+  exist: a fetch names one as `{{NAME}}` in a header, and the platform
+  fails the step "no secret named NAME" when it is not set. So the
+  keyed providers are tried in order, and a secret found missing is
+  passed over for the rest of the turn (one failed step each, at most,
+  per turn).
+  - `web_search`: Perplexity's Search API (`PERPLEXITY_API_KEY`, `POST
+    api.perplexity.ai/search`), Brave Search (`BRAVE_API_KEY`), Tavily
+    (`TAVILY_API_KEY`), then **with no key** DuckDuckGo's HTML page
+    (`html.duckduckgo.com/html/`, read for its results, its ads left
+    out). When DuckDuckGo gives nothing, Wikipedia's search, which
+    answers any server; its results say they are Wikipedia's alone and
+    name the keys. DuckDuckGo answers a datacenter's address with a
+    "prove you are human" page (2026-10-07: its duck CAPTCHA, fetched
+    from a datacenter; a home address gets results), which is read as
+    such, and DuckDuckGo is passed over for the rest of the turn: on
+    Workers the no-key search is, in practice, Wikipedia's. A keyed
+    provider that fails (a refused key, a 5xx) is noted and the next is
+    tried.
+  - `research`: with `PERPLEXITY_API_KEY`, one call of Perplexity's
+    `sonar` (`POST api.perplexity.ai/chat/completions`), which searches
+    and cites itself; its sources are its `search_results` (or
+    `citations`). Otherwise a `web_search` of 5, the first 3 pages that
+    read (each cut to 12 000 characters), and one `cheap` call
+    (`RESEARCH`) that answers from them alone, citing them as `[n]`.
+- **`web_fetch`** sends a browser-like `user-agent`, follows at most 3
+  redirects itself (a step's fetch answers them), and asks a page over
+  a fetch's 1 MiB again with `range: bytes=0-524287` (honoured by some
+  servers). A Wikipedia article (`<lang>.wikipedia.org/wiki/…`) is read
+  through Wikipedia's API instead (`prop=extracts`, plain text, its
+  headings as `#`s): its page is up to megabytes of HTML, sent whole
+  whatever range is asked (United States: 2.9 MB, past a fetch; its
+  text, 94 KB), and Wikipedia is the no-key search's source on Workers.
+  HTML becomes text: its `<main>` (else its `<article>`s, else
+  its body), less scripts, styles, media, `nav`, `footer`, `aside`, and
+  elements hidden or marked as chrome by a role or a class (menus,
+  dropdowns, navboxes, a Wikipedia section's "edit"); headings as `#`,
+  list items as `- `, links as `[words](absolute url)`, `<pre>` fenced,
+  table cells split by ` | `. Text types pass as they are; anything else
+  (a PDF, an image) is an error that says to hand it to the computer.
+- **Budgets.** A fetch's answer is kept whole in the run's 4 MiB of
+  answers, so one is taken only while the run has 1 MiB and a margin
+  left; a web tool takes a step only while 3 are left for its answer's
+  log, a last call and its log. Either way the tool answers why it
+  stopped, and the agent answers with what it has.
+
+### Attachments (`applib/files.mjs`)
+
+- **In.** A `say` record's `attachments` are the mind's blobs. The
+  `heard` job reads each small text one (a type `text/*`, JSON, XML,
+  YAML…, or a name like `.md`, `.csv`, `.py`; at most 64 KiB, and 128
+  KiB a message in all) with `job.blob` (Platform additions), and
+  `hear` logs them with the message: the log's `attachments` column,
+  `[{sha256, name, type, size, text?}]`, `text` capped as a message is.
+- **The memory reads a message with its files**: the tree's level 0
+  (the compactor), `zoom(id, 1)` and a turn's new messages are its words,
+  then each file as `[file: <name> (<type>, <size>)]`, a read one fenced
+  whole below it. So the agent sees every file's name, type and size,
+  and a small text file's words. `search` indexes the words alone.
+- **Out.** `msg` records, and `thread`, `context` and `node`'s
+  messages, name a message's files without their text (`attachments`:
+  on a record only when it has some; on a query's message always, `[]`
+  with none). `export` carries the text too.
+- **To the hands.** A `computer` hand-off's `chat` record carries the
+  turn's files (its taken messages', at most 8): goose's bridge
+  downloads them as local files for the runtime. goose's one reply may
+  carry files (its bridge uploads them to the mind); `hands_said` reads
+  the small text ones the same way, and they are the report message's
+  `attachments`. A reply of files alone reports `(files)`.
+- **Images** are named, not seen: the route's `vision` model is no tier
+  a job's step may name. Hand an image to the computer.
+- The records that name a file keep its blob (docs/api.md, Blobs): `say`
+  (its newest 10 000), `log` (never trimmed) and `chat`.
 
 ### The compactor (job `pump`)
 
@@ -251,8 +361,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 ### Hand-offs (job `computer` → `chat` → goose)
 
 1. **The task.** The tool's step publishes
-   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>]}`
-   on `chat` as the fragment (`job.publish`, which answers the record's
+   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>], attachments?}`
+   (the turn's files) on `chat` as the fragment (`job.publish`, which answers the record's
    `seq`); then `task_open` records the task, that `seq`, and the turn
    the agent's bridge gives that record: 24 hex of SHA-256 of `<agent
    fragment>|<mind>/chat/<seq>` (images/bridge `turn_id`; the agent
@@ -267,8 +377,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 3. **The mind takes the reply.** `hands_said` (`chat`'s trigger, each
    record an agent posts there) matches the reply to its task by
    `body.turn`. The first is the report: it puts it on the queue as a
-   `user` message, `[<task id>] <reply>`, and starts a turn like `heard`
-   does, in the task's thread. A later part changes nothing. A reply
+   `user` message, `[<task id>] <reply>`, with the reply's files, and
+   starts a turn like `heard` does, in the task's thread. A later part changes nothing. A reply
    that comes before its `task_open` is kept for it. The task's state is
    `done`, or `stopped` or `error` from an `(ended: …)` reply. The mind
    runs nothing for `work`: a page follows goose's steps there itself,
@@ -297,10 +407,11 @@ membership, which only its owner and the agent hold. Operations with a
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |
 | `note` | mutation (described) | `{text}` → `{i}`: append a `note` (an MCP client's write) |
 | `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`, newest `last` first (`before` is a `last`); `summary` is the text of the smallest built node covering the thread's messages (`first_i` to `last_i`), else its first user line; `count` is its `user` and `talk` messages |
-| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row |
-| `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand) |
+| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task, attachments}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row; `attachments` are `[{sha256, name, type, size}]` (`[]` with none), each read at `__blob/<sha256>` |
+| `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand), as `thread`'s |
+| `export` | query (editor) | `{after?, limit?}` → `{entries: [{i, kind, text, at, thread, persona, task, attachments}], next}`: the raw log oldest first, the messages after `after` (from the first by default), at most `limit` (500 unless named, at most 2000) and 768 KiB a page; `attachments` with the `text` the mind read of them; `next` is the next page's `after`, `null` at the end (the page's "Export memory") |
 | `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T, cut?}`: the view as structured parts (the Memory screen); past 768 KiB its last `cut` parts are left out |
-| `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` |
+| `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` (as `thread`'s) |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
 | `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
@@ -319,15 +430,23 @@ whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
 `task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
 `classify`, `topic_suggest` and `hands_said`.
 
-Seeded personas:
+Seeded personas (a persona's instructions say what it is for; each
+is seeded once, so a mind made before one was gains it, and one its
+person removed stays removed: `kv.seeded`):
 - **Mind**, the default: plain, warm, brief.
-- **Builder**: does things on the computer; `hands` is on.
+- **Builder**: does things on the computer, apps (fragments)
+  included; `hands` is on.
 - **Coach**: asks one question at a time.
+- **Researcher**: checks the web before it answers (`research`,
+  `web_search`, `web_fetch`), gives its sources, and says what it could
+  not confirm.
 
 ### Records on `log`
 
-- `{type: "msg", i, kind, text, thread, at, persona, task}`, where
-  `text` is at most 48 KiB, cut.
+- `{type: "msg", i, kind, text, thread, at, persona, task,
+  attachments?}`, where `text` is at most 48 KiB, cut, and
+  `attachments` (when it has files) name them, `[{sha256, name, type,
+  size}]`.
 - `{type: "turn", thread, state: "thinking" | "settling" | "done" | "error" | "stopped", error?}`.
 - `{type: "task", id, thread, state, text, turn, report?}`: as it opens,
   as its reply reports, and as it is found lost. Its live steps are
@@ -340,7 +459,11 @@ Seeded personas:
 
 ### The page
 
-One screen at a time, and calm. Dark, warm, generous type.
+One screen at a time, and calm, in the shell's look (Paul, 2026-10-07):
+the platform's stylesheet (`__fragment.css`) with the shell's values.
+In the shell (`?embed=shell`, docs/api.md "The mind in the shell") the
+shell's sidebar is the rail and its topbar the header, and apps open
+beside the mind; opened on its own origin the page shows its own rail.
 - **Left rail:**
   - the persona switcher at the top (the default marked);
   - **New chat** (an empty screen with the current persona; nothing is
@@ -359,12 +482,19 @@ One screen at a time, and calm. Dark, warm, generous type.
   - A hand-off is a card that shows goose's live steps and its report.
   - Snippets of other threads (a search hit, a zoom result) are
     expandable.
-  - The composer sits at the bottom, with the persona chip and Stop.
+  - The composer sits at the bottom, with the persona chip, Stop, and
+    files (paperclip, drop, paste): each uploaded with `fragment.blob`
+    and posted as `say`'s `attachments: [{sha256, name, type, size}]`
+    (a message may be files alone); a message's and a report's
+    files show as pictures, players or download chips (`__blob`).
 - **Right panel** (toggle): the thread's topics, its hand-offs ("what it
   did here"), and the computer's state.
 - **Topic screen:** the threads in the topic, each a summary card that
   expands in place.
 - **The mobile layout** comes first: the rail is a drawer.
+- **Settings:** about you, the memory and **Export memory** (the whole
+  log as one JSON file, the `export` query paged), and **Connect another
+  agent** (`claude mcp add mind -- fragment mcp mind.<username>`).
 
 ## Platform additions (generic: no platform code names the mind)
 
@@ -391,14 +521,20 @@ One screen at a time, and calm. Dark, warm, generous type.
    `POST /api/fragments {template: "mind", visibility: "members"}`.
 4. **Operation `description`** in `fragment.json`: an optional string of
    at most 1024 characters, shown in `status.code.operations`. It makes
-   the operation an MCP tool.
-5. **The shell's first run:**
+   the operation an MCP tool. #240 (merged here) added the same field;
+   the two are one now (`OpDecl.description`, `code_ops.description`).
+5. **`job.blob(sha256)`** → `{sha256, size, text, cut}`: a job reads one
+   of its fragment's blobs, its first 64 KiB as text when they are UTF-8
+   (docs/api.md, Jobs). The mind reads a message's small text files
+   with it.
+6. **The shell's first run:**
    - it makes the agent (on the default image, goose), assigns it to
      the computer, makes `mind` (members) and adds the agent there as
      an editor;
    - it no longer makes a `<agent>-chat`;
-   - signed in with a mind, `/` opens the mind full-screen; the shell's
-     own UI is one link away ("Apps").
+   - signed in with a mind, `/` is the shell with the mind in its
+     middle column (2026-10-07: it was the mind full-screen on its own
+     origin, which left the apps a link away).
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 
@@ -470,20 +606,83 @@ One screen at a time, and calm. Dark, warm, generous type.
 - **`EXTENSIONS={}`** limits goose to `developer` and the session's
   ACP `mcpServers`.
 
-## The MCP server (`fragment mcp`)
+## The MCP servers (`__mcp` and `fragment mcp`)
 
-`fragment mcp <fragment> [--write]`: an MCP server over stdio (JSON-RPC,
-protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
-- **Tools:** the fragment's operations that have a `description`,
-  named as the operation, with its input schema. Queries are always
-  served; mutations and jobs only with `--write`.
-- **A call** is `POST /api/f/<f>/ops/<op>`. A person's call is signed
-  with their key, as every CLI call is. Inside a computer it goes to
-  `FRAGMENT_API` with `x-fragment-agent`.
-- **For Claude Code:** `claude mcp add mind -- fragment mcp mind`
-  (read-only) or `… --write`.
-- A remote HTTP MCP server for chat clients without a shell is issue
-  #232's, and later.
+A fragment has two MCP servers with the same tools, by one rule and one
+piece of code (`fragment_core::mcp`: `served`, `tool`, `tools_of`,
+`call_of`, `called`), each serving the tools to its kind of client:
+
+- **`<fragment origin>/__mcp`** (cell/src/mcp.rs; docs/api.md, A
+  fragment's MCP server), Streamable HTTP for a client its person
+  connects through the platform's OAuth 2.1 authorization server
+  (docs/api.md, Connected clients). Its token acts as the person, on
+  that fragment alone.
+- **`fragment mcp <fragment> [--write]`** (cli/src/mcp.rs), stdio for
+  an agent with a shell, signed with the CLI's key; inside a computer it
+  goes to `FRAGMENT_API` with `x-fragment-agent` (goose's `mind`
+  server).
+
+The rule:
+- **Tools:** the fragment's operations that have a `description` and
+  take an object, that the caller's role may call, named as the
+  operation. Queries always; mutations and jobs only when the person
+  allowed changes: the consent page's box "Also let it change things"
+  (a connection's `writes`), or `--write`. A client that only reads is
+  refused a mutation by the fragment too, whatever the route.
+- **Arguments** are the operation's input, its schema the operation's.
+  Each call is a call of its own (a fresh operation id).
+- **A result** whose `text` is a string (the mind's view, zoom and date)
+  answers as that text, anything else as JSON; over HTTP the whole
+  answer is `structuredContent` too. A refusal is the tool's error,
+  `<code>: <message>`; an operation that is no tool is -32602, saying
+  why.
+
+This is #240's `__mcp` and the spike's `fragment mcp` made one (#240
+listed every operation the person may call, its arguments `{id,
+input}`; the spike's flat arguments were kept, being the operation's own
+schema, as the mind's descriptions say `zoom(id, n)`: decision for
+Paul).
+
+### Connect another agent
+
+The mind's tools are `view`, `zoom`, `date` and `search`, and `note` when
+you let the agent write. On the preview, a person `paul`'s mind is
+`https://mind--paul--claude-optchat.finite.place/__mcp` (another
+deployment: `https://mind--<username>.<its fragments' domain>/__mcp`;
+`fragment status mind` prints its origin).
+
+- **claude.ai** (or Claude Desktop): Settings → Connectors → Add custom
+  connector. Name it "Mind", give it the URL above, and leave the
+  advanced settings' OAuth client empty (Claude registers itself, or
+  names its metadata document). Connect: a browser page at the platform
+  asks you to sign in if you are not, then "Connect Claude?", naming
+  your mind and sending you back to claude.ai. Tick "Also let it change
+  things" to let it `note`; leave it unticked to let it only read. Allow.
+  In a chat, turn the connector on (the tools menu): Claude can now read
+  your memory (`view`), open a line (`zoom`), date a message, search
+  every chat, and note something.
+- **Claude Code over HTTP:** `claude mcp add --transport http mind
+  https://mind--paul--claude-optchat.finite.place/__mcp`, then `/mcp` in
+  Claude Code, choose `mind`, Authenticate. The same page opens in your
+  browser; it warns that it sends you back to a program on this computer
+  (Claude Code's own `localhost` port), which is right here.
+- **Claude Code over stdio** (no OAuth: the CLI's own key): `fragment
+  host https://claude-optchat.finite.place && fragment login` once, then
+  `claude mcp add mind -- fragment mcp mind` (read-only) or `claude mcp
+  add mind -- fragment mcp mind --write`.
+- **Ending one:** the shell's settings, Connected clients, End (each
+  says whether it reads only or also changes things); a client's own
+  revocation ends it too. What a connected client wrote names it in the
+  mind's `events` (`client.called`, "note … through Claude").
+
+The local proof is the e2e's `mcp` section (crates/e2e/src/lanes/mcp.rs,
+`mind_server`): a mind made from the template, connected as claude.ai
+connects one, from its `__mcp`'s 401 alone (its metadata, the platform's,
+a registration with claude.ai's callback, the consent page, the code
+with PKCE), first reading only (`date`, `search`, `view`, `zoom`; `note`
+refused) and then allowed changes (`note`, then `search` finding it,
+`zoom` opening it whole, `date` dating it, `threads` no tool), and the
+mind's events naming Claude.
 
 ## Deploy
 
@@ -508,13 +707,40 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
   to half an hour, lends its person 60 paid calls, and prints each
   latency, the recall's zoom and search calls, and the paid calls made.
 
+## Merged from issue #232 (agent-friendly fragment)
+
+The spike carries #232's open draft PRs, so the fragment skill and its
+platform are the newest an agent gets: #233 (GUIDE's build discipline
+and Design), #235 (`/llms.txt`, `/llms-full.txt`), #236 (the
+`contributor` role, the share sheet's Use), #237 (the page's errors on
+status and in events), #238, #240 and #242 (OAuth for MCP clients, each
+fragment's `__mcp`, the platform's `/mcp`), #249 (drafts before an
+account), and the templates When, Wall, Board, Watch, Brief, Hook, Wiki
+and Split (#239, #241, #243 to #248). #234 (`__fragment.css`) comes with
+the UI's merge. None of them touches the mind, but #240's `__mcp` and
+the spike's `fragment mcp` are one rule now (above), and an unclaimed
+draft holds `ai.decide` steps as it holds every other AI step.
+
 ## Not in the spike
 
 - Importing other providers' chats. `note` and an `import` job are the
   door for it.
-- A remote HTTP MCP server with OAuth.
+- MCP Apps (the mind's page inline in a chat client): docs/api.md,
+  "Inline views (MCP Apps): not yet".
 - Prompt-cache breakpoints. Workers AI caches prefixes by itself, and
   the incremental fold keeps the prefix stable.
 - Mid-run injection of a new message between tool calls. A message
   sent mid-turn starts the next turn.
 - Moving the log out of the app's 16 MiB SQLite (to R2 or git).
+- The web as a browser: `web_fetch` reads what a server sends, so a
+  page its scripts draw reads as next to nothing, and a PDF is the
+  computer's. Cloudflare's Browser Rendering is no step a job has
+  (its REST API would take the owner's own Cloudflare token).
+- A whole-web search with no key from a Worker. DuckDuckGo's HTML page
+  answers a home address and CAPTCHAs a datacenter's (checked
+  2026-10-07; from a Worker itself it is untried), so the no-key search
+  there is Wikipedia's. Bing's `format=rss` answers both, but its feed
+  says its results are for a personal RSS reader alone (decision for
+  Paul). A key (Perplexity's, Brave's or Tavily's) is the way.
+- Images to the main agent (the `vision` model is no tier a job names),
+  and `search` over a file's words (FTS indexes the message's own).
