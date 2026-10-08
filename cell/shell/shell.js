@@ -472,11 +472,15 @@ $("agent-heading").onclick = () => {
   const profiles = group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
     : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
+  // each agent's own desktop: a group's agents each have one to pick from
+  const screens = !state.computer ? [] : group
+    ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
+    : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
   openMenu($("agent-heading"), [
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     { icon: "invite", text: "Invite…", onClick: () => share(name) },
     ...profiles,
-    ...(state.computer ? [{ icon: "screen", text: group ? "Their computer's screen" : "Its computer's screen", onClick: () => openScreen() }] : []),
+    ...screens,
     archiveItem(name),
   ]);
 };
@@ -644,13 +648,14 @@ addEventListener("message", (e) => {
   show({ key: `file:${url.href}`, title: path.split("/").pop(), icon: paneIcon("folder"), body: frame });
 });
 
-// ---- its computer's screen: a port of its own origin, through a ticket ----
-async function openScreen() {
-  if (!state.computer) return;
+// ---- an agent's screen: its own desktop, a port of its computer's own
+// origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
+async function openScreen(agent) {
+  if (!state.computer || !agent) return;
   try {
-    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, {});
-    const frame = frameOf(t.url, "Its computer's screen");
-    show({ key: "screen", title: "Computer", subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
+    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
+    const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
+    show({ key: `screen:${agent}`, title: titleOf(agent), subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
   } catch (e) {
     notice("Its screen did not open", e.message);
   }
@@ -1116,10 +1121,11 @@ async function openSettings(push = true) {
       ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
-  if (c) {
-    const screen = el("button", "quiet", "Open its screen");
+  // each agent's own desktop
+  for (const a of c ? state.agents.values() : []) {
+    const screen = el("button", "quiet", `Open ${titleOf(a.fragment)}'s screen`);
     screen.type = "button";
-    screen.onclick = openScreen;
+    screen.onclick = () => openScreen(a.fragment);
     computer.append(screen);
   }
   const agents = section("Agents");

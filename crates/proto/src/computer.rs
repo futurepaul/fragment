@@ -294,9 +294,50 @@ pub struct PortTicket {
     pub expires_at: i64,
 }
 
+/// What a port ticket asks for: where on the port its browser lands, the
+/// port's root by default. A path and a query an image reads, such as an
+/// agent's screen's `/?agent=<agent fragment>` (docs/computers.md, Ports):
+/// the platform carries it and reads nothing in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortTicketAsk {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// A ticket's landing path is at most this many bytes.
+pub const PORT_PATH_MAX_BYTES: usize = 512;
+
+/// Whether `path` may be where a ticket lands on its port: `/`, then
+/// visible ASCII (no fragment `#`, no `\`), no `//` (which a redirect
+/// could read as another host), and no `.` or `..` segment in its path
+/// (which would leave the port).
+pub fn valid_port_path(path: &str) -> bool {
+    let visible = path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'#' && b != b'\\');
+    let segments = path.split('?').next().unwrap_or("").split('/').all(|s| s != "." && s != "..");
+    path.starts_with('/') && path.len() <= PORT_PATH_MAX_BYTES && visible && !path.contains("//") && segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Valid: the port's root, or a path and query an image reads. Invalid:
+    /// anything that is not a path on the port.
+    #[test]
+    fn a_tickets_landing_is_a_path_on_its_port() {
+        for ok in ["/", "/?agent=juniper.paul", "/novnc/core/rfb.js", "/a/b?c=d&e=f%20g", "/?q=a/../b"] {
+            assert!(valid_port_path(ok), "{ok}");
+        }
+        for bad in ["", "?agent=juniper.paul", "agent", "//evil.example/", "/a//b", "/../6081/", "/a/./b", "/a/..", "/a b", "/a#b", "/a\\b", "/\u{e9}", "/\n"] {
+            assert!(!valid_port_path(bad), "{bad:?}");
+        }
+        assert!(valid_port_path(&format!("/{}", "a".repeat(PORT_PATH_MAX_BYTES - 1))));
+        assert!(!valid_port_path(&format!("/{}", "a".repeat(PORT_PATH_MAX_BYTES))));
+        let ask: PortTicketAsk = serde_json::from_str("{}").unwrap();
+        assert_eq!(ask.path, None, "no path: the port's root");
+        assert!(serde_json::from_str::<PortTicketAsk>(r#"{"next":"/"}"#).is_err(), "a field it does not know is refused");
+    }
 
     #[test]
     fn computer_ids_and_their_labels() {

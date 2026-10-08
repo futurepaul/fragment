@@ -19,8 +19,10 @@
 #![allow(dead_code)]
 
 pub mod acp;
+pub mod display;
 pub mod fake;
 pub mod model;
+pub mod rfb;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,7 +67,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, screen: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run

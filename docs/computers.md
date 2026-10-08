@@ -564,10 +564,17 @@ a receiver reports (1005, none given; 1006, dropped), which workerd
 refuses to send: passed on as it was, it left the page's end open (p5,
 2026-10-05: a desktop that restarted froze its screen's page). Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
-(decision 11). The page is served at the
-port's root and reaches its sockets by relative URLs (our images':
-`websockify?viewer=` and `control?viewer=`), so it works under the
-port's prefix (`/p/6080/`).
+(decision 11), one for each agent: the shell opens an agent's at
+`/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
+…/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
+("Its screen" in the chat's menu), or with the agent picked from a group
+chat's menu ("<name>'s screen"), or from settings. The platform carries
+the query and reads nothing in it: which desktop is that agent's, and
+the refusal of an agent the computer does not run, are the image's. The
+page is served at the port's root and reaches its sockets by relative
+URLs, naming the agent again (our images': `websockify?viewer=&agent=`
+and `control?viewer=&agent=`), so it works under the port's prefix
+(`/p/6080/`).
 
 ## Our images
 
