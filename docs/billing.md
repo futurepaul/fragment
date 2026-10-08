@@ -1,10 +1,11 @@
 # Billing, organizations and the operator's admin
 
-Status: **proposed** (2026-10-08), for Paul's review. Nothing here is
-built. It stands on decisions 45 to 50 (PR #254: people are npubs found
-by email). Once Paul answers "Decisions for Paul" below, the answers
-become decisions 51 onward in docs/cloudflare-v1.md, and this file
-becomes the design of record, as docs/ledger.md is for the ledger.
+Status: **decided, not built** (Paul, 2026-10-08: "I agree with your
+recommendations, please proceed"). This is the design of record, as
+docs/ledger.md is for the ledger; its decisions are 51 to 59 in
+docs/cloudflare-v1.md ("Decided", below, maps them). It stands on
+decisions 45 to 50 (people are npubs found by email). The build follows
+"Build order"; each slice updates its section here as it lands.
 
 Paul (2026-10-08): "before we go live, we'll need stripe billing.
 guests signups will be free, but to be able to have your own agents and
@@ -180,7 +181,7 @@ the move if it ever outgrows that, not before.
   Prices are found by lookup key (`fragment_seat_month`,
   `fragment_seat_always_on_month`), so a price change is a new Price
   with the key moved, and no config edit. Tax as finite-mono's: code
-  `txcd_10103001`, tax-exclusive, automatic tax on (decision for Paul).
+  `txcd_10103001`, tax-exclusive, automatic tax on (decision 54).
 - **Subscription:** one per org, with an item per seat kind in use.
   Each item's quantity is that kind's paid seats, pending ones included.
   Metadata as the customer's.
@@ -202,8 +203,8 @@ the move if it ever outgrows that, not before.
   invoices, billing address and cancel at period end. Subscription
   update stays off, because seats are ours. The shell asks the cell for
   a portal session.
-- **Credit top-ups** (decision 25: "more credit can be bought"; decision
-  for Paul). Checkout `mode: payment` for a fixed pack, its session
+- **Credit packs** (decision 25: "more credit can be bought"; decision
+  55). Checkout `mode: payment` for a fixed pack, its session
   id the `GrantCredit` id on the buyer's ledger. An org admin may buy
   one for a member. No usage goes to Stripe: the ledger stays ours, and
   Stripe bills seats and packs.
@@ -332,7 +333,7 @@ Checked against finite-mono's code (2026-10-08):
     since Checkout's page needs a person.
   - A test clock carries a trial past its end and a renewal into a
     decline (`pm_card_chargeCustomerFail`).
-  - It needs a sandbox endpoint per preview (decision for Paul).
+  - Each preview registers its own sandbox endpoint (decision 58).
 
 ## Trials
 
@@ -479,7 +480,7 @@ The first run starts once a seat is held, so a guest's first run is
    - the portal and seat changes;
    - the `billing` e2e section.
 6. **Trials:** codes, capacity, Checkout with trial days.
-7. **Packs**, if Paul wants them.
+7. **Packs:** one $25 pack (decision 55).
 8. **The operator's admin:** the API, the CLI, `/admin`, and the audit
    log. The API can start alongside 4.
 9. **The shell's Billing page.**
@@ -493,45 +494,35 @@ The first run starts once a seat is held, so a guest's first run is
       and "organizations with several members" and Stripe leave "Not
       built in fragment, on purpose".
 
-## Decisions for Paul
+## Decided (Paul, 2026-10-08)
 
-Each has the recommendation first.
+Paul took every recommendation. In docs/cloudflare-v1.md:
 
-1. **Who may buy a seat at launch:** any guest (the gate is payment;
-   trials and comps for the rest), or only someone with an invite or a
-   code?
-2. **Orgs:** is a self-paying person an org of one (one code path)? One
-   org per person? May an admin be seatless?
-3. **When a pending seat bills:** from the invite (the admin chose to
-   pay; Stripe errors land on the admin), or from the claim?
-4. **Lapse:** as today's `canceled` (agents stop, the computer sleeps
-   and won't wake, fragments serve on credit left, nothing deleted,
-   paying restores)? How long data stays after a lapse can wait.
-5. **A removed member's fragments** stay theirs in v1. Fragments owned
-   by an org are later.
-6. **`past_due` is good standing** (Stripe's retries are the grace
-   period)?
-7. **Tax:** Stripe automatic tax with prices before tax ("$100 + tax"),
-   as finite-mono does?
-8. **Packs in v1?** Which amounts? Under the monthly allowance, does
-   bought credit outlive the month? Recommended: one $25 pack, kept
-   until spent.
-9. **Trials:** our codes with trial days, finite-mono's shape with a
-   simpler capacity (recommended)? Or Stripe promotion codes for 100%
-   off the first month, which needs no code of ours but gives whole
-   months only?
-10. **A $200 seat's computer** stays awake by default, with "let it
-    sleep"?
-11. **Upgrades and downgrades** at once, prorated (recommended), or at
-    the period's end?
-12. **Previews:** may `xtask deploy --branch` register the preview's
-    sandbox endpoint and upload its signing secret as a Worker secret,
-    as it does the test secret? Without that, previews rely on the
-    Checkout return and the reconcile, and the hosted lane cannot test
-    webhooks.
-13. **The admin page** acts with an operator's browser session, the
-    wipe staying CLI-signed?
-14. **Monthly prices only**, no annual?
+| Question | Answer | Decision |
+|---|---|---|
+| Who may buy a seat | any guest; trials and comps for the rest | 51 |
+| Orgs | a self-paying person is an org of one; one org per person; an admin may be seatless | 51 |
+| When a pending seat bills | from the invite | 52 |
+| Upgrades and downgrades | at once, prorated | 52 |
+| Lapse | today's `canceled`; nothing deleted; paying restores; retention later | 53 |
+| A removed member's fragments | stay theirs; org-owned fragments later | 53 |
+| `past_due` | good standing; Stripe's retries are the grace | 53 |
+| Tax | Stripe automatic tax, prices before tax | 54 |
+| Packs | one $25 pack, kept until spent | 55 |
+| Trials | our codes on Stripe's trial; time-held places | 56 |
+| A $200 computer | awake by default, "let it sleep" | 57 |
+| Previews | `xtask deploy --branch` registers its sandbox endpoint and uploads its signing secret | 58 |
+| The admin page | an operator's browser session; the wipe stays CLI-signed | 59 |
+| Annual prices | none; monthly only | 51 |
+
+Still Paul's, before the slices that need them:
+
+- **Stripe sandbox.** A Stripe Sandbox for fragment in finite-mono's
+  account, and a restricted key for it in the dev account's store
+  (`cargo xtask secret set`). The Stripe slice is built and tested
+  against the fake until then.
+- **Live mode.** At go-live: `xtask stripe setup` in live mode, the
+  live key and signing secret, and WorkOS sign-up on.
 
 ## Not in v1
 

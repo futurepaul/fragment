@@ -35,6 +35,8 @@ image's agent runtime.
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/ledger.md` — the usage ledger: what is metered, at what price,
    and who pays;
+   `docs/billing.md` — seats, orgs, Stripe, trials and the operator's
+   admin (decisions 51 to 59);
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
