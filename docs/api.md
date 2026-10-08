@@ -1493,10 +1493,12 @@ and the AI steps (`job.ai.*`), all above:
     is recorded as an agent's call `for` someone is (Principals and
     access): the app's `call.principal` is the owner, so what it does is
     theirs, and `call.agent` is the calling fragment's key, which its
-    ledger row, records, runs and `ops` record name. A mutation or job it
-    runs (not a replay) appends `fragment.called` to the target's
-    `events`, `{op, id, principal, fragment, key}`: "add job:… by id:…
-    through mind.paul", as a connected client's call names the client.
+    ledger row, records, runs and `ops` record name. Each answer to one
+    of its mutations or jobs appends `fragment.called` to the target's
+    `events`, `{op, id, principal, fragment, key, replayed}`: "add job:… by
+    id:… through mind.paul", as a connected client's call names the client;
+    a replay too, saying so, since a step tried again after a failure is
+    the same call, whose first try may have applied it.
     Its id is `job:<fragment>-<life>-r<run>-s<step>`, the form of a fetch's
     `Idempotency-Key`, the same on every try and replay of the step, so
     the target applies it once; the call is one hop deeper than its run.

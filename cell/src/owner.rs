@@ -215,10 +215,13 @@ impl FragmentCell {
             trigger: None,
         };
         let answered = self.invoke(inv).await?;
-        if acts && !answered.replayed {
-            let owner = npub::display(&ask.owner);
-            let summary = format!("{} {} by {owner} through {}", ask.op, ask.id, ask.from);
-            self.event("fragment.called", &summary, json!({ "op": ask.op, "id": ask.id, "principal": owner, "fragment": ask.from, "key": npub::display(&ask.key) }));
+        // each answer, a replay too: a step tried again after a failure is
+        // the same call, and its first try may have committed before it failed
+        if acts {
+            let (owner, replayed) = (npub::display(&ask.owner), answered.replayed);
+            let summary = format!("{} {} by {owner} through {}{}", ask.op, ask.id, ask.from, if replayed { " (a replay)" } else { "" });
+            let data = json!({ "op": ask.op, "id": ask.id, "principal": owner, "fragment": ask.from, "key": npub::display(&ask.key), "replayed": replayed });
+            self.event("fragment.called", &summary, data);
         }
         self.launch_queued().await;
         Ok(json!({ "result": answered.result, "replayed": answered.replayed }))
