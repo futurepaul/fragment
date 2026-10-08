@@ -1798,6 +1798,18 @@ const REFRESH: &str = "import json\nfrom hermes_cli import model_catalog as m\ne
 async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
+    // held once Hermes' start-up writes are done: its kanban dispatcher
+    // makes its board's database some seconds after the gateway starts, and
+    // until its first page is written (a WAL database's file starts empty)
+    // it is no database the hold copies, so its `-wal` and `-shm` would
+    // change inside the hold, named by nothing (seen under load, 2026-10-08)
+    let t = Instant::now();
+    // bounded: two minutes
+    while c.exec_out(&["head", "-c", "15", "/data/hermes/kanban.db"]) != "SQLite format 3" {
+        assert!(t.elapsed() < Duration::from_secs(120), "Hermes never wrote its kanban board's database");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    eprintln!("catalog: Hermes' kanban board written {} ms after its first reply", t.elapsed().as_millis());
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
     let before = files(&c, &left_out);
     let forced = hermes_python(&c, &[], REFRESH);
