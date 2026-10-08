@@ -1,41 +1,53 @@
-// The mind's memory (docs/optchat.md; OptChat's spec, sections 3 to 7):
-// the log's binary tree of one-line summaries, the view that tiles the
-// log, and what the compactor is asked. Pure: no SQLite, no clock, no
-// model. app.mjs keeps one Mem on its instance, folded from the log at
-// its first call (`fold`), and changes it only through these functions.
+// The mind's memory (docs/optchat.md): UniiChat's design (VictorTaelin's
+// gist of 2026-10-08, kept as ~/dev/finite/uniichat-spec.md on the build
+// box), its sections 1 to 4. Pure: no SQLite, no clock, no model. app.mjs
+// keeps one Mem on its instance, loaded from what it saved (`load`), and
+// changes it only through these functions, writing what each did
+// (`mem.journal`) in the same mutation.
 //
 // A node (l, i) covers messages [i·2^l, (i+1)·2^l) and is named `id+n`:
 // id = i·2^l, its first message, and n = 2^l, how many it covers. Level 0
-// summarizes one message; a parent merges its two children. The view is a
-// list of parts, tree nodes that tile [0, T) oldest first, appended one
-// part per message and coarsened by merging the most due pair (`fit`),
-// never split. Only a level-0 part can be unbuilt (a parent enters the view
-// only once built), and nodes are built in message order (rule 3 of
-// `ready`), so the view's unbuilt parts are always its tail.
+// compresses one message; a parent merges its two children. A node whose
+// source fits in NODE bytes is that source, with no model call (§2).
+//
+// Two views tile the log [0, T) with nodes, oldest first (§3, §4):
+// - the chat's view (`mem.v`), which every turn sees. Each new message
+//   appends its line and nothing else; once the view passes VIEW_HIGH bytes
+//   one batch merges the most due pairs until it is at most VIEW_LOW (§3.2,
+//   the sawtooth), and a batch that cannot get there yet merges what it can
+//   at each new message until it does;
+// - the compaction view (`mem.c`), which every compaction sees: the chat's
+//   merged further, by the same sawtooth from past CVIEW_HIGH down to
+//   CVIEW_LOW, made again from the chat's view whenever that one merges.
+// A merge joins the most due pair of sibling lines whose parent is built,
+// the oldest of equal pairs first (`mergeDue`). Only a level-0 line can be
+// unbuilt (a parent joins a view only once built); an unbuilt line counts
+// no bytes, and no call ever sees one (§4: a view stops at the first).
+//
+// What the compactor may build is tracked as it happens, never found by a
+// scan of the tree (§7.13): each message not free is `ready` when it is
+// logged, and a merge when its second child is built. app.mjs keeps them in
+// a table and picks among them (§4, "The order").
 
 export const NODE = 512;
-export const VIEW = 128_000;
+// The chat's view (§3.2), and the compaction view (§4), in bytes.
+export const VIEW_HIGH = 128_000;
+export const VIEW_LOW = 64_000;
+export const CVIEW_HIGH = 32_000;
+export const CVIEW_LOW = 16_000;
+// Compactions at once (§4, "The order"): a message's node starts once
+// fewer than JOBS messages before it are unbuilt.
 export const JOBS = 8;
 export const TRIES = 5;
+// A tool's output is clipped to this many characters, head and tail (§1);
+// any other text past it is logged as several messages in a row.
 export const CAP = 30_000;
+// zoom(id, 1) answers a message in pages of this many characters, so a
+// page and its notes stay within CAP as the turn's echo.
+export const ZOOM_PAGE = 24_000;
 export const PLACEHOLDER = "(not summarized yet: zoom it)";
-// The batched compactor (docs/optchat.md, "Importing chats": a deviation
-// from the spec, which builds one node a call): one call builds up to
-// BATCH level-0 nodes in a row, or up to BATCH merges, a line each. A
-// level-0 batch's messages are at most BATCH_MAX_BYTES, within the first
-// BATCH_WINDOW messages from `first`.
-export const BATCH = 8;
-export const BATCH_MAX_BYTES = 192 * 1024;
-export const BATCH_WINDOW = 64;
-
-// A realistic summary line of exactly NODE bytes (spec 4.2: models cannot
-// count bytes; a real example gives them the size). Checked below.
-export const SCALE =
-  'user: move the blog from Jekyll to Astro, keep every URL as is, drop the comments widget ("nobody uses it"), one PR a step; ' +
-  "tool: read _config.yml and 41 posts, 3 have custom permalinks; talk: proposed 301s for those 3 and a new layout; " +
-  "user: fine, but /feed.xml must stay byte-identical, a reader app parses it; echo: astro build failed on 2019-04-02 " +
-  "(unquoted date in front matter), fixed by quoting; work: preview deployed to staging, 2 images 404 (case mismatch in path); " +
-  "user: ship Friday after Anna reviews";
+// §4: "the ruler is 512 dashes".
+export const RULER = "-".repeat(NODE);
 
 /// The UTF-8 size of a string, counted without encoding it (a lone
 /// surrogate counts as the 3 bytes of U+FFFD, as TextEncoder writes it).
@@ -57,9 +69,6 @@ function assert(ok, why) {
   if (!ok) throw new Error(`optmem: ${why}`);
 }
 
-assert(utf8(SCALE) === NODE, `SCALE is ${utf8(SCALE)} bytes, not ${NODE}`);
-
-const PLACEHOLDER_BYTES = utf8(PLACEHOLDER);
 // A capped text's note of what was cut fits in this many characters.
 const CAP_NOTE_ROOM = 80;
 
@@ -72,9 +81,8 @@ export function cutBytes(s, max) {
   return t.endsWith("�") ? t.slice(0, -1) : t;
 }
 
-/// At most `max` characters of `text`, its head and tail kept with a note
-/// of what was cut between them (spec 7: tool results; here every logged
-/// message, docs/optchat.md, "The 16 MiB cap is debt").
+/// At most `max` characters of a tool's output, its head and tail kept
+/// with a note of what was cut between them (§1). Only tool output is cut.
 export function capText(text, max = CAP) {
   const s = String(text);
   if (s.length <= max) return s;
@@ -88,20 +96,62 @@ export function capText(text, max = CAP) {
   return `${cps.slice(0, head).join("")}\n\n[… ${cut} characters cut here …]\n\n${cps.slice(cps.length - tail).join("")}`;
 }
 
-/// A text on one line: each newline a single space (spec 5.1).
+/// A text past `max` characters as pieces of at most `max` each, every
+/// piece but the last ending at a line's end (else a space) in its last
+/// fifth when it has one, never inside a character; joined, the pieces are
+/// the text (§1: a long text is never cut, it is logged as several
+/// messages in a row).
+export function splitText(text, max = CAP) {
+  const s = String(text);
+  if (s.length <= max) return [s];
+  const cps = Array.from(s);
+  if (cps.length <= max) return [s];
+  assert(max >= 10, "a piece holds some characters");
+  const out = [];
+  let at = 0;
+  // bounded: each piece takes at least a fifth of max characters
+  while (cps.length - at > max) {
+    const floor = at + Math.floor(max * 0.8);
+    let end = at + max;
+    let cut = -1;
+    for (let k = end - 1; k >= floor && cut < 0; k--) if (cps[k] === "\n") cut = k + 1;
+    for (let k = end - 1; k >= floor && cut < 0; k--) if (cps[k] === " ") cut = k + 1;
+    if (cut > at) end = cut;
+    out.push(cps.slice(at, end).join(""));
+    at = end;
+  }
+  out.push(cps.slice(at).join(""));
+  return out;
+}
+
+/// A text on one line: each newline a single space (§3).
 export const flat = (s) => String(s).replace(/\r\n|\r|\n/g, " ");
 
 /// A message as the tree's level 0 reads it: `kind: text`.
 export const line0 = (kind, text) => `${kind}: ${text}`;
 
 export const key = (l, i) => `${l}:${i}`;
-export const width = (l) => 2 ** l;
 export const startOf = (p) => p.i * 2 ** p.l;
+/// The last message a node covers.
+export const endOf = (l, i) => (i + 1) * 2 ** l - 1;
+/// A node's name, `id+n` (§2).
+export const nameOf = (l, i) => `${i * 2 ** l}+${2 ** l}`;
 const isPow2 = (n) => Number.isSafeInteger(n) && n >= 1 && 2 ** Math.round(Math.log2(n)) === n;
+const digits = (n) => String(n).length;
 
-/// An empty memory: no messages, no nodes, an empty view.
+// ---- the memory ----
+
+function newView(tag, high, low) {
+  return { tag, high, low, lines: [], bytes: 0, shrink: false };
+}
+
+/// An empty memory: no messages, no nodes, empty views.
 export function newMem() {
-  return { T: 0, text: [[]], size: [[]], view: [], bytes: 0 };
+  return { T: 0, text: [[]], size: [[]], v: newView("v", VIEW_HIGH, VIEW_LOW), c: newView("c", CVIEW_HIGH, CVIEW_LOW), journal: [] };
+}
+
+function note(mem, entry) {
+  if (mem.journal) mem.journal.push(entry);
 }
 
 export function isBuilt(mem, l, i) {
@@ -113,10 +163,6 @@ export function built(mem, l, i) {
   return isBuilt(mem, l, i) ? mem.text[l][i] : null;
 }
 
-function partBytes(mem, p) {
-  return isBuilt(mem, p.l, p.i) ? mem.size[p.l][p.i] : PLACEHOLDER_BYTES;
-}
-
 function store(mem, l, i, text) {
   while (mem.text.length <= l) {
     mem.text.push([]);
@@ -126,190 +172,377 @@ function store(mem, l, i, text) {
   mem.size[l][i] = utf8(text);
 }
 
-/// A memory of T messages and the nodes built so far, its view folded
-/// again from message 0 by the same append + fit as it grew (spec 5.2, "At
-/// load"). `nodes` is any iterable of {l, i, text}.
-export function fold(T, nodes) {
-  assert(Number.isSafeInteger(T) && T >= 0, "T is a count");
-  const mem = newMem();
-  for (const n of nodes) {
-    assert(Number.isSafeInteger(n.l) && n.l >= 0 && Number.isSafeInteger(n.i) && n.i >= 0, "a node's place is two counts");
-    assert((n.i + 1) * 2 ** n.l <= T, `node ${n.i * 2 ** n.l}+${2 ** n.l} covers messages past the log's ${T}`);
-    assert(typeof n.text === "string" && n.text.length > 0, "a node has text");
-    store(mem, n.l, n.i, n.text);
-  }
-  for (let i = 0; i < T; i++) append(mem);
-  return mem;
+/// A view line's bytes as a call sees it: `id+n|text` and its newline; an
+/// unbuilt line, none (no call sees it).
+function lineBytes(mem, p) {
+  if (!isBuilt(mem, p.l, p.i)) return 0;
+  const s = p.i * 2 ** p.l;
+  return digits(s) + 1 + digits(2 ** p.l) + 1 + mem.size[p.l][p.i] + 1;
 }
 
-/// A new message: its level-0 part appended, then the view refitted.
-/// Answers the message's id.
-export function append(mem) {
+function addLine(mem, v, p) {
+  v.lines.push(p);
+  v.bytes += lineBytes(mem, p);
+  note(mem, ["line", v.tag, startOf(p), p.l]);
+}
+
+/// Where in a view's lines the line starting at `s` is, or -1 (its lines
+/// are in order of their starts).
+function placeOf(v, s) {
+  let lo = 0;
+  let hi = v.lines.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const at = startOf(v.lines[mid]);
+    if (at === s) return mid;
+    if (at < s) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+// A node built: kept, its view lines' bytes made real, then its parent
+// readied, or built at once when free (§2: two short lines are joined by a
+// newline).
+function made(mem, l, i, text) {
+  store(mem, l, i, text);
+  note(mem, ["node", l, i, text]);
+  if (l === 0) {
+    for (const v of [mem.v, mem.c]) {
+      const k = placeOf(v, i);
+      if (k >= 0 && v.lines[k].l === 0) v.bytes += lineBytes(mem, v.lines[k]);
+    }
+  }
+  const sib = i ^ 1;
+  if (!isBuilt(mem, l, sib)) return;
+  const p = i >> 1;
+  const both = `${mem.text[l][2 * p]}\n${mem.text[l][2 * p + 1]}`;
+  if (utf8(both) <= NODE) made(mem, l + 1, p, both);
+  else note(mem, ["ready", l + 1, p]);
+}
+
+// ---- the merge order (§3.1, §3.2) ----
+
+/// A pair's due (§3.2): how long ago it ended, measured in its own lines'
+/// size, `(T - last) / 2^l`; written as the spec's code writes it, `(T +
+/// 1)/2^l - i` with `i` the left line's place among level l's, the same
+/// order shifted by 2.
+export const dueOf = (T, l, i) => (T + 1) / 2 ** l - i;
+
+// A binary heap of candidate pairs, the most due first, the oldest of
+// equal ones first.
+const before = (a, b) => a.due > b.due || (a.due === b.due && a.s < b.s);
+
+function heapPush(h, x) {
+  h.push(x);
+  let k = h.length - 1;
+  while (k > 0) {
+    const up = (k - 1) >> 1;
+    if (!before(h[k], h[up])) break;
+    [h[k], h[up]] = [h[up], h[k]];
+    k = up;
+  }
+}
+
+function heapPop(h) {
+  const top = h[0];
+  const last = h.pop();
+  if (h.length) {
+    h[0] = last;
+    let k = 0;
+    for (;;) {
+      const a = 2 * k + 1;
+      const b = a + 1;
+      let m = k;
+      if (a < h.length && before(h[a], h[m])) m = a;
+      if (b < h.length && before(h[b], h[m])) m = b;
+      if (m === k) break;
+      [h[k], h[m]] = [h[m], h[k]];
+      k = m;
+    }
+  }
+  return top;
+}
+
+/// §3.2: merges the most due pair of sibling lines among `lines` (oldest
+/// first, each {l, i}) whose parent `parentBuilt(l + 1, i / 2)` is, the
+/// oldest of equal pairs first, and again, while `size` is over `target`.
+/// `sizeOf(line)` is a line's share of the size. Answers the lines after,
+/// their size, and each merge as {s, l, drop}: the merged line's start and
+/// its new level, and the start of the line it took in.
+export function mergeDue(lines, T, parentBuilt, sizeOf, size, target) {
+  const merges = [];
+  if (size <= target || lines.length < 2) return { lines, size, merges };
+  const n = lines.length;
+  const at = lines.map((p) => ({ l: p.l, i: p.i, ver: 0 }));
+  const next = new Int32Array(n);
+  const prev = new Int32Array(n);
+  for (let k = 0; k < n; k++) {
+    next[k] = k + 1 < n ? k + 1 : -1;
+    prev[k] = k - 1;
+  }
+  const alive = new Uint8Array(n).fill(1);
+  const heap = [];
+  const consider = (k) => {
+    if (k < 0 || next[k] < 0) return;
+    const a = at[k];
+    const b = at[next[k]];
+    if (a.l === b.l && a.i % 2 === 0 && b.i === a.i + 1 && parentBuilt(a.l + 1, a.i / 2)) {
+      heapPush(heap, { k, ver: a.ver, j: next[k], jver: b.ver, due: dueOf(T, a.l, a.i), s: a.i * 2 ** a.l });
+    }
+  };
+  for (let k = 0; k < n; k++) consider(k);
+  // bounded: each merge takes a line away
+  while (size > target && heap.length) {
+    const c = heapPop(heap);
+    const a = at[c.k];
+    if (!alive[c.k] || a.ver !== c.ver || next[c.k] !== c.j || !alive[c.j] || at[c.j].ver !== c.jver) continue;
+    const b = at[c.j];
+    size -= sizeOf(a) + sizeOf(b);
+    const drop = b.i * 2 ** b.l;
+    a.l += 1;
+    a.i /= 2;
+    a.ver++;
+    alive[c.j] = 0;
+    next[c.k] = next[c.j];
+    if (next[c.j] >= 0) prev[next[c.j]] = c.k;
+    size += sizeOf(a);
+    merges.push({ s: c.s, l: a.l, drop });
+    consider(prev[c.k]);
+    consider(c.k);
+  }
+  const out = [];
+  for (let k = 0; k >= 0 && k < n; k = next[k]) out.push({ l: at[k].l, i: at[k].i });
+  return { lines: out, size, merges };
+}
+
+// A view merged by the most due pairs down to `target`; answers how many
+// merges it made.
+function shrink(mem, v, target) {
+  const r = mergeDue(v.lines, mem.T, (l, i) => isBuilt(mem, l, i), (p) => lineBytes(mem, p), v.bytes, target);
+  v.lines = r.lines;
+  v.bytes = r.size;
+  for (const m of r.merges) {
+    note(mem, ["line", v.tag, m.s, m.l]);
+    note(mem, ["drop", v.tag, m.drop]);
+  }
+  return r.merges.length;
+}
+
+// The sawtooth (§3.2): past `high`, a batch merges down to `low`; one that
+// cannot get there yet goes on at the next chance until it does.
+function sawtooth(mem, v) {
+  if (!v.shrink && v.bytes > v.high) {
+    v.shrink = true;
+    note(mem, ["shrink", v.tag, true]);
+  }
+  if (!v.shrink) return 0;
+  const n = shrink(mem, v, v.low);
+  if (v.bytes <= v.low) {
+    v.shrink = false;
+    note(mem, ["shrink", v.tag, false]);
+  }
+  return n;
+}
+
+// The compaction view made again from the chat's (§4: "merged again …
+// when the chat's view merges"), to be merged down to CVIEW_LOW.
+function remakeC(mem) {
+  const c = mem.c;
+  c.lines = mem.v.lines.map((p) => ({ l: p.l, i: p.i }));
+  c.bytes = mem.v.bytes;
+  note(mem, ["clear", "c"]);
+  for (const p of c.lines) note(mem, ["line", "c", startOf(p), p.l]);
+  c.shrink = true;
+  note(mem, ["shrink", "c", true]);
+}
+
+/// Both views fitted: the chat's by its sawtooth, and the compaction view
+/// made again from it when it merged, else by its own sawtooth. Answers
+/// whether the chat's view merged. A new message's (`append`), and a turn's
+/// just before it renders its view, after its wait (docs/optchat.md: an
+/// import's backlog built since its last message would otherwise reach the
+/// turn unmerged).
+export function fit(mem) {
+  const merged = sawtooth(mem, mem.v) > 0;
+  if (merged) remakeC(mem);
+  sawtooth(mem, mem.c);
+  return merged;
+}
+
+/// A new message, its line `kind: text` (with its files): its line
+/// appended to both views, its node built at once when the line fits NODE
+/// (§2) or else ready for the compactor, and the views fitted (§3.2: a new
+/// message is when the chat's view merges). Answers the message's id.
+export function append(mem, line) {
+  assert(typeof line === "string", "a message's line is text");
   const i = mem.T++;
-  const p = { l: 0, i };
-  mem.view.push(p);
-  mem.bytes += partBytes(mem, p);
+  addLine(mem, mem.v, { l: 0, i });
+  addLine(mem, mem.c, { l: 0, i });
+  if (utf8(line) <= NODE) made(mem, 0, i, line);
+  else note(mem, ["ready", 0, i]);
   fit(mem);
   return i;
 }
 
-/// A node built: kept, its part's size made real if it is in the view as a
-/// placeholder, then the view refitted. Nodes are written once, each after
-/// its sources.
+/// A node the compactor built: kept, then the compaction view fitted (it
+/// is merged again "once it passes 32 KB", §4, and a node built is what
+/// makes it grow between messages). The chat's view merges only at a new
+/// message. Nodes are written once, each after its sources.
 export function setNode(mem, l, i, text) {
   assert(typeof text === "string" && text.length > 0, "a node has text");
-  assert(!isBuilt(mem, l, i), `node ${i * 2 ** l}+${2 ** l} is written once`);
-  assert((i + 1) * 2 ** l <= mem.T, `node ${i * 2 ** l}+${2 ** l} covers messages that exist`);
+  assert(!isBuilt(mem, l, i), `node ${nameOf(l, i)} is written once`);
+  assert((i + 1) * 2 ** l <= mem.T, `node ${nameOf(l, i)} covers messages that exist`);
   assert(l === 0 || (isBuilt(mem, l - 1, 2 * i) && isBuilt(mem, l - 1, 2 * i + 1)), "a parent is built after its children");
-  store(mem, l, i, text);
-  if (l === 0) {
-    // an unbuilt part is in the view's tail: look from its end
-    for (let k = mem.view.length - 1; k >= 0; k--) {
-      const p = mem.view[k];
-      if (p.l === 0 && p.i === i) {
-        mem.bytes += mem.size[0][i] - PLACEHOLDER_BYTES;
-        break;
-      }
-      if (startOf(p) < i) break;
-    }
-  }
-  fit(mem);
+  made(mem, l, i, text);
+  sawtooth(mem, mem.c);
 }
 
-/// Spec 5.2: while the view is over VIEW bytes, merge the adjacent pair
-/// whose parent is built and whose age over its weight is the largest
-/// (`due`, OptMem's age rule; the oldest wins a tie). A pair whose parent
-/// is not built is passed over; with none left, the view waits over budget.
-export function fit(mem) {
-  const v = mem.view;
-  while (mem.bytes > VIEW) {
-    let best = -1;
-    let bestDue = -Infinity;
-    for (let k = 0; k + 1 < v.length; k++) {
-      const a = v[k];
-      const b = v[k + 1];
-      if (a.l === b.l && a.i % 2 === 0 && b.i === a.i + 1 && isBuilt(mem, a.l + 1, a.i / 2)) {
-        const due = (mem.T - a.i * 2 ** a.l) / 2 ** (a.l + 2);
-        if (due > bestDue) {
-          best = k;
-          bestDue = due;
-        }
-      }
-    }
-    if (best < 0) break;
-    const a = v[best];
-    const parent = { l: a.l + 1, i: a.i / 2 };
-    mem.bytes += mem.size[parent.l][parent.i] - partBytes(mem, a) - partBytes(mem, v[best + 1]);
-    v.splice(best, 2, parent);
-  }
-}
-
-/// The first message whose view line is unbuilt, or T (spec 4.1, `first`).
-export function first(mem) {
-  for (const p of mem.view) if (!isBuilt(mem, p.l, p.i)) return startOf(p);
+/// The first message whose chat-view line is unbuilt, or T: every message
+/// before it is summarized.
+export function firstUnbuilt(mem) {
+  for (const p of mem.v.lines) if (!isBuilt(mem, p.l, p.i)) return startOf(p);
   return mem.T;
 }
 
-/// Spec 4.1: the nodes the compactor may build now, in its scan order
-/// (level by level from 0, oldest first), at most `max`: each (1) not
-/// built nor in `busy` (keys), (2) with its sources (its message; or both
-/// children built), and (3) with every view line before its end a summary.
-/// Rule 3 makes level 0 one node at a time, in message order.
-export function ready(mem, { busy = new Set(), max = JOBS } = {}) {
-  const f = first(mem);
+// ---- saved and loaded (§3.2: "Save the view … never rebuild it") ----
+
+// A view's lines from their saved rows ({s, l}, in order of `s`), checked
+// to tile [0, T) with nodes, every line above level 0 built.
+function viewOf(mem, v, rows) {
+  let at = 0;
+  for (const r of rows) {
+    const n = 2 ** r.l;
+    assert(Number.isSafeInteger(r.s) && Number.isSafeInteger(r.l) && r.l >= 0 && r.s === at && r.s % n === 0, `view ${v.tag}: a line ${r.s}+${n} where ${at} was due`);
+    assert(r.l === 0 || isBuilt(mem, r.l, r.s / n), `view ${v.tag}: line ${r.s}+${n} is a node not built`);
+    v.lines.push({ l: r.l, i: r.s / n });
+    at += n;
+  }
+  assert(at === mem.T, `view ${v.tag} covers ${at} of the log's ${mem.T} messages`);
+  v.bytes = v.lines.reduce((b, p) => b + lineBytes(mem, p), 0);
+}
+
+/// A memory as it was saved: T messages, the nodes built (any iterable of
+/// {l, i, text}), each view's lines ({s, l}, by start) and whether its
+/// sawtooth is merging.
+export function load({ T, nodes, v, c, vshrink = false, cshrink = false }) {
+  assert(Number.isSafeInteger(T) && T >= 0, "T is a count");
+  const mem = newMem();
+  mem.T = T;
+  for (const n of nodes) {
+    assert(Number.isSafeInteger(n.l) && n.l >= 0 && Number.isSafeInteger(n.i) && n.i >= 0, "a node's place is two counts");
+    assert((n.i + 1) * 2 ** n.l <= T, `node ${nameOf(n.l, n.i)} covers messages past the log's ${T}`);
+    store(mem, n.l, n.i, n.text);
+  }
+  viewOf(mem, mem.v, v);
+  viewOf(mem, mem.c, c);
+  mem.v.shrink = vshrink;
+  mem.c.shrink = cshrink;
+  return mem;
+}
+
+/// A memory that was never saved (a mind made before the views were):
+/// built once from its log as it stands (T messages, the nodes built, and
+/// `line(i)` for a message's `kind: text`), its messages appended in order
+/// and its views fitted as they would have grown; then every node ready
+/// now, found by one scan of the tree, the free ones built. Answers the
+/// memory, whose journal holds the nodes it built and the nodes ready; its
+/// views are for the caller to save whole.
+export function fold(T, nodes, line) {
+  assert(Number.isSafeInteger(T) && T >= 0, "T is a count");
+  const mem = newMem();
+  mem.journal = null;
+  for (const n of nodes) {
+    assert((n.i + 1) * 2 ** n.l <= T, `node ${nameOf(n.l, n.i)} covers messages past the log's ${T}`);
+    store(mem, n.l, n.i, n.text);
+  }
+  for (let i = 0; i < T; i++) {
+    mem.T = i + 1;
+    addLine(mem, mem.v, { l: 0, i });
+    addLine(mem, mem.c, { l: 0, i });
+    fit(mem);
+  }
+  mem.journal = [];
+  for (let l = 0; 2 ** l <= T; l++) {
+    for (let i = 0; (i + 1) * 2 ** l <= T; i++) {
+      if (isBuilt(mem, l, i)) continue;
+      if (l === 0) {
+        const t = line(i);
+        if (utf8(t) <= NODE) made(mem, 0, i, t);
+        else note(mem, ["ready", 0, i]);
+      } else if (isBuilt(mem, l - 1, 2 * i) && isBuilt(mem, l - 1, 2 * i + 1)) {
+        // a free one was built when its second child was; this is a call's
+        note(mem, ["ready", l, i]);
+      }
+    }
+  }
+  return mem;
+}
+
+// ---- what calls see ----
+
+// A view's lines that start before `end` and end by it, as a call sees
+// them (§3): `<chat>`, a line `id+n|text` per node with newlines as spaces,
+// stopping at the first unbuilt one (§4: no call sees a placeholder or
+// half a message). `settled` says none was left out for being unbuilt.
+function renderLines(mem, lines, end) {
   const out = [];
-  for (let l = 0; 2 ** l <= mem.T; l++) {
-    const n = 2 ** l;
-    // below `first`, every message's level-0 node is built
-    for (let i = l === 0 ? f : 0; (i + 1) * n <= mem.T; i++) {
-      const end = l === 0 ? i : (i + 1) * n;
-      if (end > f) break;
-      if (isBuilt(mem, l, i) || busy.has(key(l, i))) continue;
-      if (l > 0 && !(isBuilt(mem, l - 1, 2 * i) && isBuilt(mem, l - 1, 2 * i + 1))) continue;
-      if (out.length >= max) return out;
-      out.push({ l, i });
-    }
-  }
-  return out;
-}
-
-/// The text a node is without a model call, when its source fits in NODE
-/// bytes (spec 3, "Free nodes"); else null. `line(i)` is message i's
-/// `kind: text`.
-export function freeText(mem, l, i, line) {
-  if (l === 0) {
-    const t = line(i);
-    return utf8(t) <= NODE ? t : null;
-  }
-  const t = `${mem.text[l - 1][2 * i]}\n${mem.text[l - 1][2 * i + 1]}`;
-  return utf8(t) <= NODE ? t : null;
-}
-
-/// Every free node that is ready, built now, until none is: what the
-/// compactor would build at once with no call. Answers them, in the order
-/// built, for the caller to store.
-export function buildFree(mem, line) {
-  const made = [];
-  for (;;) {
-    let any = false;
-    for (const { l, i } of ready(mem, { max: Infinity })) {
-      const t = freeText(mem, l, i, line);
-      if (t === null) continue;
-      setNode(mem, l, i, t);
-      made.push({ l, i, text: t });
-      any = true;
-    }
-    if (!any) return made;
-  }
-}
-
-/// Spec 5.1: the view as a call sees it, `<chat>` and one `id+n|text` line
-/// per part, newlines flattened, covering the parts that start before
-/// `upto` (all of them by default) up to the first one not built: no call
-/// ever sees a placeholder (spec 6). `settled` says no such part was left
-/// out.
-export function render(mem, upto = mem.T) {
-  const lines = [];
   let settled = true;
-  for (const p of mem.view) {
+  for (const p of lines) {
     const s = startOf(p);
-    if (s >= upto) break;
+    if (s >= end || s + 2 ** p.l > end) break;
     if (!isBuilt(mem, p.l, p.i)) {
       settled = false;
       break;
     }
-    lines.push(`${s}+${2 ** p.l}|${flat(mem.text[p.l][p.i])}`);
+    out.push(`${s}+${2 ** p.l}|${flat(mem.text[p.l][p.i])}`);
   }
-  const text = `<chat>\n${lines.map((l) => `${l}\n`).join("")}</chat>`;
-  return { text, bytes: utf8(text), parts: lines.length, settled };
+  const text = `<chat>\n${out.map((l) => `${l}\n`).join("")}</chat>`;
+  return { text, bytes: utf8(text), parts: out.length, settled };
 }
 
-/// The view as parts, for a page: every part, a placeholder for the unbuilt.
+/// The chat's view as a turn sees it (§3): the lines before `upto` (all by
+/// default), up to the first not built.
+export function render(mem, upto = mem.T) {
+  return renderLines(mem, mem.v.lines, upto);
+}
+
+/// The view as parts, for a page: every line, a placeholder for the unbuilt.
 export function parts(mem) {
-  return mem.view.map((p) => {
+  return mem.v.lines.map((p) => {
     const b = isBuilt(mem, p.l, p.i);
     return { id: startOf(p), n: 2 ** p.l, text: b ? mem.text[p.l][p.i] : PLACEHOLDER, built: b };
   });
 }
 
-/// Whether id+n names a node of this log (spec 7.1's requirement).
+/// Whether id+n names a node of this log (§6's zoom: n a power of 2, id a
+/// multiple of n).
 export function isLine(mem, id, n) {
   return Number.isSafeInteger(id) && id >= 0 && isPow2(n) && id % n === 0 && id + n <= mem.T;
 }
 
-/// Spec 7.1: line id+n opened into its two children's lines, or for n = 1
-/// the message whole (`message(id)` → {kind, text}). An unbuilt child shows
-/// as the placeholder.
-export function zoom(mem, id, n, message) {
+/// §6: line id+n opened into the two lines of n/2 under it (an unbuilt one
+/// shows as the placeholder), or for n = 1 the message whole, in pages of
+/// ZOOM_PAGE characters (`page` from 1). `message(id)` is {kind, text,
+/// more, cont}: its words with its files, and whether the next message
+/// goes on with its text or it goes on from the one before (a long text is
+/// several messages in a row, §1).
+export function zoom(mem, id, n, message, page = 1) {
   if (!isLine(mem, id, n)) return `No line ${id}+${n}.`;
-  if (n === 1) {
-    const m = message(id);
-    return `${id}+0|${m.kind}: ${m.text}`;
+  if (n > 1) {
+    const l = Math.round(Math.log2(n));
+    const h = n / 2;
+    const i = id / n;
+    return [2 * i, 2 * i + 1].map((c) => `${c * h}+${h}|${isBuilt(mem, l - 1, c) ? flat(mem.text[l - 1][c]) : PLACEHOLDER}`).join("\n");
   }
-  const l = Math.round(Math.log2(n));
-  const h = n / 2;
-  const i = id / n;
-  return [2 * i, 2 * i + 1].map((c) => `${c * h}+${h}|${isBuilt(mem, l - 1, c) ? flat(mem.text[l - 1][c]) : PLACEHOLDER}`).join("\n");
+  const m = message(id);
+  const pages = splitText(`${m.kind}: ${m.text}`, ZOOM_PAGE);
+  if (!Number.isSafeInteger(page) || page < 1 || page > pages.length) return `Message ${id} has ${pages.length} page${pages.length > 1 ? "s" : ""}.`;
+  const notes = [];
+  if (pages.length > 1) notes.push(page < pages.length ? `[page ${page} of ${pages.length}: zoom(${id}, 1, ${page + 1}) gives the next]` : `[page ${page} of ${pages.length}]`);
+  if (m.cont && page === 1) notes.push(`[it goes on from message ${id - 1}]`);
+  if (m.more && page === pages.length) notes.push(`[it goes on in message ${id + 1}]`);
+  return `${id}+0|${pages[page - 1]}${notes.map((x) => `\n${x}`).join("")}`;
 }
 
 /// The smallest built node that covers messages a to b (inclusive), or
@@ -325,167 +558,55 @@ export function covering(mem, a, b) {
   return null;
 }
 
-/// Spec 4.2: what one compactor call sees, with no ids anywhere. `context`
-/// is the view's lines before the node's end, bare (`<chat>` …), all of
-/// them summaries by rule 3; `step` is SCALE and the message whole (level
-/// 0, `line(i)`) or the two lines to merge, written out again.
-export function compactInput(mem, l, i, line) {
-  const context = contextBefore(mem, l === 0 ? i : (i + 1) * 2 ** l);
-  const ask =
-    l === 0
-      ? `Compress this message into one line, in at most ${NODE} bytes:\n${line(i)}`
-      : `Merge these two lines into one, in at most ${NODE} bytes:\n${flat(mem.text[l - 1][2 * i])}\n${flat(mem.text[l - 1][2 * i + 1])}`;
-  return { context, step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
-}
+// ---- compactions (§4) ----
 
-/// A compactor call's context (spec 4.2): the view's lines that start
-/// before `end`, bare, in `<chat>`; every one a summary (rule 3).
-function contextBefore(mem, end) {
-  const lines = [];
-  for (const p of mem.view) {
-    if (startOf(p) >= end) break;
-    assert(isBuilt(mem, p.l, p.i), `the compactor sees only summaries (rule 3): ${startOf(p)}+${2 ** p.l} is not built`);
-    lines.push(flat(mem.text[p.l][p.i]));
+/// What one compaction sees after the system prompt: the compaction view
+/// up to the node, built lines only (its message's line excluded; for a
+/// merge, the lines up to its last message), and its task, verbatim from
+/// §4 (`line(i)` is message i's `kind: text`, whole).
+export function compaction(mem, l, i, line) {
+  assert((i + 1) * 2 ** l <= mem.T && !isBuilt(mem, l, i), `${nameOf(l, i)} is a node to build`);
+  if (l === 0) {
+    const view = renderLines(mem, mem.c.lines, i).text;
+    const task = `Compaction: compress message ${i} into one line of at most 512 bytes
+(about 70 words), the length of this ruler:
+${RULER}
+<input>
+${line(i)}
+</input>`;
+    return { view, task };
   }
-  return `<chat>\n${lines.map((t) => `${t}\n`).join("")}</chat>`;
+  assert(isBuilt(mem, l - 1, 2 * i) && isBuilt(mem, l - 1, 2 * i + 1), `${nameOf(l, i)}'s halves are built`);
+  const view = renderLines(mem, mem.c.lines, (i + 1) * 2 ** l).text;
+  const [a, b] = [2 * i, 2 * i + 1].map((c) => `${nameOf(l - 1, c)}|${flat(mem.text[l - 1][c])}`);
+  const task = `Compaction: merge lines ${nameOf(l - 1, 2 * i)} and ${nameOf(l - 1, 2 * i + 1)}, adjacent, into one line of at most
+512 bytes (about 70 words), the length of this ruler:
+${RULER}
+<chat> may hold their messages, ${i * 2 ** l} to ${endOf(l, i)}, in more detail: take details
+of them from there too.
+<input>
+${a}
+${b}
+</input>`;
+  return { view, task };
 }
 
-/// The level-0 nodes one batched call builds (docs/optchat.md, "Importing
-/// chats"): `first`'s, the one rule 3 makes ready, then each later message
-/// not built whose line is over NODE, at most `max`, their lines at most
-/// `maxBytes` in all, within `window` messages of `first` and before
-/// `upto`. A short message between them is a free node, built when `first`
-/// reaches it; one another run holds (`busy`) ends the batch.
-export function batch(mem, line, { busy = new Set(), upto = mem.T, max = BATCH, maxBytes = BATCH_MAX_BYTES, window = BATCH_WINDOW } = {}) {
-  const f = first(mem);
-  const out = [];
-  let bytes = 0;
-  const end = Math.min(upto, mem.T, f + window);
-  for (let j = f; j < end && out.length < max; j++) {
-    if (isBuilt(mem, 0, j)) continue;
-    if (busy.has(key(0, j))) break;
-    const b = utf8(line(j));
-    if (b <= NODE) continue;
-    if (out.length && bytes + b > maxBytes) break;
-    bytes += b;
-    out.push({ l: 0, i: j });
-  }
-  return out;
+/// §4's answer to a line over NODE, sent in the same conversation.
+export function tooLong(line) {
+  return `Too long: your line is ${utf8(line)} bytes, over the 512-byte limit. Write
+the whole line again for the same <input>, cutting just enough of the
+least valuable items to fit before this cut:
+${cutBytes(line, NODE)}| ← LIMIT`;
 }
 
-const BATCH_ANSWER = (n, what) =>
-  `Answer with exactly ${n} lines, one per ${what} in order, each starting with its number and ") ", and nothing else.`;
-
-/// What one batched level-0 call sees: the view before the batch's first
-/// message as its context (spec 4.2), and as its step SCALE and the batch's
-/// messages in order, each whole and numbered; a message between them that
-/// is a line already (a short one, or one built) shows as that line,
-/// unnumbered.
-export function compactBatchInput(mem, nodes, line) {
-  assert(nodes.length >= 2 && nodes.every((n, k) => n.l === 0 && (k === 0 || n.i > nodes[k - 1].i)), "a level-0 batch is two or more messages in order");
-  const number = new Map(nodes.map((n, k) => [n.i, k + 1]));
-  const blocks = [];
-  for (let j = nodes[0].i; j <= nodes[nodes.length - 1].i; j++) {
-    const k = number.get(j);
-    blocks.push(k === undefined ? `--- a line already ---\n${flat(built(mem, 0, j) ?? line(j))}` : `--- ${k} ---\n${line(j)}`);
-  }
-  const n = nodes.length;
-  const ask =
-    `Compress each of these ${n} messages into one line, in at most ${NODE} bytes each. They come next in the chat, in order; ` +
-    `a short message between them is a line already, shown for context.\n\n${blocks.join("\n")}\n---\n\n${BATCH_ANSWER(n, "message")}`;
-  return { context: contextBefore(mem, nodes[0].i), step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
-}
-
-/// What one batched merge call sees: the view's lines before the earliest
-/// end among the merges as its context (none sees past its own stretch),
-/// and as its step SCALE and each merge's two lines, numbered.
-export function compactMergeBatchInput(mem, nodes) {
-  assert(nodes.length >= 2 && nodes.every((n) => n.l > 0 && isBuilt(mem, n.l - 1, 2 * n.i) && isBuilt(mem, n.l - 1, 2 * n.i + 1)), "a merge batch is two or more merges of built lines");
-  const end = Math.min(...nodes.map((n) => (n.i + 1) * 2 ** n.l));
-  const blocks = nodes.map((n, k) => `--- ${k + 1} ---\n${flat(mem.text[n.l - 1][2 * n.i])}\n${flat(mem.text[n.l - 1][2 * n.i + 1])}`);
-  const n = nodes.length;
-  const ask =
-    `Merge each of these ${n} pairs of adjacent lines into one line, in at most ${NODE} bytes each. ` +
-    `Each pair covers a stretch of the chat; the pairs are in the chat's order.\n\n${blocks.join("\n")}\n---\n\n${BATCH_ANSWER(n, "pair")}`;
-  return { context: contextBefore(mem, end), step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
-}
-
-/// A batched reply's lines by their number (1 to k): a line starting `n) `
-/// (or `[n]`, `n.`, `n:`) starts line n, the first such wins, and a line
-/// that starts with no number goes on the one before it.
-export function batchLines(reply, k) {
-  const out = new Map();
-  let cur = null;
-  for (const raw of String(reply ?? "").split(/\r?\n/)) {
-    const m = /^\s*(?:[-*]\s+)?(?:\*\*)?(?:\[(\d{1,3})\]|(\d{1,3})[).:])(?:\*\*)?\s*(.*)$/.exec(raw);
-    if (m) {
-      const n = Number(m[1] ?? m[2]);
-      cur = n >= 1 && n <= k && !out.has(n) ? n : null;
-      if (cur !== null) out.set(cur, m[3].trim());
-    } else if (cur !== null && raw.trim()) {
-      out.set(cur, `${out.get(cur)} ${raw.trim()}`.trim());
-    }
-  }
-  for (const [n, t] of out) if (!t) out.delete(n);
-  return out;
-}
-
-/// A line's state in a batch is done when its last try fits or it has
-/// TRIES of them; else it is asked again.
-const lineOpen = (tries) => tries.length === 0 || (utf8(tries[tries.length - 1]) > NODE && tries.length < TRIES);
-const shortest = (tries) => tries.reduce((best, t) => (best === null || utf8(t) < utf8(best) ? t : best), null);
-
-export function batchStart(k) {
-  assert(Number.isSafeInteger(k) && k >= 2 && k <= BATCH, "a batch is 2 to BATCH lines");
-  return { k, tries: Array.from({ length: k }, () => []), calls: 0 };
-}
-
-/// Spec 4.3 for a batch, line by line: a reply's lines are tries of the
-/// lines still open; when none is open, or after TRIES calls, each line is
-/// its shortest try (null: it never got one). Else the retry to send in
-/// the same conversation: each line over the limit cut where it falls, and
-/// each one missing named.
-export function batchTry(state, reply) {
-  const got = batchLines(reply, state.k);
-  const tries = state.tries.map((t, n) => (lineOpen(t) && got.has(n + 1) ? [...t, got.get(n + 1)] : t));
-  const s = { k: state.k, tries, calls: state.calls + 1 };
-  const open = tries.flatMap((t, n) => (lineOpen(t) ? [n] : []));
-  if (!open.length || s.calls >= TRIES) return { state: s, lines: tries.map(shortest) };
-  const say = open.map((n) => {
-    const t = tries[n];
-    if (!t.length) return `${n + 1}) is missing.`;
-    const last = t[t.length - 1];
-    return `${n + 1}) is ${utf8(last)} bytes; the limit is ${NODE}. It must end where it is cut here:\n${n + 1}) ${cutBytes(last, NODE)}| ← LIMIT`;
-  });
-  const nums = open.map((n) => n + 1).join(", ");
-  return { state: s, retry: `${say.join("\n")}\n\nWrite line${open.length > 1 ? "s" : ""} ${nums} again, each starting with its number and ") ", and nothing else.` };
-}
-
-/// A batch's lines as they stand (its calls cut short): each line's
-/// shortest try that fits, else null.
-export function batchDone(state) {
-  return state.tries.map((t) => shortest(t.filter((x) => utf8(x) <= NODE)));
-}
-
-/// The compactor's first request: COMPACT, then one user message of two
-/// text blocks, the context first so it caches across calls.
-export function compactMessages(system, input) {
-  return [
-    { role: "system", content: system },
-    { role: "user", content: [{ type: "text", text: input.context }, { type: "text", text: input.step }] },
-  ];
-}
-
-/// Spec 4.3's feedback: the line cut where the limit falls.
-export function retryMessage(line) {
-  return `That line is ${utf8(line)} bytes; the limit is ${NODE}. It must end where it is cut here:\n${cutBytes(line, NODE)}| ← LIMIT`;
-}
-
-/// Spec 4.3, one reply: trimmed, kept as a try; done when it fits or at
-/// TRIES (the shortest try wins, the first of equals), else the retry to
-/// send in the same conversation. An empty reply fails the node.
+/// §4, one reply: trimmed, with an `id+n|` head it should not have written
+/// taken off, and kept as a try; done when it fits or at TRIES (the
+/// shortest try wins, the first of equals), else the retry to send in the
+/// same conversation. An empty reply fails the node.
 export function compactTry(tries, reply) {
-  const line = String(reply ?? "").trim();
+  const line = String(reply ?? "")
+    .trim()
+    .replace(/^\d+\+\d+\|\s*/, "");
   if (!line) return { fail: "the compactor answered nothing" };
   const all = [...tries, line];
   if (utf8(line) <= NODE || all.length >= TRIES) {
@@ -493,5 +614,5 @@ export function compactTry(tries, reply) {
     for (const t of all) if (utf8(t) < utf8(best)) best = t;
     return { tries: all, text: best };
   }
-  return { tries: all, retry: retryMessage(line) };
+  return { tries: all, retry: tooLong(line) };
 }
