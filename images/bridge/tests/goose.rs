@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fragment_bridge::records;
-use fragment_bridge::runtime::goose::{Goose, GooseConfig, FRAMING, VIEW_DOC};
+use fragment_bridge::runtime::goose::{Goose, GooseConfig, FRAMING, HANDS, VIEW_DOC};
 use support::acp::FakeGoose;
 use support::fake::{person, Fake, World};
 
@@ -30,14 +30,23 @@ fn config(api: &str, dir: &std::path::Path) -> GooseConfig {
         tier: "medium".into(),
         cli: Some("/usr/local/bin/fragment".into()),
         ca: None,
+        desktop: None,
+        skills: false,
     }
 }
 
 /// A bridge whose runtime is goose, scripted.
 fn start(fake: &Fake, name: &str) -> (support::Running, FakeGoose, std::path::PathBuf) {
+    start_with(fake, name, |_, _| {})
+}
+
+/// The same, its config changed by `change` (given its directory).
+fn start_with(fake: &Fake, name: &str, change: impl FnOnce(&mut GooseConfig, &std::path::Path)) -> (support::Running, FakeGoose, std::path::PathBuf) {
     let dir = support::dir(name);
     let goose = FakeGoose::default();
-    let runtime = Goose { config: config(&fake.url(), &dir), spawn: Arc::new(goose.clone()) };
+    let mut cfg = config(&fake.url(), &dir);
+    change(&mut cfg, &dir);
+    let runtime = Goose { config: cfg, spawn: Arc::new(goose.clone()) };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(runtime));
     (bridge, goose, dir)
 }
@@ -83,7 +92,11 @@ async fn a_mind_hands_goose_its_view_and_a_chat_its_text() {
         let log = goose.log.lock().unwrap();
         assert_eq!(log.spawned, vec!["hands.paul"], "one goose for the agent");
         assert_eq!(log.prompts, vec![vec![VIEW.to_string(), "Find my notes\n\n(task k1, thread t_0123456789abcdef)".to_string()], vec!["hello goose".to_string()]], "a mind's view, then the task; a chat's text alone");
-        assert_eq!(log.system, vec![json!({ "sessionId": "s1", "mode": "append", "key": "fragment", "text": format!("{FRAMING}\n\n{VIEW_DOC}") })], "the mind's session alone is framed");
+        assert_eq!(
+            log.system,
+            vec![json!({ "sessionId": "s1", "mode": "append", "key": "fragment", "text": format!("{HANDS}\n\n{FRAMING}\n\n{VIEW_DOC}") }), json!({ "sessionId": "s2", "mode": "append", "key": "fragment", "text": HANDS })],
+            "every session is told of its computer and fragments; the mind's alone is framed as its subagent"
+        );
         assert_eq!(log.closed, vec!["s1", "s2"]);
         let work = dir.join("work").display().to_string();
         assert_eq!(log.sessions[0]["cwd"], work.as_str());
@@ -97,6 +110,56 @@ async fn a_mind_hands_goose_its_view_and_a_chat_its_text() {
             assert_eq!(views[0].2.as_deref(), Some("hands.paul"));
         });
     }
+    bridge.stop().await;
+}
+
+/// Goal: each turn installs its agent's skills where its goose reads them:
+/// the platform skill (the computer's page, then the CLI's), goose's
+/// `web-search` replaced, and the owner's managed set as the agent is
+/// offered it, `${SKILL_DIR}` its own directory; a Hermes-only skill and a
+/// provider's the agent has no key for left out. Replay: the next turn
+/// fetches nothing. A skill gone from the fragment goes.
+#[tokio::test]
+async fn each_turn_installs_its_agents_skills() {
+    let fake = Fake::start("127.0.0.1:0", &["hands"]).await;
+    let chat = fake.chat("talk", &["hands"]);
+    fake.skills(&[
+        ("skills/research/arxiv-finite/SKILL.md", "---\nname: arxiv-finite\ndescription: papers\n---\npython3 ${SKILL_DIR}/scripts/s.py; web_extract it"),
+        ("skills/research/arxiv-finite/scripts/s.py", "print(1)"),
+        ("skills/software-development/subagent-driven-development-finite/SKILL.md", "---\nname: subagent-driven-development-finite\n---\ndelegate_task"),
+        ("skills/productivity/linear-finite/SKILL.md", "---\nname: linear-finite\n---\nlinear"),
+        ("fragment.json", "{}"),
+    ]);
+    let (bridge, _goose, dir) = start_with(&fake, "goose-skills", |cfg, dir| {
+        let cli = dir.join("fragment");
+        std::fs::write(&cli, "#!/bin/sh\nprintf -- '---\\nname: fragment\\ndescription: the cli\\n---\\n\\n# fragment\\n\\nMake apps.\\n'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cfg.cli = Some(cli);
+        cfg.skills = true;
+    });
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    fake.until(WAIT, "the reply", |w| !ends(w, &chat).is_empty()).await;
+    let skills = dir.join("goose/hands.paul/config/skills");
+    let platform = std::fs::read_to_string(skills.join("fragment/SKILL.md")).unwrap();
+    assert!(platform.starts_with("---\nname: fragment\n") && platform.contains("# Your computer") && platform.contains("Make apps."), "{platform}");
+    assert!(std::fs::read_to_string(skills.join("web-search/SKILL.md")).unwrap().contains("web_read"));
+    let arxiv = skills.join("managed/research/arxiv-finite");
+    assert_eq!(std::fs::read_to_string(arxiv.join("SKILL.md")).unwrap(), format!("---\nname: arxiv-finite\ndescription: papers\n---\npython3 {}/scripts/s.py; web_read it", arxiv.display()));
+    assert_eq!(std::fs::read_to_string(arxiv.join("scripts/s.py")).unwrap(), "print(1)");
+    assert!(!skills.join("managed/software-development").exists(), "a Hermes-only skill is left out");
+    assert!(!skills.join("managed/productivity").exists(), "a provider's skill without its key is left out");
+    let fetched = |w: &World| w.requests.iter().filter(|r| r.0.ends_with("/file")).count();
+    assert_eq!(fake.with(|w| fetched(w)), 2);
+
+    // replay: nothing fetched again; a skill gone goes
+    fake.with(|w| w.fragments.get_mut("skills.paul").unwrap().files.remove("skills/research/arxiv-finite/scripts/s.py"));
+    fake.say(&chat, &person("paul"), json!({ "text": "again" }));
+    fake.until(WAIT, "the second reply", |w| ends(w, &chat).len() == 2).await;
+    assert_eq!(fake.with(|w| fetched(w)), 2, "nothing fetched again");
+    assert!(!arxiv.join("scripts").exists(), "what went is removed");
+    assert!(arxiv.join("SKILL.md").exists());
     bridge.stop().await;
 }
 

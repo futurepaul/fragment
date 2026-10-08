@@ -20,6 +20,7 @@
 
 pub mod goose;
 pub mod script;
+pub mod skills;
 
 use std::future::Future;
 use std::path::PathBuf;

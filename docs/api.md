@@ -1296,8 +1296,8 @@ charged (none when nothing was).
 
 ### Models (docs/cloudflare-v1.md, decision 23)
 
-One OpenAI-shaped chat completion on a tier's model, metered on its
-payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
+One OpenAI-shaped chat completion on a tier's model, or one Clef
+decision, metered on its payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
 `@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
 both on Workers AI through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
@@ -1312,6 +1312,7 @@ tier an agent or a job's step may name.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `POST /api/models/v1/decide[?fragment=<name>]` | the same | a decision, `{model?, state, questions, images?}` → `{answers, model, usage}` (below) |
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
@@ -1333,6 +1334,23 @@ call settles after its answer whether or not the client read to its end.
 Nothing of the request or its answer is kept: only the usage, on the
 ledger. A refusal of the payer's ledger is its own (402
 `budget_used_up`, 403 for a guest), with its message.
+
+A decision is Clef on the same transport (`models::decide_route`), as
+an agent asks it: its body is a job's `ai.decide` input (AI, above),
+`model` `clef` or `clef-flash` (the default), and its answer is that
+step's: `answers` by question id, `model` the catalog id, `usage` Clef's
+`{input_tokens, output_tokens}`. Its caller, payer, `fragment` and 6 MiB
+limit are the chat route's. A body that is no decision (not an object,
+a field missing or unknown, a `model` that is neither size, a bound of
+the step's past) is 400 saying why, nothing reserved or sent. It
+reserves its input's bytes as tokens, at most Clef's 65,536-token
+window, under an `aig:<hex>` reference of its own, as an agent's turn,
+and settles from the input tokens Clef counted (its output is free:
+`fragment_core::decide`). A call the model refuses is released and its
+refusal passed through as it came; an answer that does not answer every
+question is 502 `upstream_failed`, charged its reservation. A
+computer's guest asks it as `POST /v1/decide` on its model intercept
+(docs/computers.md, Models).
 
 The same call, as a Rust function the cell's other parts make
 (`models::complete`: the payer, the agent, the fragment, the tier, the
@@ -1856,7 +1874,7 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
-| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
 sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by

@@ -2,8 +2,8 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=goose|script)
-//! fragment-bridge screen   only the screen on BRIDGE_SCREEN_LISTEN
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=goose|script), and
+//!                          its screens on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
 //!
@@ -19,7 +19,7 @@ use fragment_bridge::engine::Settings;
 use fragment_bridge::runtime::goose::{Goose, GooseConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
-use fragment_bridge::{ev, limits, screen};
+use fragment_bridge::{ev, limits, screen, screens};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -45,7 +45,7 @@ fn runtime() -> Box<dyn Runtime> {
     match env_or("BRIDGE_RUNTIME", "goose").as_str() {
         "goose" => Box::new(Goose::new(GooseConfig {
             command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
-            args: ["acp", "--with-builtin", "developer"].map(String::from).to_vec(),
+            args: vec!["acp".into(), "--with-builtin".into(), env_or("BRIDGE_GOOSE_BUILTINS", "developer,skills")],
             work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
             home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
             root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
@@ -54,6 +54,8 @@ fn runtime() -> Box<dyn Runtime> {
             tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
             cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
             ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+            desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),
+            skills: env("BRIDGE_GOOSE_SKILLS").is_some_and(|v| v == "1"),
         })),
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),
@@ -72,9 +74,24 @@ fn left_out() -> Vec<String> {
 
 fn screen_config() -> Option<screen::ScreenConfig> {
     let listen: SocketAddr = env("BRIDGE_SCREEN_LISTEN")?.parse().unwrap_or_else(|_| fail("BRIDGE_SCREEN_LISTEN is not host:port"));
-    let target = env("BRIDGE_SCREEN_RFB").map(|t| screen::Target::parse(&t).unwrap_or_else(|e| fail(&e)));
+    // one display for every agent was the cut model: each agent's is its own now
+    if env("BRIDGE_SCREEN_RFB").is_some() {
+        fail("BRIDGE_SCREEN_RFB is gone: name each agent's display in BRIDGE_SCREENS_FILE");
+    }
+    let screens = match (env("BRIDGE_SCREENS_FILE"), env("BRIDGE_SCREENS_DIR")) {
+        (None, None) => None,
+        (Some(file), None) => Some(screens::Source::File(PathBuf::from(file))),
+        (None, Some(dir)) => {
+            let dir = PathBuf::from(dir);
+            if !screens::dir_ok(&dir) {
+                fail(&format!("BRIDGE_SCREENS_DIR is an absolute path of at most {} bytes (its agents' sockets are under it)", screens::DIR_PATH_MAX_BYTES));
+            }
+            Some(screens::Source::Dir(dir))
+        }
+        (Some(_), Some(_)) => fail("BRIDGE_SCREENS_FILE or BRIDGE_SCREENS_DIR names the screens, not both"),
+    };
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), target, start })
+    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens, start })
 }
 
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within
@@ -104,13 +121,6 @@ async fn main() {
         "version" => {
             println!("fragment-bridge {}", env!("CARGO_PKG_VERSION"));
         }
-        "screen" => {
-            on_signal(stop_tx);
-            let cfg = screen_config().unwrap_or_else(|| fail("BRIDGE_SCREEN_LISTEN names where the screen listens"));
-            if let Err(e) = screen::serve(cfg, stop).await {
-                fail(&e);
-            }
-        }
         "run" => {
             on_signal(stop_tx);
             let api = env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address"));
@@ -124,16 +134,9 @@ async fn main() {
                 held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
                 left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
+                screen: screen_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending });
-            if let Some(screen) = screen_config() {
-                let stop = stop.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = screen::serve(screen, stop).await {
-                        ev!("screen.failed", { "error": e });
-                    }
-                });
-            }
             match driver::run(cfg, runtime(), stop).await {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
@@ -142,6 +145,6 @@ async fn main() {
                 }
             }
         }
-        other => fail(&format!("{other:?}: run, screen, or version")),
+        other => fail(&format!("{other:?}: run or version")),
     }
 }

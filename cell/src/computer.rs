@@ -48,7 +48,7 @@ use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, 
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestoreSource, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1917,9 +1917,17 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Post, [id, "ports", port, "ticket"]) => {
             let v = owned(env, who, id).await?;
             let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
+            // where on the port it lands: a path and query the image reads
+            // (an agent's screen: `/?agent=<agent>`), carried, never read
+            let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+            let path = asked.path.unwrap_or_else(|| "/".into());
+            if !valid_port_path(&path) {
+                return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
+            }
             let t = ask(env, id, "computer/ticket", &json!({ "port": port, "identity": who })).await?;
             let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
-            let url = format!("{}/__ticket?t={ticket}&next=/p/{port}/", v.origin);
+            let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
+            let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
             json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
@@ -1981,7 +1989,9 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
     if path == "/__ticket" {
         let q = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
         let ticket = q("t").ok_or_else(|| CellError::invalid("this link names no ticket"))?;
-        let next = q("next").filter(|n| n.starts_with("/p/") && !n.contains("//")).unwrap_or_else(|| "/p/6080/".into());
+        // `/p/<port>` and a path on it, as the ticket's minting checked it
+        let landing = |n: &str| n.strip_prefix("/p/").and_then(|r| r.split_once('/')).is_some_and(|(port, rest)| port.parse::<u16>().is_ok() && valid_port_path(&format!("/{rest}")));
+        let next = q("next").filter(|n| landing(n)).unwrap_or_else(|| "/p/6080/".into());
         let s = ask(env, id, "computer/redeem", &json!({ "ticket": ticket })).await?;
         let session = s["session"].as_str().ok_or_else(|| CellError::host("the computer made no session"))?;
         let max_age_s = s["maxAgeS"].as_i64().unwrap_or(0);
@@ -2170,14 +2180,18 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 
 /// The guest's model call (docs/computers.md, Models): `POST
 /// /v1/chat/completions`, OpenAI's shape, with `model` a tier and
-/// `x-fragment-agent`. It is the platform's model route as that agent
-/// (`models::route`, signed as egress_api signs), which bounds it, meters
-/// it to the agent's owner, and refuses at zero credit. Its auth headers
-/// are the guest's and go nowhere; any other path is 404, unmetered.
+/// `x-fragment-agent`, or `POST /v1/decide`, a Clef decision. It is the
+/// platform's model route as that agent (`models::route` or
+/// `models::decide_route`, signed as egress_api signs), which bounds it,
+/// meters it to the agent's owner, and refuses at zero credit. Its auth
+/// headers are the guest's and go nowhere; any other path is 404,
+/// unmetered.
 async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
-    if req.method() != Method::Post || req.path() != "/v1/chat/completions" {
-        return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions"));
-    }
+    let api = match (req.method(), req.path().as_str()) {
+        (Method::Post, "/v1/chat/completions") => "http://api.fragment.internal/api/models/v1/chat/completions",
+        (Method::Post, "/v1/decide") => "http://api.fragment.internal/api/models/v1/decide",
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions and POST /v1/decide")),
+    };
     if req.headers().get(AGENT_HEADER)?.is_none() {
         return Err(CellError::new(ErrorCode::Unauthenticated, "name the agent this call is for (x-fragment-agent): its owner pays for it"));
     }
@@ -2190,8 +2204,7 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let body = crate::read_body(&mut req, crate::models::MODEL_BODY_MAX_BYTES).await?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
-    let api = Request::new_with_init("http://api.fragment.internal/api/models/v1/chat/completions", &init)?;
-    egress_api(api, env, ctx, computer).await
+    egress_api(Request::new_with_init(api, &init)?, env, ctx, computer).await
 }
 
 /// Headers a hop answers for itself, never sent on.

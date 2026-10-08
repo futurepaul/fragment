@@ -5,6 +5,8 @@
 //! questions, and answers each with probabilities (its catalog's schemas,
 //! `developers.cloudflare.com/workers-ai/models/clef/schema-{input,output}.json`,
 //! read 2026-10-07). A step is checked against them before it reserves.
+//! An agent asks the same on the decision route (`POST
+//! /api/models/v1/decide`), its body a step's input (`route_body`).
 
 use serde_json::Value;
 
@@ -60,6 +62,46 @@ impl Refusal {
             Refusal::Images => format!("ai.decide takes at most {IMAGES_MAX} images, each a data: URL of a PNG, a JPEG or a WebP"),
         }
     }
+}
+
+/// The size the decision route calls when its body names none: the
+/// cheaper, for an agent's many small decisions.
+pub const ROUTE_DEFAULT_MODEL: Clef = Clef::Flash;
+
+/// Why the decision route refuses a body before `decide_call` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyRefusal {
+    /// Not a JSON object.
+    NotAnObject,
+    /// A `model` that is neither `clef` nor `clef-flash`.
+    Model,
+    /// A field missing, unknown, or of the wrong type: serde's words.
+    Shape(String),
+}
+
+impl BodyRefusal {
+    pub fn message(&self) -> String {
+        match self {
+            BodyRefusal::NotAnObject => "a decision is a JSON object: {model?, state, questions, images?}".into(),
+            BodyRefusal::Model => "a decision's model is clef or clef-flash (the default)".into(),
+            BodyRefusal::Shape(why) => format!("a decision: {why}"),
+        }
+    }
+}
+
+/// The decision route's body, as a step: a job's `ai.decide` input, its
+/// `model` `ROUTE_DEFAULT_MODEL` unless it names one. `decide_call`
+/// checks it next, as it checks a step.
+pub fn route_body(body: Value) -> Result<AiDecide, BodyRefusal> {
+    let Value::Object(mut fields) = body else { return Err(BodyRefusal::NotAnObject) };
+    match fields.get("model") {
+        None | Some(Value::Null) => {
+            fields.insert("model".into(), serde_json::to_value(ROUTE_DEFAULT_MODEL).expect("a size serializes"));
+        }
+        Some(m) if serde_json::from_value::<Clef>(m.clone()).is_ok() => {}
+        Some(_) => return Err(BodyRefusal::Model),
+    }
+    serde_json::from_value(Value::Object(fields)).map_err(|e| BodyRefusal::Shape(e.to_string()))
 }
 
 /// Why Clef's answer is none the platform passes on.
@@ -213,6 +255,46 @@ mod tests {
         assert_eq!((call.model, call.input.clone()), (CLEF_FLASH_MODEL, args), "the input is what the job asked, its model the size");
         let big = decide_call(&decide(json!({ "model": "clef", "state": { "rows": [1] }, "questions": { "q": noul("?") } }))).unwrap();
         assert_eq!(big.model, CLEF_MODEL);
+    }
+
+    /// Goal: the decision route's body is a step's input, `clef-flash`
+    /// unless it names a size, and a body that is not one is refused,
+    /// typed, before anything reads it further. Method: a body naming no
+    /// model, a null one and each size, then an unknown model, a body that
+    /// is no object, a field missing and one unknown, through to the call.
+    #[test]
+    fn the_routes_body_is_a_steps_input() {
+        let ask = json!({ "state": "The invoice is overdue.", "questions": { "late": noul("Is the invoice late?") } });
+        let step = route_body(ask.clone()).unwrap();
+        let mut asked = ask.clone();
+        asked["model"] = json!("clef-flash");
+        assert_eq!(step, decide(asked.clone()), "no model: the flash size");
+        assert_eq!(decide_call(&step).unwrap(), DecideCall { model: CLEF_FLASH_MODEL, input: asked }, "the call a step with the same input makes");
+        let mut nulled = ask.clone();
+        nulled["model"] = Value::Null;
+        assert_eq!(route_body(nulled).unwrap().model, Clef::Flash);
+        for (named, size) in [("clef", Clef::Clef), ("clef-flash", Clef::Flash)] {
+            let mut sized = ask.clone();
+            sized["model"] = json!(named);
+            assert_eq!(route_body(sized).unwrap().model, size);
+        }
+        for model in [json!("@cf/cloudflare/clef"), json!("cheap"), json!(1), json!(["clef"])] {
+            let mut other = ask.clone();
+            other["model"] = model.clone();
+            assert_eq!(route_body(other), Err(BodyRefusal::Model), "{model}");
+        }
+        assert_eq!(route_body(json!("decide")), Err(BodyRefusal::NotAnObject));
+        assert_eq!(route_body(json!([ask])), Err(BodyRefusal::NotAnObject));
+        let shape = |body: Value| match route_body(body) {
+            Err(BodyRefusal::Shape(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(shape(json!({ "state": "s" })).contains("questions"), "no questions");
+        assert!(shape(json!({ "state": "s", "questions": { "q": noul("?") }, "stream": true })).contains("stream"), "a field Clef does not take");
+        assert!(shape(json!({ "state": "s", "questions": { "q": { "type": "rank", "instructions": "?" } } })).contains("rank"));
+        let empty = route_body(json!({ "state": "s", "questions": {} })).unwrap();
+        assert_eq!(decide_call(&empty), Err(Refusal::Questions), "the step's bounds hold after");
+        assert!(BodyRefusal::Model.message().contains("clef-flash"));
     }
 
     /// Goal: a step outside the catalog's bounds is refused, typed, before

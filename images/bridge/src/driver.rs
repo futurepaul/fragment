@@ -16,7 +16,8 @@
 //! - the runtime's commands (a turn's attachments downloaded first, and its
 //!   note read from its chat's journal: what a restart cut of the agent's
 //!   turn before it, note.rs) and events;
-//! - the keepalive socket, held while the engine says so (decision 39).
+//! - the keepalive socket, held while the engine says so (decision 39);
+//! - the screen (screen.rs), told which agents it runs.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ use crate::net::Backoff;
 use crate::note;
 use crate::records::{self, AttachmentRef, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo, TurnStart};
+use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
 #[derive(Debug, Clone)]
@@ -64,6 +66,9 @@ pub struct Config {
     /// files the image keeps another way. None by default.
     pub left_out: Vec<String>,
     pub settings: Settings,
+    /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
+    /// (screen.rs); none, no screen.
+    pub screen: Option<ScreenConfig>,
 }
 
 /// Why the bridge stopped.
@@ -236,8 +241,26 @@ impl Shared {
     }
 }
 
+/// The agents the screen names, from those the bridge runs.
+fn named(agents: &[Agent]) -> Vec<Named> {
+    agents.iter().map(|a| Named { fragment: a.fragment.clone(), name: a.name.clone() }).collect()
+}
+
 /// Runs the bridge until `stop` turns true.
 pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<bool>) -> Result<(), BridgeError> {
+    // The screen's page answers from the start (a viewer's port wakes the
+    // computer, and waits for it); its sockets wait for the agents, which
+    // are told only past the restore gate, so no lease under `/data` is
+    // touched before the restore.
+    let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
+    if let Some(sc) = cfg.screen.clone() {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            if let Err(e) = screen::serve(sc, screen_rx, stop).await {
+                crate::ev!("screen.failed", { "error": e });
+            }
+        });
+    }
     if !restore_gate(&cfg, stop.clone()).await {
         return Ok(());
     }
@@ -285,6 +308,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         r = &mut runtime_task => return runtime_result(r, name),
     };
     let Some(computer) = computer else { return Ok(()) };
+    screen_agents.send_replace(Some(named(&computer.agents)));
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
@@ -342,6 +366,8 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c, only) => {
                         let agents = c.agents;
+                        let now = Some(named(&agents));
+                        screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
                         // An agent that left this computer is followed no more.
                         follows.keep_only(&agents);

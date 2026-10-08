@@ -377,6 +377,13 @@ expires within 30 days. The container application is the deployment's
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model through AI Gateway, streams its answer back, and
   settles the final usage (lesson 7).
+- `POST http://model.fragment.internal/v1/decide`, a Clef decision (a
+  job's `ai.decide` input: `{model?, state, questions, images?}`, `model`
+  `clef` or `clef-flash`, the default) with `x-fragment-agent`: the
+  intercept makes it `POST /api/models/v1/decide` as that agent, signed,
+  reserved and settled as a chat completion is (its input's bytes as
+  tokens, settled from Clef's input tokens), and answers `{answers, model,
+  usage}` (docs/api.md, Models). The goose image's `screen_click` asks it.
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
@@ -564,10 +571,17 @@ a receiver reports (1005, none given; 1006, dropped), which workerd
 refuses to send: passed on as it was, it left the page's end open (p5,
 2026-10-05: a desktop that restarted froze its screen's page). Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
-(decision 11). The page is served at the
-port's root and reaches its sockets by relative URLs (our images':
-`websockify?viewer=` and `control?viewer=`), so it works under the
-port's prefix (`/p/6080/`).
+(decision 11), one for each agent: the shell opens an agent's at
+`/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
+…/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
+("Its screen" in the chat's menu), or with the agent picked from a group
+chat's menu ("<name>'s screen"), or from settings. The platform carries
+the query and reads nothing in it: which desktop is that agent's, and
+the refusal of an agent the computer does not run, are the image's. The
+page is served at the port's root and reaches its sockets by relative
+URLs, naming the agent again (our images': `websockify?viewer=&agent=`
+and `control?viewer=&agent=`), so it works under the port's prefix
+(`/p/6080/`).
 
 ## Our images
 
@@ -584,6 +598,82 @@ settings and state):
 - `images/goose`: the deployment's default image (`deploy/example.jsonc`),
   the bridge with its `goose` runtime and goose itself. Its design is
   docs/optchat.md, "goose on the computer"; its build is `images/goose`.
+  499 MB compressed (1.28 GB on disk): Chromium is most of it, then goose
+  (126 MB), Node (for the browser tools) and cua-driver.
+
+  **Each agent has a desktop of its own** (`images/goose/desktop`,
+  `fragment-desktop`): TigerVNC's Xvnc serving RFB on a Unix socket alone
+  (no TCP, no password: the bridge's screen is the only way in),
+  matchbox (each window full screen), and a Chromium on it whose CDP, on
+  loopback, the agent's browser tools drive, so its owner watches it
+  browse on "Its screen". Everything of a desktop is under
+  `/run/desktop/<16 hex of its agent's name>/` (the bridge's
+  `BRIDGE_SCREENS_DIR`, which names every agent's screen by that
+  convention: docs/bridge.md), never `/data`: its browser's profile,
+  sign-ins included, lasts until the computer sleeps, and nothing of a
+  desktop is in a save. Its downloads land in `/data/work/downloads`. Each
+  agent's display number (from `:10`) is its own for the computer's life.
+  A desktop starts at its first use, never at boot: its screen's first
+  viewer (`BRIDGE_SCREEN_START`, `fragment-desktop start <agent>`, about
+  0.25 s), or the agent's first browser or computer tool call (about
+  0.6 s to a page loaded). A supervisor of its own runs it, and stops it
+  once it has been unused for 10 minutes (`desk::IDLE_STOP_MS`): no tool
+  call, no one watching (the screen touches its `activity` every 10 s
+  while someone does), no person holding it. Its next use starts it
+  again. One desktop with a page open is about 350 MB.
+
+  Take over is the desktop's lease (`lease.json`, the bridge's lease.rs):
+  while a person holds it, the agent's browser and computer tools answer
+  `human_has_control` and never reach the desktop, and its goose is told
+  to wait. All of a computer's agents run as root (decision 44), so
+  nothing but the tools and the lease keeps each on its own desktop.
+
+  **goose's tools.** Each session gets three MCP servers beside goose's
+  `developer` and `skills` builtins (the bridge names them:
+  docs/bridge.md, "goose, as the bridge speaks it"), each run by
+  `fragment-desktop mcp`:
+  - `browser`: Microsoft's Playwright MCP 0.0.83 (pinned by its lock,
+    `images/goose/browser/`), attached over CDP to the agent's own
+    Chromium. Its accessibility snapshot gives each element a ref the
+    model acts on, so it needs no eyes. 18 of its tools are offered.
+  - `computer`: cua-driver 0.28.3 (pinned by hash, as Hermes had it), 17
+    of its 62 tools: windows, keys, mouse, clipboard, its input delivered
+    `foreground` (the only way it reaches a window on Xvnc); and two of
+    ours for a model that reads no images: `screen_look` (a screenshot
+    and a question to the model route's `vision` model) and
+    `screen_click` (Clef, set-of-marks: the screenshot with a numbered
+    grid to `/v1/decide` as a `choice`, then the chosen cell's
+    neighbourhood enlarged under a finer grid; the finer cell's centre is
+    clicked with xdotool).
+  - `web`: `web_search` (DuckDuckGo's HTML results, then Bing's, then
+    DuckDuckGo's lite page, no key) and `web_read` (a page as Markdown:
+    its main text by Mozilla's Readability, ported, or all of it; long
+    pages in parts; a PDF or other file saved to the downloads), over
+    curl.
+  Before the browser and the computer a gate of ours (`proxy.rs`) holds
+  the agent back while a person holds the screen, starts the desktop at
+  the first call, leaves every image out of a result (goose's model,
+  GLM-5.3, reads none), cuts a result past 40k characters saying how to
+  read on, and offers only the tools listed. goose's code mode (its
+  `code_execution` extension) is not built in: it needs goose's
+  `code-mode` feature, which embeds V8 (214 MB where the portable build
+  is 126 MB), and is unproven with GLM.
+
+  **Its skills** (`images/bridge/src/runtime/skills.rs`), installed for
+  each agent at each turn's start where its goose's `skills` builtin reads
+  them (`/tmp/goose/<agent>/config/skills`): the platform skill
+  `fragment` (the computer's page, `runtime/computer.md`, then the CLI's
+  own, `fragment skill`); `web-search`, in the place of goose's bundled
+  one; and the owner's managed set from their skills fragment, adapted
+  (`${SKILL_DIR}` its directory, Hermes' `web_extract` read as
+  `web_read`), less `subagent-driven-development-finite` and
+  `requesting-code-review-finite` (built on Hermes' `delegate_task`) and
+  `duckduckgo-search-finite` (the web tools do it), and less a provider's
+  skill while the agent holds no credential of that provider (Google,
+  Perplexity, Google Places, xAI, X, ElevenLabs or fal, Linear, Notion,
+  Monday, Parallel, Gemini). Every session's system prompt tells goose it
+  makes its owner's apps as fragments with the CLI, and to load the
+  `fragment` skill before any app work.
 
 ## Billing
 
@@ -650,3 +740,29 @@ settings and state):
   model on the host
   (`cargo test -p fragment-bridge --test docker -- --ignored`). These are
   lower rung: fakes at the platform's edge.
+  The screens: in process against fake displays (`tests/screen.rs`: each
+  agent's socket is its own display, named by a screens file or by the
+  screens directory's convention; an agent not on the computer, one the
+  image names no screen for, or no name, refused; Take over writes the
+  agent's lease, and the input gate follows it whoever changes it; a
+  person's lease from the bridge's last life given back at its start).
+  The goose image's desktop and tools with Docker, on real sites
+  (`the_goose_desktop_and_its_tools`, needs the internet; times on this
+  build box, 2026-10-08): no desktop until its first use; `web_search`
+  0.65 s; `web_read` of a docs page 0.05 s (17.6k characters) and of a
+  listing (Hacker News, page mode, its links) 0.18 s; the first
+  `browser_navigate` 0.55 s, the desktop started; a listing's snapshot
+  0.03 s (40k characters, its 30 stories); a form filled and submitted
+  (type, click, snapshot, click) 1.2 s, and nothing of the desktop or
+  its browser under `/data` after; the screen's first frame 0.07 s,
+  the agent's own desktop with the browser drawn on it, another agent's
+  refused; Take over making the browser answer `human_has_control`, Give
+  back letting it act; cua-driver typing an address into the browser
+  (3.6 s: its foreground input is slow); `screen_look` and
+  `screen_click` through the model intercept (a scripted vision model and
+  a scripted Clef: the click lands at the cell it chose); and goose
+  itself calling a browser tool in its session, its system prompt naming
+  the platform skill. `an_unused_desktop_stops`: watched, a desktop stays
+  up past the idle bound; unwatched, it stops; the next viewer starts it
+  again. Clef's and the vision model's own grounding on a real screen
+  is the hosted rung's, not proven here.

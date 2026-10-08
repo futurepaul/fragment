@@ -14,13 +14,26 @@ ended.
 - `driver.rs`: the restore gate, the state file, followers, posting
   lanes, the keepalive.
 - `runtime/`: `goose` (goose over ACP, our goose image's: below, "goose,
-  as the bridge speaks it") and `script` (a deterministic agent, the stub
-  image's).
-- `screen.rs`: a screen page and an RFB proxy with Take over / Give back:
-  its input gate follows every message noVNC 1.7.0 sends (the extended
-  clipboard's negative length, the extended pointer event), and its
-  control socket answers on an image with no display (the stub's and the
-  goose image's) too.
+  as the bridge speaks it", with the skills each turn installs,
+  `skills.rs`, and the computer's page of the platform skill,
+  `computer.md`) and `script` (a deterministic agent, the stub image's).
+- `screen.rs`: each agent's screen (`?agent=<agent fragment>` on its
+  sockets): a page, and an RFB proxy onto that agent's own display with
+  Take over / Give back. Its input gate follows every message noVNC 1.7.0
+  sends (the extended clipboard's negative length, the extended pointer
+  event), and its control socket answers on an image with no display (the
+  stub's) too. An agent the bridge does not run, or one the image names
+  no screen for, is 404; no agent's name, 400.
+- `screens.rs`: which display is each agent's, when the image says, with
+  its runtime's lease and activity file: a file naming them
+  (`BRIDGE_SCREENS_FILE`), or a directory naming every agent's by
+  convention (`BRIDGE_SCREENS_DIR`: our goose image's).
+- `lease.rs`: who drives a screen, the agent or one person (`lease.json`
+  under its `lease.lock` flock, its epoch one on at every change, the
+  shape Hermes' Bot Desktop lease had): Take over is that lease, so the
+  agent's screen tools refuse while a person holds it
+  (`human_has_control`). A screen with no lease file keeps one of its
+  own, by the same rules.
 
 ## A runtime
 
@@ -76,10 +89,13 @@ Bodies are JSON. `api.rs` has one method for each.
 goose itself calls `FRAGMENT_MODEL` as the agent (below), and a mind's
 `fragment mcp` calls `GET /api/f/{mind}/status` and `POST
 /api/f/{mind}/ops/{view,zoom,date,search}` as the agent (cli/src/mcp.rs).
+On our goose image the agent's screen tools call `FRAGMENT_MODEL` as the
+agent too: `screen_look` its `/v1/chat/completions` with `model:
+"vision"` and a screenshot, `screen_click` its `/v1/decide` (Clef).
 
 ## Settings
 
-`fragment-bridge run` (and `screen`, the screen alone):
+`fragment-bridge run`:
 
 | Variable | Default | |
 |---|---|---|
@@ -95,7 +111,10 @@ goose itself calls `FRAGMENT_MODEL` as the agent (below), and a mind's
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `FRAGMENT_MODEL` | required for `goose` | goose's model host (its OpenAI provider's `OPENAI_HOST`) |
-| `BRIDGE_GOOSE_BIN` | `/usr/local/bin/goose` | goose, run as `goose acp --with-builtin developer` |
+| `BRIDGE_GOOSE_BIN` | `/usr/local/bin/goose` | goose, run as `goose acp --with-builtin <BRIDGE_GOOSE_BUILTINS>` |
+| `BRIDGE_GOOSE_BUILTINS` | `developer,skills` | goose's builtins: its shell and editor, and its skills (`load_skill`) |
+| `BRIDGE_GOOSE_DESKTOP` | | the image's `fragment-desktop`: set, every session gets the agent's `browser`, `computer` and `web` MCP servers (`fragment-desktop mcp …`), and each goose runs with `DISPLAY` naming its agent's own display (`fragment-desktop display <agent>`); the goose image's `/usr/local/bin/fragment-desktop` |
+| `BRIDGE_GOOSE_SKILLS` | | `1`: each turn installs its agent's skills first (below) |
 | `BRIDGE_GOOSE_WORK` | `/data/work` | each session's cwd |
 | `BRIDGE_GOOSE_HOME` | `/data/work/home` | goose's and its tools' `HOME` |
 | `BRIDGE_GOOSE_ROOT` | `/tmp/goose` | each agent's goose's own state, `<root>/<agent>` (`GOOSE_PATH_ROOT`): scratch, never `/data` |
@@ -103,10 +122,11 @@ goose itself calls `FRAGMENT_MODEL` as the agent (below), and a mind's
 | `BRIDGE_GOOSE_CLI` | | the fragment CLI: set, a mind's sessions get `fragment mcp <mind>` (the goose image's `/usr/local/bin/fragment`) |
 | `BRIDGE_TRUST_CA` | | the interception CA, appended to `/etc/ssl/certs/ca-certificates.crt` once it appears (at most 15 s: docs/computers.md, "Connections and operator keys"); the goose image's `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
-| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
+| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screens. Their sockets wait (at most 30 s) for the agents, told past the restore gate, so no lease under `/data` is touched before the restore |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
-| `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset (and no `BRIDGE_SCREENS_DIR`), no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up |
+| `BRIDGE_SCREENS_DIR` | | in place of the file, a directory naming every agent's screen by convention: `<dir>/<16 hex of SHA-256 of the agent's fragment>/` holds its display `rfb.sock`, its `lease.json` and its `activity`, whether or not its desktop has started (an absolute path of at most 64 bytes, so the socket's fits). Our goose image's is `/run/desktop` (docs/computers.md) |
+| `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
 
 ## State, and what it never does twice
 
@@ -315,8 +335,9 @@ fork's two settings.
     (`GOOSE_AUTO_COMPACT_THRESHOLD=0`, and the fork's `GOOSE_NO_COMPACTION=1`
     for an overflow too), a system prompt that never changes within a
     session (the fork's `GOOSE_STABLE_SYSTEM_PROMPT=1`), no extension of
-    its config (`EXTENSIONS={}`: `developer` and a session's own alone; no
-    subagents, scheduler, skills or memory of goose's), no session naming
+    its config (`EXTENSIONS={}`: its builtins, `developer` and `skills`, and
+    a session's own alone; no subagents, scheduler or memory of goose's),
+    no session naming
     (`GOOSE_DISABLE_SESSION_NAMING=true`), `GOOSE_MODE=auto` (it asks no
     permission), no keyring, no telemetry;
   - its state is `<BRIDGE_GOOSE_ROOT>/<agent>` (`GOOSE_PATH_ROOT`), never
@@ -372,10 +393,37 @@ fork's two settings.
   prompt are waited for 60 s, a turn's open tool calls are at most 256, and
   what it says is kept to 256 KiB.
 
+- **What every session is told.** Its system prompt gets `HANDS` (through
+  the same `system-prompt/set`, key `fragment`, before a mind's framing):
+  the computer, its web, browser and computer tools, that the model reads
+  no images, that `human_has_control` means its owner holds its screen,
+  and that it makes its owner's apps as fragments with the `fragment` CLI,
+  loading the `fragment` skill (then `apps-finite`) before any app work.
+  The same bytes every turn.
+- **Its tools, on our image** (`BRIDGE_GOOSE_DESKTOP`): each session's
+  `mcpServers` are the agent's `browser` (`fragment-desktop mcp browser
+  <agent>`), `computer` (`… mcp computer <agent>`) and `web` (`… mcp
+  web`), beside a mind's `mind`: goose prefixes their tools with their
+  names (`browser__browser_navigate`). They and goose's shell run on the
+  agent's own display (`DISPLAY`). What they are: docs/computers.md, "Our
+  images".
+- **Its skills** (`BRIDGE_GOOSE_SKILLS`, `src/runtime/skills.rs`): before
+  each turn's session, the agent's skills are installed where its goose
+  reads them (`<BRIDGE_GOOSE_ROOT>/<agent>/config/skills`, scratch): the
+  platform skill `fragment` (the computer's page, `computer.md`, then
+  what `<BRIDGE_GOOSE_CLI> skill` prints, made once a life),
+  `web-search`, and the owner's managed set from their skills fragment
+  (`GET /api/fragments?for=`, `GET /api/f/{skills}/files?for=` and
+  `…/file?path=&for=`, as the agent acting for its owner), only what
+  changed since the last install of this life fetched, adapted and
+  filtered as docs/computers.md says. A turn waits for it at most 8 s
+  (`INSTALL_MS_MAX`), then runs with what is there.
+
 Tests: the mapping, pure (`src/runtime/goose.rs`); the bridge with a
 scripted ACP goose on an in-process pipe (`tests/goose.rs`,
 `tests/support/acp.rs`: a mind's view, framing and MCP, a step's words,
-Stop, a goose that dies, a refused permission); the real goose on this
+Stop, a goose that dies, a refused permission, each turn's skills
+installed and adapted, a replay fetching nothing); the real goose on this
 host with the scripted model and the real `fragment mcp`
 (`FRAGMENT_GOOSE_BIN=… FRAGMENT_CLI_BIN=… cargo test -p fragment-bridge
 --test goose -- --ignored`); and the goose image in Docker

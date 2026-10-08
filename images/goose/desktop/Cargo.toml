@@ -1,0 +1,23 @@
+[package]
+name = "goose-desktop"
+version = "0.1.0"
+description = "Each agent's desktop in our goose image, and the screen and web tools its goose uses (docs/computers.md)"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fragment-desktop"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+# a page's main text as Markdown (Mozilla's Readability, ported), and HTML
+# read with CSS selectors (dom_smoothie's own parser)
+dom_query = "0.28"
+dom_smoothie = "0.18"
+fragment-bridge = { path = "../../bridge" }
+jpeg-encoder = "0.7"
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std"] }

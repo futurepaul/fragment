@@ -14,6 +14,9 @@ FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY bridge bridge
+# the workspace's other member, so cargo reads the workspace (only the
+# bridge is built)
+COPY goose/desktop goose/desktop
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     find bridge -type f -exec touch {} + \

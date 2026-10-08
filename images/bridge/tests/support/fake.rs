@@ -54,6 +54,8 @@ pub struct Frag {
     /// lists it) and the result it answers every call with. One not here
     /// is 404 `unknown_operation` (a chat has no `view`).
     pub ops: BTreeMap<String, (Value, Value)>,
+    /// Its files at main: path → (version, bytes).
+    pub files: BTreeMap<String, (String, Vec<u8>)>,
 }
 
 struct LiveSock {
@@ -256,6 +258,18 @@ impl Fake {
     /// Assigns the agent `label` to the computer while it runs (its
     /// fragment `<label>.paul`, identity `id:<label>`), as its owner's
     /// `PUT /api/computers/{id}/agents/{fragment}` does.
+    /// A skills fragment `skills.paul` (paul's, kind `skills`, which his
+    /// agents reach acting for him), holding `files` (path, text).
+    pub fn skills(&self, files: &[(&str, &str)]) -> String {
+        let mut f = Frag { kind: "skills".into(), ..Frag::default() };
+        f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+        for (path, text) in files {
+            f.files.insert(path.to_string(), (format!("release:{}", text.len()), text.as_bytes().to_vec()));
+        }
+        self.with(|w| w.fragments.insert("skills.paul".into(), f));
+        "skills.paul".into()
+    }
+
     pub fn add_agent(&self, label: &str) {
         self.with(|w| {
             let (fragment, identity) = (format!("{label}.paul"), format!("id:{label}"));
@@ -564,6 +578,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 }),
             )
         }
+        (Method::GET, ["files"]) => {
+            let files: Vec<Value> = f.files.iter().map(|(path, (version, bytes))| json!({ "path": path, "size": bytes.len(), "lastCommitSha": version })).collect();
+            answer(StatusCode::OK, json!({ "files": files }))
+        }
+        (Method::GET, ["file"]) => match query(&q, "path").first().and_then(|p| f.files.get(p)) {
+            Some((_, bytes)) => Response::builder().status(StatusCode::OK).body(http_body_util::Full::new(Bytes::from(bytes.clone()))).unwrap(),
+            None => refuse(StatusCode::NOT_FOUND, "no such file"),
+        },
         (Method::POST, ["ops", op]) => {
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             match (f.ops.get(*op), v["id"].as_str()) {

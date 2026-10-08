@@ -1124,6 +1124,14 @@ fn replies(api: &Api, session: &str, chat: &str, agent: &str, said: &str) -> usi
         .count()
 }
 
+/// Whether a frame of the shell's landed on `agent`'s screen: the
+/// computer's screen port at `?agent=<agent>`, its page there (the stub's,
+/// which shows no screen: what it reads of the query is the image's).
+fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bool {
+    let landed = format!("/p/6080/?agent={agent}");
+    s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, &landed, "location.search").ok() == Some(json!(format!("?agent={agent}"))))
+}
+
 /// Clicks the open menu's item named `text` (a script's click: a menu's
 /// button needs no gesture). Answers whether there was one.
 fn menu_item(b: &mut Browser, page: &Page, text: &str) -> Result<bool> {
@@ -1208,6 +1216,20 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("the group's chat, framed in the shell, shows both agents' answers", shown, &host);
     let _ = b.screenshot(page, &shots.join("desktop-group.png"));
 
+    // each agent's own screen (its own desktop): from the group's menu the
+    // person picks whose, and its frame lands on the computer's screen port
+    // at `?agent=<that agent>`, the image's to read (the platform carries it)
+    let (reader, first) = (format!("reader.{}", me.username), format!("{first_label}.{}", me.username));
+    b.click(page, "#agent-heading")?;
+    let items = b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?;
+    let mine = format!("{}'s screen", me.first_title);
+    let offered = items.as_array().is_some_and(|l| l.iter().any(|t| t == "Reader's screen") && l.iter().any(|t| t.as_str() == Some(mine.as_str())));
+    s.ok("a group chat's menu offers each of its agents' screens", offered, &items);
+    let picked = menu_item(b, page, "Reader's screen")?;
+    let landed = picked && screen_landed(s, b, page, &reader);
+    let frames = b.eval(page, "[...document.querySelectorAll('#stack iframe')].map((f) => f.dataset.src)")?;
+    s.ok("picking one opens that agent's screen: its frame lands on the computer's screen port at ?agent=<that agent>", landed, &frames);
+
     // search: a message's words, and clicking one opens its chat
     let first_chat = format!("{first_label}-chat.{}", me.username);
     b.click(page, "#search-agents")?;
@@ -1219,6 +1241,12 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     b.click(page, &hit)?;
     let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
     s.ok("clicking it opens its chat", opened, b.eval(page, "document.getElementById('chat-title').textContent")?);
+    // a direct chat's menu opens its own agent's screen
+    b.click(page, "#agent-heading")?;
+    let picked = menu_item(b, page, "Its screen")?;
+    let landed = picked && screen_landed(s, b, page, &first);
+    let frames = b.eval(page, "[...document.querySelectorAll('#stack iframe')].map((f) => f.dataset.src)")?;
+    s.ok("a direct chat's menu opens its own agent's screen (Its screen: ?agent=<its agent>)", landed, &frames);
 
     // archiving, from the chat's menu: the person's own view
     let row_of = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
