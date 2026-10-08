@@ -1,10 +1,11 @@
 // Sheets over the page: a persona's (name, face, instructions, hands, the
-// default), and the settings (about me, the apps, other agents). A sheet
+// default), and the settings (about you, the memory and its export,
+// connecting another agent, the apps). A sheet
 // is a dialog in the middle of a wide screen and rises from the bottom of
 // a phone's.
 
 import { avatar } from "./pieces.js";
-import { F, S, changed, problem } from "./store.js";
+import { EMBED, F, S, changed, problem } from "./store.js";
 import { copyButton, h, icon, iconButton, plural } from "./ui.js";
 
 const FACES = ["🌿", "🛠️", "🧭", "🌙", "✨", "🦉", "🐙", "🍄", "🔭", "📚", "🎨", "🧪", "🌊", "🔥", "🍋", "🐝", "🪴", "🎧", "🧘", "🗺️", "🦊", "🐢", "☕", "🪐"];
@@ -123,8 +124,45 @@ export function platformOrigin() {
   return `${location.protocol}//${rest.join(".")}`;
 }
 
-/// The fragment's name, as the CLI names it (its host's first label).
+/// The fragment's label (its host's first label's first part).
 export const fragmentName = () => (location.hostname.includes("--") ? location.hostname.split(".")[0].split("--")[0] : "mind");
+/// The fragment's name as the CLI names it, `<label>.<username>`: its
+/// host is `<label>--<username>[--<branch>].<zone>`.
+const fullName = () => {
+  const [label, user] = location.hostname.split(".")[0].split("--");
+  return user ? `${label}.${user}` : `${fragmentName()}.${S.person?.username || "you"}`;
+};
+
+/// Export memory: the whole log (`export {after?, limit}` → `{entries,
+/// next}`, paged until `next` is null) as one JSON file, downloaded.
+const EXPORT_PAGE = 200;
+/// The most pages read: 16 MiB of log is far fewer entries.
+const EXPORT_PAGES_MAX = 10_000;
+async function exportMemory(button, note) {
+  button.disabled = true;
+  const entries = [];
+  try {
+    let after = null;
+    for (let k = 0; k < EXPORT_PAGES_MAX; k++) {
+      const r = await F.call("export", after === null ? { limit: EXPORT_PAGE } : { after, limit: EXPORT_PAGE });
+      entries.push(...(Array.isArray(r.entries) ? r.entries : []));
+      note.textContent = `Read ${plural(entries.length, "entry", "entries")}…`;
+      // a `next` that does not move on ends it too
+      if (r.next === null || r.next === undefined || r.next === after) break;
+      after = r.next;
+    }
+    const file = new Blob([JSON.stringify({ mind: fullName(), exported: new Date().toISOString(), entries }, null, 2)], { type: "application/json" });
+    const a = h("a", { href: URL.createObjectURL(file), download: `${fullName()}-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+    note.textContent = `Saved ${plural(entries.length, "entry", "entries")}.`;
+  } catch (e) {
+    note.textContent = `Could not export it: ${e.message}`;
+  }
+  button.disabled = false;
+}
 
 export function settingsSheet() {
   const about = h("textarea.field", { rows: 6, maxlength: ABOUT_MAX, value: S.about ?? "", placeholder: "Your name, what you do, who's who in your life, how you like answers. Every persona reads this.", "aria-label": "About you" });
@@ -142,11 +180,11 @@ export function settingsSheet() {
     }
     saveAbout.disabled = false;
   });
-  const name = fragmentName();
-  const read = `claude mcp add ${name} -- fragment mcp ${name}`;
-  const write = `${read} --write`;
-  const cmd = (label, text) => h("div.cmd", null, h("div.cmd-label", { text: label }), h("div.cmd-line", null, h("code", { text: text }), copyButton(text)));
+  const connect = `claude mcp add ${fragmentName()} -- fragment mcp ${fullName()}`;
   const st = S.status;
+  const exportNote = h("span.quiet", { "aria-live": "polite" });
+  const exportBtn = h("button.pill", { type: "button" }, icon("download"), "Export memory");
+  exportBtn.addEventListener("click", () => exportMemory(exportBtn, exportNote));
   const body = h(
     "div.settings",
     null,
@@ -154,18 +192,19 @@ export function settingsSheet() {
     h(
       "section",
       null,
-      h("h3", { text: "Your mind in other agents" }),
-      h("p.quiet", { text: "Give Claude Code (or any MCP client) the same memory: search, zoom and the view. Needs the fragment CLI, signed in." }),
-      cmd("Read only", read),
-      cmd("Read and write notes", write),
+      h("h3", { text: "Memory" }),
+      h("p.quiet", { text: st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt} still being summarized` : ", all summarized"}. ${st.hands ? "Your computer is connected." : "No computer is connected."}` : "…" }),
+      h("div.row", null, exportBtn, exportNote),
     ),
     h(
       "section",
       null,
-      h("h3", { text: "Memory" }),
-      h("p.quiet", { text: st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt} still being summarized` : ", all summarized"}. ${st.hands ? "Your computer is connected." : "No computer is connected."}` : "…" }),
+      h("h3", { text: "Connect another agent" }),
+      h("p.quiet", { text: "Give Claude Code (or any MCP client) this memory: its view, zoom and search. Needs the fragment CLI, signed in; add --write to let it leave notes." }),
+      h("div.cmd-line", null, h("code", { text: connect }), copyButton(connect)),
     ),
-    h("a.apps-link", { href: `${platformOrigin()}/?apps`, target: "_top" }, icon("grid"), h("span", null, h("b", { text: "Your apps" }), h("small", { text: "Everything else on fragment" })), icon("open")),
+    // in the shell, the apps are beside it already
+    EMBED ? null : h("a.apps-link", { href: `${platformOrigin()}/`, target: "_top" }, icon("grid"), h("span", null, h("b", { text: "Your apps" }), h("small", { text: "Everything else on fragment" })), icon("open")),
   );
   sheet("Settings", body, { cls: "wide" });
 }

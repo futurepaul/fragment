@@ -84,7 +84,7 @@ const THREADS = [
   { d: 48, h: 10, p: "p_mind", t: ["fragment"], turns: [{ u: "wrangler dev takes 90s to boot on the mac", a: "First boot pulls Chrome for Testing for Browser Rendering (about 145 MB) into target/cache. After that it should be ~6 s. If every boot is slow, check that `XDG_CACHE_HOME` points at target/cache and isn't being cleared by `--clean`." }] },
   { d: 44, h: 6, p: "p_coach", t: ["running"], turns: [{ u: "What should my tempo pace be?", a: "What's a pace you could hold for an hour if you had to, right now, today?" }, { u: "Maybe 5:15/km", a: "Then your tempo is about there: 5:10–5:20. How does that compare to what you've been running them at?" }] },
   { d: 40, h: 9, p: "p_mind", t: ["garden"], turns: [{ u: "Compost is soggy and smells", a: "Too much green, not enough brown. Turn it, mix in shredded cardboard or dry leaves (about two parts brown to one green), and leave the lid cracked for a few days. It should smell like soil again within a week." }] },
-  { d: 36, h: 20, p: "p_mind", t: ["money"], turns: [{ u: "Should we refinance? Rates dropped to 5.6", a: "At 6.9% on $318k, 5.6% saves about $270 a month. With roughly $6k in closing costs you break even in 22 months. You plan to stay at least five years, so yes, if the closing costs come in near that." }] },
+  { d: 36, h: 20, p: "p_mind", t: ["money"], turns: [{ u: "Should we refinance? Rates dropped to 5.6", files: [{ name: "loan-estimate.pdf", type: "application/pdf", size: 412_904 }], a: "At 6.9% on $318k, 5.6% saves about $270 a month. With roughly $6k in closing costs you break even in 22 months. You plan to stay at least five years, so yes, if the closing costs come in near that." }] },
   { d: 33, h: 18, p: "p_mind", t: ["kitchen"], turns: [{ u: "miso soup ratio", a: "1 tbsp miso per cup of dashi. Whisk the miso into a ladle of warm dashi first, add it off the boil, and never let it boil after: it goes grainy and loses its aroma." }] },
   { d: 30, h: 15, p: "p_mind", t: ["fragment"], turns: [{ u: "should `fragment try` be renamed? people think it's a dry run", a: "Maybe `fragment new --open`? `try` scaffolds and deploys a template, which isn't trying anything. But you said in August you'd rather cut commands than rename them: it could just go, since `new --template` plus the printed link covers it." }] },
   { d: 27, h: 21, p: "p_mind", t: ["reading", "lisbon"], turns: [{ u: "A book for the flight to Lisbon?", a: "The Book of Disquiet, by Pessoa: you can open it anywhere, it's Lisbon on every page, and it suits a long flight. If you want a story instead: Night Train to Lisbon." }] },
@@ -100,12 +100,12 @@ const THREADS = [
   { d: 5, h: 10, p: "p_mind", t: ["fragment"], turns: [{ u: "shard 3 timed out again on the browser section. 40 min. any idea?", steps: [["search", "shard browser Chrome cache"]], a: "Last time it was Chrome's first launch: Chrome for Testing downloading into target/cache because the cache key missed after a package-lock change. Look in the shard's log for `Downloading Chrome` at the start of the browser section." }, { u: "yep that's it. the lock changed again.", a: "Then the next push to master saves the new cache, and shard 3 should be back to about 11 minutes. Worth a line in the debt ledger: the cache key could name the Chrome version instead of the whole lock." }] },
   { d: 4, h: 20, p: "p_mind", t: ["money"], turns: [{ u: "If I put $1,800 a month into the house fund starting October, when do we hit $60k? We're at $31,400.", a: "$28,600 to go at $1,800 a month is 15.9 months: your 16th deposit, in **January 2028**, takes you to $60,200. At the HYSA's 4.1%, interest gets you there about a month sooner, in December 2027." }] },
   { d: 3, h: 13, p: "p_mind", t: ["reading"], turns: [{ u: "What did I think of Piranesi when I finished it? Someone asked me for a rec", steps: [["search", "Piranesi"], ["zoom"]], a: "You finished it in March and called it \"the calmest book about being lost\". You loved the House and its tides, found the mystery a little thin in the last third, and said you'd give it to anyone who liked *The Library of Babel*.\n\nYour own one-liner: **short, strange, kind.** That's the rec." }] },
-  { d: 2, h: 16, p: "p_builder", t: ["fragment"], turns: [{ u: "Delete the claude-* preview fragments older than a week on finite.place, but leave anything named demo-* alone", hand: { id: "k_7c1d2e", say: "On it. I've handed the sweep to your computer; it will skip anything named `demo-*`.", steps: [["shell", "fragment list --host claude-cards.finite.place"], ["shell", "fragment list --host claude-sync.finite.place"], ["shell", "fragment list --host claude-ledger.finite.place"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-cards"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-sync"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-ledger"]], report: "Swept 14 e2e fragments older than 7 days across three previews (claude-cards 6, claude-sync 5, claude-ledger 3). Kept demo-board and demo-notes as asked. That freed about 212 MB of R2. Nothing failed.", after: "Done: 14 old fragments are gone across claude-cards, claude-sync and claude-ledger, about 212 MB freed. I left demo-board and demo-notes alone." } }] },
+  { d: 2, h: 16, p: "p_builder", t: ["fragment"], turns: [{ u: "Delete the claude-* preview fragments older than a week on finite.place, but leave anything named demo-* alone", hand: { id: "k_7c1d2e", say: "On it. I've handed the sweep to your computer; it will skip anything named `demo-*`.", steps: [["shell", "fragment list --host claude-cards.finite.place"], ["shell", "fragment list --host claude-sync.finite.place"], ["shell", "fragment list --host claude-ledger.finite.place"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-cards"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-sync"], ["shell", "cargo xtask e2e --hosted --sweep-all --branch claude-ledger"]], report: "Swept 14 e2e fragments older than 7 days across three previews (claude-cards 6, claude-sync 5, claude-ledger 3). Kept demo-board and demo-notes as asked. That freed about 212 MB of R2. Nothing failed.", files: [{ name: "sweep-report.csv", type: "text/csv", size: 1_842 }], after: "Done: 14 old fragments are gone across claude-cards, claude-sync and claude-ledger, about 212 MB freed. I left demo-board and demo-notes alone." } }] },
   { d: 2, h: 9, p: "p_mind", t: ["kitchen"], turns: [{ u: "My sourdough keeps spreading flat. 78% hydration, King Arthur bread flour. What's going wrong?", steps: [["search", "sourdough hydration"]], a: "With bread flour, 78% is high for a loaf that holds its shape, and your kitchen has been warm (26°C last week). In order:\n\n1. Drop to **72%** for the next bake.\n2. Shorten the bulk: at 26°C it's likely done in 4 hours, not 6. Look for a 50% rise and domed edges.\n3. Preshape tighter and rest 20 minutes before the final shape.\n\nChange one thing at a time so you know which one fixed it." }, { u: "72% it is. I'll report back.", a: "Good. Note the rise at 3 and 4 hours; that tells us whether bulk was the problem." }] },
   { d: 1, h: 13, p: "p_mind", t: ["lisbon"], turns: [{ u: "For Lisbon, Alfama or Príncipe Real? We want walkable, not too party-ish, and good coffee.", steps: [["search", "Lisbon"]], a: "**Príncipe Real.** Alfama is beautiful but steep, and the fado bars run late right under the windows. Príncipe Real is calm at night, flat by Lisbon standards, and a ten-minute walk to Chiado and Bairro Alto without being in them.\n\nCoffee: *Hello, Kristof* and *Copenhagen Coffee Lab* are both close. You wanted one day in Sintra: the train from Rossio is fifteen minutes' walk away." }] },
   { d: 1, h: 19.5, p: "p_coach", t: ["running"], turns: [{ u: "Long run this morning felt awful. 14k and I was dying by 9.", a: "That sounds rough. Before we look for a reason: how did you sleep the two nights before?" }, { u: "Badly. Maybe 5 hours Friday. And I skipped breakfast.", a: "That's most of it, then: short sleep, and running fasted past an hour. Your easy pace has been about 6:05/km. What pace did today's run start at?" }] },
   { ago: 9, p: "p_builder", t: ["garden", "fragment"], turns: [{ u: "Can you make me a little web page for the garden log? What I planted where and when, and the watering schedule. Make it a fragment so Sam can see it.", hand: { id: "k_4f2a91", live: true, say: "On it. I've handed this to your computer: it will build the page from what I remember of the beds (the fence bed's tomatoes and basil, the back bed, the drip zones) and publish it as a fragment Sam can open. I'll tell you when it's up.", steps: [["shell", "fragment new garden-log --template blank"], ["mind", "search {\"q\":\"planted\"}"], ["mind", "zoom {\"id\":1024,\"n\":256}"], ["edit", "site/index.html"], ["edit", "site/garden.css"], ["shell", "fragment deploy garden-log"], ["?", "Share garden-log with Sam (sam@okafor.me) as a viewer?"], ["shell", "fragment share garden-log --with sam"], ["browser", "open https://garden-log--paul.fragment.boats/"]], report: "The page is up at https://garden-log--paul.fragment.boats/ and shared with Sam (viewer).\n\n- **Beds**: the fence bed (tomatoes since April 2, basil since May 20) and the back bed (kale, strawberries from runners).\n- **Watering**: drip zone 2 (fence bed) at 6:00 for 15 minutes, zone 1 at 6:20 for 10.\n- It reads from a `log.md` in the fragment, so adding a line there updates the page." } }] },
-  { d: 0, h: 9.2, p: "p_mind", t: ["garden"], turns: [{ u: "The tomato leaves are curling up at the edges, mostly the new ones. Too much sun?", steps: [["search", "tomatoes"], ["zoom"], ["search", "drip zone 2"]], a: "Probably heat, not disease. The fence bed gets sun until 6, and you moved zone 2 to one 15-minute run at 6am. Leaf roll on new growth after a hot spell is the plant saving water; it's harmless while the fruit keeps setting.\n\nTwo things to try:\n- A second drip run at 4pm on days over 32°C.\n- 30% shade cloth over the fence bed only.\n\nIf the curl turns yellow or spotty, send me a photo." }, { u: "ok add the 4pm run. remind me what timer we bought?", steps: [["search", "timer"]], a: "The **Orbit B-hyve**, 4 zones, from May; zone 2 is the fence bed. In its app: *Zone 2 → Watering schedule → add a start time*, 4:00 PM, 10 minutes, and turn on *Weather sensitivity* so it skips cool days." }] },
+  { d: 0, h: 9.2, p: "p_mind", t: ["garden"], turns: [{ u: "The tomato leaves are curling up at the edges, mostly the new ones. Too much sun?", files: [{ name: "tomato-leaves.jpg", type: "image/jpeg", size: 284_310 }], steps: [["search", "tomatoes"], ["zoom"], ["search", "drip zone 2"]], a: "Probably heat, not disease. The fence bed gets sun until 6, and you moved zone 2 to one 15-minute run at 6am. Leaf roll on new growth after a hot spell is the plant saving water; it's harmless while the fruit keeps setting.\n\nTwo things to try:\n- A second drip run at 4pm on days over 32°C.\n- 30% shade cloth over the fence bed only.\n\nIf the curl turns yellow or spotty, send me a photo." }, { u: "ok add the 4pm run. remind me what timer we bought?", steps: [["search", "timer"]], a: "The **Orbit B-hyve**, 4 zones, from May; zone 2 is the fence bed. In its app: *Zone 2 → Watering schedule → add a start time*, 4:00 PM, 10 minutes, and turn on *Weather sensitivity* so it skips cool days." }] },
 ];
 
 const TOPIC_IDS = { garden: "tp_garden", kitchen: "tp_kitchen", fragment: "tp_fragment", running: "tp_running", lisbon: "tp_lisbon", reading: "tp_reading", money: "tp_money" };
@@ -114,6 +114,38 @@ function push(kind, text, at, thread, persona, task = null) {
   const m = { i: log.length, kind, text, at, thread, persona, task };
   log.push(m);
   return m;
+}
+
+// ---- blobs: a message's files, read at blobUrl(sha256) ----
+const blobs = new Map(); // sha256 -> a URL the page can read
+/// A picture for a seeded image: leaves on a bed, drawn once.
+function drawn(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const g = c.getContext("2d");
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, "#5d7f3a");
+  sky.addColorStop(1, "#2c3d1b");
+  g.fillStyle = sky;
+  g.fillRect(0, 0, w, h);
+  for (let k = 0; k < 26; k++) {
+    g.save();
+    g.translate(rnd() * w, rnd() * h);
+    g.rotate(rnd() * Math.PI);
+    g.fillStyle = `hsl(${88 + rnd() * 30} ${40 + rnd() * 25}% ${28 + rnd() * 22}%)`;
+    g.beginPath();
+    g.ellipse(0, 0, 26 + rnd() * 30, 10 + rnd() * 9, 0, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+  return c.toDataURL("image/jpeg", 0.82);
+}
+/// A seeded file: `{name, type, size}` as a message carries it.
+function seedFile(f) {
+  const sha256 = hex(64);
+  blobs.set(sha256, f.type.startsWith("image/") ? drawn(480, 360) : `data:${f.type};charset=utf-8,${encodeURIComponent(`${f.name}\n(made up by the page's dev mode)\n`)}`);
+  return { sha256, name: f.name, type: f.type, size: f.size };
 }
 
 const fills = []; // echoes written once the log is whole
@@ -129,7 +161,8 @@ for (const def of sorted) {
   threads.set(id, th);
   threadTopic.set(id, def.t.map((t) => ({ id: TOPIC_IDS[t], p: 0.7 + rnd() * 0.29 })));
   for (const turn of def.turns) {
-    push("user", turn.u, at, id, def.p);
+    const said = push("user", turn.u, at, id, def.p);
+    if (turn.files) said.attachments = turn.files.map(seedFile);
     at += 40_000;
     for (const [tool, q] of turn.steps ?? []) {
       const call = push("tool", "", (at += 2000), id, def.p);
@@ -147,7 +180,8 @@ for (const def of sorted) {
       push("echo", `[${hd.id}] started`, (at += 800), id, def.p, hd.id);
       push("talk", hd.say, (at += 6000), id, def.p);
       if (!hd.live) {
-        push("user", `[${hd.id}] ${hd.report}`, (at += 6 * MIN), id, def.p, hd.id);
+        const report = push("user", `[${hd.id}] ${hd.report}`, (at += 6 * MIN), id, def.p, hd.id);
+        if (hd.files) report.attachments = hd.files.map(seedFile);
         push("talk", hd.after, (at += 20_000), id, def.p);
       }
     } else {
@@ -303,7 +337,7 @@ const summaryOf = (th) => {
   return `user: ${cut(u, 64)}; talk: ${cut(two, 200)}`;
 };
 const publicThread = (th) => ({ id: th.id, title: th.title, persona: th.persona, started: th.started, last: th.last, summary: summaryOf(th), topics: threadTopic.get(th.id) ?? [], count: log.slice(th.first_i, th.last_i + 1).filter((m) => m.thread === th.id).length });
-const publicMsg = ({ i, kind, text, at, thread, persona, task }) => ({ i, kind, text, at, thread, persona, task });
+const publicMsg = ({ i, kind, text, at, thread, persona, task, attachments }) => ({ i, kind, text, at, thread, persona, task, ...(attachments ? { attachments } : {}) });
 // a task as `log` carries it: goose's steps are `work`'s, and its turn is
 // left out, so the page finds it the exact way (turn.start's cause)
 const publicTask = (t) => ({ id: t.id, thread: t.thread, text: t.text, state: t.state, ...(t.report ? { report: t.report } : {}) });
@@ -341,6 +375,12 @@ const QUERIES = {
   tasks: ({ thread } = {}) => ({ tasks: [...tasks.values()].filter((t) => !thread || t.thread === thread).map((t) => ({ ...publicTask(t), i: t.i, steps: [], report: t.report ?? null, started: t.started, ended: t.ended })) }),
   status: () => ({ turn: turnNow ? { running: true, thread: turnNow.thread, since: turnNow.since } : null, queued: queue.length, unbuilt: view.filter((p) => !isBuilt(p.l, p.i)).length, T: log.length, hands: true }),
   settings: () => ({ about }),
+  // the whole log, a page at a time: entries after `after`, and the last one's i while more remain
+  export: ({ after, limit = 200 }) => {
+    const from = after === undefined ? 0 : after + 1;
+    const entries = log.slice(from, from + Math.min(limit, 1000)).map((m) => ({ ...publicMsg(m), attachments: m.attachments ?? [] }));
+    return { entries, next: from + entries.length < log.length ? entries.at(-1).i : null };
+  },
 };
 
 const MUTATIONS = {
@@ -477,8 +517,9 @@ function touch(thread, text, personaId) {
   return th;
 }
 
-function logged(kind, text, thread, personaId, task = null) {
+function logged(kind, text, thread, personaId, task = null, attachments = null) {
   const m = push(kind, text, Date.now(), thread, personaId, task);
+  if (attachments?.length) m.attachments = attachments;
   const th = threads.get(thread);
   if (th) {
     th.last = m.at;
@@ -670,7 +711,7 @@ export async function post(channel, body) {
   if (channel !== "say") throw new Error(`cannot post to ${channel}`);
   publish("say", body, "id:paul");
   touch(body.thread, body.text, body.persona);
-  logged("user", body.text, body.thread, body.persona ?? null);
+  logged("user", body.text, body.thread, body.persona ?? null, null, body.attachments);
   queue.push({ thread: body.thread, text: body.text, persona: body.persona ?? threads.get(body.thread)?.persona });
   runTurn();
   return { seq: channels.say.length };
@@ -692,6 +733,16 @@ export function subscribe(channel, onRecord, { last = null, after = 0, onDraft =
   }, 20);
   return () => subs.splice(subs.indexOf(s), 1);
 }
+
+/// An upload, as `fragment.blob` answers it; the page reads it back at
+/// `blobUrl` (a fragment serves it at `__blob/<sha256>`).
+export async function blob(file, { name = file.name ?? "", type = file.type || "application/octet-stream" } = {}) {
+  await sleep(300 + file.size / 50_000);
+  const sha256 = hex(64);
+  blobs.set(sha256, URL.createObjectURL(file));
+  return { sha256, size: file.size, type, name };
+}
+export const blobUrl = (sha256) => blobs.get(sha256) ?? `./__blob/${sha256}`;
 
 export const presence = { set() {}, on: () => () => {} };
 export const closed = () => () => {};

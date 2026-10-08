@@ -247,6 +247,12 @@ export function kb(bytes) {
   return `${Math.round(bytes / 1000)} KB`;
 }
 
+/// A file's size: "812 B", "40 KB", "3.4 MB".
+export function size(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1_000_000) return kb(bytes);
+  return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)} MB`;
+}
+
 /// A button with an icon and an accessible name.
 export function iconButton(name, label, onclick, cls = "") {
   return h(`button.icon-btn${cls ? "." + cls : ""}`, { type: "button", "aria-label": label, title: label, onclick }, icon(name));
