@@ -1149,6 +1149,11 @@ later is told when it is made.
 | `GET /api/seat` | a person | → `MySeat {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}]}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
 | `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
+| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind}` → `{seat: OrgMember, created, mailed}`: a paid seat, held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's counts are pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`) |
+| `PATCH /api/org/seats/{id}` | the same | `{kind}` → `OrgMember`: a paid seat's new kind, pushed as above (a comped one is 400: an operator's) |
+| `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes (an admin's row stays, seatless), its holder's seat canceled, the count pushed. The org's last paid seat is 400: its subscription is canceled in the portal |
+| `POST /api/org/admins` | the same | `{email}` → `{admin: OrgMember, created}`: an admin too (a seat they hold stays), or waiting on the email; at most 10 |
+| `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes). The last admin is 400 |
 | `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
 | `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
 | `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
@@ -1171,6 +1176,13 @@ becomes the kind bought). An org has one Stripe customer and one
 subscription; everything fragment makes carries `fragment_deployment`
 (the platform's origin) in its metadata, and nothing without this
 deployment's is touched (the account is finite-mono's too).
+
+An org's paid seats are the registry's, and the subscription's item
+quantities a copy of their count by kind, held and pending: each change
+queues the org, and the registry's alarm pushes the counts read fresh
+(`POST /v1/subscriptions/{id}`, `create_prorations`), so two changes at
+once never leave Stripe a seat short; a subscription fetched with other
+counts (changed in Stripe's dashboard) is pushed back to the seats'.
 
 The registry writes an org's subscription only as fetched from Stripe:
 by the Checkout's return, by the webhook, and daily by the registry's

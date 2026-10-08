@@ -218,7 +218,7 @@ impl RegistryCell {
     /// Writes `s` as `org`'s subscription, when it may (module docs). A
     /// change in whether the org pays queues a push for each paid seat's
     /// holder. Answers whether it was written.
-    fn apply_subscription_copy(&self, org: &str, s: &SubscriptionCopy, at: Option<i64>) -> CellResult<bool> {
+    pub(super) fn apply_subscription_copy(&self, org: &str, s: &SubscriptionCopy, at: Option<i64>) -> CellResult<bool> {
         let row = self.billing_row(org)?;
         let status = Status::parse(&s.status).ok_or_else(|| CellError::invalid(format!("a subscription's status is Stripe's, not {:?}", s.status)))?;
         match row.subscription.as_deref() {
@@ -266,6 +266,8 @@ impl RegistryCell {
                 self.queue_sync(m.person.as_deref().expect("selected for its person"))?;
             }
         }
+        // the seats are the truth: counts Stripe holds otherwise are pushed
+        self.queue_quantities_if_drifted(org, s)?;
         Ok(true)
     }
 
@@ -347,6 +349,7 @@ impl RegistryCell {
     async fn armed_billing<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
         let answer = change()?;
         self.arm_syncs().await?;
+        self.arm_quantities().await?;
         self.arm_reconcile().await?;
         Ok(answer)
     }

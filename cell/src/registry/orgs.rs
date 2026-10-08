@@ -153,7 +153,7 @@ impl MemberRow {
         self.seat.as_deref().map(|s| SeatKind::parse(s).ok_or_else(|| CellError::host(format!("org_members.seat of {} is {s:?}", self.id)))).transpose()
     }
 
-    fn wire(&self, email: Option<String>) -> CellResult<OrgMember> {
+    pub(super) fn wire(&self, email: Option<String>) -> CellResult<OrgMember> {
         Ok(OrgMember {
             id: self.id.clone(),
             person: self.person.clone(),
@@ -214,7 +214,7 @@ impl RegistryCell {
         self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person = ?"), vec![person.into()])
     }
 
-    fn member(&self, id: &str) -> CellResult<MemberRow> {
+    pub(super) fn member(&self, id: &str) -> CellResult<MemberRow> {
         if !org::valid_member_id(id) {
             return Err(not_found(format!("no seat {id}")));
         }
@@ -231,7 +231,7 @@ impl RegistryCell {
     }
 
     /// The person a verified email names, if one signs in with it.
-    fn person_by_email(&self, email: &str) -> CellResult<Option<String>> {
+    pub(super) fn person_by_email(&self, email: &str) -> CellResult<Option<String>> {
         Ok(self.row::<HolderRow>("SELECT identity FROM subjects WHERE email = ? LIMIT 1", vec![email.into()])?.map(|r| r.identity))
     }
 
@@ -265,7 +265,7 @@ impl RegistryCell {
         }
     }
 
-    fn check_seats_room(&self, org: &str) -> CellResult<()> {
+    pub(super) fn check_seats_room(&self, org: &str) -> CellResult<()> {
         if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND seat IS NOT NULL", vec![org.into()])? >= SEATS_PER_ORG_MAX {
             return Err(CellError::invalid(format!("an org holds at most {SEATS_PER_ORG_MAX} seats")));
         }
@@ -632,7 +632,7 @@ impl RegistryCell {
     }
 
     /// A person a wipe of whom runs is no one to comp.
-    fn not_wiping_id(&self, person: &str) -> CellResult<()> {
+    pub(super) fn not_wiping_id(&self, person: &str) -> CellResult<()> {
         if self.wiping(person)? {
             return Err(not_found(format!("{person} is being wiped")));
         }

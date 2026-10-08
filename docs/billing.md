@@ -189,15 +189,19 @@ the move if it ever outgrows that, not before.
   - It carries `client_reference_id` (the org), the metadata, a card
     always, and `allow_promotion_codes` (discounts are Stripe's,
     below).
-  - The return URL is `/settings/billing?session={CHECKOUT_SESSION_ID}`.
+  - The return URL is `/settings?checkout={CHECKOUT_SESSION_ID}`.
   - After that, seats change through the API, not Checkout.
 - **Seat changes** call `POST /v1/subscriptions/<id>` with the items'
   new quantities. That covers adding a seat, removing one, and moving
   one between kinds (an upgrade or a downgrade).
   - Changes are prorated (`create_prorations`) onto the next invoice.
-  - Each carries an `Idempotency-Key` (the seat change's id).
-  - The order is: Stripe first, then the seat row. If the row fails
-    after Stripe took the change, the reconcile pushes the counts again.
+  - Each carries an `Idempotency-Key` (the push's own).
+  - The order is: the seat row first, then Stripe. A change queues its
+    org (`quantity_syncs`) in its own turn, and the registry's alarm
+    pushes the counts read fresh, as plans are pushed: two changes at
+    once never leave Stripe a seat short, and a push that fails is tried
+    again. A subscription fetched with other counts (a webhook, the
+    reconcile) is pushed back to the seats'.
 - **Billing portal:** our own portal configuration, never the default
   (finite-mono's readiness audit pins the default). It offers card,
   invoices, billing address and cancel at period end. Subscription
@@ -473,9 +477,9 @@ The first run starts once a seat is held, so a guest's first run is
    - the plan pushed to ledgers, and always-on to computers.
 
    Launch could run on comped seats from here.
-5. **Stripe** (a person's own seat built 2026-10-08, branch
-   `claude/billing-stripe`; docs/api.md, Billing; an org's admins'
-   seats next):
+5. **Stripe** (built 2026-10-08: a person's own seat, branch
+   `claude/billing-stripe`; an org's admins' seats and the counts pushed
+   to Stripe, branch `claude/org-paid-seats`; docs/api.md, Billing):
    - the client, the fake and the config;
    - `xtask stripe check|setup`;
    - Checkout;
