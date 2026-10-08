@@ -20,8 +20,11 @@
 //! awake, a turn of a persona with hands hands a task to it on `chat`,
 //! recorded under the turn the agent's bridge gives that record; the
 //! agent's one reply is the task's report, and comes back as a `work`
-//! message `[<task>] …` that runs a turn of its own, and that zoom("<task>")
-//! gives whole. Its steps on `work` start nothing (a page follows them).
+//! message `[<task>] …` that runs a turn of its own. A turn's zoom("<task>")
+//! gives the whole run: what it was given, the stub's step and end, read
+//! from `work` by the task's turn (`job.records`), and its report; the zoom
+//! query gives it without the run. Its steps on `work` start nothing (a
+//! page follows them).
 //!
 //! The web: web_fetch reads a page of a local upstream (a redirect
 //! followed) as text, its chrome and scripts left out. A search reaches the
@@ -371,7 +374,8 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its computer wakes and follows the mind's chat", following, phase(api, &owner, &computer));
 
     let shed = "t_00112233445566aa";
-    let r = say("m4", json!({ "text": padded("please hand it over [[call computer {\"task\": \"tidy the shed\"}]]"), "thread": shed, "persona": "builder" }))?;
+    // (the stub takes a step for a task that names a tool)
+    let r = say("m4", json!({ "text": padded("please hand it over [[call computer {\"task\": \"tidy the shed, tool by tool\"}]]"), "thread": shed, "persona": "builder" }))?;
     anyhow::ensure!(r.status == 200, "saying m4: {r}");
     let opened = s.eventually(TURN, || op(api, &owner, &mind, "tasks", json!({ "thread": shed }))["tasks"].as_array().is_some_and(|t| t.len() == 1));
     let tasks = op(api, &owner, &mind, "tasks", json!({ "thread": shed }));
@@ -380,7 +384,7 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let handed = chat.iter().find(|r| r["principal"] == npub.as_str());
     s.ok(
         "a persona with hands hands the task to the agent on chat, as the mind, and records it",
-        opened && handed.is_some_and(|h| h["body"]["to"] == json!([identity]) && h["body"]["text"] == format!("tidy the shed\n\n(task {task}, thread {shed})").as_str()),
+        opened && handed.is_some_and(|h| h["body"]["to"] == json!([identity]) && h["body"]["text"] == format!("tidy the shed, tool by tool\n\n(task {task}, thread {shed})").as_str()),
         json!({ "tasks": tasks, "chat": chat }),
     );
     let builder = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with("please hand it over")));
@@ -410,12 +414,38 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let answered = s.eventually(TURN, || messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "talk" && m["i"].as_i64() > report["i"].as_i64()));
     s.ok("which runs a turn of its own", answered, json!(messages(api, &owner, &mind, shed)));
+    // the report is the reply, trimmed
+    let reply = replies.first().and_then(|r| r["body"]["text"].as_str()).unwrap_or("(no reply)").trim().to_string();
     let zoomed = op(api, &owner, &mind, "zoom", json!({ "id": task }));
     s.ok(
-        "zoom(\"<task>\") gives the task whole: what it was given, and its report",
-        zoomed["text"].as_str().is_some_and(|t| t.starts_with(&format!("Task {task} (done) on the user's computer, from ")) && t.contains("\n\nGiven:\ntidy the shed\n\nIts report (message ") && replies.first().and_then(|r| r["body"]["text"].as_str()).is_some_and(|r| t.contains(r))),
+        "the zoom query (the page's, an MCP client's) gives the task: what it was given, and its report; goose's run is a turn's zoom's",
+        zoomed["text"].as_str().is_some_and(|t| {
+            t.starts_with(&format!("Task {task} (done) on the user's computer, from "))
+                && t.contains("\n\nGiven:\ntidy the shed, tool by tool\n\nIts run on the computer: read by Mind's own zoom in a turn, not here.\n\nIts report (message ")
+                && t.ends_with(&format!("):\n{reply}"))
+        }),
         &zoomed,
     );
+    // a turn's zoom("<task>"): the whole run, goose's steps read from work by the task's turn
+    let ended = s.eventually(WAKE, || records(api, &owner, &mind, "work").iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == turn.as_str()));
+    let r = say("m11", json!({ "text": padded(&format!("what did the computer do [[call zoom {{\"id\": \"{task}\"}}]]")), "thread": shed }))?;
+    anyhow::ensure!(r.status == 200, "saying m11: {r}");
+    let whole = |m: &Value| m["kind"] == "echo" && m["text"].as_str().is_some_and(|t| t.starts_with(&format!("Task {task} (done)")));
+    let echoed = s.eventually(TURN, || messages(api, &owner, &mind, shed).iter().any(whole));
+    let echo = messages(api, &owner, &mind, shed).into_iter().find(whole).unwrap_or(Value::Null);
+    s.ok(
+        "a turn's zoom(\"<task>\") gives its whole run: what it was given, goose's words and steps (tool, args, ok, excerpt) and its end, read from work, then its report",
+        ended
+            && echoed
+            && echo["text"].as_str().is_some_and(|t| {
+                t.contains("\n\nGiven:\ntidy the shed, tool by tool\n\nIts run on the computer:\nLet me look.\n[step 1] search {\"q\":\"tidy the shed, tool by tool")
+                    && t.contains("→ ok: 3 results\n[ended] idle\n\nIts report (message ")
+                    && t.ends_with(&format!("):\n{reply}"))
+            }),
+        &echo,
+    );
+    // (its turn ends before the next hand-off's)
+    s.eventually(TURN, || messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "talk" && m["i"].as_i64() > echo["i"].as_i64()));
     let work = records(api, &owner, &mind, "work");
     let done = op(api, &owner, &mind, "tasks", json!({ "thread": shed }));
     s.ok(
