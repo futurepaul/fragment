@@ -34,12 +34,13 @@ pub const LIMITS_MODULE: &str = "limits.js";
 const JS_SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
 
 /// Every limit the platform code reads, by its name there.
-fn numbers() -> [(&'static str, u64); 11] {
+fn numbers() -> [(&'static str, u64); 12] {
     [
         ("RECORD_BODY_MAX_BYTES", limits::RECORD_BODY_MAX_BYTES as u64),
         ("EFFECTS_MAX", limits::EFFECTS_MAX as u64),
         ("RESULT_MAX_BYTES", limits::RESULT_MAX_BYTES as u64),
         ("APP_DB_MAX_BYTES", limits::APP_DB_MAX_BYTES),
+        ("APP_DB_DECLARED_MAX_BYTES", limits::APP_DB_DECLARED_MAX_BYTES),
         ("FILE_WRITE_MAX_BYTES", limits::FILE_WRITE_MAX_BYTES as u64),
         ("FILE_WRITES_MAX", limits::FILE_WRITES_MAX as u64),
         ("PATH_MAX_BYTES", limits::PATH_MAX_BYTES as u64),

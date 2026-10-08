@@ -89,7 +89,7 @@ pub(crate) fn input_sha(op: &str, canonical_input: &str) -> String {
 /// The facet refused a call: nothing of the call committed.
 fn refused(why: Refusal, op: &str) -> CellError {
     let message = match why {
-        Refusal::StorageFull => format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
+        Refusal::StorageFull => "the app's database is at its cap (16 MiB, or its fragment.json's storage.maxBytes): the mutation was rolled back".to_string(),
         Refusal::ConflictingBody => "this operation id was already used with a different input".to_string(),
         Refusal::UnknownOperation => format!("the app has no method {op:?}"),
     };
@@ -298,6 +298,7 @@ impl FragmentCell {
                     "agent": agent,
                     "role": inv.role,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "dbMax": self.app_db_max()?,
                 });
                 self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
             }
@@ -392,6 +393,15 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::AppFailed, format!("{} committed, but the platform refused its effects: {why}", inv.op)));
         }
         bounded(Answered { result: ran.result, replayed: false })
+    }
+
+    /// The app's database cap: the platform's, or what live's manifest
+    /// declares (`storage.maxBytes`, checked when the manifest was read).
+    fn app_db_max(&self) -> CellResult<u64> {
+        let declared = self.meta(MetaKey::AppDbMax)?.and_then(|v| v.parse::<u64>().ok());
+        let cap = declared.unwrap_or(limits::APP_DB_MAX_BYTES);
+        assert!((limits::APP_DB_MAX_BYTES..=limits::APP_DB_DECLARED_MAX_BYTES).contains(&cap), "a stored cap was checked when its manifest was read");
+        Ok(cap)
     }
 
     /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or

@@ -48,6 +48,7 @@ import {
   EFFECTS_MAX,
   RESULT_MAX_BYTES,
   APP_DB_MAX_BYTES,
+  APP_DB_DECLARED_MAX_BYTES,
   FILE_WRITE_MAX_BYTES,
   FILE_WRITES_MAX,
   PATH_MAX_BYTES,
@@ -63,9 +64,16 @@ import {
 } from "./limits.js";
 
 const LEDGER = "_fragment_ops";
-// A mutation that leaves the app's database over APP_DB_MAX_BYTES rolls
-// back.
+// A mutation that leaves the app's database over its cap rolls back.
 const STORAGE_FULL = Symbol("storage_full");
+
+// The app's database cap: APP_DB_MAX_BYTES, or the larger one its live
+// fragment.json declares (`storage.maxBytes`), as the supervisor names it
+// in a mutation's meta, at most APP_DB_DECLARED_MAX_BYTES.
+function dbMax(meta) {
+  const n = meta.dbMax;
+  return Number.isSafeInteger(n) && n >= APP_DB_MAX_BYTES && n <= APP_DB_DECLARED_MAX_BYTES ? n : APP_DB_MAX_BYTES;
+}
 // Half of a character (a lone surrogate, as from cutting a string inside an
 // emoji) in JSON text: JSON.stringify escapes one as \udXXX (lowercase), and
 // the supervisor's JSON reader refuses it, so it is refused here while the
@@ -487,6 +495,7 @@ export class App extends AuthorApp {
       throw new Error("the supervisor names the run and the ledger's window");
     }
     const now = Date.now();
+    const cap = dbMax(meta);
     return this.ctx.storage.transactionSync(() => {
       const prior = ephemeral ? undefined : sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
       if (prior && prior.at >= now - meta.ledgerMs) {
@@ -506,7 +515,7 @@ export class App extends AuthorApp {
       const effects = JSON.stringify(effectsOf(call));
       if (ephemeral) {
         if (effects !== "[]") throw new Error(`${name} is ephemeral (fragment.json): with no ledger row to apply them from, it may not publish, push, or write files`);
-        if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
+        if (sql.databaseSize > cap) throw STORAGE_FULL;
         return mutated(false, null, effects, text);
       }
       if (LONE_SURROGATE.test(effects)) {
@@ -517,7 +526,7 @@ export class App extends AuthorApp {
       if (sql.exec("SELECT last_insert_rowid() AS r").one().r % 100 === 0) {
         sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - meta.ledgerMs);
       }
-      if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
+      if (sql.databaseSize > cap) throw STORAGE_FULL;
       return mutated(false, meta.run, effects, text);
     });
   }

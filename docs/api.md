@@ -733,6 +733,12 @@ the code the fragment's own.
   "run": op}` (a move of `main` changing a matching path; `*`, `**`, `?`,
   a trailing `/`). The operation must be a mutation or a job an editor
   may call.
+- `storage` (optional): `{"maxBytes": n}`, the app's database cap, from
+  16 MiB (`limits::APP_DB_MAX_BYTES`, the cap with none declared) to 1 GiB
+  (`limits::APP_DB_DECLARED_MAX_BYTES`); anything else is refused at
+  deploy. A fragment on a blessed template runs with its template's (the
+  mind declares 1 GiB: a long history, imported) and declares none of its
+  own. Below.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an identity,
@@ -776,7 +782,9 @@ method), with `x-fragment-principal` and `x-fragment-role` set; a
 redirect it answers reaches the browser as it is (the platform follows
 none: followed, it came back into the app at its `Location`).
 
-The app's database holds at most 16 MiB: a mutation that would leave it
+The app's database holds at most 16 MiB, or what its live `fragment.json`
+declares (`storage.maxBytes`, at most 1 GiB; the supervisor names the cap
+in each mutation's call into the facet): a mutation that would leave it
 larger rolls back and answers 507 `storage_full`; the app still reads,
 and deleting rows makes room. A write from anywhere else (a query, the
 app's `fetch`) is not stopped: every check on the app's database runs in

@@ -48,6 +48,10 @@ pub mod limits {
     /// The app facet's database (docs/MODEL.md): a mutation that leaves it
     /// larger rolls back (the platform checks).
     pub const APP_DB_MAX_BYTES: u64 = 16 * 1024 * 1024;
+    /// The most an app may declare for its database instead
+    /// (`fragment.json` `storage.maxBytes`, docs/api.md Apps): a Durable
+    /// Object's SQLite holds 10 GB, and the owner pays for what is stored.
+    pub const APP_DB_DECLARED_MAX_BYTES: u64 = 1024 * 1024 * 1024;
     /// Secrets per fragment.
     pub const SECRETS_MAX: usize = 100;
     /// Members per fragment.

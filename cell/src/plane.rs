@@ -384,6 +384,10 @@ impl FragmentCell {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
         }
+        match manifest.storage {
+            Some(n) => self.set_meta(MetaKey::AppDbMax, &n.to_string())?,
+            None => self.del_meta(MetaKey::AppDbMax)?,
+        }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
             None => self.del_meta(MetaKey::Blessed)?,

@@ -392,6 +392,9 @@ pub(crate) enum MetaKey {
     Searched,
     /// Why live's code was not installed.
     CodeError,
+    /// The app's database cap live's manifest declares (`storage.maxBytes`),
+    /// when it declares one.
+    AppDbMax,
     /// When the blob collection runs next.
     BlobsGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
@@ -464,6 +467,7 @@ impl MetaKey {
             MetaKey::Face => "face",
             MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
+            MetaKey::AppDbMax => "app_db_max",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
             MetaKey::TestLedgerMs => "test_ledger_ms",

@@ -31,6 +31,10 @@ pub struct Manifest {
     /// the platform's release serves it, and the fragment's own manifest
     /// names only its face (`on_template`).
     pub template: Option<String>,
+    /// The app's database cap it declares (`storage.maxBytes`), from
+    /// `limits::APP_DB_MAX_BYTES` to `limits::APP_DB_DECLARED_MAX_BYTES`;
+    /// `None`: the platform's.
+    pub storage: Option<u64>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -58,6 +62,7 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("operations", !own.operations.is_empty()),
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
+        ("storage", own.storage.is_some()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -297,7 +302,25 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         Some(Value::String(t)) if valid_template_name(t) => m.template = Some(t.clone()),
         Some(_) => return Err("template names a blessed template (^[a-z][a-z0-9-]{0,31}$)".into()),
     }
+    match obj.get("storage") {
+        None | Some(Value::Null) => {}
+        Some(v) => m.storage = Some(storage(v)?),
+    }
     Ok(m)
+}
+
+/// `storage`: `{"maxBytes": n}`, the app's database cap, from the
+/// platform's (16 MiB) to the most an app may declare (1 GiB).
+fn storage(v: &Value) -> Result<u64, String> {
+    let (lo, hi) = (limits::APP_DB_MAX_BYTES, limits::APP_DB_DECLARED_MAX_BYTES);
+    let obj = v.as_object().ok_or("storage must be an object: {\"maxBytes\": n}")?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "maxBytes") {
+        return Err(format!("storage has an unknown key {k:?} (maxBytes)"));
+    }
+    match obj.get("maxBytes").and_then(Value::as_u64) {
+        Some(n) if (lo..=hi).contains(&n) => Ok(n),
+        _ => Err(format!("storage.maxBytes is the app database's cap in bytes, from {lo} to {hi}")),
+    }
 }
 
 #[cfg(test)]
@@ -484,5 +507,27 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    /// Goal: an app may declare a larger database, within the platform's
+    /// bounds, and a fragment on a template takes its template's. Method:
+    /// declarations at, inside and past each bound.
+    #[test]
+    fn storage_declares_the_database_cap() {
+        let (lo, hi) = (limits::APP_DB_MAX_BYTES, limits::APP_DB_DECLARED_MAX_BYTES);
+        assert_eq!(parse(b"{}").unwrap().storage, None, "none declared: the platform's");
+        for n in [lo, 256 * 1024 * 1024, hi] {
+            let m = parse(json!({ "storage": { "maxBytes": n } }).to_string().as_bytes()).unwrap();
+            assert_eq!(m.storage, Some(n));
+        }
+        for bad in [json!({ "maxBytes": lo - 1 }), json!({ "maxBytes": hi + 1 }), json!({ "maxBytes": "1 GiB" }), json!({}), json!({ "maxBytes": lo, "rows": 1 }), json!(1024)] {
+            let m = json!({ "storage": bad });
+            assert!(parse(m.to_string().as_bytes()).unwrap_err().contains("storage"), "{m}");
+        }
+        let blessed = parse(json!({ "kind": "mind", "storage": { "maxBytes": hi } }).to_string().as_bytes()).unwrap();
+        let own = parse(br#"{"template":"mind"}"#).unwrap();
+        assert_eq!(on_template(&own, &blessed).unwrap().storage, Some(hi), "a template's fragment runs with its template's cap");
+        let mine = parse(json!({ "template": "mind", "storage": { "maxBytes": lo } }).to_string().as_bytes()).unwrap();
+        assert!(on_template(&mine, &blessed).unwrap_err().contains("storage"), "and declares none of its own");
     }
 }

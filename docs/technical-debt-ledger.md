@@ -468,6 +468,28 @@ fragment.club until cutover (decisions 34–35).
   database size or bound it (a facet storage limit), and the meter
   samples it, with a test of a query that writes past the cap.
 
+## An app may declare a 1 GiB database that no meter counts
+
+- **Observed:** 2026-10-07, the optchat spike (docs/optchat.md,
+  "Importing chats"). A long history imported into a mind outgrows the
+  16 MiB cap, so `fragment.json` may declare up to 1 GiB
+  (`storage.maxBytes`; docs/api.md, Apps), and the mind does. The cap is
+  the app realm's courtesy as before (the entry above), and the storage
+  meter still does not sample an app's database, so a declared GiB is
+  stored unbilled.
+- **Risk:** the platform pays for up to 1 GiB of SQLite a fragment
+  ($0.20 a month at list) for each mind, and a mind's folded memory
+  (applib/optmem.mjs keeps every node's text on its instance) grows with
+  its log toward the isolate's 128 MB long before its database reaches a
+  GiB.
+- **First proof:** a mind whose `status` reports more than about 30 000
+  messages, or a Fragment namespace's stored bytes well over its sampled
+  `sqlite`.
+- **Delete when:** the meter samples an app's database (the entry above),
+  and a mind keeps only its view's texts on its instance (the rest read
+  from SQLite as a zoom or a merge needs them), or its log moves out of
+  SQLite (docs/optchat.md, "Not in the spike").
+
 ## A blob larger than the zone's request limit cannot be uploaded
 
 - **Observed:** phase 2. A blob route takes up to 256 MiB, but
