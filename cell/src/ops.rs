@@ -426,6 +426,17 @@ impl FragmentCell {
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
+            Some("repo") => {
+                // the repo it names, as one made before repos were named for
+                // their owner kept (`<prefix><label>--<username>`), or one
+                // code.storage never had: a wipe deletes what it names
+                let repo = body["repo"]
+                    .as_str()
+                    .filter(|r| (1..=200).contains(&r.len()) && r.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+                    .ok_or_else(|| CellError::invalid("repo is a repo's name: [a-z0-9-], 1 to 200"))?;
+                self.set_meta(MetaKey::Repo, repo)?;
+                json!({ "repo": repo })
+            }
             Some("alarm") => {
                 let alarm_at = self.state.storage().get_alarm().await?;
                 let poll_at = self.meta(MetaKey::PollAt)?.and_then(|at| at.parse::<i64>().ok());
