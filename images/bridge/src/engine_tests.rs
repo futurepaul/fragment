@@ -392,6 +392,55 @@ fn a_restart_starts_nothing_twice() {
     assert_eq!(e2.state().boot, 2);
 }
 
+/// Goal (a rollback of `/data`): the turns a life reads again that another
+/// life ran (their claims answered 409) are ones its runtime does not
+/// remember: the agent's next turn in that chat carries them
+/// (`TurnStart::forgotten`, the newest `NOTE_FORGOTTEN_MAX` and how many
+/// more), said once; another chat's turn, or another agent's, carries none.
+/// Method: a life's claims answered as another's, then its own.
+#[test]
+fn turns_another_life_ran_are_told_once_to_the_next_turn() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let theirs = |e: &mut Engine, s: Step| -> Vec<String> {
+        let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
+        for turn in &claims {
+            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs }, T0 + 1);
+            assert!(started(&r).is_none(), "another life's turn never runs here");
+            let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
+            for (turn, id) in owed {
+                // a 409 too: that life ended it
+                e.step(Input::Posted { turn, id }, T0 + 1);
+            }
+        }
+        claims
+    };
+    // the backlog a rollback sent the cursor back over: six of juniper's turns
+    let mut ran = vec![];
+    for seq in 1..=(limits::NOTE_FORGOTTEN_MAX as u64 + 2) {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
+        ran.extend(theirs(&mut e, s));
+    }
+    assert_eq!(ran.len(), limits::NOTE_FORGOTTEN_MAX + 2);
+    // rowan's own turn there is told nothing of juniper's
+    let r = said(&mut e, &b, &v, 20, "id:paul", json!({ "text": "@rowan hi", "to": [b.identity] }), T0 + 2);
+    let rowans = started(&r).expect("rowan's runs");
+    assert!(rowans.forgotten.is_empty() && rowans.forgotten_more == 0, "{rowans:?}");
+    // juniper's next turn there is told of the newest four, and two more
+    let r = said(&mut e, &a, &v, 21, "id:paul", json!({ "text": "and now?" }), T0 + 3);
+    let next = started(&r).expect("juniper's runs");
+    assert_eq!(next.forgotten, ran[2..].to_vec(), "the newest, oldest first");
+    assert_eq!(next.forgotten_more, 2);
+    ev(&mut e, Event::Reply { turn: next.turn.clone(), part: 1, text: "ok".into() }, T0 + 4);
+    ev(&mut e, Event::End { turn: next.turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+    // said once: the turn after it is told nothing
+    let r = said(&mut e, &a, &v, 22, "id:paul", json!({ "text": "again" }), T0 + 5);
+    let after = started(&r).expect("runs");
+    assert!(after.forgotten.is_empty() && after.forgotten_more == 0, "{after:?}");
+}
+
 /// Invalid state: a turn past its channel's cursor, or a wrong id, is
 /// refused at load rather than trusted.
 #[test]

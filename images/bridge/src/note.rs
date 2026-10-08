@@ -222,6 +222,71 @@ pub fn text(cut: &Cut, asked: Option<&str>, replies: &[String]) -> String {
     note
 }
 
+/// One of the agent's turns in a chat that another life ran since the
+/// `/data` this life restored ("forgotten", below): what it was asked, and
+/// what it replied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forgot {
+    pub turn: String,
+    pub asked: Option<String>,
+    pub replies: Vec<String>,
+}
+
+/// The agent's turns `turns` (oldest first) as the chat's journal holds
+/// them: each one's start on `work` (its cause, which `chat` holds when it
+/// is this chat's message) and its replies on `chat`. A turn whose start
+/// is not among the records read is left out (nothing of it can be said),
+/// and so is one a restart cut: it is the agent's turn before this one
+/// (one turn of an agent runs in a chat at a time, and the cut one was its
+/// life's last), whose own note says what was cut (`previous`, `text`).
+/// Pure, as `previous` is.
+///
+/// "Forgotten": a rollback of `/data` sends the bridge's cursors back, and
+/// the turns it reads again were claimed by the life that ran them (their
+/// claims answer 409), so its runtime, restored from the older save,
+/// remembers none of them. The agent's next turn in the chat is told what
+/// they were, from the journal, which never goes back in time.
+pub fn forgotten(work: &[Record], chat: &[Record], agent: &str, turns: &[String]) -> Vec<Forgot> {
+    let mut out = Vec::with_capacity(turns.len());
+    for turn in turns {
+        let start = work.iter().find(|r| own(r, agent, "turn.start").is_some_and(|b| b["turn"] == turn.as_str() && b["agent"] == agent));
+        let Some(start) = start else { continue };
+        let Ok(cause) = serde_json::from_value::<Cause>(start.body["cause"].clone()) else { continue };
+        let cut = work.iter().filter_map(|r| own(r, agent, "turn.end")).any(|e| e["turn"] == turn.as_str() && e["outcome"] == "error" && field(e, "error") == LOST);
+        if cut {
+            continue;
+        }
+        let asked = chat.iter().find(|r| r.channel == records::CHAT && r.seq == cause.seq && cause.channel == records::CHAT).and_then(asked);
+        out.push(Forgot { turn: turn.clone(), asked, replies: replies(chat, agent, turn) });
+    }
+    assert!(out.len() <= turns.len(), "each forgotten turn is told once at most");
+    out
+}
+
+/// What the agent is told of its forgotten turns in the chat, bounded
+/// (`NOTE_MAX_BYTES`): what happened and what to do first, then each
+/// turn's request and its last replies, oldest first, and how many earlier
+/// ones there were.
+pub fn forgotten_text(items: &[Forgot], more: u32) -> String {
+    let mut lines = vec![
+        "Your memory of this chat is behind: your computer went back to an earlier save, so you do not remember these turns of yours here, which came after it (the chat keeps them). What they did may have had effects: check before you do any of it again.".to_string(),
+    ];
+    if more > 0 {
+        lines.push(format!("(And {more} earlier.)"));
+    }
+    for f in items {
+        let asked = f.asked.as_deref().filter(|a| !a.trim().is_empty()).map_or_else(|| "something".to_string(), |a| quoted(a, limits::NOTE_ASKED_MAX_CHARS));
+        lines.push(format!("You were asked: {asked}"));
+        let shown = f.replies.len().min(limits::NOTE_REPLIES_MAX);
+        for r in &f.replies[f.replies.len() - shown..] {
+            lines.push(format!("You replied: {}", quoted(r, limits::NOTE_REPLY_MAX_CHARS)));
+        }
+    }
+    let note = records::cut_bytes(&lines.join("\n"), limits::NOTE_MAX_BYTES);
+    assert!(note.len() <= limits::NOTE_MAX_BYTES, "a note is bounded");
+    note
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -403,5 +468,60 @@ mod tests {
         assert_eq!(replies(&[reply("cut", ME, "one"), reply("other", ME, "x"), reply("cut", "id:rowan", "y"), reply("cut", ME, "two")], ME, "cut"), vec!["one".to_string(), "two".to_string()]);
         // on one line, so the note's lines stay its own
         assert!(text(&c, Some("a\n\nb"), &[]).contains("It was answering: “a b”"));
+    }
+
+    /// Goal (a rollback): the turns another life ran that this life's
+    /// runtime does not remember are told from the journal, oldest first:
+    /// what each was asked and what it replied; one a restart cut is the
+    /// cut note's, another agent's and a turn the records read do not hold
+    /// are left out; the note is bounded, its first line whole. Valid,
+    /// invalid.
+    #[test]
+    fn forgotten_turns_are_told_from_the_journal() {
+        let msg = |seq: u64, by: &str, body: Value| Record { channel: "chat".into(), seq, at: seq as i64, principal: by.into(), kind: "message".into(), body };
+        let chat = vec![
+            msg(1, "id:paul", json!({ "text": "remember the zebra" })),
+            msg(2, ME, json!({ "text": "noted: zebra", "turn": "t1" })),
+            msg(3, "id:paul", json!({ "text": "and the\ngiraffe" })),
+            msg(4, ME, json!({ "text": "noted: giraffe", "turn": "t2" })),
+            msg(5, ME, json!({ "text": "both noted", "turn": "t2" })),
+            msg(6, "id:paul", json!({ "text": "a slow one" })),
+            msg(7, "id:paul", json!({ "text": "rowan, hi" })),
+        ];
+        let mut w = Work::default();
+        w.start(ME, "t1", 1);
+        w.end(ME, "t1", Outcome::Idle);
+        w.start(ME, "t2", 3);
+        w.end(ME, "t2", Outcome::Idle);
+        w.start(ME, "cut", 6);
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        w.start("id:rowan", "r1", 7);
+        let turns: Vec<String> = ["t1", "t2", "cut", "r1", "nowhere"].iter().map(|t| t.to_string()).collect();
+        let got = forgotten(&w.0, &chat, ME, &turns);
+        assert_eq!(
+            got,
+            vec![
+                Forgot { turn: "t1".into(), asked: Some("remember the zebra".into()), replies: vec!["noted: zebra".into()] },
+                Forgot { turn: "t2".into(), asked: Some("and the\ngiraffe".into()), replies: vec!["noted: giraffe".into(), "both noted".into()] },
+            ],
+            "its own, in order; the cut one (its own note's), another agent's and one not read left out"
+        );
+        let note = forgotten_text(&got, 3);
+        assert_eq!(
+            note,
+            "Your memory of this chat is behind: your computer went back to an earlier save, so you do not remember these turns of yours here, which came after it (the chat keeps them). What they did may have had effects: check before you do any of it again.\n\
+             (And 3 earlier.)\n\
+             You were asked: “remember the zebra”\n\
+             You replied: “noted: zebra”\n\
+             You were asked: “and the giraffe”\n\
+             You replied: “noted: giraffe”\n\
+             You replied: “both noted”"
+        );
+        assert!(forgotten(&w.0, &chat, "id:nobody", &turns).is_empty(), "none of another's");
+        // bounded, its first line whole
+        let long = Forgot { turn: "t".into(), asked: Some("é".repeat(10_000)), replies: vec!["é".repeat(10_000); 5] };
+        let note = forgotten_text(&vec![long; limits::NOTE_FORGOTTEN_MAX], u32::MAX);
+        assert!(note.len() <= limits::NOTE_MAX_BYTES && note.lines().next().unwrap().ends_with("before you do any of it again."), "{}", note.len());
+        assert!(forgotten_text(&[Forgot { turn: "t".into(), asked: None, replies: vec![] }], 0).ends_with("You were asked: something"));
     }
 }

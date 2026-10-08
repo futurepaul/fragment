@@ -100,6 +100,10 @@ pub const NOTE_REPLY_MAX_CHARS: usize = 200;
 pub const NOTE_STEPS_MAX: usize = 8;
 pub const NOTE_CARDS_MAX: usize = 3;
 pub const NOTE_REPLIES_MAX: usize = 2;
+/// A turn whose agent's memory of its chat is behind (a rollback of
+/// `/data`: note.rs, "forgotten") is told of the newest this many of its
+/// turns there that another life ran; the rest are counted.
+pub const NOTE_FORGOTTEN_MAX: usize = 4;
 /// The journal a note reads, at most: pages of this many records, back from
 /// the turn's claim on `work` (to the agent's turn before it) and back from
 /// the chat's tail (to that turn's start, for its replies), at most
@@ -226,6 +230,8 @@ const _: () = assert!(SHUTDOWN_MS_MAX < 5_000, "the platform kills the guest 5 s
 const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
+const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut turn's note and a forgotten one's, together, are small beside it too");
+const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
