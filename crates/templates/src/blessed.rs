@@ -298,8 +298,8 @@ mod tests {
     /// starts a turn, goose's reply on `chat` reaches `hands_said`, and its
     /// steps on `work` run nothing (one run a hand-off, under the triggered
     /// runs' hourly breaker); a new topic's `sort` record classifies; `log`
-    /// takes no posts (so it is never trimmed); its memory is the
-    /// template's own pure module beside its prompts; and every operation
+    /// takes no posts (so it is never trimmed); its memory, its web and its
+    /// files are the template's own modules beside its prompts; and every operation
     /// the contract names is declared, the five an MCP client sees
     /// described.
     #[test]
@@ -316,16 +316,20 @@ mod tests {
         assert!(m.channels["log"].post.is_none() && m.channels["sort"].post.is_none(), "log and sort are the app's alone");
         assert!(m.channels["say"].signed_in, "say takes people signed in");
         let c = code("mind").unwrap().expect("a mind carries code");
-        assert!(c.modules.contains_key("applib/optmem.mjs") && c.modules.contains_key("applib/prompts.mjs"), "{:?}", c.modules.keys());
+        assert!(
+            ["applib/optmem.mjs", "applib/prompts.mjs", "applib/web.mjs", "applib/files.mjs"].iter().all(|m| c.modules.contains_key(*m)),
+            "{:?}",
+            c.modules.keys()
+        );
         for op in [
-            "view", "zoom", "date", "search", "note", "threads", "thread", "context", "memory", "node", "topics", "personas", "tasks", "status",
+            "view", "zoom", "date", "search", "note", "threads", "thread", "context", "export", "memory", "node", "topics", "personas", "tasks", "status",
             "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop", "topic_suggest",
             "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan", "node_built",
             "task_open", "hands_reply", "topics_set",
         ] {
             assert!(m.operations.contains_key(op), "the mind declares {op}");
         }
-        assert_eq!(m.operations.len(), 37, "and nothing else");
+        assert_eq!(m.operations.len(), 38, "and nothing else");
         let raw: serde_json::Value = serde_json::from_slice(template("mind").unwrap().iter().find(|(p, _)| *p == "fragment.json").unwrap().1).unwrap();
         let described: Vec<&str> = raw["operations"].as_object().unwrap().iter().filter(|(_, d)| d.get("description").is_some()).map(|(k, _)| k.as_str()).collect();
         assert_eq!(described, ["date", "note", "search", "view", "zoom"], "the MCP tools");

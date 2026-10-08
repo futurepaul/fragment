@@ -859,6 +859,7 @@ impl FragmentCell {
                 }
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
+            Step::Blob { sha256 } => self.step_blob(&sha256).await,
         }
     }
 
@@ -958,6 +959,24 @@ impl FragmentCell {
         }
         let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
         Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
+    }
+
+    /// `job.blob(sha256)`: one of this fragment's blobs (a page's upload, a
+    /// chat's attachment), its first `BLOB_READ_MAX_BYTES` read as text when
+    /// they are UTF-8 (`steps::blob_read`). Its bytes are under the
+    /// fragment's own npub, so another fragment's hash is not found.
+    async fn step_blob(&self, sha: &str) -> Result<Value, StepFail> {
+        if !fragment_core::blob::valid_sha(sha) {
+            return Err(permanent("a blob is named by its SHA-256, 64 lowercase hex characters"));
+        }
+        let max = fragment_core::steps::BLOB_READ_MAX_BYTES;
+        let key = self.blob_key(sha).map_err(|e| StepFail::Retry(e.message))?;
+        let found = js::blob_get(&self.env, &key, Some(&format!("bytes=0-{}", max - 1))).await.map_err(|e| StepFail::Retry(e.message))?;
+        let b = found.ok_or_else(|| permanent(format!("this fragment has no blob {sha}")))?;
+        let mut resp = Response::from_body(ResponseBody::Stream(b.body)).map_err(|e| StepFail::Retry(e.to_string()))?;
+        let mut head = resp.bytes().await.map_err(|e| StepFail::Retry(e.to_string()))?;
+        head.truncate(max);
+        Ok(fragment_core::steps::blob_read(sha, b.size, &head))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a

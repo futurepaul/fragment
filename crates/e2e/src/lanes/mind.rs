@@ -15,15 +15,26 @@
 //! agent's bridge gives that record; the agent's one reply is the task's
 //! report, and comes back as a `[<task>] …` user message that runs a turn
 //! of its own. Its steps on `work` start nothing (a page follows them).
+//!
+//! The web: web_fetch reads a page of a local upstream (a redirect
+//! followed) as text, its chrome and scripts left out. A search reaches the
+//! internet, which a local run does not call: a skip. Files: a message's
+//! text file (the mind's blob, named on `say`) is read whole into its turn,
+//! goes with the hand-off on `chat`, the stub names it, and its reply's
+//! file comes back on the report and is read into the next turn. `export`
+//! pages the raw log.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::blob::sha256_hex;
+use fragment_fakes::http::{Handler, Response, Server};
 use serde_json::{json, Value};
 
 use super::computers::{agent_replies, phase, told, turn_of, AGENT_JSON};
 use super::jobs::records;
-use crate::api::{Api, Socket};
+use crate::api::{Api, Call, Socket};
 use crate::Keys;
 use crate::Suite;
 
@@ -59,6 +70,21 @@ fn op(api: &Api, owner: &Keys, mind: &str, name: &str, input: Value) -> Value {
     api.op(owner, mind, name, &format!("{name}-{}", crate::api::now_ms()), input).map(|r| r.body["result"].clone()).unwrap_or(Value::Null)
 }
 
+/// A page for web_fetch, behind a redirect: words, a link to make absolute,
+/// and a script, a nav and a footer to leave out.
+const COMPOST_HTML: &str = "<!doctype html><html><head><title>Compost, &amp; how</title><script>var words = \"a script's words\";</script></head>\
+<body><nav><a href=\"/\">Home</a> menu words</nav><main><h1>Compost</h1><p>Turn the heap every <b>two weeks</b> &mdash; keep it damp.</p>\
+<ul><li>Browns: leaves</li><li>Greens: scraps</li></ul><p>See <a href=\"/guide\">the guide</a>.</p></main><footer>footer words</footer></body></html>";
+
+fn page_upstream() -> Result<Server> {
+    let handler: Handler = Arc::new(|req| match req.path.as_str() {
+        "/old" => Response::bytes(301, "text/plain", b"moved".to_vec()).with_header("location", "/compost.html"),
+        "/compost.html" => Response::bytes(200, "text/html; charset=utf-8", COMPOST_HTML.as_bytes().to_vec()),
+        _ => Response::bytes(404, "text/plain", b"no such page".to_vec()),
+    });
+    Ok(Server::start(0, handler)?)
+}
+
 pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("mind", &[crate::Need::Fakes, crate::Need::Computers]) {
         return Ok(());
@@ -79,7 +105,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let personas = op(api, &owner, &mind, "personas", json!({}));
     let ids: Vec<&str> = personas["personas"].as_array().into_iter().flatten().filter_map(|p| p["id"].as_str()).collect();
-    s.ok("it starts with three personas, Mind the default and Builder's hands on", ids == ["mind", "builder", "coach"] && personas["default"] == "mind" && personas["personas"][1]["hands"] == true, &personas);
+    s.ok(
+        "it starts with four personas, Mind the default, Builder's hands on, and Researcher",
+        ids == ["mind", "builder", "coach", "researcher"] && personas["default"] == "mind" && personas["personas"][1]["hands"] == true,
+        &personas,
+    );
 
     // ---- a first message: logged, answered, the answer drafted first
     let mut page = Socket::open(api, &mind, "__live", Some(&owner), None)?;
@@ -128,11 +158,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = s.ai.chats();
     let first = calls.iter().find(|c| c["messages"][1]["content"][1]["text"] == "hello mind, the garden has tomatoes and basil");
     s.ok(
-        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date and search",
+        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date, search and the web's tools",
         first.is_some_and(|c| {
             c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You are Mind, an AI agent"))
                 && c["messages"][1]["content"][0]["text"] == "<chat>\n</chat>"
-                && c["tools"].as_array().is_some_and(|t| t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search"])
+                && c["tools"].as_array().is_some_and(|t| t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search", "web_search", "web_fetch", "research"])
         }),
         format!("{first:?}"),
     );
@@ -197,6 +227,27 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let topics = op(api, &owner, &mind, "topics", json!({}));
     s.ok("the topic counts its thread", topics["topics"][0]["name"] == "Garden" && topics["topics"][0]["count"] == 1, &topics);
     s.ok("its threads' topics are published on log", logged(api, &owner, &mind, "topics").iter().any(|t| t["body"]["thread"] == garden), "");
+
+    // ---- the web: a page read as text, behind a redirect
+    let web = page_upstream()?;
+    let compost = "t_0c0c0c0c0c0c0c0c";
+    let r = say("m5", json!({ "text": padded(&format!("read the page [[call web_fetch {{\"url\": \"{}/old\"}}]]", web.url)), "thread": compost }))?;
+    anyhow::ensure!(r.status == 200, "saying m5: {r}");
+    let read = s.eventually(TURN, || messages(api, &owner, &mind, compost).iter().any(|m| m["kind"] == "talk" && m["text"].as_str().is_some_and(|t| t.starts_with("the tool said: "))));
+    let said = messages(api, &owner, &mind, compost);
+    let echo = said.iter().find(|m| m["kind"] == "echo").and_then(|m| m["text"].as_str()).unwrap_or("");
+    s.ok(
+        "web_fetch follows the redirect and reads the page as text: its title, its address, its words, a link made absolute",
+        read && said.iter().any(|m| m["kind"] == "tool" && m["text"] == format!("web_fetch {{\"url\":\"{}/old\"}}", web.url).as_str())
+            && echo.starts_with(&format!("# Compost, & how\n{}/compost.html\n\n# Compost\n\nTurn the heap every two weeks — keep it damp.\n\n- Browns: leaves\n- Greens: scraps", web.url))
+            && echo.contains(&format!("[the guide]({}/guide)", web.url)),
+        echo,
+    );
+    s.ok("its scripts and its chrome (nav, footer) are left out", !echo.is_empty() && ["a script's words", "menu words", "footer words"].iter().all(|w| !echo.contains(w)), echo);
+    s.skip(
+        "web_search and research find pages on the internet (a keyed search, else DuckDuckGo, else Wikipedia)",
+        "a local run calls nothing on the internet: the no-key search was tried by hand (docs/optchat.md, \"The web\")",
+    );
 
     // ---- hands: the stub agent, an editor of the mind
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
@@ -268,6 +319,95 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         "goose's steps on work start no run: only its reply on chat does",
         runs.body["triggers"].as_array().is_some_and(|t| t.iter().all(|t| t["channel"] != "work") && t.iter().any(|t| t["channel"] == "chat" && t["run"] == "hands_said")),
         &runs,
+    );
+
+    // ---- files: a text file said with a message, read whole into its
+    // turn, handed on with the task; goose's file back on its report
+    let notes = b"the spare key hangs on the third hook\n".to_vec();
+    let notes_sha = sha256_hex(&notes);
+    let r = api.call(Call {
+        method: "PUT",
+        url: format!("{}/api/f/{mind}/blobs/{notes_sha}", api.base),
+        body: Some(notes.clone()),
+        content_type: Some("text/plain"),
+        keys: Some(&owner),
+        ..Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "uploading notes.txt to the mind: {r}");
+    let file = json!({ "sha256": notes_sha, "name": "notes.txt", "type": "text/plain", "size": notes.len() });
+    let hooks = "t_00112233445566bb";
+    let r = say("m6", json!({ "text": padded("draw the hooks [[call computer {\"task\": \"draw the hooks\"}]]"), "thread": hooks, "persona": "builder", "attachments": [file] }))?;
+    anyhow::ensure!(r.status == 200, "saying m6: {r}");
+    let opened = s.eventually(TURN, || op(api, &owner, &mind, "tasks", json!({ "thread": hooks }))["tasks"].as_array().is_some_and(|t| t.len() == 1));
+    let task = op(api, &owner, &mind, "tasks", json!({ "thread": hooks }))["tasks"][0]["id"].as_str().unwrap_or("").to_string();
+    let said = messages(api, &owner, &mind, hooks);
+    s.ok("a message's file is named on its msg record, without its text", opened && said.first().is_some_and(|m| m["kind"] == "user" && m["attachments"] == json!([file])), json!(said));
+    let shown = format!("[file: notes.txt (text/plain, {} B)]\n```\nthe spare key hangs on the third hook\n```", notes.len());
+    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with("draw the hooks")));
+    s.ok(
+        "its turn reads the text file whole, below its name (job.blob)",
+        call.as_ref().is_some_and(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.ends_with(&shown))),
+        format!("{call:?}"),
+    );
+    let first = said.first().and_then(|m| m["i"].as_i64()).unwrap_or(-1);
+    let z = op(api, &owner, &mind, "zoom", json!({ "id": first, "n": 1 }));
+    let listed = op(api, &owner, &mind, "thread", json!({ "id": hooks }));
+    s.ok(
+        "zoom opens the message with its file; the thread lists it named",
+        z["text"].as_str().is_some_and(|t| t.ends_with(&shown)) && listed["messages"][0]["attachments"] == json!([file]),
+        json!({ "zoom": z, "thread": listed }),
+    );
+    let handed = records(api, &owner, &mind, "chat").into_iter().find(|r| r["principal"] == npub.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.ends_with(&format!("(task {task}, thread {hooks})"))));
+    s.ok("the hand-off carries the turn's file on chat", handed.as_ref().is_some_and(|h| h["body"]["attachments"] == json!([file])), format!("{handed:?}"));
+    let reported = s.eventually(WAKE, || messages(api, &owner, &mind, hooks).iter().any(|m| m["kind"] == "user" && m["task"] == task.as_str()));
+    let report = messages(api, &owner, &mind, hooks).into_iter().find(|m| m["kind"] == "user" && m["task"] == task.as_str()).unwrap_or(Value::Null);
+    let seq = handed.as_ref().and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
+    let turn = turn_of(&agent_name, &mind, "chat", seq);
+    let reply = agent_replies(&records(api, &owner, &mind, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).unwrap_or(Value::Null);
+    s.ok(
+        "goose got the file (the stub names it), and its reply's file comes back on the report",
+        reported
+            && reply["body"]["text"].as_str().is_some_and(|t| t.ends_with("[got 1: notes.txt]"))
+            && reply["body"]["attachments"][0]["name"] == "drawing.txt"
+            && report["attachments"][0]["name"] == "drawing.txt"
+            && report["attachments"][0]["sha256"] == reply["body"]["attachments"][0]["sha256"],
+        json!({ "reply": reply, "report": report }),
+    );
+    let read_back = s.eventually(TURN, || {
+        s.ai.chats().iter().any(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] ")) && t.contains("[file: drawing.txt (text/plain, ") && t.contains("\na drawing for ")))
+    });
+    s.ok("and the report's turn reads goose's text file whole", read_back, "");
+    let bare = "t_00112233445566cc";
+    let r = say("m7", json!({ "text": "", "thread": bare, "attachments": [file] }))?;
+    let titled = r.status == 200 && s.eventually(TURN, || logged(api, &owner, &mind, "thread").iter().any(|t| t["body"]["id"] == bare && t["body"]["title"] == "notes.txt"));
+    s.ok("a message may be a file alone: its thread is titled by the file's name", titled, &r);
+
+    // ---- export: the raw log, a page at a time
+    let t0 = op(api, &owner, &mind, "status", json!({}))["T"].as_i64().unwrap_or(0);
+    let mut entries: Vec<Value> = vec![];
+    let mut after = Value::Null;
+    let mut pages = 0;
+    while pages < 200 {
+        let input = if after.is_null() { json!({ "limit": 7 }) } else { json!({ "after": after, "limit": 7 }) };
+        let page = op(api, &owner, &mind, "export", input);
+        pages += 1;
+        entries.extend(page["entries"].as_array().cloned().unwrap_or_default());
+        after = page["next"].clone();
+        if after.is_null() {
+            break;
+        }
+    }
+    let ids: Vec<i64> = entries.iter().filter_map(|e| e["i"].as_i64()).collect();
+    s.ok(
+        "export pages the whole log in order, seven a page, to its end",
+        t0 > 7 && ids.len() as i64 >= t0 && ids.iter().enumerate().all(|(k, i)| *i == k as i64) && pages as i64 == (ids.len() as i64 + 6) / 7,
+        json!({ "T": t0, "pages": pages, "ids": ids }),
+    );
+    let with_notes = entries.iter().find(|e| e["thread"] == hooks && e["kind"] == "user" && e["task"].is_null());
+    s.ok(
+        "each entry carries its files and the text the mind read of them",
+        with_notes.is_some_and(|e| e["attachments"][0]["name"] == "notes.txt" && e["attachments"][0]["text"] == "the spare key hangs on the third hook\n"),
+        format!("{with_notes:?}"),
     );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;

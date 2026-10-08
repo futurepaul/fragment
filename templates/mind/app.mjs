@@ -23,8 +23,10 @@
 // A turn's view is the one exception, frozen by a step (`view`) so every
 // model call of the turn sees the same one.
 import { DurableObject } from "cloudflare:workers";
+import * as F from "./applib/files.mjs";
 import * as M from "./applib/optmem.mjs";
 import { COMPACT, SUGGEST, TOOLS, system } from "./applib/prompts.mjs";
+import * as W from "./applib/web.mjs";
 
 const THREAD = /^t_[0-9a-f]{16}$/;
 const LOGGED_KINDS = new Set(["talk", "tool", "echo"]);
@@ -49,6 +51,11 @@ const RESERVE_STEPS = 8;
 const TURN_START_STEPS = 64;
 const SETTLE_STEPS = 96;
 const RESULTS_SOFT_BYTES = 3 * 1024 * 1024;
+// A web fetch's answer is kept whole (up to the 1 MiB a step's result
+// takes): one is taken only while the run's 4 MiB of answers has room for it.
+const FETCH_ROOM_BYTES = 4 * 1024 * 1024 - 1024 * 1024 - 64 * 1024;
+// A web tool keeps this many steps for its answer's log, a last call and its log.
+const WEB_KEEP_STEPS = 3;
 const TURNS_PER_RUN = 4;
 // A turn's settle tries a failing node this many times, RETRY_MS apart.
 const SETTLE_FAILS_MAX = 3;
@@ -93,6 +100,9 @@ const TOPICS_MAX = 256;
 const QUEUE_MAX = 1000;
 const FAILS_KEPT = 64;
 const ABOUT_MAX = 8000;
+// `export`'s pages: messages a page, unless named, and at most.
+const EXPORT_LIMIT = 500;
+const EXPORT_MAX = 2000;
 
 const PERSONAS = [
   {
@@ -109,7 +119,7 @@ const PERSONAS = [
     emoji: "🛠️",
     hands: 1,
     instructions:
-      "You get things done on the user's computer. When a task needs files, a shell, a browser or code, hand it to the computer with everything it needs, say what you started, and report results plainly when they come back.",
+      "You get things done on the user's computer. When a task needs files, a shell, code, or an app (a fragment) made or changed, hand it to the computer with everything it needs, say what you started, and report results plainly when they come back.",
   },
   {
     id: "coach",
@@ -118,6 +128,14 @@ const PERSONAS = [
     hands: 0,
     instructions:
       "Ask one question at a time, and wait for the answer. Help the user think it through rather than handing them answers: say back in one sentence what you heard before the next question.",
+  },
+  {
+    id: "researcher",
+    name: "Researcher",
+    emoji: "🔎",
+    hands: 0,
+    instructions:
+      "You find things out. Check anything current or uncertain on the web before you answer: research for a question that needs several sources, web_search and web_fetch for a quick look. Give your sources, and say plainly what you could not confirm.",
   },
 ];
 
@@ -131,11 +149,12 @@ function need(ok, why) {
   if (!ok) throw new Error(why);
 }
 
-// A record's text: at most RECORD_TEXT_MAX bytes, and its JSON within the
-// record's limit however many characters it escapes.
-function recordText(text) {
+// A record's text: at most RECORD_TEXT_MAX bytes, and its JSON within
+// `room` (the record's limit, less what else it carries) however many
+// characters it escapes.
+function recordText(text, room = RECORD_JSON_MAX) {
   let t = M.cutBytes(text, RECORD_TEXT_MAX);
-  while (M.utf8(JSON.stringify(t)) > RECORD_JSON_MAX) t = M.cutBytes(t, Math.floor(M.utf8(t) * 0.8));
+  while (M.utf8(JSON.stringify(t)) > room) t = M.cutBytes(t, Math.floor(M.utf8(t) * 0.8));
   return t;
 }
 
@@ -227,6 +246,14 @@ class Steps {
     return this.#took(this.job.publish(channel, body));
   }
 
+  fetch(url, init) {
+    return this.#took(this.job.fetch(url, init));
+  }
+
+  blob(sha256) {
+    return this.#took(this.job.blob(sha256));
+  }
+
   sleep(ms) {
     return this.#took(this.job.sleep(ms));
   }
@@ -274,14 +301,24 @@ export class App extends DurableObject {
     sql.exec("CREATE INDEX IF NOT EXISTS task_thread ON task (thread, started)");
     sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
     sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(text, content='log', content_rowid='i')");
-    if (sql.exec("SELECT COUNT(*) AS n FROM persona").one().n === 0) {
+    // a message's files (applib/files.mjs), JSON; null with none. A log made
+    // before them gains the column.
+    if (!sql.exec("SELECT * FROM log LIMIT 0").columnNames.includes("attachments")) sql.exec("ALTER TABLE log ADD COLUMN attachments TEXT");
+    // The seeded personas, each once: a mind made before one was seeded
+    // (`seeded` counts them; three before it was kept) gains it, and one
+    // its person removed stays removed.
+    const fresh = sql.exec("SELECT COUNT(*) AS n FROM persona").one().n === 0;
+    const seeded = fresh ? 0 : Number(this.#get("seeded") ?? 3);
+    if (seeded < PERSONAS.length) {
       ctx.storage.transactionSync(() => {
         const now = Date.now();
         // listed in this order (by `made`)
         for (const [k, p] of PERSONAS.entries()) {
+          if (k < seeded || sql.exec("SELECT id FROM persona WHERE id = ?", p.id).toArray().length) continue;
           sql.exec("INSERT INTO persona (id, name, emoji, instructions, hands, made) VALUES (?, ?, ?, ?, ?, ?)", p.id, p.name, p.emoji, p.instructions, p.hands, now + k);
         }
-        this.#set("default", PERSONAS[0].id);
+        if (fresh) this.#set("default", PERSONAS[0].id);
+        this.#set("seeded", PERSONAS.length);
       });
     }
   }
@@ -340,12 +377,23 @@ export class App extends DurableObject {
     return out;
   }
 
+  // A log row as the page reads it: its files named, without their text.
+  #shown(r) {
+    return { ...r, attachments: F.described(F.filesOf(r.attachments)) };
+  }
+
   #message(i) {
-    return this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task FROM log WHERE i = ?", i).toArray()[0] ?? null;
+    return this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i = ?", i).toArray()[0] ?? null;
+  }
+
+  // Message i as the memory reads it: its words and its files (applib/files.mjs).
+  #full(i) {
+    const r = this.ctx.storage.sql.exec("SELECT kind, text, attachments FROM log WHERE i = ?", i).one();
+    return { kind: r.kind, text: F.rendered(r.text, F.filesOf(r.attachments)) };
   }
 
   #line(i) {
-    const r = this.ctx.storage.sql.exec("SELECT kind, text FROM log WHERE i = ?", i).one();
+    const r = this.#full(i);
     return M.line0(r.kind, r.text);
   }
 
@@ -356,19 +404,25 @@ export class App extends DurableObject {
     }
   }
 
-  // One message appended to the log (capped: the 16 MiB debt), its thread
-  // touched, its free nodes built, and its record published on `log`.
-  #log(call, m, kind, text, { thread = null, persona = null, task = null } = {}) {
+  // One message appended to the log (capped: the 16 MiB debt), with its
+  // files (`attachments`, applib/files.mjs: their text, when read, kept
+  // with them), its thread touched, its free nodes built, and its record
+  // published on `log` (the files named, not their text).
+  #log(call, m, kind, text, { thread = null, persona = null, task = null, attachments = [] } = {}) {
     const sql = this.ctx.storage.sql;
     const i = m.T;
     const t = M.capText(text);
     const at = Date.now();
-    sql.exec("INSERT INTO log (i, kind, text, at, thread, persona, task) VALUES (?, ?, ?, ?, ?, ?, ?)", i, kind, t, at, thread, persona, task);
+    const files = attachments.length ? JSON.stringify(attachments) : null;
+    sql.exec("INSERT INTO log (i, kind, text, at, thread, persona, task, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", i, kind, t, at, thread, persona, task, files);
     sql.exec("INSERT INTO log_fts (rowid, text) VALUES (?, ?)", i, t);
     if (thread !== null) sql.exec("UPDATE thread SET last = ?, last_i = ? WHERE id = ?", at, i, thread);
     M.append(m);
     this.#free(m);
-    call.publish("log", { type: "msg", i, kind, text: recordText(t), thread, at, persona, task });
+    const named = F.described(attachments);
+    const body = { type: "msg", i, kind, text: recordText(t, RECORD_JSON_MAX - sizeOf(named)), thread, at, persona, task };
+    if (named.length) body.attachments = named;
+    call.publish("log", body);
     return { i, at };
   }
 
@@ -397,13 +451,13 @@ export class App extends DurableObject {
   // A `user` message: logged in its thread (made on its first message,
   // titled from its first line) and queued for a turn. Answers whether a
   // turn is running, which takes it next.
-  #enqueue(call, m, { text, thread, persona = null, task = null }) {
+  #enqueue(call, m, { text, thread, persona = null, task = null, attachments = [] }) {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
     const t = this.#thread(thread);
     const p = this.#persona(persona ?? t?.persona ?? null).id;
     if (!t) {
-      const title = titleOf(text);
+      const title = titleOf(text.trim() ? text : (attachments[0]?.name ?? ""));
       sql.exec("INSERT INTO thread (id, title, persona, started, last, first_i, last_i) VALUES (?, ?, ?, ?, ?, ?, ?)", thread, title, p, now, now, m.T, m.T);
       call.publish("log", { type: "thread", id: thread, title });
     } else if (persona !== null && t.persona !== p) {
@@ -411,7 +465,7 @@ export class App extends DurableObject {
     }
     const queue = this.#json("queue", []);
     need(queue.length < QUEUE_MAX, `${QUEUE_MAX} messages already wait for a turn`);
-    const { i } = this.#log(call, m, "user", text, { thread, persona: p, task });
+    const { i } = this.#log(call, m, "user", text, { thread, persona: p, task, attachments });
     queue.push({ i, thread });
     this.#setJson("queue", queue);
     return { i, running: this.#lock(now) !== null };
@@ -419,12 +473,15 @@ export class App extends DurableObject {
 
   // ---- internal operations: the jobs' halves (docs/optchat.md) ----
 
-  // A person's message from `say`.
-  hear({ text, thread, persona = null }, call) {
-    need(typeof text === "string" && text.trim().length > 0, "hear: text is words");
+  // A person's message from `say`: words, files (their text, when its job
+  // read it), or both.
+  hear({ text, thread, persona = null, attachments = [] }, call) {
+    const a = F.attachmentsOf(attachments, { texts: true });
+    need(!a.error, `hear: ${a.error}`);
+    need(typeof text === "string" && (text.trim().length > 0 || a.files.length > 0), "hear: text is words, or the message carries files");
     need(THREAD.test(thread), "hear: thread is t_ and 16 hex");
     need(persona === null || typeof persona === "string", "hear: persona is a persona's id");
-    return this.#changing((m) => this.#enqueue(call, m, { text, thread, persona }));
+    return this.#changing((m) => this.#enqueue(call, m, { text, thread, persona, attachments: a.files }));
   }
 
   // Takes the turn lock (free, run out, or this run's) and the queued
@@ -447,14 +504,19 @@ export class App extends DurableObject {
     const thread = queue[0].thread;
     const taken = [];
     const texts = [];
+    // the taken messages' files, which a hand-off of this turn carries
+    const attachments = [];
     let bytes = 0;
     for (const q of queue) {
       if (q.thread !== thread) continue;
-      const text = sql.exec("SELECT text FROM log WHERE i = ?", q.i).one().text;
+      const r = sql.exec("SELECT text, attachments FROM log WHERE i = ?", q.i).one();
+      const files = F.filesOf(r.attachments);
+      const text = F.rendered(r.text, files);
       if (taken.length && bytes + M.utf8(text) > TEXTS_MAX_BYTES) break;
       bytes += M.utf8(text);
       taken.push(q.i);
       texts.push(text);
+      for (const f of F.described(files)) if (attachments.length < F.FILES_MAX && !attachments.some((a) => a.sha256 === f.sha256)) attachments.push(f);
     }
     const took = new Set(taken);
     this.#setJson("queue", queue.filter((q) => !took.has(q.i)));
@@ -472,7 +534,7 @@ export class App extends DurableObject {
       sql.exec("UPDATE task SET state = 'lost' WHERE id = ?", id);
       this.#publishTask(call, this.#task(id));
     }
-    return { took: true, thread, persona, about: this.#get("about") ?? "", texts, taken, tail, settled };
+    return { took: true, thread, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments };
   }
 
   // The lock kept by its run; answers whether Stop was asked.
@@ -599,10 +661,10 @@ export class App extends DurableObject {
       );
       const early = this.#json("early", {});
       if (turn in early) {
-        const said = early[turn].text;
+        const { text: said, attachments = [] } = early[turn];
         delete early[turn];
         this.#setJson("early", early);
-        return { id, turn, opened: true, ...this.#endTask(call, m, this.#task(id), said) };
+        return { id, turn, opened: true, ...this.#endTask(call, m, this.#task(id), said, attachments) };
       }
       this.#publishTask(call, this.#task(id));
       return { id, turn, opened: true };
@@ -623,32 +685,36 @@ export class App extends DurableObject {
   }
 
   // A hand-off's end: its one reply is its report, queued as a `user`
-  // message `[<task>] …` in its thread, which starts a turn. A reply to a
-  // task that ended already (a later part) changes nothing.
-  #endTask(call, m, t, said) {
+  // message `[<task>] …` in its thread, with the reply's files, which
+  // starts a turn. A reply to a task that ended already (a later part)
+  // changes nothing.
+  #endTask(call, m, t, said, files = []) {
     if (t.report !== null) return { task: t.id, ended: false };
-    const report = M.capText(said.trim() || "(ended: idle: no words)");
+    const report = M.capText(said.trim() || (files.length ? "(files)" : "(ended: idle: no words)"));
     const state = endedBy(report);
     this.ctx.storage.sql.exec("UPDATE task SET state = ?, report = ?, ended = ? WHERE id = ?", state, report, Date.now(), t.id);
     this.#publishTask(call, { ...t, state, report });
-    const q = this.#enqueue(call, m, { text: `[${t.id}] ${report}`, thread: t.thread, task: t.id });
+    const q = this.#enqueue(call, m, { text: `[${t.id}] ${report}`, thread: t.thread, task: t.id, attachments: files });
     return { task: t.id, ended: true, running: q.running, i: q.i };
   }
 
-  // A reply of goose's on `chat`: the report of the task its turn names.
-  // One whose task is not recorded yet is kept for `task_open`.
-  hands_reply({ turn, text }, call) {
+  // A reply of goose's on `chat`, with its files (their text, when its job
+  // read it): the report of the task its turn names. One whose task is not
+  // recorded yet is kept for `task_open`.
+  hands_reply({ turn, text, attachments = [] }, call) {
     need(typeof turn === "string" && typeof text === "string", "hands_reply: {turn, text}");
+    const a = F.attachmentsOf(attachments, { texts: true });
+    need(!a.error, `hands_reply: ${a.error}`);
     const id = this.ctx.storage.sql.exec("SELECT id FROM task WHERE turn = ?", turn).toArray()[0]?.id ?? null;
     if (id === null) {
       const early = this.#json("early", {});
-      if (!(turn in early)) early[turn] = { text: M.capText(text), at: Date.now() };
+      if (!(turn in early)) early[turn] = { text: M.capText(text), attachments: a.files, at: Date.now() };
       const keys = Object.keys(early);
       if (keys.length > EARLY_REPLIES_MAX) for (const old of keys.slice(0, keys.length - EARLY_REPLIES_MAX)) delete early[old];
       this.#setJson("early", early);
       return { task: null, ended: false };
     }
-    return this.#changing((m) => this.#endTask(call, m, this.#task(id), text));
+    return this.#changing((m) => this.#endTask(call, m, this.#task(id), text, a.files));
   }
 
   // Clef's answers: for each thread, its topics among `scope` replaced by
@@ -682,7 +748,7 @@ export class App extends DurableObject {
   }
 
   zoom({ id, n }) {
-    return { text: M.zoom(this.#memory(), id, n, (i) => this.#message(i)) };
+    return { text: M.zoom(this.#memory(), id, n, (i) => this.#full(i)) };
   }
 
   date({ id }) {
@@ -777,11 +843,11 @@ export class App extends DurableObject {
     const n = clamp(limit, 1, 200);
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT i, kind, text, at, persona, task FROM log WHERE thread = ?${before !== null ? " AND i < ?" : ""} ORDER BY i DESC LIMIT ?`,
+        `SELECT i, kind, text, at, persona, task, attachments FROM log WHERE thread = ?${before !== null ? " AND i < ?" : ""} ORDER BY i DESC LIMIT ?`,
         ...(before !== null ? [id, before, n + 1] : [id, n + 1]),
       )
       .toArray();
-    const { messages, cut } = this.#page(rows.slice(0, n));
+    const { messages, cut } = this.#page(rows.slice(0, n).map((r) => this.#shown(r)));
     return { thread: { id: t.id, title: t.title, persona: t.persona, started: t.started, last: t.last }, messages, more: rows.length > n || cut };
   }
 
@@ -789,8 +855,30 @@ export class App extends DurableObject {
     need(isInt(i), "context: i is a message's id");
     const lo = Math.max(0, i - clamp(before, 0, 50));
     const hi = i + clamp(after, 0, 50);
-    const rows = this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task FROM log WHERE i BETWEEN ? AND ? ORDER BY i DESC", lo, hi).toArray();
-    return { messages: this.#page(rows).messages };
+    const rows = this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i BETWEEN ? AND ? ORDER BY i DESC", lo, hi).toArray();
+    return { messages: this.#page(rows.map((r) => this.#shown(r))).messages };
+  }
+
+  // The raw log, a page at a time (the page's "Export memory"): every
+  // message after `after` (all from the first by default), oldest first,
+  // at most `limit` and RESULT_SOFT_BYTES of them, each with its files and
+  // the text the mind read of them. `next` is the `after` of the next page;
+  // null, the log's end.
+  export({ after = null, limit = EXPORT_LIMIT } = {}) {
+    need(after === null || isInt(after), "export: after is a message's id");
+    const n = clamp(limit, 1, EXPORT_MAX);
+    const rows = this.ctx.storage.sql
+      .exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i > ? ORDER BY i LIMIT ?", after ?? -1, n + 1)
+      .toArray();
+    const entries = [];
+    let bytes = 0;
+    for (const r of rows.slice(0, n)) {
+      const e = { ...r, attachments: F.filesOf(r.attachments) };
+      bytes += sizeOf(e);
+      if (entries.length && bytes > RESULT_SOFT_BYTES) break;
+      entries.push(e);
+    }
+    return { entries, next: entries.length < rows.length ? entries[entries.length - 1].i : null };
   }
 
   memory() {
@@ -812,7 +900,7 @@ export class App extends DurableObject {
   node({ id, n }) {
     const m = this.#memory();
     need(M.isLine(m, id, n), `no line ${id}+${n}`);
-    if (n === 1) return { message: this.#message(id) };
+    if (n === 1) return { message: this.#shown(this.#message(id)) };
     const l = Math.round(Math.log2(n)) - 1;
     const h = n / 2;
     return {
@@ -952,13 +1040,44 @@ export class App extends DurableObject {
     if (record) {
       if (job.via !== "channel") return { why: "only the say channel's trigger hears a record" };
       const b = record.body ?? {};
-      if (typeof b.text !== "string" || !b.text.trim() || typeof b.thread !== "string" || !THREAD.test(b.thread)) {
-        return { why: "a say record is {text, thread, persona?}, thread t_ and 16 hex" };
+      const a = F.attachmentsOf(b.attachments);
+      if (a.error) return { why: `a say record: ${a.error}` };
+      const text = typeof b.text === "string" ? b.text : "";
+      if ((!text.trim() && !a.files.length) || typeof b.thread !== "string" || !THREAD.test(b.thread)) {
+        return { why: "a say record is {text, thread, persona?, attachments?}, words or files, thread t_ and 16 hex" };
       }
-      const h = await s.call("hear", { text: b.text, thread: b.thread, persona: typeof b.persona === "string" ? b.persona : null });
+      const attachments = await this.#readFiles(job, s, a.files);
+      const h = await s.call("hear", { text, thread: b.thread, persona: typeof b.persona === "string" ? b.persona : null, attachments });
       if (h.running) return { i: h.i, queued: true };
     }
     return this.#turns(job, s);
+  }
+
+  // A message's files, those the memory reads whole (small text:
+  // applib/files.mjs) with their text, read by `job.blob` (a step each, up
+  // to READ_TOTAL_MAX in all). A blob that is gone, or no text, stays named
+  // alone; so does every file on a platform without `job.blob`.
+  async #readFiles(job, s, files) {
+    if (typeof job.blob !== "function") return files;
+    const out = [];
+    let read = 0;
+    for (const f of files) {
+      if (F.readable(f) && read + f.size <= F.READ_TOTAL_MAX) {
+        let r = null;
+        try {
+          r = await s.blob(f.sha256);
+        } catch {
+          r = null;
+        }
+        if (typeof r?.text === "string") {
+          read += f.size;
+          out.push({ ...f, text: r.cut ? `${r.text}\n[… the file goes on past its first ${F.bytesText(F.READ_MAX)} …]` : r.text });
+          continue;
+        }
+      }
+      out.push(f);
+    }
+    return out;
   }
 
   // Turns while messages are queued (spec 7, docs/optchat.md "Turns"), each
@@ -1006,7 +1125,19 @@ export class App extends DurableObject {
       const v = await s.call("view", { upto: b.tail });
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
       const hands = b.persona.hands === true && agent !== null;
-      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, ...(hands ? [TOOLS.computer] : [])];
+      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, ...(hands ? [TOOLS.computer] : [])];
+      // the web's steps (applib/web.mjs), and the providers it passes over
+      // this turn (a secret found missing, DuckDuckGo found refusing)
+      const web = {
+        fetch: (url, init) => {
+          if (s.bytes > FETCH_ROOM_BYTES) throw new Error("this turn has read all the web its run can keep; answer with what you have");
+          return s.fetch(url, init);
+        },
+        text: (opts) => s.text(opts),
+        room: (n) => s.left() - WEB_KEEP_STEPS >= n,
+        passed: new Set(),
+      };
+      const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [] };
       const messages = [
         { role: "system", content: system(b.persona, b.about) },
         { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: b.texts.join("\n\n") }] },
@@ -1029,6 +1160,8 @@ export class App extends DurableObject {
         const entries = [];
         if (content.trim()) entries.push({ kind: "talk", text: content });
         const results = [];
+        // what this answer's results add to the conversation so far
+        let adding = 0;
         for (const [k, tc] of asked.entries()) {
           const name = String(tc?.function?.name ?? "");
           const raw = tc?.function?.arguments;
@@ -1045,8 +1178,13 @@ export class App extends DurableObject {
           else if (s.left() < 6) {
             out = { text: "Error: this turn is out of steps; answer with what you have." };
             last = true;
-          } else out = await this.#tool(job, s, name, args, { thread, hands, agent });
+          } else if (convo + adding > CONVO_MAX_BYTES) {
+            // a page or a message whole is up to CAP: a few fill a call's arguments
+            out = { text: "Error: this turn has read all it can hold; answer with what you have." };
+            last = true;
+          } else out = await this.#tool(job, s, name, args, ctx);
           const echo = M.capText(out.text);
+          adding += M.utf8(echo);
           entries.push({ kind: "tool", text: `${name} ${args === null ? String(raw) : JSON.stringify(args)}`, task: out.task ?? null });
           entries.push({ kind: "echo", text: echo, task: out.task ?? null });
           results.push({ role: "tool", tool_call_id: String(tc?.id ?? `call_${calls}_${k}`), content: echo });
@@ -1169,8 +1307,9 @@ export class App extends DurableObject {
     return { built, rounds: PUMP_ROUNDS_MAX, continued: true };
   }
 
-  // One tool call of a turn: zoom, date and search are queries; computer
-  // hands the task to goose on `chat` (docs/optchat.md, "Hand-offs").
+  // One tool call of a turn: zoom, date and search are queries; the web's
+  // are fetches (applib/web.mjs); computer hands the task to goose on
+  // `chat` (docs/optchat.md, "Hand-offs").
   async #tool(job, s, name, args, ctx) {
     switch (name) {
       case "zoom": {
@@ -1191,6 +1330,19 @@ export class App extends DurableObject {
         const { results } = await s.call("search", { q, limit });
         return { text: results.length ? results.map((r) => `${r.i}+1|${r.kind}: ${r.snippet}`).join("\n") : "No match." };
       }
+      case "web_search": {
+        const q = String(args.q ?? "").trim().slice(0, 400);
+        if (!q) return { text: "Error: web_search needs what to search for (q)." };
+        const n = clamp(Number(args.limit ?? W.SEARCH_DEFAULT), 1, W.SEARCH_MAX);
+        return { text: W.searchText(q, await W.search(ctx.web, q, n)) };
+      }
+      case "web_fetch":
+        return { text: W.pageText(await W.read(ctx.web, args.url)) };
+      case "research": {
+        const question = String(args.question ?? "").trim().slice(0, 2000);
+        if (!question) return { text: "Error: research needs the question." };
+        return { text: await W.research(ctx.web, question) };
+      }
       case "computer": {
         if (!ctx.hands) return { text: "Error: no computer is at hand for this persona; answer yourself." };
         const task = String(args.task ?? "").trim();
@@ -1200,7 +1352,10 @@ export class App extends DurableObject {
         if (typeof agentFragment !== "string" || !agentFragment) return { text: "Error: the computer's agent has no fragment to hand work to." };
         // the run and this step: the same id on every re-run
         const id = `w${job.run}-${s.n}`;
-        const posted = await s.publish("chat", { text: `${M.cutBytes(task, TASK_TEXT_MAX)}\n\n(task ${id}, thread ${ctx.thread})`, to: [ctx.agent] });
+        // the turn's files go with it: goose's bridge downloads them (docs/chat-records.md)
+        const handed = { text: `${M.cutBytes(task, TASK_TEXT_MAX)}\n\n(task ${id}, thread ${ctx.thread})`, to: [ctx.agent] };
+        if (ctx.attachments.length) handed.attachments = ctx.attachments.slice(0, F.FILES_MAX);
+        const posted = await s.publish("chat", handed);
         const turn = await turnOf(agentFragment, job.fragment, "chat", posted.seq);
         await s.call("task_open", { id, thread: ctx.thread, text: task, seq: posted.seq, turn });
         return { text: `[${id}] started`, task: id };
@@ -1304,7 +1459,9 @@ export class App extends DurableObject {
     const b = input?.record?.body;
     if (!b || typeof b !== "object" || typeof b.turn !== "string" || (b.kind !== undefined && b.kind !== "message")) return { why: "not a reply" };
     const s = new Steps(job);
-    const h = await s.call("hands_reply", { turn: b.turn, text: typeof b.text === "string" ? b.text : "" });
+    // its files (a reply naming them badly reports without them)
+    const attachments = await this.#readFiles(job, s, F.attachmentsOf(b.attachments).files ?? []);
+    const h = await s.call("hands_reply", { turn: b.turn, text: typeof b.text === "string" ? b.text : "", attachments });
     if (!h.ended || h.running) return h;
     return this.#turns(job, s);
   }
