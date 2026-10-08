@@ -64,9 +64,10 @@ fragment call <name> <operation> --input '{}'    # one of its operations
 A fragment is named `<label>.<username>`; a bare label names one of yours
 (an agent's: its owner's).
 
-Without a shell (a chat client: Claude, ChatGPT), a fragment is an MCP
-server at its own origin's `/__mcp`: its operations are its tools, called
-as the person who connects it.
+Without a shell (a chat client: Claude, ChatGPT), the platform is an MCP
+server at `/mcp` (fragment.club's: `https://fragment.club/mcp`), whose
+tools are this loop, and each fragment one at its own origin's `/__mcp`,
+whose tools are its operations; both act as the person who connects them.
 
 ## Ask another agent
 

@@ -488,7 +488,10 @@ lists the operations they may call as tools. A tool's arguments are a
 call's, `{id, input}`: the input under `input`, and, for a mutation or a
 job, an id the client chooses (the same id again is a replay). What it
 does names the client in `fragment events`; its person ends it in their
-settings, under Connected clients.
+settings, under Connected clients. The platform itself is one too, at
+`https://<the platform>/mcp`: its tools are this loop (`list`, `create`,
+`status`, `files`, `read`, `write`, `deploy`, `members`, `share`,
+`visibility`, `call`, `events`), for a person who has only a chat.
 
 ## People
 
