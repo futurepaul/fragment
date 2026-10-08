@@ -82,6 +82,8 @@ pub const UNSAVED_MAX_MS: u64 = 45_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// Where the platform's mail says it comes from on the e2e's node.
+pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
@@ -216,6 +218,8 @@ pub struct Suite {
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
+    /// The platform's mail: Email Sending, faked; what was sent is read here.
+    pub mail: Fake<fragment_fakes::mail::Mailer>,
     org_key: String,
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
@@ -470,6 +474,8 @@ impl Suite {
             // the lower rung: the model route's calls go to the Workers AI fake
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
+            mail_url: Some(self.mail.node().url.clone()),
+            mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
@@ -871,6 +877,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         fake: Fake::of(hidden, "code.storage", fake),
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
+        mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
         org_key,
         host_secret: devstack::random_hex(32),
         test_secret,

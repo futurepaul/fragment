@@ -61,6 +61,10 @@
   // or a mailto address, linked from the shell's notice. Without it, the
   // shell shows them what to tell whoever runs the deployment.
   // "support_url": "mailto:help@example.dev",
+  // The address the platform's mail (invites, seats) comes from, on a
+  // domain onboarded to Cloudflare Email Sending (`wrangler email sending
+  // enable <domain>`). Without it, the deployment sends no mail.
+  // "mail_from": "fragment <mail@example.com>",
   // The operators (npubs or identities): they grant credit, set plans,
   // release usernames, and wipe a person (docs/api.md, Operators). Wipe
   // with an operator key no person holds (`fragment operator key <file>`

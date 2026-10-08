@@ -282,6 +282,11 @@ pub struct Fleet {
     /// the AI binding, through `ai_gateway`).
     pub ai_url: Option<String>,
     pub ai_gateway: Option<String>,
+    /// Where the platform's mail goes (`FRAGMENT_MAIL_URL`: the mail fake in
+    /// dev and the e2e; `None`: the Email Sending binding), and the address
+    /// it comes from (`FRAGMENT_MAIL_FROM`).
+    pub mail_url: Option<String>,
+    pub mail_from: Option<String>,
     /// A new person's plan (`FRAGMENT_DEFAULT_PLAN`; `None`: the cell's, guest).
     pub default_plan: Option<String>,
     /// The wait before a delivery is retried, every time (`None`: the
@@ -369,6 +374,12 @@ impl Fleet {
         let grace = self.blob_grace_s.map(|g| g.to_string());
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
+        }
+        if let Some(u) = &self.mail_url {
+            vars.push(("FRAGMENT_MAIL_URL", u.as_str()));
+        }
+        if let Some(f) = &self.mail_from {
+            vars.push(("FRAGMENT_MAIL_FROM", f.as_str()));
         }
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));

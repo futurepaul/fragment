@@ -84,6 +84,11 @@ struct Deployment {
     /// (`FRAGMENT_SUPPORT_URL`): an `https:` page or a `mailto:` address
     /// (`fragment_core::computer::support_url_ok`), linked from the shell.
     support_url: Option<String>,
+    /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
+    /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
+    /// Sending (`wrangler email sending enable <domain>`). Without it, the
+    /// deployment sends no mail.
+    mail_from: Option<String>,
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
@@ -611,6 +616,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     if let Some(u) = &d.support_url {
         v.insert("FRAGMENT_SUPPORT_URL".into(), json!(u));
     }
+    if let Some(f) = &d.mail_from {
+        v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
+    }
     if let Some(m) = &d.vision_model {
         v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
     }
@@ -736,6 +744,7 @@ mod tests {
             vision_model: None,
             default_plan: None,
             support_url: None,
+            mail_from: None,
             computers: None,
             providers: vec![],
             price_book_version: None,
@@ -1026,6 +1035,26 @@ mod tests {
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
+    }
+
+    /// The deployment's mail: its `mail_from` is the cell's
+    /// `FRAGMENT_MAIL_FROM`, beside the Email Sending binding the cell's
+    /// config declares; without one, the cell sends no mail.
+    #[test]
+    fn the_mail_comes_from_the_config_s_address() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let rendered = |v: &Value, test: &str| {
+            let d = load(&config_file(test, v)).unwrap();
+            worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()
+        };
+        v.as_object_mut().unwrap().remove("mail_from");
+        let none = rendered(&v, "mail-none");
+        assert!(none["vars"].get("FRAGMENT_MAIL_FROM").is_none());
+        v["mail_from"] = json!(" fragment <mail@finite.place> ");
+        let cell = rendered(&v, "mail-from");
+        assert_eq!(cell["vars"]["FRAGMENT_MAIL_FROM"], "fragment <mail@finite.place>");
+        assert_eq!(cell["send_email"], json!([{ "name": "EMAIL" }]));
     }
 
     /// The vision model is one the price book prices, refused before a
