@@ -15,6 +15,7 @@ mod delegation;
 mod drafts;
 mod deliver;
 mod frames;
+mod hook;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -106,6 +107,7 @@ const LANES: &[Lane] = &[
     brain::brain,
     watcher::watcher,
     brief::brief,
+    hook::hook,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -137,7 +139,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
     &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
-    &["when", "wall", "board", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher", "brief"],
+    &["when", "wall", "board", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher", "brief", "hook"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
