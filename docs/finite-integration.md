@@ -17,7 +17,7 @@ matters: an agreed direction is not a finished interface.
 | Issue | What | Status on 2026-09-24 |
 |---|---|---|
 | FIN-10 | Core platform contracts: accounts, orgs, billing (Stripe in Core), agent lifecycle, Google credentials | accepted by Alex 2026-09-07; wider review pending |
-| FIN-11 | BANKS: identity and public-key registry, shared WorkOS login, designated owners | direction agreed with Alex; interfaces, migration, review open |
+| FIN-11 | BANKS: identity and public-key registry, shared WorkOS login, designated owners | canceled 2026-10-05 with V3; fragment's own version is docs/cloudflare-v1.md, decisions 45 to 50 (2026-10-08) |
 | FIN-13 | Finite Private authorization and usage accounting | Austin's; not designed yet |
 | FIN-14 | Add-on access and entitlements (Sites, Brain, connections) | not designed yet |
 | FIN-15 | Chat: native Hermes web chat, then optional SimpleX | accepted by Alex; review open |
@@ -26,6 +26,11 @@ matters: an agreed direction is not a finished interface.
 | FIN-60 | Core-managed runtime secret delivery (SOPS + encrypted app storage) | in review |
 
 ## The rules fragment follows now (FIN-11's model)
+
+Decisions 45 to 50 (docs/cloudflare-v1.md, 2026-10-08) change two of
+these as they are built. Rule 2: an identity is an npub, and a sign-in
+names it. Rule 3: the registry keeps a person's own key, and signs with
+it only for named purposes.
 
 1. **Identities, not keys.** A person or an agent is a stable identity
    with an opaque ID. Grants (fragment membership, ownership, invites)
