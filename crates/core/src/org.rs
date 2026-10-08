@@ -147,6 +147,50 @@ fn hex16(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+// ------------------------------------------------------------- trials
+
+/// A trial code's alphabet: base32 without O, I, 0 and 1, so a code read
+/// aloud or typed from paper is never ambiguous (finite-mono's).
+pub const TRIAL_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+/// A trial's days, and a code's places (decision 56).
+pub const TRIAL_DAYS_MAX: u32 = 30;
+pub const TRIAL_CAPACITY_MAX: u64 = 10_000;
+/// A code's name, as operators read it.
+pub const TRIAL_NAME_MAX_BYTES: usize = 120;
+/// Codes a fleet keeps (each with its uses).
+pub const TRIAL_CODES_MAX: u64 = 1_000;
+
+/// A code as typed: its letters and digits, upper case, spaces and dashes
+/// dropped; 8 to 64 of them, all of the alphabet's.
+pub fn trial_code(raw: &str) -> Option<String> {
+    let code: String = raw.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_uppercase()).collect();
+    (8..=64).contains(&code.len()).then_some(())?;
+    code.bytes().all(|b| TRIAL_ALPHABET.contains(&b)).then_some(code)
+}
+
+/// A new code from 10 random bytes: 16 of the alphabet's characters (80
+/// bits), as `XXXX-XXXX-XXXX-XXXX`.
+pub fn new_trial_code(random: [u8; 10]) -> String {
+    let mut bits: u128 = 0;
+    for b in random {
+        bits = (bits << 8) | u128::from(b);
+    }
+    let chars: Vec<char> = (0..16).map(|i| TRIAL_ALPHABET[((bits >> (5 * (15 - i))) & 31) as usize] as char).collect();
+    chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
+/// A code as it is shown: in groups of four.
+pub fn shown_trial_code(code: &str) -> String {
+    code.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join("-")
+}
+
+/// Whether a code has a place: its uses that bought a subscription, and
+/// its Checkouts still open, are fewer than its capacity. A Checkout never
+/// completed frees its place when it expires, with nothing to clean up.
+pub fn trial_has_place(capacity: u64, subscribed: u64, open: u64) -> bool {
+    subscribed.saturating_add(open) < capacity
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +267,28 @@ mod tests {
         assert!(!valid_org_id("org-0123"));
         assert!(valid_member_id("mem-0123456789abcdef"));
         assert!(!valid_member_id("mem-0123456789abcdeg"));
+    }
+
+    #[test]
+    fn trial_codes_read_as_typed_and_are_made_unambiguous() {
+        assert_eq!(trial_code("abcd-efgh jkmn-pqrs").as_deref(), Some("ABCDEFGHJKMNPQRS"));
+        assert_eq!(trial_code("ABCD-EFG"), None, "fewer than 8");
+        assert_eq!(trial_code("ABCD-EFGO"), None, "O is not the alphabet's");
+        assert_eq!(trial_code("ABCD-EFG1"), None, "nor 1");
+        assert_eq!(trial_code(&"A".repeat(65)), None);
+        let made = new_trial_code([0xff; 10]);
+        assert_eq!(made, "9999-9999-9999-9999");
+        let made = new_trial_code([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(made.len(), 19);
+        assert_eq!(trial_code(&made).map(|c| shown_trial_code(&c)), Some(made.clone()), "a made code reads back as itself");
+        assert_ne!(new_trial_code([0; 10]), new_trial_code([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn a_trial_place_is_taken_by_a_subscription_or_an_open_checkout() {
+        assert!(trial_has_place(2, 0, 1));
+        assert!(!trial_has_place(2, 1, 1), "the last place is held by an open Checkout");
+        assert!(!trial_has_place(2, 2, 0));
+        assert!(!trial_has_place(0, 0, 0));
     }
 }

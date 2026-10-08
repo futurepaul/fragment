@@ -1276,12 +1276,16 @@ later is told when it is made.
 | `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
 | `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
 | `GET /api/admin/orgs/{id}` | the same | → `OrgView` |
+| `POST /api/admin/trials` | the same | `NewTrialCode {name, kind, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
+| `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
+| `GET /api/admin/trials/{id}` | the same | → `TrialCode` with its `uses: [{person, email, at, status}]` |
+| `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
 
 `/api/admin/*` takes an operator's signature, or the shell's session of
 a person the deployment's `operators` names (decision 59). A wipe takes
 the person's rows, and an org it leaves empty.
 
-### Billing (docs/billing.md, "Stripe")
+### Billing (docs/billing.md, "Stripe" and "Trials")
 
 On a deployment that sells seats (its config's `stripe`; else these are
 400, and seats are comped only), a person buys their own through Stripe
@@ -1312,7 +1316,7 @@ and orgs).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind}` → `{url, session}`: Stripe's Checkout, for 31 minutes |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout, for 31 minutes. With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days for its kind (a `kind` other than the code's is 400), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, or past its expiry), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (`/settings?checkout={id}`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
 | `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |

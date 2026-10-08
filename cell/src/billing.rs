@@ -25,10 +25,17 @@ use fragment_nip98::Payload;
 const CHECKOUT_TTL_S: i64 = 31 * 60;
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Buy {
-    kind: SeatKind,
+    /// The seat's kind (a trial code's own when one is named).
+    #[serde(default)]
+    kind: Option<SeatKind>,
+    #[serde(default)]
+    trial_code: Option<String>,
 }
+
+/// The Checkout's metadata key for the trial code it redeems.
+const META_TRIAL: &str = "fragment_trial";
 
 #[derive(Serialize)]
 struct Checkout {
@@ -64,11 +71,14 @@ async fn price(stripe: &Stripe, kind: SeatKind) -> CellResult<String> {
     Ok(p.id)
 }
 
-/// `POST /api/billing/checkout {kind}`: a Checkout for the asker's own
-/// seat, in their org (one made for them if they are in none).
-async fn checkout(env: &Env, cfg: &Config, by: By, kind: SeatKind) -> CellResult<Checkout> {
+/// `POST /api/billing/checkout {kind?, trialCode?}`: a Checkout for the
+/// asker's own seat, in their org (one made for them if they are in none);
+/// with a trial code, Stripe's trial of its days, a card taken first.
+async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Checkout> {
     let stripe_cfg = cfg.stripe()?;
-    let plan = ask_registry(env, &CheckoutBegin { by, kind }).await?;
+    let expires_at_s = js::now_ms() / 1000 + CHECKOUT_TTL_S;
+    let plan = ask_registry(env, &CheckoutBegin { by, kind: buy.kind, trial: buy.trial_code, until_ms: expires_at_s * 1000 }).await?;
+    let kind = plan.kind;
     let stripe = crate::stripe::client(env, cfg).await?;
     let deployment = cfg.stripe_deployment();
     let customer = match plan.customer {
@@ -96,16 +106,24 @@ async fn checkout(env: &Env, cfg: &Config, by: By, kind: SeatKind) -> CellResult
         .push("line_items[0][price]", price)
         .push("line_items[0][quantity]", "1")
         .push("payment_method_collection", "always")
-        .push("allow_promotion_codes", "true")
         .push("success_url", format!("{platform}/settings?checkout={{CHECKOUT_SESSION_ID}}"))
         .push("cancel_url", format!("{platform}/settings?checkout=canceled"))
-        .push("expires_at", (js::now_ms() / 1000 + CHECKOUT_TTL_S).to_string())
+        .push("expires_at", expires_at_s.to_string())
         .push(format!("metadata[{META_DEPLOYMENT}]"), deployment)
         .push(format!("metadata[{META_ORG}]"), plan.org.clone())
         .push(format!("metadata[{META_PERSON}]"), plan.person.clone())
         .push(format!("metadata[{META_KIND}]"), kind.as_str())
         .push(format!("subscription_data[metadata][{META_DEPLOYMENT}]"), deployment)
         .push(format!("subscription_data[metadata][{META_ORG}]"), plan.org.clone());
+    form = match &plan.trial {
+        // a trial: Stripe's days, its card taken now and charged at the end
+        // (none on file at the end cancels it); no discount on top
+        Some(t) => form
+            .push("subscription_data[trial_period_days]", t.days.to_string())
+            .push("subscription_data[trial_settings][end_behavior][missing_payment_method]", "cancel")
+            .push(format!("metadata[{META_TRIAL}]"), t.id.clone()),
+        None => form.push("allow_promotion_codes", "true"),
+    };
     if stripe_cfg.tax {
         form = form.push("automatic_tax[enabled]", "true").push("customer_update[address]", "auto");
     }
@@ -137,7 +155,8 @@ async fn checked_out(env: &Env, cfg: &Config, stripe: &Stripe, session: &Checkou
     if sub.metadata.get(META_ORG) != Some(&org) {
         return Err(CellError::host(format!("{sub_id} names another org than its Checkout {}", session.id)));
     }
-    Ok(ask_registry(env, &ApplyCheckout { session: session.id.clone(), org, person, kind, subscription: copy }).await?.applied)
+    let trial = session.metadata.get(META_TRIAL).cloned();
+    Ok(ask_registry(env, &ApplyCheckout { session: session.id.clone(), org, person, kind, subscription: copy, trial }).await?.applied)
 }
 
 /// `POST /api/billing/sessions/<id>`: the Checkout's return. The buyer
@@ -185,7 +204,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Post, ["checkout"]) => {
             let buy: Buy = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let by = by(env, &req, url, &bytes)?;
-            json_answer(&checkout(env, cfg, by, buy.kind).await?)
+            json_answer(&checkout(env, cfg, by, buy).await?)
         }
         (Method::Post, ["sessions", id]) => json_answer(&returned(env, cfg, &req, url, &bytes, id).await?),
         (Method::Post, ["portal"]) => {

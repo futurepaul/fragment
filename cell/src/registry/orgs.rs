@@ -221,6 +221,15 @@ impl RegistryCell {
         self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.id = ?"), vec![id.into()])?.ok_or_else(|| not_found(format!("no seat {id}")))
     }
 
+    /// When an org's trial ends (seconds), as its subscription says.
+    fn trial_end_of(&self, org: &str) -> CellResult<Option<i64>> {
+        #[derive(Deserialize)]
+        struct Row {
+            trial_end: Option<i64>,
+        }
+        Ok(self.row::<Row>("SELECT trial_end FROM orgs WHERE id = ?", vec![org.into()])?.and_then(|r| r.trial_end))
+    }
+
     pub(super) fn org_row(&self, id: &str) -> CellResult<Option<OrgRow>> {
         self.row::<OrgRow>("SELECT id, name, created_at, status FROM orgs WHERE id = ?", vec![id.into()])
     }
@@ -445,7 +454,11 @@ impl RegistryCell {
                 let seat = match m.seat()? {
                     Some(kind) => {
                         let held = Held { kind, comped: m.comped != 0, status: o.status()?, sleeps: m.sleeps != 0 };
-                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0 })
+                        let trial_ends = match (held.comped, held.status) {
+                            (false, Some(Status::Trialing)) => self.trial_end_of(&o.id)?,
+                            _ => None,
+                        };
+                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0, trial_ends })
                     }
                     None => None,
                 };
