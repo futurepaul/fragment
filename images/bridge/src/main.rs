@@ -19,7 +19,7 @@ use fragment_bridge::engine::Settings;
 use fragment_bridge::runtime::goose::{Goose, GooseConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
-use fragment_bridge::{ev, limits, screen};
+use fragment_bridge::{ev, limits, screen, screens};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -76,9 +76,20 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     if env("BRIDGE_SCREEN_RFB").is_some() {
         fail("BRIDGE_SCREEN_RFB is gone: name each agent's display in BRIDGE_SCREENS_FILE");
     }
-    let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
+    let screens = match (env("BRIDGE_SCREENS_FILE"), env("BRIDGE_SCREENS_DIR")) {
+        (None, None) => None,
+        (Some(file), None) => Some(screens::Source::File(PathBuf::from(file))),
+        (None, Some(dir)) => {
+            let dir = PathBuf::from(dir);
+            if !screens::dir_ok(&dir) {
+                fail(&format!("BRIDGE_SCREENS_DIR is an absolute path of at most {} bytes (its agents' sockets are under it)", screens::DIR_PATH_MAX_BYTES));
+            }
+            Some(screens::Source::Dir(dir))
+        }
+        (Some(_), Some(_)) => fail("BRIDGE_SCREENS_FILE or BRIDGE_SCREENS_DIR names the screens, not both"),
+    };
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
+    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens, start })
 }
 
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within

@@ -62,7 +62,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::lease::{self, Holder, Lease, LeaseError, LeaseFile};
 use crate::net::{self, Body};
-use crate::screens::{Display, Screens};
+use crate::screens::{self, Display, Screens, Source};
 
 /// The RFB server a screen shows.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,9 +89,10 @@ pub struct ScreenConfig {
     pub listen: SocketAddr,
     /// The page and its files.
     pub dir: PathBuf,
-    /// The image's screens file (screens.rs): each agent's display and its
-    /// runtime's files. None: no agent has a display (the stub's).
-    pub screens_file: Option<PathBuf>,
+    /// Where the image names each agent's display and its runtime's files
+    /// (screens.rs): a file, or a directory by convention. None: no agent
+    /// has a display (the stub's).
+    pub screens: Option<Source>,
     /// What starts an agent's display, run with the agent's fragment as its
     /// last argument by a viewer that finds it down.
     pub start: Option<Vec<String>>,
@@ -335,10 +336,20 @@ impl Drop for Open {
     }
 }
 
+/// Where the screens are named, as the screen reads them.
+enum Naming {
+    /// No agent has a display.
+    None,
+    /// The image's screens file, read again when it changes.
+    File(Mutex<Screens>),
+    /// Every agent has a display, in a directory of its own here.
+    Dir(PathBuf),
+}
+
 struct Shared {
     cfg: ScreenConfig,
     agents: Agents,
-    screens_file: Option<Mutex<Screens>>,
+    naming: Naming,
     by_agent: Mutex<HashMap<String, Arc<Screen>>>,
 }
 
@@ -347,13 +358,14 @@ impl Shared {
     /// screens at all (every agent has one, with no display), `None` when it
     /// names screens and none for this agent.
     fn display_of(&self, agent: &str) -> Option<Option<Display>> {
-        match &self.screens_file {
-            None => Some(None),
-            Some(file) => {
+        match &self.naming {
+            Naming::None => Some(None),
+            Naming::File(file) => {
                 let mut file = file.lock().expect("the screens file");
                 file.refresh();
                 file.get(agent).cloned().map(Some)
             }
+            Naming::Dir(dir) => Some(Some(screens::in_dir(dir, agent))),
         }
     }
 
@@ -374,9 +386,13 @@ impl Shared {
 
 pub async fn serve(cfg: ScreenConfig, agents: Agents, stop: watch::Receiver<bool>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| format!("screen listen {}: {e}", cfg.listen))?;
-    crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "screensFile": cfg.screens_file.as_ref().map(|p| p.display().to_string()) });
-    let screens_file = cfg.screens_file.clone().map(|p| Mutex::new(Screens::new(p)));
-    let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()) });
+    crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "screens": format!("{:?}", cfg.screens) });
+    let naming = match cfg.screens.clone() {
+        None => Naming::None,
+        Some(Source::File(p)) => Naming::File(Mutex::new(Screens::new(p))),
+        Some(Source::Dir(d)) => Naming::Dir(d),
+    };
+    let shared = Arc::new(Shared { cfg, agents, naming, by_agent: Mutex::new(HashMap::new()) });
     tokio::spawn(tick(shared.clone(), stop.clone()));
     let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
         let shared = shared.clone();
@@ -400,18 +416,20 @@ async fn tick(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
             _ = every.tick() => {}
         }
         let Some(running) = shared.agents.borrow().clone() else { continue };
-        let named: Vec<String> = match &shared.screens_file {
-            Some(file) => {
+        // the agents the image names a screen for: by convention, all of them
+        let named: Option<Vec<String>> = match &shared.naming {
+            Naming::File(file) => {
                 let mut file = file.lock().expect("the screens file");
                 file.refresh();
-                file.agents().cloned().collect()
+                Some(file.agents().cloned().collect())
             }
-            None => vec![],
+            Naming::Dir(_) => Some(running.iter().map(|a| a.fragment.clone()).collect()),
+            Naming::None => None,
         };
-        for agent in &named {
+        for agent in named.iter().flatten() {
             let _ = shared.screen(agent);
         }
-        let here = |agent: &str| running.iter().any(|a| a.fragment == agent) && (shared.screens_file.is_none() || named.iter().any(|n| n == agent));
+        let here = |agent: &str| running.iter().any(|a| a.fragment == agent) && named.as_ref().is_none_or(|n| n.iter().any(|n| n == agent));
         let open: Vec<Arc<Screen>> = {
             let mut by = shared.by_agent.lock().expect("the screens");
             // a screen of an agent gone, with no socket left, is let go
