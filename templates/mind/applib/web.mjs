@@ -57,7 +57,7 @@ const httpUrl = (s, base) => {
 // ---- HTML, as text ----
 
 const NAMED = {
-  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", ensp: " ", emsp: " ", thinsp: " ", hairsp: " ",
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0", ensp: " ", emsp: " ", thinsp: " ", hairsp: " ",
   shy: "", zwj: "", zwnj: "", ndash: "–", mdash: "—", minus: "−", hellip: "…", lsquo: "‘", rsquo: "’", sbquo: "‚",
   ldquo: "“", rdquo: "”", bdquo: "„", laquo: "«", raquo: "»", lsaquo: "‹", rsaquo: "›", copy: "©", reg: "®",
   trade: "™", middot: "·", bull: "•", times: "×", divide: "÷", deg: "°", plusmn: "±", micro: "µ", para: "¶",
@@ -76,7 +76,7 @@ export function decode(s) {
   return String(s).replace(/&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/g, (m, e) => {
     if (e[0] === "#") {
       const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : "�";
+      return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : "\uFFFD";
     }
     return NAMED[e] ?? m;
   });
@@ -184,7 +184,7 @@ export function htmlText(html, base) {
   h = h.replace(/<\/(?:td|th)\s*>/gi, " | ").replace(/<\/?p\b[^>]*>/gi, "\n\n").replace(BLOCK, "\n");
   const text = decode(strip(h))
     .split("\n")
-    .map((l) => l.replace(/[ \t\f\v\r ]+/g, " ").trim())
+    .map((l) => l.replace(/[ \t\f\v\r\u00a0]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
@@ -203,7 +203,7 @@ export function page(url, type, body) {
   const mime = String(type ?? "").split(";")[0].trim().toLowerCase();
   const sniffed = mime === "" || mime === "application/octet-stream";
   if (HTML_TYPE.test(mime) || (sniffed && /^\s*(?:<!doctype html|<html\b)/i.test(body))) return { url, ...htmlText(body, url) };
-  if (TEXT_TYPE.test(mime) || (sniffed && !/[\u0000-\u0008�]/.test(body.slice(0, 4096)))) return { url, title: "", text: body };
+  if (TEXT_TYPE.test(mime) || (sniffed && !/[\u0000-\u0008\uFFFD]/.test(body.slice(0, 4096)))) return { url, title: "", text: body };
   return { url, error: `it is ${mime || "of no type"}, not a page or text: hand it to the computer to open` };
 }
 
