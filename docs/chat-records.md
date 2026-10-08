@@ -221,6 +221,23 @@ turn across a restart, and the agent's next turn is told the card was cut
 with it), or `stopped`.
 
 ```json
+{ "kind": "turn.timing", "turn": "…", "ready_ms": 2100, "session_ms": 1400,
+  "first_ms": 2300, "steps": [[2500, 400]], "last_ms": 2600, "total_ms": 8100 }
+```
+
+Part `timing`, at most once, just before `turn.end`: how long the turn's
+phases took, in milliseconds, by the runtime's own names (at most 16 KiB
+of them; past it, `dropped: true`). goose's (images/bridge, runtime
+`goose`): `view_ms` and `skills_ms` (fetched and installed at once),
+`goose_ms` (its process started, when it was not running), `session_ms`
+(`session/new`, its MCP servers started), `system_ms`, `ready_ms` (from
+the turn handed to it to its prompt sent), `first_ms` (the prompt to
+goose's first update), `steps` (each tool call's wait before it was asked,
+goose's model call the most of it, and its run), `last_ms` (the last step
+to the prompt's answer: its last model call), `prompt_ms` and `total_ms`.
+Readers that do not know it pass it over.
+
+```json
 { "kind": "turn.end", "turn": "…", "outcome": "idle" }
 ```
 

@@ -49,9 +49,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -773,25 +773,105 @@ async fn install_skills(ctx: &Ctx, ts: &TurnStart) {
     }
 }
 
-/// The turn's session, made: its goose, its id, its updates, and its prompt.
-async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>), String> {
-    let (view, ()) = tokio::join!(view_of(&ctx.api, ts), async {
-        if ctx.config.skills {
-            install_skills(ctx, ts).await;
+/// Milliseconds since `t`.
+fn ms(t: Instant) -> u64 {
+    u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The turn's session, made: its goose, its id, its updates, its prompt,
+/// and what each phase took (`turn.timing`'s first fields).
+async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>, Map<String, Value>), String> {
+    let mut timing = Map::new();
+    let ((view, view_ms), skills_ms) = tokio::join!(
+        async {
+            let t = Instant::now();
+            let v = view_of(&ctx.api, ts).await;
+            (v, ms(t))
+        },
+        async {
+            let t = Instant::now();
+            if ctx.config.skills {
+                install_skills(ctx, ts).await;
+            }
+            ms(t)
         }
-    });
+    );
+    timing.insert("view_ms".into(), json!(view_ms));
+    timing.insert("skills_ms".into(), json!(skills_ms));
+    let t = Instant::now();
     let conn = ctx.goose_for(&ts.agent).await.map_err(|e| format!("goose: {e}"))?;
+    timing.insert("goose_ms".into(), json!(ms(t)));
+    let t = Instant::now();
     let made = conn.call("session/new", new_session(&ctx.config, ts, view.is_some()), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
     let made = made.map_err(|e| format!("goose made no session: {e}"))?;
+    // its MCP servers started (goose starts a session's own as it makes it)
+    timing.insert("session_ms".into(), json!(ms(t)));
     let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
     let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(view.is_some()) });
+    let t = Instant::now();
     if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
         close(&conn, &session);
         return Err(format!("goose took no system prompt: {e}"));
     }
+    timing.insert("system_ms".into(), json!(ms(t)));
     let updates = conn.follow(&session);
-    crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len) });
-    Ok((conn, session, updates, prompt(view.as_deref(), ts)))
+    crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len), "timing": timing });
+    Ok((conn, session, updates, prompt(view.as_deref(), ts), timing))
+}
+
+/// Steps a turn's timing lists, at most (the rest are counted).
+pub const TIMED_STEPS_MAX: usize = 64;
+
+/// A turn's timing from its prompt on: when goose first said anything,
+/// and each tool call's wait before it was asked (goose's model call, the
+/// most of it) and its run, then the wait after the last (its last model
+/// call). Pure: the turn's loop feeds it each update with the time.
+#[derive(Debug, Default)]
+pub struct Clock {
+    /// Milliseconds from the prompt to its first update.
+    first: Option<u64>,
+    /// When the last tool call ended (or the prompt was sent), in ms from the prompt.
+    mark: u64,
+    /// Calls asked and not yet done: their id, when asked, and the wait before.
+    open: Vec<(String, u64, u64)>,
+    steps: Vec<[u64; 2]>,
+    more: u64,
+}
+
+impl Clock {
+    /// One `session/update`'s `update`, `at` ms after the prompt was sent.
+    pub fn update(&mut self, u: &Value, at: u64) {
+        self.first.get_or_insert(at);
+        let id = u["toolCallId"].as_str().unwrap_or("").to_string();
+        match u["sessionUpdate"].as_str() {
+            Some("tool_call") if self.open.len() < CALLS_OPEN_MAX => {
+                let wait = at.saturating_sub(self.mark);
+                self.open.push((id, at, wait));
+            }
+            Some("tool_call_update") if matches!(u["status"].as_str(), Some("completed" | "failed")) => {
+                let Some(k) = self.open.iter().position(|(i, _, _)| *i == id) else { return };
+                let (_, asked, wait) = self.open.remove(k);
+                if self.steps.len() < TIMED_STEPS_MAX {
+                    self.steps.push([wait, at.saturating_sub(asked)]);
+                } else {
+                    self.more += 1;
+                }
+                self.mark = self.mark.max(at);
+            }
+            _ => {}
+        }
+    }
+
+    /// The fields it adds, the prompt answered `at` ms after it was sent.
+    pub fn fields(&self, at: u64, timing: &mut Map<String, Value>) {
+        timing.insert("first_ms".into(), json!(self.first));
+        timing.insert("steps".into(), json!(self.steps));
+        if self.more > 0 {
+            timing.insert("steps_more".into(), json!(self.more));
+        }
+        timing.insert("last_ms".into(), json!(at.saturating_sub(self.mark)));
+        timing.insert("prompt_ms".into(), json!(at));
+    }
 }
 
 /// Closes a turn's session (and its MCP servers), never waiting on it.
@@ -806,6 +886,7 @@ fn close(conn: &Arc<Conn>, session: &str) {
 }
 
 async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, events: mpsc::Sender<Event>) {
+    let t0 = Instant::now();
     let id = ts.turn.clone();
     let emit = |out: Vec<Event>| {
         let events = events.clone();
@@ -824,7 +905,7 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             return;
         }
     };
-    let (conn, session, mut updates, blocks) = match prepared {
+    let (conn, session, mut updates, blocks, mut timing) = match prepared {
         Ok(p) => p,
         Err(e) => {
             crate::ev!("goose.turn_failed", { "turn": id, "error": e });
@@ -832,8 +913,11 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             return;
         }
     };
+    timing.insert("ready_ms".into(), json!(ms(t0)));
     let mut map = Mapper::new(&id);
+    let mut clock = Clock::default();
     let blocks: Vec<Value> = blocks.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
+    let sent = Instant::now();
     let prompt = conn.call("session/prompt", json!({ "sessionId": session, "prompt": blocks }), None);
     tokio::pin!(prompt);
     let (mut stopping, mut following, mut hearing) = (false, true, true);
@@ -842,7 +926,10 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
         tokio::select! {
             biased;
             u = updates.recv(), if following => match u {
-                Some(u) => emit(map.update(&u)).await,
+                Some(u) => {
+                    clock.update(&u, ms(sent));
+                    emit(map.update(&u)).await
+                }
                 None => following = false,
             },
             a = &mut prompt => break a,
@@ -861,11 +948,17 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             },
         }
     };
+    let answered = ms(sent);
     // what goose said before it answered, in order
     while let Ok(u) = updates.try_recv() {
+        clock.update(&u, answered);
         emit(map.update(&u)).await;
     }
     close(&conn, &session);
+    clock.fields(answered, &mut timing);
+    timing.insert("total_ms".into(), json!(ms(t0)));
+    crate::ev!("goose.timing", { "turn": id, "timing": timing });
+    emit(vec![Event::Timing { turn: id.clone(), timing }]).await;
     emit(map.end(answer.as_ref(), stopping)).await;
 }
 
@@ -1050,6 +1143,28 @@ mod tests {
 
     fn draft(text: &str) -> Event {
         Event::Draft { turn: "t".into(), text: text.into() }
+    }
+
+    /// Goal: a turn's timing says when goose first spoke, each tool call's
+    /// wait before it (goose's model call) and its run, and the wait after
+    /// the last. Method: two calls in a row, then two at once, then words.
+    #[test]
+    fn a_turns_clock() {
+        let mut c = Clock::default();
+        c.update(&chunk("Let me", "m1"), 1200);
+        c.update(&call("c1", "shell", json!({})), 1500);
+        c.update(&done("c1", "completed", "ok"), 1700);
+        c.update(&call("c2", "shell", json!({})), 4700);
+        c.update(&call("c3", "shell", json!({})), 4710);
+        c.update(&done("c3", "failed", "no"), 4800);
+        c.update(&done("c2", "completed", "ok"), 5000);
+        c.update(&chunk("Done.", "m2"), 7000);
+        let mut t = Map::new();
+        c.fields(7400, &mut t);
+        assert_eq!(t["first_ms"], 1200);
+        assert_eq!(t["steps"], json!([[1500, 200], [3010, 90], [3000, 300]]));
+        assert_eq!(t["last_ms"], 2400, "from the last call's end to the answer");
+        assert_eq!(t["prompt_ms"], 7400);
     }
 
     /// Goal: words stream as drafts, the words before a tool call are its

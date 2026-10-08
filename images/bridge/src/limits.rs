@@ -52,6 +52,10 @@ pub const DRAFT_INTERVAL_MS: u64 = 250;
 /// Steps one turn posts, at most; the rest are counted, not posted.
 pub const STEPS_PER_TURN_MAX: u32 = 200;
 
+/// A turn's timing record's fields, at most this many bytes of JSON (well
+/// under a record's 64 KiB: a few dozen numbers and a list a step).
+pub const TIMING_MAX_BYTES: usize = 16 * 1024;
+
 /// Replies one turn posts, at most (a runtime that sends more is looping).
 pub const REPLIES_PER_TURN_MAX: u32 = 64;
 

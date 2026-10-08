@@ -163,6 +163,10 @@ pub enum Event {
     /// next message in its chat, which the bridge hands it (`Command::Tell`)
     /// instead of queueing it as a turn behind this one.
     Asked { turn: String },
+    /// How long the turn's phases took, in milliseconds by name (a
+    /// runtime's own: docs/chat-records.md, `turn.timing`), said once, just
+    /// before its end.
+    Timing { turn: String, timing: serde_json::Map<String, serde_json::Value> },
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):
