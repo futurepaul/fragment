@@ -47,6 +47,36 @@ use crate::ops::JOB_ID_PREFIX;
 
 /// Holds released per pass, of runs that ended.
 const RELEASE_BATCH: i64 = 25;
+/// Text steps whose tries this instance counts at once, at most (a step's
+/// count goes when its answer is kept; the oldest go past this).
+const TRIES_KEPT: usize = 256;
+
+thread_local! {
+    /// Each text step's tries on this instance, and when its first began:
+    /// its answer's `timing` says them (an evicted instance counts afresh).
+    static TRIES: std::cell::RefCell<std::collections::BTreeMap<String, (u32, i64)>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// A text step's try begins: its number (from 1) and when its first began.
+fn try_begins(key: &str, now: i64) -> (u32, i64) {
+    TRIES.with(|t| {
+        let mut t = t.borrow_mut();
+        if t.len() >= TRIES_KEPT && !t.contains_key(key) {
+            let oldest = t.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                t.remove(&k);
+            }
+        }
+        let e = t.entry(key.to_string()).or_insert((0, now));
+        e.0 += 1;
+        *e
+    })
+}
+
+/// A text step's answer was kept: its tries are counted no more.
+fn tries_end(key: &str) {
+    TRIES.with(|t| t.borrow_mut().remove(key));
+}
 /// A streamed text step's drafts go at most this often: 4 a second.
 const DRAFT_EVERY_MS: i64 = 250;
 
@@ -345,22 +375,29 @@ impl FragmentCell {
         }
         let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, drafting.is_some())).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
-        let (answer, used, log_id) = match &drafting {
-            Some(d) => self.streamed(&p, &bounded, d).await?,
+        let t0 = crate::js::now_ms();
+        let (tries, began) = try_begins(&p.key, t0);
+        let (answer, used, log_id, first_ms) = match &drafting {
+            Some(d) => self.streamed(&p, &bounded, d, t0).await?,
             None => {
                 let (status, bytes, log_id) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
                 if status != 200 {
                     return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
                 }
                 let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                (Answer::of_completion(&v), v["usage"].clone(), log_id)
+                (Answer::of_completion(&v), v["usage"].clone(), log_id, None)
             }
         };
         let usage = bounds::usage_of(bounded.model, &used);
         if usage.is_none() {
             self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
         }
-        let result = json!({ "text": answer.content, "message": answer.message(), "finish_reason": answer.finish_reason, "model": bounded.model, "tier": tier, "usage": used });
+        // how long it took (docs/optchat.md, "Latency"): its first data line
+        // and its whole answer on this try, its tries, and since its first
+        let now = crate::js::now_ms();
+        let timing = json!({ "first_ms": first_ms, "ms": now - t0, "tries": tries, "since_ms": now - began, "at": now });
+        let result = json!({ "text": answer.content, "message": answer.message(), "finish_reason": answer.finish_reason, "model": bounded.model, "tier": tier, "usage": used, "timing": timing });
+        tries_end(&p.key);
         self.keep(&p, &result, usage.as_ref())?;
         self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
@@ -382,7 +419,7 @@ impl FragmentCell {
     /// record's size). A stream that breaks, or ends before its answer
     /// says why it stopped, is the step's to try again under the same
     /// hold, as an unstreamed answer cut short is.
-    async fn streamed(&self, p: &Paying, bounded: &Bounded, d: &Drafting) -> Result<(Answer, Value, Option<String>), StepFail> {
+    async fn streamed(&self, p: &Paying, bounded: &Bounded, d: &Drafting, t0: i64) -> Result<(Answer, Value, Option<String>, Option<i64>), StepFail> {
         let (status, opened, log_id) = crate::models::call_streamed(&self.env, bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
         let mut bytes = match opened {
             Ok(bytes) => bytes,
@@ -390,9 +427,18 @@ impl FragmentCell {
         };
         let mut stream = Stream::answering();
         let (mut sent, mut sent_at) = (0usize, None::<i64>);
+        // its first data line: when the model began to answer
+        let (mut head, mut first_ms) = (Vec::new(), None::<i64>);
         // bounded by the model's answer: at most the tier's max_tokens
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|e| StepFail::Retry(format!("the model's stream broke: {e}")))?;
+            if first_ms.is_none() {
+                head.extend_from_slice(&chunk);
+                if fragment_core::hedge::began(&head) {
+                    first_ms = Some(crate::js::now_ms() - t0);
+                    head = Vec::new();
+                }
+            }
             stream.push(&chunk, None);
             let text = &stream.answer().expect("an answering stream keeps its answer").content;
             let now = crate::js::now_ms();
@@ -414,7 +460,7 @@ impl FragmentCell {
         if answer.content.len() > sent {
             self.put_draft(d, &answer.content);
         }
-        Ok((answer, stream.usage().cloned().unwrap_or(Value::Null), log_id))
+        Ok((answer, stream.usage().cloned().unwrap_or(Value::Null), log_id, first_ms))
     }
 
     /// One draft of the text so far, to the channel's live readers: its

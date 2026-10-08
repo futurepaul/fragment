@@ -129,6 +129,9 @@ struct Held {
     model: &'static str,
     /// What the call named, for its log lines: a tier, `vision`, or `decide`.
     named: &'static str,
+    /// When it was held, just before the call was made: its log line says
+    /// how long the call took.
+    t0: i64,
 }
 
 impl Held {
@@ -137,10 +140,17 @@ impl Held {
     /// left held, and the ledger's sweep charges it at its worst case after
     /// six hours: the money path fails closed.
     async fn settle(&self, usage: Option<Usage>, log_id: Option<String>) {
+        self.settle_timed(usage, log_id, None).await;
+    }
+
+    /// `settle`, its log line saying when the answer's first data line came
+    /// (`first_ms`, a streamed answer's) and how long the call took.
+    async fn settle_timed(&self, usage: Option<Usage>, log_id: Option<String>, first_ms: Option<i64>) {
+        let ms = js::now_ms() - self.t0;
         let settle = Settle { reference: self.reference.clone(), usage };
         match ledger::retried(&self.env, &self.payer, &settle).await {
             // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named, "model": self.model, "charge": settled.charge, "basis": settled.basis })),
+            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": first_ms, "ms": ms })),
             Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
     }
@@ -171,7 +181,7 @@ async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
     };
     let reserve = Reserve { reference: format!("aig:{}", js::random_hex::<16>()), spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
     ledger::hold(env, payer, &reserve).await?;
-    Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, named })
+    Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, named, t0: js::now_ms() })
 }
 
 /// One model call, metered (the module's doc): its answer as the client
@@ -231,10 +241,20 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         let mut stream = Stream::default();
         let mut bytes = ByteStream::from(meter);
         let mut broke = false;
+        let (mut head, mut first_ms) = (Vec::new(), None::<i64>);
         // bounded by the model's answer: at most the tier's max_tokens
         while let Some(chunk) = bytes.next().await {
             match chunk {
-                Ok(c) => stream.push(&c, None),
+                Ok(c) => {
+                    if first_ms.is_none() {
+                        head.extend_from_slice(&c);
+                        if fragment_core::hedge::began(&head) {
+                            first_ms = Some(js::now_ms() - held.t0);
+                            head = Vec::new();
+                        }
+                    }
+                    stream.push(&c, None)
+                }
                 Err(_) => {
                     broke = true;
                     break;
@@ -243,7 +263,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         }
         stream.finish(None);
         let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-        held.settle(usage, log_id).await;
+        held.settle_timed(usage, log_id, first_ms).await;
     }));
     let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default(), done: false };
     let mut resp = Response::from_stream(normalized)?;
