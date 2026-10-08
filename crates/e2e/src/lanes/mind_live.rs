@@ -189,6 +189,24 @@ impl Mind<'_> {
         (!done || task["state"] != "running").then_some(task)
     }
 
+    /// The compactor at work, watched until nothing is left to build or
+    /// `bound` passes: the most pumps at work at once, the most nodes
+    /// ready then, and how long it took (each look a request).
+    fn pumps(&self, bound: Duration) -> (u64, u64, f64) {
+        let t0 = Instant::now();
+        let (mut most, mut ready) = (0, 0);
+        while t0.elapsed() < bound {
+            let st = self.op("status", json!({}));
+            most = most.max(st["pumps"].as_u64().unwrap_or(0));
+            ready = ready.max(st["left"].as_u64().unwrap_or(0));
+            if st["left"] == 0 && st["unbuilt"] == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        (most, ready, t0.elapsed().as_secs_f64())
+    }
+
     /// A channel's records, oldest first (at most 10 pages of 1000).
     fn records(&self, channel: &str) -> Vec<Value> {
         let mut out = Vec::new();
@@ -305,6 +323,7 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
     let firsts: Vec<f64> = calls.iter().filter_map(|c| c.0).collect();
     let wholes: Vec<f64> = calls.iter().filter_map(|c| c.1).collect();
     let hedged = calls.iter().filter(|c| c.2).count();
+    let (fell, of) = timing::fell_back(&turns.iter().map(|(_, t)| t).collect::<Vec<_>>());
     let reports: Vec<f64> = handoffs.iter().filter(|(l, _)| l != "D").filter_map(|(_, h)| h.total()).collect();
     let follows: Vec<f64> = handoffs.iter().filter_map(|(_, h)| h.follow_up()).collect();
     let goose: Vec<f64> = handoffs.iter().flat_map(|(_, h)| h.goose_calls()).collect();
@@ -313,10 +332,17 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
     }
     let holds = entries(api, identity, "");
     let hedges = holds.iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains("hedge"))).count();
+    // which models answered (a fallback's when a tier's own was busy), the ledger's rows
+    let mut by_model: std::collections::BTreeMap<String, usize> = Default::default();
+    for e in &holds {
+        if let Some(m) = e["entry"]["end"]["usage"]["model"].as_str() {
+            *by_model.entry(m.rsplit('/').next().unwrap_or(m).to_string()).or_default() += 1;
+        }
+    }
     println!(
-        "      (latency: turns in words, logged→answered {}; by the page's clock (ask→talk) {}; the mind's model calls, first data line {}, whole {}, {hedged} of {} hedged; \
+        "      (latency: turns in words, logged→answered {}; by the page's clock (ask→talk) {}; the mind's model calls, first data line {}, whole {}, {hedged} of {} hedged, {fell} of {of} answered on a fallback (their own model busy); \
          simple hand-offs ask→report {}; follow-ups report→talk {}; goose's model calls (wait before each step, and its last) {}; \
-         the ledger: {hedges} hedge holds of {} reservations)",
+         the ledger: {hedges} hedge holds of {} reservations, settled by model {by_model:?})",
         timing::stats(&words),
         timing::stats(word_secs),
         timing::stats(&firsts),
@@ -352,7 +378,7 @@ fn first_run(s: &Suite, api: &Api, owner: &Keys) -> Result<(Value, String)> {
     let of = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent.as_str()).cloned()).unwrap_or_default();
     let identity = of["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(assigned.status == 200 && identity.starts_with("id:"), "assigning the agent: {assigned}");
-    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium", "color": color_of(&identity) }))?);
+    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "cheap", "color": color_of(&identity) }))?);
     let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(&username) }, { "path": "agent.json", "text": agent_json }] });
     let r = api.signed(owner, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
     anyhow::ensure!(r.status == 200, "the agent's SOUL: {r}");
@@ -478,6 +504,9 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
         println!("      (thread F, hand-off {k} (the computer {awake} when asked), {}: {})", done["state"].as_str().unwrap_or("?"), h.line());
         handoffs.push((format!("F{k}"), h));
     }
+    // the compactor after them: its pumps at work at once (up to 8)
+    let (most, ready, took) = m.pumps(Duration::from_secs(60));
+    println!("      (the compactor after thread F: up to {most} pumps at work at once, with up to {ready} nodes ready, all built in {took:.1} s)");
 
     // ---- thread D: Builder hands browsing to goose
     let d = thread_id();

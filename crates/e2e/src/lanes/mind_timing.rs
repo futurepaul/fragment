@@ -36,6 +36,13 @@ fn secs(ms: i64) -> String {
     format!("{:.1}", ms as f64 / 1000.0)
 }
 
+/// How many of the turns' calls answered on a rung of their ladder (their
+/// own model busy), of all.
+pub fn fell_back(timings: &[&Value]) -> (usize, usize) {
+    let calls: Vec<&Value> = timings.iter().flat_map(|t| t["calls"].as_array().into_iter().flatten()).collect();
+    (calls.iter().filter(|c| c["passed"].as_array().is_some_and(|p| !p.is_empty())).count(), calls.len())
+}
+
 /// A turn's model calls as `(first data line, whole answer)` in seconds,
 /// and whether each was hedged, from its timing.
 pub fn calls(timing: &Value) -> Vec<(Option<f64>, Option<f64>, bool)> {
@@ -75,6 +82,18 @@ pub fn turn_line(timing: &Value) -> String {
             call += &format!("gap {} ", secs(s - last));
         }
         call += &format!("first {} whole {}", first.map_or("?".into(), secs), whole.map_or("?".into(), secs));
+        // the model that answered, when its own was busy
+        let short = |m: &Value| m.as_str().map(|m| m.rsplit('/').next().unwrap_or(m).to_string());
+        if let Some(passed) = c["passed"].as_array().filter(|p| !p.is_empty()) {
+            let passed: Vec<String> = passed.iter().filter_map(short).collect();
+            call += &format!(" on {} ({} busy)", short(&c["model"]).unwrap_or_default(), passed.join(", "));
+        }
+        if let Some(n) = c["thought"].as_u64().filter(|n| *n > 0) {
+            call += &format!(" ({n} chars of reasoning)");
+        }
+        if let (Some(p), Some(o)) = (c["tokens"][0].as_u64(), c["tokens"][2].as_u64()) {
+            call += &format!(" [{p} in, {} cached, {o} out]", c["tokens"][1].as_u64().unwrap_or(0));
+        }
         if c["tries"].as_i64().is_some_and(|t| t > 1) {
             call += &format!(" ({} tries over {})", c["tries"], ms(&c["since"]).map_or("?".into(), secs));
         }
