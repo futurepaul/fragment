@@ -26,11 +26,12 @@
 //! a GIF or a WebP), answers 400.
 //!
 //! A call answers the text a test set for it (`say_next`), else
-//! (`plain_reply`), when it offers tools and its last message (a person's
-//! or a tool's) holds `[[call NAME {json}]]`, a call of that tool; after a
-//! tool's result, `TOOL_SAID` and the result's first 200 characters; and
-//! otherwise an echo of its last message. A streamed text comes in
-//! `PIECES`.
+//! (`plain_reply`), when it offers tools (and `tool_choice` is not `none`)
+//! and its last message (a person's or a tool's; of one in parts, its last
+//! text part) holds `[[call NAME {json}]]`, a call of that tool; after a
+//! tool's result, `TOOL_SAID` and
+//! the result's first 200 characters; and otherwise an echo of its last
+//! message. A streamed text comes in `PIECES`.
 //!
 //! Clef (`CLEF_MODELS`, a job's `ai.decide`) answers as its catalog's
 //! output schema says, decided from the words of its input (`clef_answer`),
@@ -38,7 +39,8 @@
 //!
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
-//! report (`set_usage`), and a stream cut before its usage (`break_next`).
+//! report (`set_usage`), a stream cut before its usage (`break_next`), and
+//! the most calls it held at once (`most_at_once`).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -113,6 +115,9 @@ struct State {
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
+    /// Calls being answered now, and the most there were at once.
+    at_once: usize,
+    most_at_once: usize,
 }
 
 /// The images a chat's messages carry (`image_url` parts' URLs), or why a
@@ -159,6 +164,16 @@ fn text_of(content: &Value) -> String {
     }
 }
 
+/// The words a message ends with: its text, or of one in parts its last
+/// text part's (a mind's turn sends its view and its state first, which
+/// may quote earlier words, and the person's words last).
+fn last_words(content: &Value) -> String {
+    match content {
+        Value::Array(parts) => parts.iter().rev().find_map(|p| p["text"].as_str()).unwrap_or("").to_string(),
+        other => text_of(other),
+    }
+}
+
 /// A tool call a message asks for: `[[call NAME {json}]]`, its arguments
 /// the one JSON value after the name.
 fn directive(text: &str) -> Option<(String, Value)> {
@@ -171,38 +186,23 @@ fn directive(text: &str) -> Option<(String, Value)> {
 
 /// The answer a call gets when no test scripted one and no agent runtime
 /// reads it: a tool call its last message (a person's or a tool's) asks
-/// for with `[[call NAME {json}]]`, when the call offers that tool; else,
-/// after a tool's result, `TOOL_SAID` and the result's first
-/// `TOOL_SAID_CHARS` characters; else an echo of its last message.
+/// for with `[[call NAME {json}]]`, when the call offers that tool and does
+/// not say `tool_choice: "none"` (as a model calls none then); else, after
+/// a tool's result, `TOOL_SAID` and the result's first `TOOL_SAID_CHARS`
+/// characters; else an echo of its last message.
 pub fn plain_reply(body: &Value) -> Reply {
     let last = body["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or(Value::Null);
     let said = text_of(&last["content"]);
-    let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
+    let offered = |name: &str| body["tool_choice"] != "none" && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     if last["role"] == "user" || last["role"] == "tool" {
-        if let Some((name, args)) = directive(&said).filter(|(name, _)| offered(name)) {
+        if let Some((name, args)) = directive(&last_words(&last["content"])).filter(|(name, _)| offered(name)) {
             return Reply::Tools(vec![(name, args)]);
         }
     }
     if last["role"] == "tool" {
         return Reply::Text(format!("{TOOL_SAID}{}", said.chars().take(TOOL_SAID_CHARS).collect::<String>()));
     }
-    if let Some(n) = batch_asked(&said).filter(|_| last["role"] == "user" && body["tools"].is_null()) {
-        return Reply::Text((1..=n).map(|k| format!("{k}) {BATCH_SAID}{k}")).collect::<Vec<_>>().join("\n"));
-    }
     Reply::Text(format!("echo: {}", last["content"].as_str().unwrap_or("")))
-}
-
-/// A batched compactor call's line (templates/mind, `compactBatchInput`
-/// and `compactMergeBatchInput`): the fake answers `k) ` and this and `k`
-/// for each of the N it is asked for.
-pub const BATCH_SAID: &str = "a batch's line ";
-
-/// How many lines a batched compactor call asks for: "Compress each of
-/// these N messages" or "Merge each of these N pairs".
-fn batch_asked(text: &str) -> Option<usize> {
-    let rest = ["Compress each of these ", "Merge each of these "].iter().find_map(|ask| text.find(ask).map(|at| &text[at + ask.len()..]))?;
-    let n: usize = rest.split(' ').next()?.parse().ok()?;
-    (1..=64).contains(&n).then_some(n)
 }
 
 /// Text's words, lowercased: its runs of letters and digits.
@@ -501,12 +501,15 @@ impl WorkersAi {
             // unlocked, after its levers were consumed
             let (response, sleep_ms) = {
                 let mut s = st.lock().expect("workers ai state");
+                s.at_once += 1;
+                s.most_at_once = s.most_at_once.max(s.at_once);
                 let response = answer(&mut s, req);
                 (response, std::mem::take(&mut s.sleep_ms))
             };
             if sleep_ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
+            st.lock().expect("workers ai state").at_once -= 1;
             response
         });
         let server = Server::start(port, handler)?;
@@ -559,6 +562,18 @@ impl WorkersAi {
 
     pub fn calls(&self) -> Vec<AiCall> {
         self.state().calls.clone()
+    }
+
+    /// The most calls it was answering at once since it started, or since
+    /// the last `reset_at_once` (a delay, `delay_next`, holds calls long
+    /// enough to overlap).
+    pub fn most_at_once(&self) -> usize {
+        self.state().most_at_once
+    }
+
+    pub fn reset_at_once(&self) {
+        let mut s = self.state();
+        s.most_at_once = s.at_once;
     }
 
     /// The calls' inputs, in order (what a chat completion's body carried, less its model).
@@ -619,23 +634,14 @@ mod tests {
         let again = json!({ "messages": [{ "role": "tool", "content": "then [[call lookup {\"word\": \"more\"}]]" }], "tools": lookup_tools() });
         assert!(matches!(plain_reply(&again), Reply::Tools(c) if c[0].1 == json!({ "word": "more" })), "a tool's result may ask for another call");
         assert!(matches!(plain_reply(&ask("hi", json!(null))), Reply::Text(t) if t == "echo: hi"));
-    }
-
-    /// Goal: a batched compactor call is answered a numbered line for each
-    /// node it asks for. Method: the mind's two asks, in a content list as
-    /// it sends them, and one with tools offered (a turn's, never batched).
-    #[test]
-    fn a_batched_compactor_call_gets_its_lines() {
-        let ask = |step: &str, tools: Value| json!({ "messages": [{ "role": "system", "content": "You write the memory" }, { "role": "user", "content": [{ "type": "text", "text": "<chat>\n</chat>" }, { "type": "text", "text": step }] }], "tools": tools });
-        let lines = |r: Reply| match r {
-            Reply::Text(t) => t,
-            other => panic!("{other:?}"),
-        };
-        let three = "For scale…\n\nCompress each of these 3 messages into one line, in at most 512 bytes each.";
-        assert_eq!(lines(plain_reply(&ask(three, Value::Null))), format!("1) {BATCH_SAID}1\n2) {BATCH_SAID}2\n3) {BATCH_SAID}3"));
-        assert_eq!(lines(plain_reply(&ask("Merge each of these 2 pairs of adjacent lines", Value::Null))).lines().count(), 2);
-        assert!(lines(plain_reply(&ask(three, lookup_tools()))).starts_with("echo: "), "a call with tools is a turn's");
-        assert!(lines(plain_reply(&ask("Compress each of these many messages", Value::Null))).starts_with("echo: "));
+        let parts = json!({ "messages": [{ "role": "user", "content": [
+            { "type": "text", "text": "<chat>\n0+1|user: an old [[call lookup {\"word\": \"old\"}]]\n</chat>" },
+            { "type": "text", "text": "Chat: t_1 \"x [[call lookup {\\\"word\\\": \\\"esc\\\"}]]\"" },
+            { "type": "text", "text": "now [[call lookup {\"word\": \"new\"}]]" },
+        ] }], "tools": lookup_tools() });
+        assert!(matches!(plain_reply(&parts), Reply::Tools(c) if c[0].1 == json!({ "word": "new" })), "of a message in parts, the words of its last");
+        let none = json!({ "messages": [{ "role": "user", "content": "[[call lookup {}]]" }], "tools": lookup_tools(), "tool_choice": "none" });
+        assert!(matches!(plain_reply(&none), Reply::Text(t) if t.starts_with("echo: ")), "tools offered, none to be called (a compaction)");
     }
 
     /// Goal: a plain streamed text comes in pieces, and a directive's call
