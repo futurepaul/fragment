@@ -11,7 +11,7 @@ live (multiplayer is built in), and members with roles. Use one when the
 person wants something on the web that keeps its state or that others
 open with them: a shared list, a tracker, notes, a webhook inbox, a chat,
 a small site. fragment.club is invite-only: the person must have been
-invited.
+invited to keep one (a first one can be made before: a draft, below).
 
 ## Install
 
@@ -22,8 +22,18 @@ mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/relea
 ```
 
 If `fragment` is then not found, `~/.local/bin` is not on the PATH: run
-`export PATH="$HOME/.local/bin:$PATH"`, and add that line to
-`~/.zshrc` or `~/.bashrc`. The same command updates it.
+it as `~/.local/bin/fragment` (an agent's shell may not keep an
+`export` from one command to the next), or run `export
+PATH="$HOME/.local/bin:$PATH"` and add that line to `~/.zshrc` or
+`~/.bashrc`. The same command updates it.
+
+In a sandbox that reaches only the hosts it allows (Claude Code on the
+web, Codex cloud), the install needs `github.com` and
+`release-assets.githubusercontent.com`, and the CLI needs
+`fragment.club` (and `*.code.storage` for `fragment sync` and `deploy
+--dir`). When one is blocked, ask the person to allow it in the
+environment's network settings. Each new sandbox is a new machine: pair
+it again.
 
 An agent on a Fragment computer (`FRAGMENT_AS_AGENT` is set) needs neither
 this nor pairing: `fragment` is installed there, and acts as the agent.
@@ -37,12 +47,18 @@ terminal show the same ending). With no browser at hand, `fragment login
 login` again once they have approved it. A new person also chooses a
 username once, on that page or with `fragment username <name>`.
 
+No account yet? `fragment create --draft --template todo` makes a first
+fragment with no login: a draft, named by the platform, with tight
+limits (no secrets, no `job.fetch`, no AI steps), deleted a day later
+unless claimed. Give the person the page and the claim link it prints:
+claiming makes it theirs, and this machine's key theirs too.
+
 ## Your fragments
 
 ```
 fragment whoami                                  # who you are (an agent: for whom it acts)
 fragment list                                    # the fragments you have a role on, and the role
-fragment status <name>                           # its links, its live commit, why its code was refused
+fragment status <name>                           # its links, its live commit, why its code was refused, its page's errors
 fragment events <name> --tail 30                 # what happened there: believe it over your memory
 fragment sync <name> --dir <folder> --mode pull  # its files, into a folder
 fragment create <label> --template todo          # a new one (`fragment new --list`: the templates)
@@ -53,6 +69,19 @@ fragment call <name> <operation> --input '{}'    # one of its operations
 
 A fragment is named `<label>.<username>`; a bare label names one of yours
 (an agent's: its owner's).
+
+Without a shell (a chat client: Claude, ChatGPT), the platform is an MCP
+server at `/mcp` (fragment.club's: `https://fragment.club/mcp`), whose
+tools are this loop, and each fragment one at its own origin's `/__mcp`,
+whose tools are its described operations; both act as the person who
+connects them, reading only unless they allow changes. From a shell,
+`fragment mcp <name> [--write]` serves a fragment's same tools over
+stdio (`claude mcp add <name> -- fragment mcp <name>`).
+
+A page is mostly seen in a narrow pane (about 380 px) beside its
+person's chat, under a titlebar that already names it: give it no
+page-title heading, start with the content, and link `./__fragment.css`
+for the platform's look.
 
 ## Ask another agent
 
@@ -73,5 +102,6 @@ minutes.
 
 ## Then
 
-Run `fragment guide` and read it all before you build: it is the whole
-manual (the folder, operations, deploys, sharing, the ledger, errors).
+Run `fragment guide` (or read https://fragment.club/llms-full.txt, the
+same text) and read it all before you build: it is the whole manual
+(the folder, operations, deploys, sharing, the ledger, errors).

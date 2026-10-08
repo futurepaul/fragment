@@ -19,7 +19,9 @@
 //! `FRAGMENT_AI_URL` instead, and the same input is POSTed to
 //! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
-//! A job's image step calls its model on the same transport (`run`).
+//! A job's image and decision steps call their models on the same
+//! transport (`run`), and its text step with a draft reads its answer as
+//! it streams (`call_streamed`).
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
@@ -27,12 +29,20 @@
 //! is the call itself. The payer is the agent's owner (decision 36).
 //! A call names a tier, or `vision`: the deployment's vision model
 //! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
-//! image (Hermes' screenshots), metered the same way.
+//! image (its computer's screenshots), metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
+//!
+//! Beside it, the decision route, `POST /api/models/v1/decide`
+//! (`decide_route`): the same caller, payer and fragment, a body that is a
+//! job's `ai.decide` input (fragment_core::decide, `clef-flash` unless it
+//! names `clef`), and the same reserve, call and settle, its worst case
+//! its input's bytes as tokens, its answer the step's `{answers, model,
+//! usage}`.
 
 use std::pin::Pin;
 
+use fragment_core::decide;
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Named, Stream};
 use fragment_core::price::Usage;
@@ -48,12 +58,15 @@ use crate::error::{CellError, CellResult};
 use crate::ledger::{self, FragmentOpen};
 use crate::{js, read_body, routed};
 
-/// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
-/// and its prompt fit.
+/// A call's request (`fragment_core::models`): the largest image and its
+/// prompt fit.
 pub use fragment_core::models::MODEL_BODY_MAX_BYTES;
 /// An unstreamed answer, or a refusal, read whole: at most `MAX_TOKENS`
 /// of text and its JSON.
 const ANSWER_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// A model's refusal, passed on: what a client reads of one (a message,
+/// not a document).
+const REFUSAL_MAX_CHARS: usize = 4096;
 
 /// The fragment a call is spent in: its name and owner, and whether the
 /// spender is that owner, or an agent of theirs acting for them (caps
@@ -114,7 +127,8 @@ struct Held {
     payer: String,
     reference: String,
     model: &'static str,
-    named: Named,
+    /// What the call named, for its log lines: a tier, `vision`, or `decide`.
+    named: &'static str,
 }
 
 impl Held {
@@ -126,7 +140,7 @@ impl Held {
         let settle = Settle { reference: self.reference.clone(), usage };
         match ledger::retried(&self.env, &self.payer, &settle).await {
             // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named.as_str(), "model": self.model, "charge": settled.charge, "basis": settled.basis })),
+            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named, "model": self.model, "charge": settled.charge, "basis": settled.basis })),
             Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
     }
@@ -140,6 +154,26 @@ impl Held {
     }
 }
 
+/// Holds a call's worst case on its payer's ledger, under a reference of
+/// its own (`aig:<hex>`), as an agent's turn. Whose cap applies: the
+/// payer's own fragment's, on its ledger; another owner's, asked of
+/// theirs first, unless the spender is that owner's (decision 26).
+async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, named: &'static str, worst: Usage) -> CellResult<Held> {
+    let (fragment, capped) = match fragment {
+        Some(f) if f.owner == payer => (Some(f.name.to_string()), !f.by_owner),
+        Some(f) => {
+            if !f.by_owner {
+                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
+            }
+            (None, false)
+        }
+        None => (None, false),
+    };
+    let reserve = Reserve { reference: format!("aig:{}", js::random_hex::<16>()), spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
+    ledger::hold(env, payer, &reserve).await?;
+    Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, named })
+}
+
 /// One model call, metered (the module's doc): its answer as the client
 /// reads it, OpenAI's shape. A streamed answer is settled after it ends,
 /// by `after`, whether or not the client read it to its end.
@@ -151,28 +185,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     }
     let model = bounds::capped(call.named, cfg.vision_model.as_str()).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
-    // whose cap applies: the payer's own fragment's on its ledger; another
-    // owner's, asked of theirs, unless the spender is that owner's
-    let (fragment, capped) = match &call.fragment {
-        Some(f) if f.owner == call.payer => (Some(f.name.to_string()), !f.by_owner),
-        Some(f) => {
-            if !f.by_owner {
-                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
-            }
-            (None, false)
-        }
-        None => (None, false),
-    };
-    let reserve = Reserve {
-        reference: format!("aig:{}", js::random_hex::<16>()),
-        spend: Spend::AgentTurn,
-        worst: bounded.worst(body_bytes),
-        fragment,
-        agent: call.agent.map(str::to_string),
-        capped,
-    };
-    ledger::hold(env, call.payer, &reserve).await?;
-    let held =Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, named: call.named };
+    let held = hold(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model, call.named.as_str(), bounded.worst(body_bytes)).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
         Ok(r) => r,
@@ -247,9 +260,24 @@ pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Optio
     run(env, bounded.model, &bounded.input, payer, agent).await
 }
 
+/// `call`, streamed (a job's text step with a draft): its status, the
+/// gateway's log id, and its answer's bytes as they come; a refusal's
+/// body is read whole.
+pub(crate) async fn call_streamed(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, std::result::Result<ByteStream, Vec<u8>>, Option<String>)> {
+    assert!(bounded.stream, "a streamed call asks for a stream");
+    let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let mut resp = transport(env, Config::from_env(env), bounded.model, &bounded.input, &meta).await?;
+    let status = resp.status_code();
+    let log_id = resp.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        return Ok((status, Err(read_whole(&mut resp).await?), log_id));
+    }
+    Ok((status, Ok(resp.stream()?), log_id))
+}
+
 /// One call of a catalog model with its input, on the same transport,
-/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
-/// caller bounds the input and meters it).
+/// unmetered and read whole (`call`; a job's image and decision steps:
+/// ai.rs, whose caller bounds the input and meters it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     let mut resp = transport(env, Config::from_env(env), model, input, &meta).await?;
@@ -352,9 +380,8 @@ async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
 
 /// A refusal's body as text, cut to what a client reads (and read no further).
 async fn bounded_text(resp: &mut Response) -> String {
-    const CHARS: usize = 4096;
-    let (bytes, _) = crate::cs::read_answer(resp, 4 * CHARS).await.unwrap_or_default();
-    String::from_utf8_lossy(&bytes).chars().take(CHARS).collect()
+    let (bytes, _) = crate::cs::read_answer(resp, 4 * REFUSAL_MAX_CHARS).await.unwrap_or_default();
+    String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect()
 }
 
 /// The answer a `whose` asks a fragment for: its owner, and whether the
@@ -365,22 +392,62 @@ pub(crate) struct Whose {
     pub member: bool,
 }
 
+/// Who makes a call on an agent's routes (`route`, `decide_route`): the
+/// signer, an agent; its owner, who pays; and the `fragment` it names.
+struct Caller {
+    agent: String,
+    owner: String,
+    /// The fragment named, one the agent is in: its name, its owner, and
+    /// whether that owner spends there (the agent as itself, or for its
+    /// owner, in its owner's fragment).
+    fragment: Option<(String, String, bool)>,
+}
+
+impl Caller {
+    fn in_fragment(&self) -> Option<InFragment<'_>> {
+        self.fragment.as_ref().map(|(name, owner, by_owner)| InFragment { name, owner, by_owner: *by_owner })
+    }
+}
+
+/// The caller of an agent's route, checked: signed by an agent (`for`
+/// names whom it acts for), naming at most one `fragment`, one it is in.
+async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Caller> {
+    let agent = crate::signer_for(env, req, url, body).await?;
+    if agent.kind != IdentityKind::Agent {
+        return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
+    }
+    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let mut fragments = url.query_pairs().filter(|(k, _)| k == "fragment").map(|(_, v)| v.into_owned());
+    let named = fragments.next();
+    if fragments.next().is_some() {
+        return Err(CellError::invalid("`fragment` is named once"));
+    }
+    let Some(name) = named else { return Ok(Caller { agent: agent.id.clone(), owner, fragment: None }) };
+    if !valid_fragment_name(&name) {
+        return Err(CellError::invalid("`fragment` is a fragment's name, <label>.<username>"));
+    }
+    let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
+    let mut answer = env.durable_object("FRAGMENT")?.get_by_name(&name)?.fetch_with_request(ask).await?;
+    if answer.status_code() != 200 {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
+    }
+    let whose: Whose = answer.json().await?;
+    if !whose.member {
+        return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
+    }
+    // the owner's own: the agent acting as itself, or for its owner, in its owner's fragment
+    let for_owner = agent.acting_for.as_deref().is_none_or(|asker| asker == owner);
+    let by_owner = whose.owner == owner && for_owner;
+    Ok(Caller { agent: agent.id.clone(), owner, fragment: Some((name, whose.owner, by_owner)) })
+}
+
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
 /// model call, signed by the agent (`for` names whom it acts for), its
 /// `model` a tier or `vision`. Its owner pays; `fragment` (one the agent
 /// is in) is where the turn is, for that fragment's cap.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
-    let agent = crate::signer_for(env, &req, url, &body).await?;
-    if agent.kind != IdentityKind::Agent {
-        return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
-    }
-    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let mut fragments = url.query_pairs().filter(|(k, _)| k == "fragment").map(|(_, v)| v.into_owned());
-    let fragment = fragments.next();
-    if fragments.next().is_some() {
-        return Err(CellError::invalid("`fragment` is named once"));
-    }
+    let caller = caller(env, &req, url, &body).await?;
     let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
     let named = match v.get("model") {
         None | Some(Value::Null) => bounds::route_named(None),
@@ -389,36 +456,54 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
     };
     let named = named.map_err(refused)?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
-    let placed = match &fragment {
-        None => None,
-        Some(name) => {
-            if !valid_fragment_name(name) {
-                return Err(CellError::invalid("`fragment` is a fragment's name, <label>.<username>"));
-            }
-            let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-            let mut answer = env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(ask).await?;
-            if answer.status_code() != 200 {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
-            }
-            let whose: Whose = answer.json().await?;
-            if !whose.member {
-                return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
-            }
-            Some(whose)
+    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, body: v, stream };
+    complete(env, call, after).await
+}
+
+/// `POST /api/models/v1/decide[?fragment=<name>]`: an agent's decision,
+/// Clef on the model route's transport (the module's doc). Its caller and
+/// payer are `route`'s; its body is a job's `ai.decide` input, `model`
+/// `clef-flash` unless it names `clef` (`decide::route_body`), checked as
+/// a step is (`decide::decide_call`) before anything is reserved. Its
+/// answer is the step's, `{answers, model, usage}`. A call the model
+/// refuses is released and its refusal passed through; an answer that
+/// does not answer every question is charged its reservation and refused.
+pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
+    let caller = caller(env, &req, url, &body).await?;
+    let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    let step = decide::route_body(v).map_err(|why| CellError::invalid(why.message()))?;
+    let call = decide::decide_call(&step).map_err(|why| CellError::invalid(why.message()))?;
+    let input_bytes = call.input.to_string().len();
+    if input_bytes > MODEL_BODY_MAX_BYTES {
+        return Err(CellError::too_large("a model call", input_bytes, MODEL_BODY_MAX_BYTES));
+    }
+    let held = hold(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), call.model, "decide", call.worst(input_bytes)).await?;
+    let (status, bytes, log_id) = match run(env, call.model, &call.input, &caller.owner, Some(&caller.agent)).await {
+        Ok(answered) => answered,
+        Err(e) => {
+            held.release("the model was not reached").await;
+            return Err(e);
         }
     };
-    // the owner's own: the agent acting as itself, or for its owner, in its owner's fragment
-    let for_owner = agent.acting_for.as_deref().is_none_or(|asker| asker == owner);
-    let call = ModelCall {
-        payer: &owner,
-        agent: Some(&agent.id),
-        fragment: match (&fragment, &placed) {
-            (Some(name), Some(whose)) => Some(InFragment { name, owner: &whose.owner, by_owner: whose.owner == owner && for_owner }),
-            _ => None,
-        },
-        named,
-        body: v,
-        stream,
+    if status != 200 {
+        // a refusal used nothing: the vendor's answer, as it came
+        held.release(&format!("the model answered {status}")).await;
+        let text: String = String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect();
+        let mut resp = Response::ok(text)?.with_status(status);
+        resp.headers_mut().set("content-type", "application/json")?;
+        return Ok(resp);
+    }
+    let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let answers = match decide::answers_of(&step, &answer) {
+        Ok(answers) => answers,
+        Err(fault) => {
+            // it answered, so it was paid for: charged its reservation, then refused
+            held.settle(None, log_id).await;
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}: its call is charged at its worst case", fault.message())));
+        }
     };
-    complete(env, call, after).await
+    held.settle(call.usage(&answer), log_id).await;
+    let used = answer.get("usage").or_else(|| answer["result"].get("usage")).cloned().unwrap_or(Value::Null);
+    Ok(Response::from_json(&json!({ "answers": answers, "model": call.model, "usage": used }))?)
 }

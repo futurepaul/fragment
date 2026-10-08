@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use fragment_bridge::records;
-use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use support::fake::{person, Fake, World};
 
 const WAIT: u64 = 8_000;
@@ -198,8 +197,8 @@ async fn an_approval_expired() {
     bridge.stop().await;
 }
 
-/// Goal: a turn that asks its asker something in words (Hermes' open
-/// clarify) posts the question, and the asker's next message is its
+/// Goal: a turn that asks its asker something in words (an open clarify)
+/// posts the question, and the asker's next message is its
 /// answer, mid-turn: the turn ends saying it, and the message starts no
 /// turn of its own. Someone else's message meanwhile waits its turn.
 #[tokio::test]
@@ -404,73 +403,6 @@ async fn two_agents_on_one_computer() {
         let by = |chat: &str| w.records(chat, "chat").into_iter().find(|r| r["body"].get("turn").is_some()).unwrap()["principal"].clone();
         assert_eq!((by(&talk), by(&notes)), (json!("id:juniper"), json!("id:rowan")));
     });
-    bridge.stop().await;
-}
-
-/// The image's ready file (ready.rs), written whole and renamed into place
-/// as an image's host writes it.
-fn write_ready(file: &std::path::Path, agents: &[&str]) {
-    let tmp = file.with_extension("json.tmp");
-    std::fs::write(&tmp, json!({ "agents": agents }).to_string()).unwrap();
-    std::fs::rename(&tmp, file).unwrap();
-}
-
-/// Goal (docs/computers.md: a computer's agents may change while it runs):
-/// with a ready file, the bridge runs only the agents the image made
-/// ready. One assigned while the bridge runs is not followed, however often
-/// the computer is read, until the file names it, and then within a tick
-/// or two; taken out of the file, it is followed no more. Another agent's
-/// turn runs on, whole, through both.
-#[tokio::test]
-async fn agents_the_image_makes_ready() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let talk = fake.chat("talk", &["juniper"]);
-    let dir = support::dir("ready-file");
-    let file = dir.join("agents.json");
-    write_ready(&file, &["juniper.paul"]);
-    let mut cfg = support::config(&fake.url(), &dir, support::settings());
-    cfg.agents_file = Some(file.clone());
-    // a pace that makes `slow` take five seconds: a turn that runs through the change
-    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } });
-    let bridge = support::start(cfg, script);
-    following(&fake, 2).await;
-    let slow = fake.say(&talk, &person("paul"), json!({ "text": "slow, while maple arrives" }));
-    let slow_turn = turn_of("juniper", &talk, seq(&slow));
-    fake.until(WAIT, "juniper's turn running", |w| w.keepalive_open == 1).await;
-
-    fake.add_agent("maple");
-    let grove = fake.chat("grove", &["maple"]);
-    fake.say(&grove, &person("paul"), json!({ "text": "hello maple" }));
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
-    fake.with(|w| {
-        assert!(replies(w, &grove).is_empty(), "not ready, maple is not run: {:?}", replies(w, &grove));
-        assert_eq!(w.live_sockets(), 2, "nor followed");
-    });
-    let t = Instant::now();
-    write_ready(&file, &["juniper.paul", "maple.paul"]);
-    fake.until(WAIT, "maple's reply, once the image made it ready", |w| replies(w, &grove).len() == 1).await;
-    let took = t.elapsed();
-    eprintln!("ready file to maple's reply: {} ms", took.as_millis());
-    assert!(took < Duration::from_secs(4), "within a tick or two of the file: {took:?}");
-    fake.until(WAIT, "juniper's slow turn's end", |w| w.bodies(&talk, "work", "turn.end").iter().any(|e| e["turn"] == slow_turn)).await;
-    fake.with(|w| {
-        let end = w.bodies(&talk, "work", "turn.end").into_iter().find(|e| e["turn"] == slow_turn).unwrap();
-        assert_eq!(end["outcome"], "idle", "juniper's turn ran on through the change: {end}");
-        assert!(replies(w, &talk).iter().any(|r| r["turn"] == slow_turn.as_str() && r["text"].as_str().is_some_and(|t| t.contains("while maple arrives"))));
-        assert_eq!(w.records(&grove, "chat").iter().filter(|r| r["principal"] == "id:maple").count(), 1, "maple answered as itself");
-    });
-
-    // Replay: the file written again with the same agents changes nothing.
-    write_ready(&file, &["juniper.paul", "maple.paul"]);
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-    fake.with(|w| assert_eq!(w.live_sockets(), 4, "juniper's and maple's tasks and chats, once each"));
-
-    // Out of the file: maple is followed no more, and its chat goes unanswered.
-    write_ready(&file, &["juniper.paul"]);
-    fake.until(WAIT, "maple's follows dropped", |w| w.live_sockets() == 2).await;
-    fake.say(&grove, &person("paul"), json!({ "text": "still there?" }));
-    tokio::time::sleep(Duration::from_millis(2_000)).await;
-    fake.with(|w| assert_eq!(replies(w, &grove).len(), 1, "no longer run: {:?}", replies(w, &grove)));
     bridge.stop().await;
 }
 

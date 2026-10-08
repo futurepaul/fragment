@@ -3,8 +3,8 @@
 //! depends on them: channels with seq, idempotent posts by id (409 for
 //! another body), drafts fanned out on `__live`, `__live` paging from a
 //! cursor, wake subscriptions, members, `GET /api/computer`, the keepalive
-//! socket, blobs, and a fragment's files. Levers drop every socket (a
-//! deploy), take the API down, and fail posts.
+//! socket, blobs, and a fragment's operations (its `view`). Levers drop every
+//! socket (a deploy), take the API down, and fail posts.
 //!
 //! A request acts as the agent its `x-fragment-agent` names (the intercept's
 //! job, faked): one not assigned to the computer is refused.
@@ -50,8 +50,12 @@ pub struct Frag {
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
     pub blobs: HashMap<String, (String, Bytes)>,
-    pub files: BTreeMap<String, Bytes>,
-    pub commits: Vec<Value>,
+    /// Its operations: each one's declaration (as `status.code.operations`
+    /// lists it) and the result it answers every call with. One not here
+    /// is 404 `unknown_operation` (a chat has no `view`).
+    pub ops: BTreeMap<String, (Value, Value)>,
+    /// Its files at main: path → (version, bytes).
+    pub files: BTreeMap<String, (String, Vec<u8>)>,
 }
 
 struct LiveSock {
@@ -235,17 +239,18 @@ impl Fake {
         name
     }
 
-    /// paul's skills fragment `<label>.paul` (the blessed `skills`
-    /// template's: its agents reach it acting for paul), holding `files`.
-    pub fn skills(&self, label: &str, files: &[(&str, &str)]) -> String {
-        let name = format!("{label}.paul");
+    /// A mind `<label>.paul` (docs/optchat.md): a chat whose `view` answers
+    /// `view`, with a `zoom` that answers `zoomed` whatever it is asked,
+    /// both described (so `fragment mcp` serves them).
+    pub fn mind(&self, label: &str, agents: &[&str], view: &str, zoomed: &str) -> String {
+        let name = self.chat(label, agents);
         self.with(|w| {
-            let mut f = Frag { kind: "skills".into(), ..Frag::default() };
-            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-            for (path, text) in files {
-                f.files.insert(path.to_string(), Bytes::from(text.to_string()));
-            }
-            w.fragments.insert(name.clone(), f);
+            let f = w.fragments.get_mut(&name).expect("the chat just made");
+            f.kind = "mind".into();
+            let object = |props: Value| json!({ "type": "object", "properties": props });
+            f.ops.insert("view".into(), (json!({ "kind": "query", "role": "viewer", "description": "The rendered view.", "input": object(json!({})) }), json!({ "text": view, "bytes": view.len(), "settled": true })));
+            let zoom = json!({ "kind": "query", "role": "viewer", "description": "Open a line of the view.", "input": object(json!({ "id": { "type": "integer" }, "n": { "type": "integer" } })) });
+            f.ops.insert("zoom".into(), (zoom, json!({ "text": zoomed })));
         });
         name
     }
@@ -253,6 +258,18 @@ impl Fake {
     /// Assigns the agent `label` to the computer while it runs (its
     /// fragment `<label>.paul`, identity `id:<label>`), as its owner's
     /// `PUT /api/computers/{id}/agents/{fragment}` does.
+    /// A skills fragment `skills.paul` (paul's, kind `skills`, which his
+    /// agents reach acting for him), holding `files` (path, text).
+    pub fn skills(&self, files: &[(&str, &str)]) -> String {
+        let mut f = Frag { kind: "skills".into(), ..Frag::default() };
+        f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+        for (path, text) in files {
+            f.files.insert(path.to_string(), (format!("release:{}", text.len()), text.as_bytes().to_vec()));
+        }
+        self.with(|w| w.fragments.insert("skills.paul".into(), f));
+        "skills.paul".into()
+    }
+
     pub fn add_agent(&self, label: &str) {
         self.with(|w| {
             let (fragment, identity) = (format!("{label}.paul"), format!("id:{label}"));
@@ -548,35 +565,34 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
             None => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
+        // a fragment's status, as `fragment mcp` reads its operations
+        (Method::GET, ["status"]) => {
+            let operations: serde_json::Map<String, Value> = f.ops.iter().map(|(name, (decl, _))| (name.clone(), decl.clone())).collect();
+            answer(
+                StatusCode::OK,
+                json!({
+                    "name": fragment, "npub": "n", "owner": "id:paul", "role": role, "visibility": "members", "repo": "r",
+                    "pins": { "main": "a", "live": "a" }, "counts": { "files": 0, "events": 0, "members": f.members.len() },
+                    "code": { "sha": "a", "id": "app:x", "operations": operations, "error": null },
+                    "viewToken": null, "inboxToken": null, "urls": { "canonical": format!("https://{fragment}.x/"), "platform": "https://x" },
+                }),
+            )
+        }
         (Method::GET, ["files"]) => {
-            // a file's version moves with its bytes, as a commit's does
-            let version = |b: &Bytes| format!("c{}", &fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))[..12]);
-            let list: Vec<Value> = f.files.iter().map(|(p, b)| json!({ "path": p, "size": b.len(), "mode": "100644", "lastCommitSha": version(b), "machinery": false })).collect();
-            answer(StatusCode::OK, json!({ "ref": "main", "files": list }))
+            let files: Vec<Value> = f.files.iter().map(|(path, (version, bytes))| json!({ "path": path, "size": bytes.len(), "lastCommitSha": version })).collect();
+            answer(StatusCode::OK, json!({ "files": files }))
         }
-        (Method::GET, ["file"]) => {
-            let path = query(&q, "path").into_iter().next().unwrap_or_default();
-            match f.files.get(&path) {
-                Some(b) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
-                None => refuse(StatusCode::NOT_FOUND, "no such file"),
-            }
-        }
-        (Method::POST, ["files"]) => {
+        (Method::GET, ["file"]) => match query(&q, "path").first().and_then(|p| f.files.get(p)) {
+            Some((_, bytes)) => Response::builder().status(StatusCode::OK).body(http_body_util::Full::new(Bytes::from(bytes.clone()))).unwrap(),
+            None => refuse(StatusCode::NOT_FOUND, "no such file"),
+        },
+        (Method::POST, ["ops", op]) => {
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let files = w.fragments.get_mut(&fragment).unwrap();
-            for c in v["files"].as_array().cloned().unwrap_or_default() {
-                let path = c["path"].as_str().unwrap_or("").to_string();
-                if c["delete"] == json!(true) {
-                    files.files.remove(&path);
-                } else if let Some(t) = c["text"].as_str() {
-                    files.files.insert(path, Bytes::from(t.to_string()));
-                } else if let Some(b) = c["base64"].as_str() {
-                    use base64::Engine;
-                    files.files.insert(path, Bytes::from(base64::engine::general_purpose::STANDARD.decode(b).unwrap_or_default()));
-                }
+            match (f.ops.get(*op), v["id"].as_str()) {
+                (_, None) => refuse(StatusCode::BAD_REQUEST, "an operation's call names its id"),
+                (Some((_, result)), Some(_)) => answer(StatusCode::OK, json!({ "result": result, "replayed": false })),
+                (None, Some(_)) => net::refusal(StatusCode::NOT_FOUND, "unknown_operation", "no such operation"),
             }
-            files.commits.push(v);
-            answer(StatusCode::OK, json!({ "commit": format!("c{}", files.commits.len()) }))
         }
         _ => refuse(StatusCode::NOT_FOUND, "no such route"),
     }

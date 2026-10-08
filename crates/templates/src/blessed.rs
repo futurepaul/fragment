@@ -21,7 +21,7 @@ use crate::Template;
 use sha2::{Digest, Sha256};
 
 /// The templates the platform serves from its release.
-pub const BLESSED: [&str; 4] = ["agent", "chat", "brain", "skills"];
+pub const BLESSED: [&str; 5] = ["agent", "chat", "brain", "skills", "mind"];
 
 /// A blessed template's files, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the templates it names (build.rs:
@@ -32,6 +32,7 @@ pub fn template(name: &str) -> Option<Template> {
         "chat" => Some(crate::CHAT),
         "brain" => Some(crate::BRAIN),
         "skills" => Some(crate::SKILLS),
+        "mind" => Some(crate::MIND),
         _ => None,
     }
 }
@@ -290,6 +291,53 @@ mod tests {
         let body = text.strip_suffix("`;\n").expect("one template literal, to the end");
         assert!(!body.contains('`') && !body.contains("${"), "the guide holds no backtick or substitution");
         assert!(body.contains("raw/") && body.contains("fragment call <brain> search"), "it says how to ingest and search");
+    }
+
+    /// Goal: a mind (docs/optchat.md) is the contract its page, its MCP
+    /// server and goose code against. Method: its kind; a person's `say`
+    /// starts a turn, goose's reply on `chat` reaches `hands_said`, and its
+    /// steps on `work` run nothing (one run a hand-off, under the triggered
+    /// runs' hourly breaker); a new topic's `sort` record classifies; `log`
+    /// takes no posts (so it is never trimmed); its memory, its web and its
+    /// files are the template's own modules beside its prompts; and every operation
+    /// the contract names is declared, the five an MCP client sees
+    /// described.
+    #[test]
+    fn a_mind_is_its_contract() {
+        let m = manifest("mind").unwrap();
+        assert_eq!(m.kind(), fragment_proto::FragmentKind::Mind);
+        let runs = |channel: &str| m.triggers.iter().find(|t| t.on == fragment_proto::TriggerOn::Channel(channel.into())).map(|t| (t.run.as_str(), t.from));
+        use fragment_proto::IdentityKind::{Agent, Person};
+        assert_eq!(runs("say"), Some(("heard", Some(Person))));
+        assert_eq!(runs("chat"), Some(("hands_said", Some(Agent))));
+        assert_eq!(runs("work"), None, "goose's steps are the page's to follow");
+        assert!(m.channels["work"].post.is_some(), "goose claims its turns on work");
+        assert_eq!(runs("sort"), Some(("classify", None)));
+        assert!(m.channels["log"].post.is_none() && m.channels["sort"].post.is_none(), "log and sort are the app's alone");
+        assert!(m.channels["say"].signed_in, "say takes people signed in");
+        let c = code("mind").unwrap().expect("a mind carries code");
+        assert!(
+            ["applib/optmem.mjs", "applib/prompts.mjs", "applib/web.mjs", "applib/files.mjs"].iter().all(|m| c.modules.contains_key(*m)),
+            "{:?}",
+            c.modules.keys()
+        );
+        for op in [
+            "view", "zoom", "date", "search", "note", "threads", "thread", "context", "export", "memory", "node", "topics", "personas", "tasks", "task",
+            "status", "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop",
+            "topic_suggest", "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_view", "turn_end", "logged",
+            "pump_step", "task_open", "hands_reply", "topics_set", "import", "imported",
+        ] {
+            assert!(m.operations.contains_key(op), "the mind declares {op}");
+        }
+        assert_eq!(m.operations.len(), 41, "and nothing else");
+        // an import starts the compactor through its own channel, and a long
+        // history needs more than the platform's 16 MiB
+        assert_eq!(runs("compact"), Some(("pump", None)));
+        assert!(m.channels["compact"].post.is_none(), "compact is the app's alone");
+        assert_eq!(m.storage, Some(fragment_proto::limits::APP_DB_DECLARED_MAX_BYTES));
+        let raw: serde_json::Value = serde_json::from_slice(template("mind").unwrap().iter().find(|(p, _)| *p == "fragment.json").unwrap().1).unwrap();
+        let described: Vec<&str> = raw["operations"].as_object().unwrap().iter().filter(|(_, d)| d.get("description").is_some()).map(|(k, _)| k.as_str()).collect();
+        assert_eq!(described, ["date", "note", "search", "view", "zoom"], "the MCP tools");
     }
 
     /// Goal: what counts as code is what a fragment on a template may not

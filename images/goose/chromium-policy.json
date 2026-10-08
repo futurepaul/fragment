@@ -1,0 +1,13 @@
+{
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionsEnabled": false,
+  "PasswordManagerEnabled": false,
+  "TranslateEnabled": false,
+  "MetricsReportingEnabled": false,
+  "BackgroundModeEnabled": false,
+  "PrivacySandboxPromptEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false
+}

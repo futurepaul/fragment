@@ -1,16 +1,18 @@
-//! A fake display: an RFB 3.8 server on loopback TCP, as an agent's Xvnc
-//! is one to the screen (no authentication, a tiny framebuffer of one
-//! colour, its desktop named as Hermes' launcher names it,
-//! `hermes:<profile>`), recording each pointer event that reaches it, so a
-//! test sees whose input the screen let through. Started on demand, as a
-//! display the screen's start command starts.
+//! A fake display: an RFB 3.8 server on loopback TCP or a Unix socket, as
+//! an agent's Xvnc is one to the screen (no authentication, a tiny
+//! framebuffer of one colour, its desktop named by the test), recording
+//! each pointer event that reaches it, so a test sees whose input the
+//! screen let through. Started on demand, as a display the screen's start
+//! command starts.
 
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use std::path::Path;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixListener};
 
 /// Its framebuffer's size.
 const W: u16 = 4;
@@ -49,6 +51,27 @@ impl Display {
         Display { port, pointers, task }
     }
 
+    /// Listens on the Unix socket `path` (its directory made), naming its
+    /// desktop `name`; `port` is 0.
+    pub async fn start_unix(path: &Path, name: &str) -> Display {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).expect("the display listens");
+        let pointers = Arc::new(Mutex::new(Vec::new()));
+        let (seen, name) = (pointers.clone(), name.to_string());
+        let task = tokio::spawn(async move {
+            // bounded by the test: aborted when the display is dropped
+            loop {
+                let Ok((s, _)) = listener.accept().await else { return };
+                let (seen, name) = (seen.clone(), name.clone());
+                tokio::spawn(async move {
+                    let _ = serve(s, &name, &seen).await;
+                });
+            }
+        });
+        Display { port: 0, pointers, task }
+    }
+
     /// A free port on loopback, for a display started later on it.
     pub async fn free_port() -> u16 {
         TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port()
@@ -63,7 +86,7 @@ impl Display {
     }
 }
 
-async fn serve(mut s: TcpStream, name: &str, seen: &Mutex<Vec<(u16, u16)>>) -> std::io::Result<()> {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, name: &str, seen: &Mutex<Vec<(u16, u16)>>) -> std::io::Result<()> {
     s.write_all(b"RFB 003.008\n").await?;
     let mut version = [0u8; 12];
     s.read_exact(&mut version).await?;
@@ -119,7 +142,7 @@ async fn serve(mut s: TcpStream, name: &str, seen: &Mutex<Vec<(u16, u16)>>) -> s
     }
 }
 
-async fn skip(s: &mut TcpStream, n: usize) -> std::io::Result<()> {
+async fn skip<S: AsyncRead + Unpin>(s: &mut S, n: usize) -> std::io::Result<()> {
     let mut buf = vec![0u8; n];
     s.read_exact(&mut buf).await.map(|_| ())
 }

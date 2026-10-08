@@ -21,6 +21,7 @@
 //! there is a host fault, not a 404.
 //!
 //! People come from sign-in, and browsers hold sessions: `signin.rs`.
+//! The clients a person connects (MCP's OAuth) hold connections: `oauth.rs`.
 //! An operator's wipe of a person is recorded here, locks them while it
 //! runs, and ends with their rows: `wipe.rs`.
 
@@ -52,13 +53,15 @@ macro_rules! username_join {
 }
 
 pub(crate) mod calls;
+mod drafts;
+mod oauth;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
     Hold, SubjectOf,
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
-    Resolve, RevokeKey, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, Connected, Disconnect, EndSession, Exchange, FindClient, FindUsername, GrantCode,
+    Holder, IssueTokens, ListConnections, Logout, Lookup, Mint, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, RegisterClient,
+    Released, ReleaseUsername, Resolve, RevokeKey, RevokeToken, Session, SetPicture, StartDraft, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -106,7 +109,9 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
+        state.storage().sql().exec(oauth::SCHEMA, None).expect("the connected clients' schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
+        state.storage().sql().exec(drafts::SCHEMA, None).expect("the drafts' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -543,7 +548,7 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::Forbidden, "only an agent's owner holds it"));
         }
         if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::access::AGENT_ROLE_MAX) {
-            return Err(CellError::invalid("an agent is held at viewer or editor"));
+            return Err(CellError::invalid("an agent is held at viewer, contributor, or editor"));
         }
         let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec("UPDATE identities SET held = ? WHERE id = ?", vec![held, agent.id.as_str().into()])?;
@@ -717,6 +722,15 @@ impl RegistryCell {
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            RegisterClient::PATH => reply::<RegisterClient>(self.register_client(body(&bytes)?)),
+            FindClient::PATH => reply::<FindClient>(self.find_client(body(&bytes)?)),
+            GrantCode::PATH => reply::<GrantCode>(self.grant_code(body(&bytes)?).await),
+            IssueTokens::PATH => reply::<IssueTokens>(self.issue_tokens(body(&bytes)?).await),
+            RevokeToken::PATH => reply::<RevokeToken>(self.revoke_token(body(&bytes)?)),
+            ListConnections::PATH => reply::<ListConnections>(self.list_connections(body(&bytes)?)),
+            Disconnect::PATH => reply::<Disconnect>(self.disconnect(body(&bytes)?)),
+            Connected::PATH => reply::<Connected>(self.connected(body(&bytes)?)),
+            StartDraft::PATH => reply::<StartDraft>(self.start_draft(body(&bytes)?).await),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),

@@ -3,6 +3,9 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod import;
+mod mcp;
+mod mind;
 mod operator;
 mod sync;
 mod watch;
@@ -90,7 +93,13 @@ enum Cmd {
     },
     /// Create a fragment (empty, or from one of the platform's templates)
     Create {
-        name: String,
+        #[arg(required_unless_present = "draft")]
+        name: Option<String>,
+        /// A draft, with no login: the platform names it, it lives a day
+        /// with tight limits, and a person makes it theirs by signing in
+        /// at its claim link (this machine's key then acts as them)
+        #[arg(long, conflicts_with_all = ["name", "visibility", "title", "show_tokens"])]
+        draft: bool,
         /// public | link (default) | members
         #[arg(long)]
         visibility: Option<String>,
@@ -272,6 +281,20 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// Serve a fragment's described operations as tools to an MCP client
+    /// (Claude Code, goose, …) over stdio: its queries, and with --write its
+    /// mutations and jobs too. `claude mcp add <name> -- fragment mcp <fragment>`
+    Mcp {
+        name: String,
+        /// Serve its described mutations and jobs too (else its queries only)
+        #[arg(long)]
+        write: bool,
+    },
+    /// Your mind (docs/optchat.md): import other agents' chats into it
+    Mind {
+        #[command(subcommand)]
+        sub: MindCmd,
+    },
     /// Ask another of your agents (an agent: of its owner's) something, in
     /// a chat of the two of you and your owner, made the first time (a
     /// person: their direct chat with it), or in --chat; prints the chat
@@ -349,6 +372,43 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MindCmd {
+    /// Play your chats with other agents into your mind, oldest first, as
+    /// if they were said there: your words and the agents' final replies
+    /// (no tool calls, no repeated pastes), each chat a thread. Then follow
+    /// its compactor until every message is summarized. A rerun sends only
+    /// what the mind lacks.
+    Import {
+        /// Files or folders: Claude Code's ~/.claude/projects, Codex's
+        /// ~/.codex/sessions, claude.ai's export conversations.json, a
+        /// `hermes sessions export` file (or Hermes's older sessions folder)
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// claude-code | claude-export | codex | hermes | auto (each file's own)
+        #[arg(long, default_value = "auto")]
+        from: String,
+        /// Only chats begun on or after this date (YYYY-MM-DD, UTC)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only the first N chats (the oldest)
+        #[arg(long, value_name = "N")]
+        limit_conversations: Option<usize>,
+        /// Count what would go, estimate what compacting it costs, send nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// With --dry-run: print the first N chats as they would go, a line a message
+        #[arg(long, value_name = "N", requires = "dry_run")]
+        show: Option<usize>,
+        /// The mind to import into
+        #[arg(long, default_value = "mind")]
+        mind: String,
+        /// Return once the messages are in, without following the compactor
+        #[arg(long)]
+        no_wait: bool,
     },
 }
 
@@ -441,7 +501,7 @@ enum MembersCmd {
         name: String,
         /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
         who: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// Lend the member's agents nothing: only the person acts with it
@@ -459,7 +519,7 @@ enum InviteCmd {
     /// Make an invite (the owner, or their agent for them); prints the token once
     Create {
         name: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// how many people may join with it
@@ -734,9 +794,13 @@ fn error_body(e: &anyhow::Error) -> (Value, Code) {
 }
 
 fn main() {
-    let json_mode = json_env_flag();
+    let mut json_mode = json_env_flag();
     let result = match Cli::try_parse() {
-        Ok(cli) => run(cli),
+        Ok(cli) => {
+            // an MCP server's stdout is the protocol's alone: its failure goes to stderr
+            json_mode &= !matches!(cli.cmd, Cmd::Mcp { .. });
+            run(cli)
+        }
         // help and version (exit 0), and clap's own usage text for a person (exit 2)
         Err(e) if !json_mode || !e.use_stderr() => e.exit(),
         Err(e) => Err(usage(e.to_string())),
@@ -846,6 +910,26 @@ fn run(cli: Cli) -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Create { draft: true, template, .. } => {
+            // an agent's fragments are its owner's: it makes them as itself
+            if let Some(mode) = agent_mode()? {
+                return Err(usage(format!("{} is an agent: what it makes is its owner's (`fragment create <label>`), never a draft", mode.agent)));
+            }
+            // a draft is signed by a key no one holds: this machine's, made now if it has none
+            if load_config().secret_key.is_none() {
+                save_config("secret_key", &auth::Identity::generate().secret_hex())?;
+            }
+            let c = require_client(&cli.host, cli.verbose)?;
+            let v: Created = c.call_as(c.post_json("/api/drafts", &fragment_proto::MakeDraft { template })?)?;
+            let draft = v.draft.as_ref().ok_or_else(|| anyhow!("the host answered no draft for {}", v.name))?;
+            // its page's share link and its claim link are what a draft is for: shown
+            json_exit(j, &v);
+            println!("made draft {} (no account: until it is claimed it holds no secrets, fetches nothing, and runs no AI step)", v.name);
+            println!("  page:   {}", share_link(&v.canonical, &v.view_token));
+            println!("  claim:  {}", draft.claim);
+            println!("it is deleted at {} unless someone signs in at the claim link: claiming makes it theirs, and this machine's key theirs too", chrono_like(draft.expires_at as u64 / 1000));
+            return Ok(());
+        }
         Cmd::Guide => {
             print!("{GUIDE}");
             return Ok(());
@@ -909,6 +993,30 @@ fn run(cli: Cli) -> Result<()> {
             println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
+            return Ok(());
+        }
+        Cmd::Mind { sub: MindCmd::Import { paths, from, since, limit_conversations, dry_run, show, mind, no_wait } } => {
+            let from = match from.as_str() {
+                "auto" => None,
+                f => Some(import::Source::parse(f).ok_or_else(|| usage(format!("--from is claude-code, claude-export, codex, hermes or auto, not {f:?}")))?),
+            };
+            let since = since.as_deref().map(import::since).transpose().map_err(|e| usage(e.to_string()))?;
+            let o = mind::Options { paths, from, since, limit: limit_conversations, mind, wait: !no_wait };
+            let (convs, found) = mind::read(&o)?;
+            if dry_run {
+                json_exit(j, &mind::report(&convs, &found));
+                mind::print_report(&convs, &found);
+                mind::show(&convs, show.unwrap_or(0));
+                return Ok(());
+            }
+            let c = require_client(&cli.host, cli.verbose)?;
+            let (conversations, messages) = mind::send(&c, &o, &convs, j)?;
+            let status = if o.wait { Some(mind::wait(&c, &o.mind, j)?) } else { None };
+            json_exit(j, &json!({ "conversations": conversations, "messages": messages, "status": status }));
+            println!("imported {messages} messages of {conversations} chats into {}", o.mind);
+            if !o.wait {
+                println!("its compactor summarizes them now: `fragment call {} status` shows how far", o.mind);
+            }
             return Ok(());
         }
         _ => {}
@@ -983,12 +1091,13 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("revoked {npub}");
         }
-        Cmd::Create { name, visibility, show_tokens, template, title } => {
+        Cmd::Create { name, visibility, show_tokens, template, title, draft: _ } => {
             let visibility = match visibility.as_deref() {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template, title };
+            let name = name.ok_or_else(|| usage("name the fragment: fragment create <label>"))?;
+            let body = fragment_proto::CreateFragment { name, visibility, template, title };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
@@ -1426,7 +1535,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             MembersCmd::Add { name, who, role, people_only } => {
                 let who = member_named(who)?;
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
@@ -1448,7 +1557,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Invite { sub } => match sub {
             InviteCmd::Create { name, role, uses, ttl } => {
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
                 let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
                 // the create is the one answer that carries the token
@@ -1534,6 +1643,10 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: post {id} had already appended this record)");
             }
         }
+        Cmd::Mcp { name, write } => {
+            // stdout carries the protocol's messages and nothing else
+            mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
+        }
         Cmd::Ask { agent, text, chat, wait, id } => {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
             let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
@@ -1601,7 +1714,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Mind { .. } => unreachable!(),
     }
     Ok(())
 }

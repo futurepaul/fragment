@@ -1,0 +1,19 @@
+{
+  "name": "hook",
+  "operations": {
+    "heard": { "kind": "mutation" },
+    "board": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } },
+    "forget": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["source", "name"],
+        "additionalProperties": false,
+        "properties": { "source": { "type": "string", "maxLength": 200 }, "name": { "type": "string", "maxLength": 200 } }
+      }
+    }
+  },
+  "triggers": [{ "channel": "inbox", "run": "heard" }],
+  "meta": { "title": "Hook", "description": "CI runs, deploys and payments, live as their webhooks arrive, with a push when one fails." }
+}

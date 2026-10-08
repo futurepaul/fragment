@@ -71,7 +71,7 @@
 //!   on its card (at most the card's life), so a card expires with its
 //!   runtime there and its turn ends as the runtime ends it, never cut by an
 //!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
-//!   one left Hermes to meet the next message with the cut request).
+//!   one left its runtime to meet the next message with the cut request).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -971,8 +971,8 @@ impl Engine {
                     return;
                 }
                 t.stop_requested = true;
-                // a Stop is its question's answer too (Relay says "Stop." to
-                // a clarify waiting on words): the next message is a turn
+                // a Stop is its question's answer too: the next message is a
+                // turn
                 t.asking = false;
                 let open: Vec<String> = t.prompts.iter().filter(|p| !p.closed).map(|p| p.id.clone()).collect();
                 for p in t.prompts.iter_mut() {
@@ -1053,7 +1053,10 @@ impl Engine {
             Event::Draft { turn, text } => {
                 let t = &self.state.turns[&turn];
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
-                self.draft(&agent, &fragment, &turn, Some(records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES)));
+                // an empty draft is none: the words it showed went elsewhere
+                // (a step's, as goose's before a tool call)
+                let text = (!text.is_empty()).then(|| records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES));
+                self.draft(&agent, &fragment, &turn, text);
             }
             Event::Reply { turn, part, text } => self.reply(&turn, part, Some(text), None),
             Event::Attachment { turn, part, file } => self.reply(&turn, part, None, Some(file)),

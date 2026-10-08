@@ -1,8 +1,8 @@
 # fragment-next
 
 Fragment is the product: stateful, multiplayer web apps published from
-the CLI. Agents are fragments a computer of your own runs (today, Hermes
-profiles; docs/computers.md).
+the CLI. Agents are fragments a computer of your own runs (on this
+branch, goose: docs/optchat.md; docs/computers.md).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
@@ -11,8 +11,8 @@ cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
 `wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
 took Hermes, computers, the desktop, the personal agent's chat,
 sandcastle, and the fleet's deploy path off master; they live at the tag
-`celld-final`. Computers came back in its phase 4, Hermes as their
-image's agent runtime.
+`celld-final`. Computers came back in its phase 4; on branch
+`claude/optchat` their image's agent runtime is goose (docs/optchat.md).
 
 ## Read first
 
@@ -38,8 +38,8 @@ image's agent runtime.
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
-   (its connector went at the cut).
+   `docs/optchat.md` — the spike's contract on this branch (one memory,
+   every chat; goose as the hands).
 3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
 4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
@@ -85,23 +85,22 @@ prebuilt bundle is in the debt ledger).
   builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
-  auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, isolation, frames, ops, public,
+  auth, create, lockdown, keys, members, identities, signin, drafts, levers, secrets,
+  delegation, files, deploy, templates, when, wall, board, split, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
-  hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
+  brain, watcher, brief, hook, wiki, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
   file `--operator-key-file <file>` names (its npub in the config's
-  `operators`; a skip without one).
+  `operators`; a skip without one). `drafts` sends its own client
+  addresses (`CF-Connecting-IP`), so it runs on a local node only.
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
-  in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
-  and runs our Hermes image (3.8 GB), so it runs only by name
-  (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
+  in Docker, and `chat`, `frames` and `shell-ui` drive Chrome. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
-  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
-  notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
+  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, mcp (its settings check),
+  notes, when, wall, board and split sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section;
   frames, and computers' frame checks, start one of their own that
   blocks third-party cookies, as Safari does);
@@ -154,12 +153,7 @@ prebuilt bundle is in the debt ledger).
   starts), and a section that needs what a preview lacks is
   a skip that says why. Paid calls (models, AI steps) are lent from the
   run's budget (default 60), each person's capped by their ledger, and the
-  run ends saying what it spent. `agent-smoke` runs only here, and only
-  by name (`--only agent-smoke`): a real agent (our Hermes image on its
-  real model, `Need::RealAgent`) and Chrome, through the flows a person
-  uses (a first reply, the CLI, an app, the desktop and its screen, an
-  approval, a sleep and a wake), for about half an hour and up to 50 paid
-  calls (crates/e2e/src/lanes/agent_smoke.rs). `--dry-run` prints the plan (base URL,
+  run ends saying what it spent. `--dry-run` prints the plan (base URL,
   what runs, what is skipped and why) and calls nothing. A preview is
   shared (several sessions run on it at once), so a sweep is one run's
   unless told otherwise: `--sweep` deletes the fragments of the last run
@@ -204,8 +198,18 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, and `calories`: a channel trigger and a text step); the
-  shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`, `calories`: a channel trigger and a text step, `when`: `public` operations,
+  live, presence, and `wall`: a channel people post to, live, anonymous
+  posters held to the public call budget, and `board`: live, presence, a push
+  to the person a card is given to, and `watch`: a cron job that fetches
+  pages and pushes their changes, and `brief`: a cron job that fetches
+  feeds and sums them up with a text step, and `hook`: the inbox's
+  trigger as a mutation, a live board, and push, and `wiki`: files as
+  the state, edited by a mutation or a synced folder, followed through a
+  file trigger, and `split`: per-person rows summed in SQL, a text step
+  that reads a receipt photo); the shell's catalog offers `todo`,
+  `inbox`, `when`, `wall`, `board`, `watch`, `brief`, `hook`, `wiki`,
+  `split` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store
@@ -232,13 +236,13 @@ prebuilt bundle is in the debt ledger).
   `crates/fakes` (code.storage, Workers AI, WorkOS, a push service),
 
   `crates/devstack`, `crates/e2e`.
-- `images/` (the computer images: the bridge, the stub, our Hermes image;
+- `images/` (the computer images: the bridge, the stub, the goose image;
   docs/bridge.md) is its own workspace: `cargo test --workspace` and
   `cargo clippy --workspace --all-targets -- -D warnings` there (CI:
   `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
-  docker -- --ignored` builds both images and runs them in Docker
-  (linux/amd64) against a fake API and a scripted model, real Hermes
-  included. The e2e's computer sections run the stub image under
+  docker -- --ignored` builds the images and runs them in Docker
+  (linux/amd64) against a fake API and a scripted model. The e2e's
+  computer sections run the stub image under
   `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux. Its caches

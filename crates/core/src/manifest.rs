@@ -31,8 +31,55 @@ pub struct Manifest {
     /// the platform's release serves it, and the fragment's own manifest
     /// names only its face (`on_template`).
     pub template: Option<String>,
+    /// The app's database cap it declares (`storage.maxBytes`), from
+    /// `limits::APP_DB_MAX_BYTES` to `limits::APP_DB_DECLARED_MAX_BYTES`;
+    /// `None`: the platform's.
+    pub storage: Option<u64>,
+    /// What the platform lends its code beyond the fragment itself
+    /// (`capabilities`): only a blessed template's release declares any
+    /// (`own_code`).
+    pub capabilities: Vec<Capability>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
+}
+
+/// A power beyond the fragment itself that its code asks the platform for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Capability {
+    /// Its jobs act as its owner on the owner's other fragments
+    /// (`job.owner.*`, `crate::access::owner_lent`).
+    Owner,
+}
+
+impl Capability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Owner => "owner",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Capability> {
+        [Capability::Owner].into_iter().find(|c| c.as_str() == s)
+    }
+}
+
+/// A manifest whose code is the fragment's own (no `template`) asks for no
+/// capability: what one lends is the owner's reach, which only the
+/// platform's own release code (a blessed template, decision 40) is
+/// trusted with, since whoever may change a fragment's code (an editor, an
+/// agent) would hold it.
+pub fn own_code(m: &Manifest) -> Result<(), String> {
+    assert!(m.template.is_none(), "own_code is for a fragment that runs its own code");
+    match m.capabilities.as_slice() {
+        [] => Ok(()),
+        caps => {
+            let names: Vec<&str> = caps.iter().map(|c| c.as_str()).collect();
+            Err(format!(
+                "capabilities ({}) are the platform's to lend, to a blessed template's release alone: a fragment with its own code declares none",
+                names.join(", ")
+            ))
+        }
+    }
 }
 
 impl Manifest {
@@ -58,6 +105,8 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("operations", !own.operations.is_empty()),
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
+        ("storage", own.storage.is_some()),
+        ("capabilities", !own.capabilities.is_empty()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -101,8 +150,8 @@ fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
 
 fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("operations.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral")) {
-        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral" | "description")) {
+        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral, description)"));
     }
     let kind = match obj.get("kind").and_then(Value::as_str) {
         Some("query") => OpKind::Query,
@@ -118,7 +167,7 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some(r) => r
             .as_str()
             .and_then(Role::parse)
-            .ok_or_else(|| format!("operations.{name}.role must be public, viewer, editor, or owner"))?,
+            .ok_or_else(|| format!("operations.{name}.role must be public, viewer, contributor, editor, or owner"))?,
     };
     let input = match obj.get("input") {
         None => None,
@@ -134,7 +183,15 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some(Value::Bool(true)) => return Err(format!("operations.{name}.ephemeral is for a mutation: it keeps no ledger row")),
         Some(_) => return Err(format!("operations.{name}.ephemeral must be true or false")),
     };
-    Ok(OpDecl { kind, role, input, ephemeral })
+    let max = limits::OP_DESCRIPTION_MAX_CHARS;
+    let description = match obj.get("description") {
+        None => None,
+        Some(Value::String(d)) if d.trim().is_empty() => return Err(format!("operations.{name}.description is empty: say what it does, or leave it out")),
+        Some(Value::String(d)) if d.chars().count() > max => return Err(format!("operations.{name}.description is longer than {max} characters")),
+        Some(Value::String(d)) => Some(d.clone()),
+        Some(_) => return Err(format!("operations.{name}.description must be a string")),
+    };
+    Ok(OpDecl { kind, role, input, ephemeral, description })
 }
 
 /// One entry of `channels`: who reads it (default `viewer`), who may post
@@ -148,7 +205,7 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     }
     let role = |key: &str| -> Result<Option<Role>, String> {
         obj.get(key)
-            .map(|r| r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.{key} must be public, viewer, editor, or owner")))
+            .map(|r| r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.{key} must be public, viewer, contributor, editor, or owner")))
             .transpose()
     };
     let read = role("read")?.unwrap_or(Role::Viewer);
@@ -281,7 +338,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     }
     match obj.get("kind") {
         None | Some(Value::Null) => {}
-        Some(Value::String(k)) => m.kind = Some(FragmentKind::parse(k).ok_or_else(|| format!("kind is app, chat, agent, brain or skills, not {k:?}"))?),
+        Some(Value::String(k)) => m.kind = Some(FragmentKind::parse(k).ok_or_else(|| format!("kind is app, chat, agent, brain, skills or mind, not {k:?}"))?),
         Some(_) => return Err("kind must be a string".into()),
     }
     match obj.get("template") {
@@ -289,18 +346,51 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         Some(Value::String(t)) if valid_template_name(t) => m.template = Some(t.clone()),
         Some(_) => return Err("template names a blessed template (^[a-z][a-z0-9-]{0,31}$)".into()),
     }
+    match obj.get("storage") {
+        None | Some(Value::Null) => {}
+        Some(v) => m.storage = Some(storage(v)?),
+    }
+    match obj.get("capabilities") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            for c in list {
+                let c = c.as_str().and_then(Capability::parse).ok_or_else(|| format!("capabilities names owner, not {c}"))?;
+                if m.capabilities.contains(&c) {
+                    return Err(format!("capabilities names {} twice", c.as_str()));
+                }
+                m.capabilities.push(c);
+            }
+        }
+        Some(_) => return Err("capabilities must be an array: [\"owner\"]".into()),
+    }
     Ok(m)
+}
+
+/// `storage`: `{"maxBytes": n}`, the app's database cap, from the
+/// platform's (16 MiB) to the most an app may declare (1 GiB).
+fn storage(v: &Value) -> Result<u64, String> {
+    let (lo, hi) = (limits::APP_DB_MAX_BYTES, limits::APP_DB_DECLARED_MAX_BYTES);
+    let obj = v.as_object().ok_or("storage must be an object: {\"maxBytes\": n}")?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "maxBytes") {
+        return Err(format!("storage has an unknown key {k:?} (maxBytes)"));
+    }
+    match obj.get("maxBytes").and_then(Value::as_u64) {
+        Some(n) if (lo..=hi).contains(&n) => Ok(n),
+        _ => Err(format!("storage.maxBytes is the app database's cap in bytes, from {lo} to {hi}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn kinds_and_templates() {
         assert_eq!(parse(b"{}").unwrap().kind(), FragmentKind::App);
         assert_eq!(parse(br#"{"kind":"brain"}"#).unwrap().kind(), FragmentKind::Brain);
         assert_eq!(parse(br#"{"kind":"skills"}"#).unwrap().kind(), FragmentKind::Skills);
+        assert_eq!(parse(br#"{"kind":"mind"}"#).unwrap().kind(), FragmentKind::Mind);
         assert!(parse(br#"{"kind":"bot"}"#).is_err());
         assert!(parse(br#"{"template":"Chat"}"#).is_err());
         let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat","description":"d"},"channels":{"chat":{"read":"public","post":"viewer"}}}"#).unwrap();
@@ -321,16 +411,25 @@ mod tests {
     fn operations_and_defaults() {
         let m = parse(br#"{"name":"t","visibility":"public","editors":[],"workflows":[],
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
-            "sign":{"kind":"mutation","role":"public"}},"meta":{"title":"T"}}"#)
+            "sign":{"kind":"mutation","role":"public"},"log":{"kind":"mutation","role":"contributor"}},"meta":{"title":"T"}}"#)
         .unwrap();
-        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false });
+        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false, description: None });
         assert_eq!(m.operations["add"].role, Role::Editor);
         assert_eq!(m.operations["add"].input, Some(serde_json::json!({"type":"object"})));
         assert_eq!(m.operations["sign"].role, Role::Public);
+        assert_eq!(m.operations["log"].role, Role::Contributor);
+        let e = parse(br#"{"operations":{"log":{"kind":"mutation","role":"user"}}}"#).unwrap_err();
+        assert_eq!(e, "operations.log.role must be public, viewer, contributor, editor, or owner");
         let ops = parse(br#"{"operations":{"frame":{"kind":"mutation","ephemeral":true},"add":{"kind":"mutation","ephemeral":false}}}"#).unwrap().operations;
         assert!(ops["frame"].ephemeral && !ops["add"].ephemeral, "a mutation may keep no ledger row");
         for bad in [&br#"{"operations":{"q":{"kind":"query","ephemeral":true}}}"#[..], br#"{"operations":{"j":{"kind":"job","ephemeral":true}}}"#, br#"{"operations":{"m":{"kind":"mutation","ephemeral":1}}}"#] {
             assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".ephemeral"), "only a mutation is ephemeral, with a boolean");
+        }
+        let said = parse(br#"{"operations":{"add":{"kind":"mutation","description":"Adds a todo."}}}"#).unwrap().operations;
+        assert_eq!(said["add"].description.as_deref(), Some("Adds a todo."));
+        let long = format!(r#"{{"operations":{{"add":{{"kind":"mutation","description":"{}"}}}}}}"#, "x".repeat(limits::OP_DESCRIPTION_MAX_CHARS + 1));
+        for bad in [&br#"{"operations":{"add":{"kind":"mutation","description":" "}}}"#[..], br#"{"operations":{"add":{"kind":"mutation","description":3}}}"#, long.as_bytes()] {
+            assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".description"), "a description is 1 to the limit's characters");
         }
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
@@ -343,13 +442,61 @@ mod tests {
             "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
             {"files":"notes/**","run":"digest"}]}"#)
         .unwrap();
-        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false });
+        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
         assert_eq!(m.triggers.len(), 4);
         assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
         assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
         let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
         assert_eq!(back, m.triggers[0], "stored triggers read back");
+    }
+
+    /// Goal: an operation may say what it does, for an agent (`fragment
+    /// mcp` serves the ones that do as tools), within its bounds. Method:
+    /// valid descriptions (the longest, counted in characters, not bytes)
+    /// read back from the wire as status serves them, an operation without
+    /// one says nothing of it, and each bad one is refused naming why.
+    #[test]
+    fn an_operation_may_describe_itself() {
+        let max = limits::OP_DESCRIPTION_MAX_CHARS;
+        let longest = "é".repeat(max);
+        let m = parse(
+            json!({ "operations": {
+                "zoom": { "kind": "query", "description": "Expand a part of the view." },
+                "note": { "kind": "mutation", "description": longest },
+                "pump": { "kind": "job" },
+            } })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(m.operations["zoom"].description.as_deref(), Some("Expand a part of the view."));
+        assert_eq!(m.operations["note"].description.as_ref().map(|d| d.chars().count()), Some(max), "the limit is characters: {max} two-byte ones pass");
+        assert_eq!(m.operations["pump"].description, None);
+        let wire = serde_json::to_value(&m.operations).unwrap();
+        assert_eq!(wire["zoom"], json!({ "kind": "query", "role": "viewer", "description": "Expand a part of the view." }));
+        assert!(wire["pump"].get("description").is_none(), "an operation without one says nothing of it: {}", wire["pump"]);
+        let back: BTreeMap<String, OpDecl> = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, m.operations, "status's operations read back");
+        let older: OpDecl = serde_json::from_value(json!({ "kind": "query", "role": "viewer" })).unwrap();
+        assert_eq!(older.description, None, "a host before descriptions reads as none");
+        // a blessed template's descriptions are its fragments'
+        let blessed = parse(br#"{"kind":"brain","operations":{"zoom":{"kind":"query","description":"z"}}}"#).unwrap();
+        let on = on_template(&parse(br#"{"template":"brain"}"#).unwrap(), &blessed).unwrap();
+        assert_eq!(on.operations["zoom"].description.as_deref(), Some("z"));
+        for (bad, says) in [
+            (json!(""), "operations.q.description is empty"),
+            (json!(" \n\t"), "operations.q.description is empty"),
+            (json!("x".repeat(max + 1)), "operations.q.description is longer than 1024 characters"),
+            (json!(7), "operations.q.description must be a string"),
+            (json!(null), "operations.q.description must be a string"),
+            (json!(["a"]), "operations.q.description must be a string"),
+        ] {
+            let manifest = json!({ "operations": { "q": { "kind": "query", "description": bad } } }).to_string();
+            let why = parse(manifest.as_bytes()).expect_err(&manifest);
+            assert!(why.contains(says), "{why}");
+        }
+        assert!(parse(br#"{"operations":{"q":{"kind":"query","desc":"x"}}}"#).unwrap_err().contains("description)"), "the unknown-key refusal names it");
     }
 
     /// Goal: a channel trigger may start runs only for one kind of poster
@@ -383,11 +530,14 @@ mod tests {
         let control = parse(br#"{"channels":{"control":{"post":"viewer","signedIn":true}}}"#).unwrap().channels["control"].clone();
         assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true }, "a post role for signed-in posters only");
         assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
+        let log = parse(br#"{"channels":{"log":{"post":"contributor"}}}"#).unwrap().channels["log"].clone();
+        assert_eq!(log, ChannelDecl { read: Role::Viewer, post: Some(Role::Contributor), signed_in: false }, "viewers read what contributors post");
         for (bad, says) in [
+            (&br#"{"channels":{"chat":{"read":"contributor","post":"viewer"}}}"#[..], "channels.chat.post (viewer) is looser than its read (contributor)"),
             (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
             (br#"{"channels":{"chat":{"post":"public"}}}"#, "channels.chat.post (public) is looser than its read (viewer)"),
             (br#"{"channels":{"chat":{"read":"owner","post":"editor"}}}"#, "channels.chat.post (editor) is looser than its read (owner)"),
-            (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, editor, or owner"),
+            (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, contributor, editor, or owner"),
             (br#"{"channels":{"chat":{"post":true}}}"#, "channels.chat.post must be public"),
             (br#"{"channels":{"chat":{"signedIn":true}}}"#, "channels.chat.signedIn is about who may post: give it a post role"),
             (br#"{"channels":{"chat":{"post":"viewer","signedIn":"yes"}}}"#, "channels.chat.signedIn must be true or false"),
@@ -425,6 +575,49 @@ mod tests {
             br#"{"channels":{"chat":{"write":"public"}}}"#,
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    /// Goal: an app may declare a larger database, within the platform's
+    /// bounds, and a fragment on a template takes its template's. Method:
+    /// declarations at, inside and past each bound.
+    #[test]
+    fn storage_declares_the_database_cap() {
+        let (lo, hi) = (limits::APP_DB_MAX_BYTES, limits::APP_DB_DECLARED_MAX_BYTES);
+        assert_eq!(parse(b"{}").unwrap().storage, None, "none declared: the platform's");
+        for n in [lo, 256 * 1024 * 1024, hi] {
+            let m = parse(json!({ "storage": { "maxBytes": n } }).to_string().as_bytes()).unwrap();
+            assert_eq!(m.storage, Some(n));
+        }
+        for bad in [json!({ "maxBytes": lo - 1 }), json!({ "maxBytes": hi + 1 }), json!({ "maxBytes": "1 GiB" }), json!({}), json!({ "maxBytes": lo, "rows": 1 }), json!(1024)] {
+            let m = json!({ "storage": bad });
+            assert!(parse(m.to_string().as_bytes()).unwrap_err().contains("storage"), "{m}");
+        }
+        let blessed = parse(json!({ "kind": "mind", "storage": { "maxBytes": hi } }).to_string().as_bytes()).unwrap();
+        let own = parse(br#"{"template":"mind"}"#).unwrap();
+        assert_eq!(on_template(&own, &blessed).unwrap().storage, Some(hi), "a template's fragment runs with its template's cap");
+        let mine = parse(json!({ "template": "mind", "storage": { "maxBytes": lo } }).to_string().as_bytes()).unwrap();
+        assert!(on_template(&mine, &blessed).unwrap_err().contains("storage"), "and declares none of its own");
+    }
+
+    /// Goal: a capability is the platform's to lend to its own release
+    /// code alone. Method: a blessed template's declaration runs on its
+    /// fragments; the same declared by a fragment on it, or by one with its
+    /// own code (a fork), is refused; unknown and repeated names are too.
+    #[test]
+    fn only_a_blessed_templates_release_declares_a_capability() {
+        assert_eq!(parse(b"{}").unwrap().capabilities, [], "none unless declared");
+        let blessed = parse(br#"{"kind":"mind","capabilities":["owner"]}"#).unwrap();
+        assert_eq!(blessed.capabilities, [Capability::Owner]);
+        let on = on_template(&parse(br#"{"template":"mind"}"#).unwrap(), &blessed).unwrap();
+        assert_eq!(on.capabilities, [Capability::Owner], "a template's fragment runs with its template's");
+        let asks = parse(br#"{"template":"mind","capabilities":["owner"]}"#).unwrap();
+        assert!(on_template(&asks, &blessed).unwrap_err().contains("capabilities"), "and declares none of its own");
+        let fork = parse(br#"{"kind":"mind","capabilities":["owner"],"operations":{"x":{"kind":"job"}}}"#).unwrap();
+        assert!(own_code(&fork).unwrap_err().contains("blessed template"), "a fragment with its own code is refused it");
+        assert_eq!(own_code(&parse(br#"{"operations":{"x":{"kind":"job"}}}"#).unwrap()), Ok(()));
+        for bad in [json!({ "capabilities": ["root"] }), json!({ "capabilities": ["owner", "owner"] }), json!({ "capabilities": "owner" }), json!({ "capabilities": [7] })] {
+            assert!(parse(bad.to_string().as_bytes()).unwrap_err().contains("capabilities"), "{bad}");
         }
     }
 }

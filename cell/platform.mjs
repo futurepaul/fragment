@@ -48,6 +48,7 @@ import {
   EFFECTS_MAX,
   RESULT_MAX_BYTES,
   APP_DB_MAX_BYTES,
+  APP_DB_DECLARED_MAX_BYTES,
   FILE_WRITE_MAX_BYTES,
   FILE_WRITES_MAX,
   PATH_MAX_BYTES,
@@ -63,9 +64,16 @@ import {
 } from "./limits.js";
 
 const LEDGER = "_fragment_ops";
-// A mutation that leaves the app's database over APP_DB_MAX_BYTES rolls
-// back.
+// A mutation that leaves the app's database over its cap rolls back.
 const STORAGE_FULL = Symbol("storage_full");
+
+// The app's database cap: APP_DB_MAX_BYTES, or the larger one its live
+// fragment.json declares (`storage.maxBytes`), as the supervisor names it
+// in a mutation's meta, at most APP_DB_DECLARED_MAX_BYTES.
+function dbMax(meta) {
+  const n = meta.dbMax;
+  return Number.isSafeInteger(n) && n >= APP_DB_MAX_BYTES && n <= APP_DB_DECLARED_MAX_BYTES ? n : APP_DB_MAX_BYTES;
+}
 // Half of a character (a lone surrogate, as from cutting a string inside an
 // emoji) in JSON text: JSON.stringify escapes one as \udXXX (lowercase), and
 // the supervisor's JSON reader refuses it, so it is refused here while the
@@ -341,9 +349,12 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
-  // for each (docs/ledger.md):
-  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, tier, usage }
+  // decisions (Clef) and images (FLUX.1 [schnell]) on Workers AI; the
+  // owner's ledger pays for each (docs/ledger.md):
+  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
+  //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage }
+  //     (with a draft it streams, its text so far that channel's draft)
+  //   ai.decide({ model: "clef" | "clef-flash", state, questions, images? }) → { answers, model, usage }
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
   //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
@@ -351,6 +362,7 @@ class Job {
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
     return {
       text: (opts) => step("ai.text", clean(opts)),
+      decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };
@@ -379,6 +391,47 @@ class Job {
 
   presence() {
     return this.#step("presence", {}).then((v) => v.here);
+  }
+
+  // One of the fragment's blobs (a page's upload, a chat's attachment), by
+  // its hash: { sha256, size, text, cut }, `text` its first 64 KiB when
+  // they are UTF-8, else null.
+  blob(sha256) {
+    if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) throw new TypeError("job.blob(sha256): a blob's SHA-256, 64 lowercase hex");
+    return this.#step("blob", { sha256 });
+  }
+
+  // A page of the fragment's own records on one of its channels
+  // (fragment.json's), as a reader with the run's role reads them:
+  // { records: [{ seq, at, principal, kind, body }], next }, at most `limit`
+  // (200) after `after` (the first kept on), only those whose body's `turn`
+  // is `turn` when named; `next` is the next page's `after`, null at the
+  // channel's newest record.
+  records(channel, { after, limit, turn } = {}) {
+    if (!this.#channels.has(channel)) throw new Error(`channel ${channel} is not declared in fragment.json`);
+    const args = { channel };
+    if (after !== undefined) args.after = after;
+    if (limit !== undefined) args.limit = limit;
+    if (turn !== undefined) args.turn = turn;
+    return this.#step("records", args);
+  }
+
+  // As the fragment's owner, on their other fragments: only a blessed
+  // template that declares the `owner` capability, while no one but its
+  // owner reads or drives it (docs/api.md, Jobs). `fragments()` → [{ name,
+  // title, kind, role, url, operations: [{ name, kind, description, input
+  // }] }], the described operations the owner may call in each;
+  // `call(fragment, op, input)` → { result, url }, one of them, as the
+  // owner, applied once however often its step is tried.
+  get owner() {
+    const step = (kind, args) => this.#step(kind, args);
+    return {
+      fragments: () => step("owner.fragments", {}).then((v) => v.fragments),
+      call: (fragment, op, input = {}) => {
+        if (typeof fragment !== "string" || typeof op !== "string") throw new TypeError("job.owner.call(fragment, op, input): a fragment's name and an operation's");
+        return step("owner.call", { fragment, op, input: JSON.parse(JSON.stringify(input ?? {})) });
+      },
+    };
   }
 
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.
@@ -483,6 +536,7 @@ export class App extends AuthorApp {
       throw new Error("the supervisor names the run and the ledger's window");
     }
     const now = Date.now();
+    const cap = dbMax(meta);
     return this.ctx.storage.transactionSync(() => {
       const prior = ephemeral ? undefined : sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
       if (prior && prior.at >= now - meta.ledgerMs) {
@@ -502,7 +556,7 @@ export class App extends AuthorApp {
       const effects = JSON.stringify(effectsOf(call));
       if (ephemeral) {
         if (effects !== "[]") throw new Error(`${name} is ephemeral (fragment.json): with no ledger row to apply them from, it may not publish, push, or write files`);
-        if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
+        if (sql.databaseSize > cap) throw STORAGE_FULL;
         return mutated(false, null, effects, text);
       }
       if (LONE_SURROGATE.test(effects)) {
@@ -513,7 +567,7 @@ export class App extends AuthorApp {
       if (sql.exec("SELECT last_insert_rowid() AS r").one().r % 100 === 0) {
         sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - meta.ledgerMs);
       }
-      if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
+      if (sql.databaseSize > cap) throw STORAGE_FULL;
       return mutated(false, meta.run, effects, text);
     });
   }

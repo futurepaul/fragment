@@ -260,13 +260,11 @@ pub fn run(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> Re
 
 /// What a hosted run would have: levers when it has a secret, computers
 /// and models when its deployment offers them (models only with paid calls
-/// to lend), a real agent when it has both (its computers run the
-/// deployment's own image on its real model), and Chrome when it is
-/// installed.
+/// to lend, and real: a preview's), and Chrome when it is installed.
 fn offers(hosted: &Hosted) -> Offers {
     let models = hosted.models && hosted.max_paid_calls > 0;
     let operator = hosted.operator_key_file.is_some();
-    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models, operator }
+    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, models, real_models: models, chrome: browser::chrome().is_some(), operator }
 }
 
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
@@ -333,7 +331,7 @@ pub fn plan(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted) -> 
 pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> String {
     let o = offers(hosted);
     let offered: Vec<&str> =
-        [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
+        [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.real_models, "real-models"), (o.chrome, "chrome"), (o.operator, "operator")]
             .iter()
             .filter(|(on, _)| *on)
             .map(|(_, n)| *n)

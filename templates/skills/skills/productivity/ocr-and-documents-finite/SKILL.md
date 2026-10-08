@@ -5,9 +5,8 @@ version: 2.3.0
 author: Hermes Agent
 license: MIT
 metadata:
-  hermes:
-    tags: [PDF, Documents, Research, Arxiv, Text-Extraction, OCR]
-    related_skills: []
+  tags: [PDF, Documents, Research, Arxiv, Text-Extraction, OCR]
+  related_skills: []
 ---
 
 # PDF & Document Extraction

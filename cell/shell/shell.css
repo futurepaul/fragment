@@ -336,6 +336,8 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-value { min-width: 0; overflow-wrap: anywhere; }
 .settings-warning { color: var(--danger-text); font-size: 14px; }
 .settings-section .row { width: 100%; }
+/* the mind's settings, its page's own, framed: as tall as it says (shell.js `mindSection`) */
+.settings-section .mind-settings { display: block; width: 100%; height: 640px; margin-top: 4px; border: 0; background: transparent; }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .settings-actions form { margin: 0; }
 .settings-value.mono, .settings-section code { font: 500 12.5px/1.6 var(--font-mono); }
@@ -374,6 +376,37 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .creating-steps li.failed::before { border-color: var(--danger-text); }
 @keyframes creating-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .creating-steps li.doing::before { animation: none; } }
+
+/* the sidebar's middle scrolls as one: the mind, the agents, the apps */
+.sidebar-scroll { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px; margin: 0 -6px; padding: 0 6px; overflow-y: auto; }
+.sidebar-scroll .rows { max-height: none; overflow: visible; }
+.agents { display: flex; flex-direction: column; }
+#chats { flex: none; min-height: 0; }
+/* the mind (shell.js `renderMind`): its personas, a face and a name, the
+   default marked; its screens; its recent threads, one line each */
+.mind-nav { display: flex; flex-direction: column; gap: 2px; }
+.mind-nav .section-label:first-child { padding-top: 2px; }
+.persona-face { display: inline-grid; place-items: center; width: 26px; height: 26px; flex: none; border-radius: 50%; background: var(--surface-muted); box-shadow: inset 0 0 0 1px var(--border); font-size: 14px; line-height: 1; }
+.persona-face.small { width: 18px; height: 18px; background: none; box-shadow: none; font-size: 12px; }
+#agent-mark .persona-face { width: 24px; height: 24px; font-size: 13px; }
+.agent-heading .title { min-width: 0; }
+.persona-row { padding: 0 2px 0 0; gap: 0; }
+.persona-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 4px 8px; border: 0; background: none; text-align: left; font-size: 14px; }
+.persona-pick .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.persona-pick .meta { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.persona-pick .hands { display: inline-grid; color: var(--accent-blue); }
+.persona-pick .hands svg { width: 14px; height: 14px; }
+.persona-edit { opacity: 0; transition: opacity .12s; }
+.persona-row:hover .persona-edit, .persona-edit:focus-visible { opacity: 1; }
+.mind-link svg { color: var(--text-secondary); }
+.mind-link .meta { font-variant-numeric: tabular-nums; }
+#recent { gap: 0; }
+.recent-row { min-height: 30px; padding: 4px 8px; gap: 9px; font-size: 13px; color: var(--text-secondary); }
+.recent-row:hover, .recent-row.active { color: var(--text-primary); }
+.recent-row .meta { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.recent-row .pulse { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--accent-blue); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .recent-row .pulse { animation: none; } }
 
 /* An agent's image (Paul, 2026-10-03): a CRT monitor, whole (no circle),
    tinted to the agent's colour: its silhouette filled with the colour and

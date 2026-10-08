@@ -273,8 +273,9 @@ impl Suite {
         self.hosted_rules
     }
 
-    /// A heavy section runs only when `--only` names it (the real-Hermes
-    /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
+    /// A heavy section runs only when `--only` names it (mind-live runs a
+    /// computer from cold on real models, paid); otherwise it is a skip
+    /// that says how, or what it lacks.
     pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {
         if self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name)) {
             return self.section(name, needs);
@@ -825,17 +826,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             Err(e) => println!("      could not remove this run's containers: {e:#}"),
         }
     })?;
-    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
-        lanes::hermes::stage_images(&project)?;
-    }
     let test_secret = devstack::random_hex(32);
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
-            // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
+            // its models are the Workers AI fake's: no real ones
+            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, real_models: false, chrome: browser::chrome().is_some(), operator: true };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };

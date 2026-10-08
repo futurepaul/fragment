@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wiki</title>
+  <link rel="stylesheet" href="./__fragment.css">
+  <style>
+    html, body { height: 100%; }
+    .quiet { border: 1px solid var(--line-strong); background: transparent; color: inherit; padding: 0 .9rem; font-size: .875rem; font-weight: 500; }
+    .shell { display: grid; grid-template-columns: 16rem minmax(0, 1fr); min-height: 100%; }
+    #side { background: var(--soft); border-right: 1px solid var(--line); padding: 1rem .9rem; display: flex; flex-direction: column; gap: .7rem; }
+    .brand { color: inherit; font-weight: 600; text-decoration: none; }
+    #side input { width: 100%; font-size: .9rem; }
+    #list { list-style: none; margin: 0; padding: 0; font-size: .9rem; }
+    #list a { display: block; padding: .3rem .5rem; border-radius: 8px; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #list a small { color: var(--muted); }
+    #list a.on { background: var(--bg); color: var(--accent); font-weight: 500; }
+    #new { display: flex; gap: .4rem; }
+    #side .foot { margin-top: auto; display: flex; flex-direction: column; gap: .35rem; font-size: var(--text-sm); }
+    #side .foot a { color: var(--muted); }
+    #side .foot a.on { color: var(--accent); }
+    main { max-width: none; margin: 0; padding: 1.25rem clamp(1rem, 4vw, 3rem) 3rem; min-width: 0; }
+    .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; max-width: 46rem; margin-bottom: 1rem; font-size: var(--text-sm); color: var(--muted); }
+    .top .who { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+    .pill { padding: .1rem .5rem; border-radius: 999px; background: var(--soft); color: var(--fg); font-size: .78rem; }
+    .pill.editing { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+    #view { max-width: 46rem; font-size: 1rem; line-height: 1.65; overflow-wrap: anywhere; }
+    #view h1 { font-size: 1.375rem; margin: 0 0 .9rem; }
+    #view h2 { font-size: 1.125rem; margin: 1.75rem 0 .5rem; }
+    #view h3, #view h4, #view h5, #view h6 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+    #view a.wiki, #view a.external { color: var(--accent); }
+    #view a.missing { color: var(--danger); text-decoration: underline dashed; text-underline-offset: 3px; }
+    #view pre { border: 1px solid var(--line); line-height: 1.5; }
+    #view blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--line-strong); color: var(--muted); }
+    #view img { border-radius: 8px; }
+    #view li.task { list-style: none; margin-left: -1.2rem; }
+    #view .table { overflow-x: auto; }
+    #view table { border-collapse: collapse; font-size: .9rem; line-height: 1.5; }
+    #view th, #view td { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+    #view hr { margin: 2rem 0; }
+    .empty { color: var(--muted); }
+    #editor { max-width: 46rem; display: flex; flex-direction: column; gap: .6rem; }
+    #editor .bar { display: flex; gap: .5rem; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    #editor .bar span { margin-right: auto; color: var(--muted); font-size: var(--text-sm); }
+    #editor .bar span.warn { color: var(--danger); }
+    #text { width: 100%; min-height: 60vh; padding: .9rem 1rem; font: .9rem/1.6 var(--font-mono); }
+    #changes { list-style: none; padding: 0; margin: 0; max-width: 46rem; font-size: .9375rem; }
+    #changes li { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: .75rem; padding: .55rem 0; border-top: 1px solid var(--line); }
+    #changes time, #changes small { color: var(--muted); font-size: .8rem; }
+    #changes a { color: var(--accent); }
+    #error { color: var(--danger); font-size: var(--text-sm); }
+    #menu { display: none; }
+    @media (max-width: 46rem) {
+      .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      #side { border-right: 0; border-bottom: 1px solid var(--line); padding: .6rem 1rem; gap: .6rem; }
+      #side .head { display: flex; align-items: center; justify-content: space-between; }
+      #menu { display: inline-flex; }
+      #side:not(.open) > :not(.head) { display: none; }
+      main { padding-top: 1rem; }
+      #changes li { grid-template-columns: 1fr; gap: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav id="side">
+      <div class="head"><a href="#/home" class="brand" id="brand">Home</a> <button class="quiet" id="menu" type="button">Pages</button></div>
+      <input id="filter" type="search" placeholder="Find a page" autocomplete="off">
+      <ul id="list"></ul>
+      <form id="new" hidden><input id="new-title" placeholder="A new page's title" maxlength="100" autocomplete="off"><button class="quiet">New</button></form>
+      <div class="foot"><a href="#/_recent" id="recent-link">Recent changes</a></div>
+    </nav>
+    <main>
+      <div class="top"><span id="meta"></span><span class="who" id="who"></span></div>
+      <article id="view"></article>
+      <form id="editor" hidden>
+        <div class="bar"><span id="edit-note"></span><button class="quiet" type="button" id="cancel">Cancel</button><button class="primary" id="save">Save</button></div>
+        <textarea id="text" spellcheck="true"></textarea>
+      </form>
+      <p id="error"></p>
+    </main>
+  </div>
+  <script type="module" src="wiki.js"></script>
+</body>
+</html>

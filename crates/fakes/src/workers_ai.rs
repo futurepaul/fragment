@@ -23,18 +23,24 @@
 //! model that reads them (`TAKES_IMAGES`, as Workers AI's catalog marks
 //! them: the route's vision model); one carrying an image to another, or a
 //! part that is no image (a `data:` URL that is not base64 of a PNG, a JPEG,
-//! a GIF or a WebP), answers 400. An image is described from its bytes
-//! (`describe_image`: its kind and size), so a test sees which image a
-//! model was shown.
+//! a GIF or a WebP), answers 400.
 //!
-//! A call answers the text a test set for it (`say_next`), else an echo of
-//! its last message, or, for a real agent runtime (`transcripts`),
-//! `transcript_reply`: a pure function of the transcript (lesson 13), which
-//! an agent's own auxiliary calls (titles, its approval guardian) cannot put
-//! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
+//! A call answers the text a test set for it (`say_next`), else
+//! (`plain_reply`), when it offers tools (and `tool_choice` is not `none`)
+//! and its last message (a person's or a tool's; of one in parts, its last
+//! text part) holds `[[call NAME {json}]]`, a call of that tool; after a
+//! tool's result, `TOOL_SAID` and
+//! the result's first 200 characters; and otherwise an echo of its last
+//! message. A streamed text comes in `PIECES`.
+//!
+//! Clef (`CLEF_MODELS`, a job's `ai.decide`) answers as its catalog's
+//! output schema says, decided from the words of its input (`clef_answer`),
+//! its usage in input and output tokens.
+//!
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
-//! report (`set_usage`), and a stream cut before its usage (`break_next`).
+//! report (`set_usage`), a stream cut before its usage (`break_next`), and
+//! the most calls it held at once (`most_at_once`).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -51,38 +57,25 @@ pub use fragment_core::media::IMAGE_MODEL;
 /// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
 /// default vision model; GLM-5.3, the medium tier's, has none).
 pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::CHEAP_MODEL];
-/// What a model is told of an image it was shown: `describe_image`'s
-/// answer starts so.
-pub const SEEN: &str = "I see an image";
 
-/// A model's reply: an echo's, or `transcript_reply`'s.
+/// A model's reply.
 #[derive(Clone, Debug)]
 pub enum Reply {
     Text(String),
     /// Tool calls: (name, arguments).
     Tools(Vec<(String, Value)>),
-    /// Text and tool calls in one answer, as a model narrates its call
-    /// ("Let me check that." beside a `terminal` call): streamed, the
-    /// text's deltas, then the calls'.
-    Narrated(String, Vec<(String, Value)>),
-}
-
-/// The text a `narrate:` answer says beside its call (`transcript_reply`).
-pub const NARRATION: &str = "Let me check that.";
-
-/// A transcript's answer after a tool's result waits this long, as a
-/// model's next call does: a runtime's tool progress is out before its
-/// answer (Hermes sends its progress at most every 0.3 s, and drops what
-/// it has not sent when the turn ends).
-pub const FOLLOW_UP_MS: u64 = 1_000;
-
-/// A tool's result came since the transcript's last user message.
-fn follows_a_tool(body: &Value) -> bool {
-    body["messages"].as_array().is_some_and(|m| m.iter().rev().take_while(|m| m["role"] != "user").any(|m| m["role"] == "tool"))
 }
 
 /// The characters one token of an answer stands for.
 pub const CHARS_PER_TOKEN: usize = 4;
+/// A streamed text comes in this many deltas, so a client's draft grows.
+pub const PIECES: usize = 3;
+/// What an answer to a tool's result starts with, before the result's
+/// first `TOOL_SAID_CHARS` characters.
+pub const TOOL_SAID: &str = "the tool said: ";
+pub const TOOL_SAID_CHARS: usize = 200;
+/// Clef's two sizes, as the catalog names them.
+pub const CLEF_MODELS: [&str; 2] = [fragment_core::decide::CLEF_MODEL, fragment_core::decide::CLEF_FLASH_MODEL];
 /// A tool call's arguments stream in pieces of at most this many characters.
 const ARGS_PIECE_CHARS: usize = 1024;
 
@@ -122,8 +115,9 @@ struct State {
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
-    /// Calls answer `transcript_reply`, in pieces.
-    transcripts: bool,
+    /// Calls being answered now, and the most there were at once.
+    at_once: usize,
+    most_at_once: usize,
 }
 
 /// The images a chat's messages carry (`image_url` parts' URLs), or why a
@@ -133,7 +127,7 @@ fn images_of(body: &Value) -> Result<Vec<String>, String> {
     for m in body["messages"].as_array().into_iter().flatten() {
         for part in m["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "image_url") {
             let url = part["image_url"]["url"].as_str().ok_or("an image_url part has image_url.url, a string")?;
-            image_bytes_of(url)?;
+            check_image(url)?;
             urls.push(url.to_string());
         }
     }
@@ -150,49 +144,16 @@ fn image_refusal(model: &str, body: &Value) -> Option<String> {
     }
 }
 
-/// An image's bytes from its `data:` URL, if it is base64 of an image.
-fn image_bytes_of(url: &str) -> Result<Vec<u8>, String> {
+/// Whether a `data:` URL is base64 of an image: a PNG, a JPEG, a GIF or a
+/// WebP, by its first bytes, as a model detects one.
+fn check_image(url: &str) -> Result<(), String> {
     let Some((head, data)) = url.strip_prefix("data:").and_then(|r| r.split_once(',')) else { return Err("an image_url is a data: URL (a fetched URL is the hosted lane's)".into()) };
     if !head.starts_with("image/") || !head.ends_with(";base64") {
         return Err(format!("an image_url's data: URL is base64 of an image, not {head:?}"));
     }
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| format!("an image_url's data is not base64: {e}"))?;
-    kind_of(&bytes).ok_or("an image_url's data is no PNG, JPEG, GIF or WebP")?;
-    Ok(bytes)
-}
-
-/// An image's kind, by its first bytes, as a model detects it.
-fn kind_of(b: &[u8]) -> Option<&'static str> {
-    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("PNG")
-    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("JPEG")
-    } else if b.starts_with(b"GIF8") {
-        Some("GIF")
-    } else if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
-        Some("WebP")
-    } else {
-        None
-    }
-}
-
-/// What a model says of an image (a `data:` URL): `I see an image, a
-/// 1280x800 PNG` (its size, when its header tells it), or of so many bytes.
-pub fn describe_image(url: &str) -> String {
-    let Ok(bytes) = image_bytes_of(url) else { return format!("{SEEN} I cannot read") };
-    let kind = kind_of(&bytes).unwrap_or("image");
-    let size = match kind {
-        "PNG" if bytes.len() >= 24 && &bytes[12..16] == b"IHDR" => {
-            let be = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-            Some((be(16), be(20)))
-        }
-        "JPEG" => fragment_core::media::jpeg_size(&bytes).map(|(w, h)| (u32::from(w), u32::from(h))),
-        _ => None,
-    };
-    match size {
-        Some((w, h)) => format!("{SEEN}, a {w}x{h} {kind}"),
-        None => format!("{SEEN}, a {kind} of {} bytes", bytes.len()),
-    }
+    let b = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| format!("an image_url's data is not base64: {e}"))?;
+    let image = b.starts_with(b"\x89PNG\r\n\x1a\n") || b.starts_with(&[0xFF, 0xD8, 0xFF]) || b.starts_with(b"GIF8") || (b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP");
+    image.then_some(()).ok_or_else(|| "an image_url's data is no PNG, JPEG, GIF or WebP".into())
 }
 
 fn text_of(content: &Value) -> String {
@@ -203,76 +164,113 @@ fn text_of(content: &Value) -> String {
     }
 }
 
-/// The answer for a transcript, as an agent runtime's lane needs it:
-///
-/// - after a tool's result (since the last user message):
-///   `scripted: the tool ran: <its first line>`;
-/// - Hermes' smart-approval guardian, asking for one word: `ESCALATE`, so a
-///   person decides;
-/// - a user message whose newest line is `run: <command>`, when the call
-///   offers a `terminal` tool: that tool, called with the rest of the line;
-/// - one saying `look at your screen`: a `computer_use` capture of the
-///   screen, called directly or through Hermes' `tool_call` bridge (Hermes
-///   defers the tool behind `tool_search`), and once its result is in, an
-///   answer quoting what the vision model said of the screenshot
-///   (`scripted: the screen: I see an image, …`);
-///   The newest line is the last a person said (Hermes puts `[name] ` before
-///   each, and merges two user messages a restart left side by side into
-///   one), else the first (a runtime appends its own notes after it, which
-///   may quote an earlier command);
-/// - `narrate: <command>`, as `run:`: the same call, with `NARRATION` as
-///   its text in the same answer (`Reply::Narrated`);
-/// - a user message with an image: what is seen of it (`describe_image`):
-///   `scripted: I see an image, a 1456x816 PNG`;
-/// - otherwise `scripted: <the message's first line> [<user messages in
-///   the transcript>]`, so a restored conversation shows in its count.
-pub fn transcript_reply(body: &Value) -> Reply {
-    let messages = body["messages"].as_array().cloned().unwrap_or_default();
-    let users: Vec<&Value> = messages.iter().filter(|m| m["role"] == "user").collect();
-    let last = users.last().map(|m| &m["content"]).cloned().unwrap_or(Value::Null);
-    let said = text_of(&last);
-    let result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
-    if let Some(result) = result {
-        // a screenshot's description, as the vision model gave it (in the
-        // tool's JSON, maybe inside the bridge's): up to its first quote
-        if let Some(at) = result.find(SEEN) {
-            let seen: String = result[at..].chars().take_while(|c| *c != '"' && *c != '\\').take(200).collect();
-            return Reply::Text(format!("scripted: the screen: {seen}"));
+/// The words a message ends with: its text, or of one in parts its last
+/// text part's (a mind's turn sends its view and its state first, which
+/// may quote earlier words, and the person's words last).
+fn last_words(content: &Value) -> String {
+    match content {
+        Value::Array(parts) => parts.iter().rev().find_map(|p| p["text"].as_str()).unwrap_or("").to_string(),
+        other => text_of(other),
+    }
+}
+
+/// A tool call a message asks for: `[[call NAME {json}]]`, its arguments
+/// the one JSON value after the name.
+fn directive(text: &str) -> Option<(String, Value)> {
+    let rest = &text[text.find("[[call ")? + "[[call ".len()..];
+    let (name, rest) = rest.split_once(' ')?;
+    let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    let args = values.next()?.ok()?;
+    rest[values.byte_offset()..].trim_start().starts_with("]]").then(|| (name.to_string(), args))
+}
+
+/// The answer a call gets when no test scripted one and no agent runtime
+/// reads it: a tool call its last message (a person's or a tool's) asks
+/// for with `[[call NAME {json}]]`, when the call offers that tool and does
+/// not say `tool_choice: "none"` (as a model calls none then); else, after
+/// a tool's result, `TOOL_SAID` and the result's first `TOOL_SAID_CHARS`
+/// characters; else an echo of its last message.
+pub fn plain_reply(body: &Value) -> Reply {
+    let last = body["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or(Value::Null);
+    let said = text_of(&last["content"]);
+    let offered = |name: &str| body["tool_choice"] != "none" && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
+    if last["role"] == "user" || last["role"] == "tool" {
+        if let Some((name, args)) = directive(&last_words(&last["content"])).filter(|(name, _)| offered(name)) {
+            return Reply::Tools(vec![(name, args)]);
         }
-        let first = result.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect::<String>();
-        return Reply::Text(format!("scripted: the tool ran: {first}"));
     }
-    if said.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
-        return Reply::Text("ESCALATE".into());
+    if last["role"] == "tool" {
+        return Reply::Text(format!("{TOOL_SAID}{}", said.chars().take(TOOL_SAID_CHARS).collect::<String>()));
     }
-    let has_terminal = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "terminal"));
-    // a person's line: `[name] text`, the name one word
-    let named = |l: &str| l.strip_prefix('[').and_then(|r| r.split_once("] ")).filter(|(n, _)| !n.is_empty() && !n.contains(' ')).map(|(_, t)| t.to_string());
-    let lines: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let newest = lines.iter().rev().find_map(|l| named(l)).or_else(|| lines.first().map(|l| l.to_string())).unwrap_or_default();
-    if let (Some(command), true) = (newest.strip_prefix("run: ").map(str::trim), has_terminal) {
-        return Reply::Tools(vec![("terminal".into(), json!({ "command": command }))]);
+    Reply::Text(format!("echo: {}", last["content"].as_str().unwrap_or("")))
+}
+
+/// Text's words, lowercased: its runs of letters and digits.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+}
+
+/// Text, or JSON as its text: what Clef reads of a state or a question.
+fn read_as_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
-    if let (Some(command), true) = (newest.strip_prefix("narrate: ").map(str::trim), has_terminal) {
-        return Reply::Narrated(NARRATION.into(), vec![("terminal".into(), json!({ "command": command }))]);
-    }
-    if newest.contains("look at your screen") {
-        let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
-        let listed = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains("computer_use"))));
-        let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
-        if offered("computer_use") {
-            return Reply::Tools(vec![("computer_use".into(), capture)]);
+}
+
+/// Clef's answer to one question about `state` (its words), decided from
+/// the words alone: a `noul` is 0.9 when a word of its instructions over 3
+/// letters is a word of the state, else 0.1; a `choice` is the first
+/// option (by id) the state names, else the first; a `score` is the
+/// highest level whose description the state holds, else 0.
+fn clef_decides(question: &Value, state: &[String]) -> Result<Value, String> {
+    let named = |w: &str| state.iter().any(|s| s == w);
+    match question["type"].as_str() {
+        Some("noul") => {
+            let yes = words(&read_as_text(&question["instructions"])).iter().any(|w| w.chars().count() > 3 && named(w));
+            Ok(json!({ "type": "noul", "noul": if yes { 0.9 } else { 0.1 } }))
         }
-        if listed && offered("tool_call") {
-            return Reply::Tools(vec![("tool_call".into(), json!({ "calls": [{ "name": "computer_use", "arguments": capture }] }))]);
+        Some("choice") => {
+            let options: Vec<&String> = question["criteria"].as_object().map(|o| o.keys().collect()).unwrap_or_default();
+            let first = *options.first().ok_or("a choice has options")?;
+            let chosen = options.iter().copied().find(|o| named(&o.to_lowercase())).unwrap_or(first);
+            let rest = 0.1 / (options.len().max(2) - 1) as f64;
+            let probabilities: serde_json::Map<String, Value> = options.iter().map(|o| ((*o).clone(), json!(if *o == chosen { 0.9 } else { rest }))).collect();
+            Ok(json!({ "type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": 0.8 }))
         }
-        return Reply::Text("scripted: no computer_use among my tools".into());
+        Some("score") => {
+            let levels = question["criteria"].as_array().ok_or("a score has levels")?;
+            let state_text = format!(" {} ", state.join(" "));
+            let held = |l: &Value| {
+                let w = words(&read_as_text(l));
+                !w.is_empty() && state_text.contains(&format!(" {} ", w.join(" ")))
+            };
+            let level = levels.iter().rposition(held).unwrap_or(0);
+            let legend: serde_json::Map<String, Value> = levels.iter().enumerate().map(|(i, l)| (i.to_string(), l.clone())).collect();
+            let probabilities: serde_json::Map<String, Value> = (0..levels.len()).map(|i| (i.to_string(), json!(if i == level { 1.0 } else { 0.0 }))).collect();
+            Ok(json!({ "type": "score", "score": level as f64, "legend": legend, "probabilities": probabilities, "confidence": 1.0 }))
+        }
+        other => Err(format!("a question's type is noul, choice or score, not {other:?}")),
     }
-    let shown = last.as_array().and_then(|parts| parts.iter().find(|p| p["type"] == "image_url")).and_then(|p| p["image_url"]["url"].as_str());
-    if let Some(url) = shown {
-        return Reply::Text(format!("scripted: {}", describe_image(url)));
+}
+
+/// Clef's answer to `input` (its catalog's input and output schemas):
+/// `{model, answers, usage: {input_tokens, output_tokens}}`, or a 400 for
+/// an input it refuses (a `model` that is not the path's size, no
+/// questions or more than 64, a question of no type it knows).
+pub fn clef_answer(model: &str, input: &Value, used: Option<Used>) -> Result<Value, String> {
+    let size = model.strip_prefix("@cf/cloudflare/").unwrap_or(model);
+    if input["model"].as_str().map(str::trim) != Some(size) {
+        return Err(format!("/model must be {size:?} for {model}"));
     }
-    Reply::Text(format!("scripted: {newest} [{}]", users.len()))
+    let questions = input["questions"].as_object().filter(|q| (1..=64).contains(&q.len())).ok_or("/questions has 1 to 64 questions")?;
+    if input.get("state").is_none_or(Value::is_null) {
+        return Err("/state is required".into());
+    }
+    let state = words(&read_as_text(&input["state"]));
+    let answers = questions.iter().map(|(id, q)| clef_decides(q, &state).map(|a| (id.clone(), a))).collect::<Result<serde_json::Map<String, Value>, String>>()?;
+    let used = used.unwrap_or(Used { prompt: (input.to_string().len() / CHARS_PER_TOKEN).max(1) as u64, cached: 0, completion: questions.len() as u64 });
+    Ok(json!({ "model": size, "answers": answers, "usage": { "input_tokens": used.prompt, "output_tokens": used.completion } }))
 }
 
 /// The usage of an answer: a test's, or the request's bytes in and the
@@ -315,57 +313,51 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
 
 /// A reply streamed as Workers AI streams it (S4's shapes); `broken` ends
 /// it before the usage and `[DONE]`, as a dropped stream does.
-fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
+fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool) -> String {
     *ids += 1;
     let id = format!("fake{ids:08x}");
     let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
     let mut parts: Vec<Value> = Vec::new();
-    // text, in pieces, so a client's draft grows
-    let text_parts = |text: &str, parts: &mut Vec<Value>, budget: &mut Option<usize>| -> bool {
-        let (text, was_cut) = within(text, budget);
-        let chars: Vec<char> = text.chars().collect();
-        for piece in chars.chunks(chars.len().div_ceil(pieces.max(1)).max(1)) {
-            parts.push(json!({ "content": piece.iter().collect::<String>() }));
+    let (finish, mut cut) = match reply {
+        // text, in pieces, so a client's draft grows
+        Reply::Text(text) => {
+            let (text, cut) = within(text, &mut budget);
+            let chars: Vec<char> = text.chars().collect();
+            for piece in chars.chunks(chars.len().div_ceil(PIECES).max(1)) {
+                parts.push(json!({ "content": piece.iter().collect::<String>() }));
+            }
+            ("stop", cut)
         }
-        if chars.is_empty() {
-            parts.push(json!({ "content": "" }));
-        }
-        was_cut
+        Reply::Tools(_) => ("tool_calls", false),
     };
     // tool calls, each's arguments in pieces
-    let call_parts = |calls: &[(String, Value)], parts: &mut Vec<Value>, budget: &mut Option<usize>, ids: &mut u64, mut cut: bool| -> bool {
-        for (i, (name, args)) in calls.iter().enumerate() {
-            if cut {
-                break;
-            }
-            *ids += 1;
-            let (args, was_cut) = within(&args.to_string(), budget);
-            cut = was_cut;
-            let chars: Vec<char> = args.chars().collect();
-            let mut pieces: Vec<String> = chars.chunks(ARGS_PIECE_CHARS).map(|c| c.iter().collect()).collect();
-            if pieces.is_empty() {
-                pieces.push(String::new());
-            }
-            for (n, piece) in pieces.iter().enumerate() {
-                let call = match n {
-                    0 => json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": piece } }),
-                    _ => json!({ "index": i, "id": null, "function": { "arguments": piece } }),
-                };
-                parts.push(json!({ "tool_calls": [call] }));
-            }
-        }
-        cut
+    let calls: &[(String, Value)] = match reply {
+        Reply::Tools(calls) => calls,
+        Reply::Text(_) => &[],
     };
-    let (finish, cut) = match reply {
-        Reply::Text(text) => ("stop", text_parts(text, &mut parts, &mut budget)),
-        Reply::Tools(calls) => ("tool_calls", call_parts(calls, &mut parts, &mut budget, ids, false)),
-        // the text's deltas first, then the calls', as a model streams a
-        // narrated call
-        Reply::Narrated(text, calls) => {
-            let cut = text_parts(text, &mut parts, &mut budget);
-            ("tool_calls", call_parts(calls, &mut parts, &mut budget, ids, cut))
+    for (i, (name, args)) in calls.iter().enumerate() {
+        if cut {
+            break;
         }
-    };
+        *ids += 1;
+        let (args, was_cut) = within(&args.to_string(), &mut budget);
+        cut = was_cut;
+        let chars: Vec<char> = args.chars().collect();
+        let mut pieces: Vec<String> = chars.chunks(ARGS_PIECE_CHARS).map(|c| c.iter().collect()).collect();
+        if pieces.is_empty() {
+            pieces.push(String::new());
+        }
+        for (n, piece) in pieces.iter().enumerate() {
+            let call = match n {
+                0 => json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": piece } }),
+                _ => json!({ "index": i, "id": null, "function": { "arguments": piece } }),
+            };
+            parts.push(json!({ "tool_calls": [call] }));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(json!({ "content": "" }));
+    }
     // the completion's tokens, spread over its chunks as deltas
     let n = parts.len().max(1) as u64;
     for (i, delta) in parts.iter().enumerate() {
@@ -448,32 +440,30 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if model == IMAGE_MODEL {
         return image_answer(&body, &log_id);
     }
+    if CLEF_MODELS.contains(&model.as_str()) {
+        return match clef_answer(&model, &body, s.usage.pop_front()) {
+            Ok(answer) => Response::json(200, &answer).with_header("cf-aig-log-id", &log_id),
+            Err(why) => problem(400, &why),
+        };
+    }
     if let Some(why) = image_refusal(&model, &body) {
         return problem(400, &why);
     }
-    let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
     let said = s.said.pop_front();
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
-    if s.transcripts && said.is_none() && follows_a_tool(&body) {
-        s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
-    }
     let broken = s.breaks.pop_front().unwrap_or(false);
     let reply = match said {
         Some(text) => Reply::Text(text),
-        None if s.transcripts => transcript_reply(&body),
-        None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
+        None => plain_reply(&body),
     };
     if body["stream"] == true {
-        let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
         let written = match &reply {
             Reply::Text(t) => t.chars().count(),
-            Reply::Tools(calls) => called(calls),
-            Reply::Narrated(t, calls) => t.chars().count() + called(calls),
+            Reply::Tools(calls) => calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>(),
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
-        let pieces = if s.transcripts { 3 } else { 1 };
-        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
+        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken);
         return Response::bytes(200, "text/event-stream", events.into_bytes()).with_header("cf-aig-log-id", &log_id);
     }
     let tool_calls = |calls: &[(String, Value)]| -> Vec<Value> {
@@ -481,10 +471,6 @@ fn answer(s: &mut State, req: &Request) -> Response {
     };
     let (message, finish, written) = match reply {
         Reply::Tools(calls) => (json!({ "role": "assistant", "content": null, "tool_calls": tool_calls(&calls) }), "tool_calls", 16),
-        Reply::Narrated(text, calls) => {
-            let n = text.chars().count() + 16;
-            (json!({ "role": "assistant", "content": text, "tool_calls": tool_calls(&calls) }), "tool_calls", n)
-        }
         Reply::Text(text) => {
             let n = text.chars().count();
             (json!({ "role": "assistant", "content": text }), "stop", n)
@@ -515,12 +501,15 @@ impl WorkersAi {
             // unlocked, after its levers were consumed
             let (response, sleep_ms) = {
                 let mut s = st.lock().expect("workers ai state");
+                s.at_once += 1;
+                s.most_at_once = s.most_at_once.max(s.at_once);
                 let response = answer(&mut s, req);
                 (response, std::mem::take(&mut s.sleep_ms))
             };
             if sleep_ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
+            st.lock().expect("workers ai state").at_once -= 1;
             response
         });
         let server = Server::start(port, handler)?;
@@ -571,15 +560,20 @@ impl WorkersAi {
         self.state().failures.extend(std::iter::repeat_n(None, n));
     }
 
-
-    /// Calls answer from their transcript (`transcript_reply`), in pieces
-    /// (`true`), or echo their last message.
-    pub fn transcripts(&self, on: bool) {
-        self.state().transcripts = on;
-    }
-
     pub fn calls(&self) -> Vec<AiCall> {
         self.state().calls.clone()
+    }
+
+    /// The most calls it was answering at once since it started, or since
+    /// the last `reset_at_once` (a delay, `delay_next`, holds calls long
+    /// enough to overlap).
+    pub fn most_at_once(&self) -> usize {
+        self.state().most_at_once
+    }
+
+    pub fn reset_at_once(&self) {
+        let mut s = self.state();
+        s.most_at_once = s.at_once;
     }
 
     /// The calls' inputs, in order (what a chat completion's body carried, less its model).
@@ -598,66 +592,112 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
+        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
         let last = lines.last().unwrap();
         assert_eq!((last["response"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!(""), json!(23), json!(15)));
         assert!(text.ends_with("data: [DONE]\n\n"));
-        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
+        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
     }
 
-    /// Goal: a narrated call is one answer carrying text and a tool call,
-    /// streamed as a model streams one: the text's deltas, then the call's,
-    /// ending `tool_calls`; unstreamed, one message with both. Method: the
-    /// stream's deltas in order; the unstreamed answer through the server;
-    /// and a budget that cuts the text, so no call follows.
+    fn lookup_tools() -> Value {
+        json!([{ "type": "function", "function": { "name": "lookup", "parameters": { "type": "object" } } }])
+    }
+
+    /// Goal: a call offering tools answers the call its last message asks
+    /// for, a tool's result is answered quoting it, and anything else is
+    /// echoed. Method: each case, and directives that do not read or name
+    /// a tool not offered.
     #[test]
-    fn a_narrated_call_streams_its_text_then_its_call() {
-        let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
-        let asked = json!({ "messages": [{ "role": "user", "content": "[paul] narrate: echo narrated-ran" }], "tools": tools });
-        let reply = transcript_reply(&asked);
-        assert!(matches!(&reply, Reply::Narrated(t, c) if t == NARRATION && *c == vec![("terminal".to_string(), json!({ "command": "echo narrated-ran" }))]), "{reply:?}");
-        // without a terminal tool, `narrate:` is only words
-        assert!(matches!(transcript_reply(&json!({ "messages": [{ "role": "user", "content": "narrate: ls" }] })), Reply::Text(t) if t == "scripted: narrate: ls [1]"));
-        // its answer after the tool's result waits as a model's next call
-        // does; an answer to a person's message does not
-        let ran = json!({ "messages": [{ "role": "user", "content": "narrate: echo x" }, { "role": "assistant", "content": NARRATION, "tool_calls": [] }, { "role": "tool", "content": "x" }] });
-        assert!(follows_a_tool(&ran) && !follows_a_tool(&asked));
-        let again = json!({ "messages": [{ "role": "tool", "content": "x" }, { "role": "user", "content": "hi" }] });
-        assert!(!follows_a_tool(&again), "a tool's result before the newest message is an earlier turn's");
+    fn a_plain_call_answers_its_directive_or_its_tools_result() {
+        let ask = |text: &str, tools: Value| json!({ "messages": [{ "role": "user", "content": text }], "tools": tools });
+        let call = plain_reply(&ask("look it up [[call lookup {\"word\": \"shard]]\", \"n\": [[1]]}]] please", lookup_tools()));
+        assert!(matches!(&call, Reply::Tools(c) if *c == vec![("lookup".to_string(), json!({ "word": "shard]]", "n": [[1]] }))]), "{call:?}");
+        assert!(matches!(plain_reply(&ask("[[call lookup {\"word\": \"x\"}]]", json!([]))), Reply::Text(t) if t.starts_with("echo: ")), "no tools offered");
+        assert!(matches!(plain_reply(&ask("[[call zoom {}]]", lookup_tools())), Reply::Text(_)), "a tool not offered");
+        assert!(matches!(plain_reply(&ask("[[call lookup {\"word\": ]]", lookup_tools())), Reply::Text(_)), "arguments that do not read");
+        assert!(matches!(plain_reply(&ask("[[call lookup {} no end", lookup_tools())), Reply::Text(_)));
+        let long = "x".repeat(300);
+        let ran = json!({ "messages": [
+            { "role": "user", "content": "[[call lookup {}]]" },
+            { "role": "assistant", "content": "", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{}" } }] },
+            { "role": "tool", "tool_call_id": "call_1", "content": format!("a small fragment {long}") },
+        ], "tools": lookup_tools() });
+        let said = match plain_reply(&ran) {
+            Reply::Text(t) => t,
+            other => panic!("{other:?}"),
+        };
+        assert!(said.starts_with("the tool said: a small fragment") && said.chars().count() == TOOL_SAID.len() + TOOL_SAID_CHARS, "{said}");
+        let again = json!({ "messages": [{ "role": "tool", "content": "then [[call lookup {\"word\": \"more\"}]]" }], "tools": lookup_tools() });
+        assert!(matches!(plain_reply(&again), Reply::Tools(c) if c[0].1 == json!({ "word": "more" })), "a tool's result may ask for another call");
+        assert!(matches!(plain_reply(&ask("hi", json!(null))), Reply::Text(t) if t == "echo: hi"));
+        let parts = json!({ "messages": [{ "role": "user", "content": [
+            { "type": "text", "text": "<chat>\n0+1|user: an old [[call lookup {\"word\": \"old\"}]]\n</chat>" },
+            { "type": "text", "text": "Chat: t_1 \"x [[call lookup {\\\"word\\\": \\\"esc\\\"}]]\"" },
+            { "type": "text", "text": "now [[call lookup {\"word\": \"new\"}]]" },
+        ] }], "tools": lookup_tools() });
+        assert!(matches!(plain_reply(&parts), Reply::Tools(c) if c[0].1 == json!({ "word": "new" })), "of a message in parts, the words of its last");
+        let none = json!({ "messages": [{ "role": "user", "content": "[[call lookup {}]]" }], "tools": lookup_tools(), "tool_choice": "none" });
+        assert!(matches!(plain_reply(&none), Reply::Text(t) if t.starts_with("echo: ")), "tools offered, none to be called (a compaction)");
+    }
 
-        let used = Used { prompt: 10, cached: 0, completion: 9 };
-        let text = stream("m", &reply, &mut 0, used, None, false, 3);
-        let deltas: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str::<Value>(d).unwrap()).filter_map(|l| l["choices"][0]["delta"].as_object().cloned().map(Value::Object)).collect();
-        let kinds: Vec<&str> = deltas.iter().filter_map(|d| if d["tool_calls"].is_array() { Some("call") } else if d["content"].as_str().is_some_and(|c| !c.is_empty()) { Some("text") } else { None }).collect();
-        assert_eq!(kinds, ["text", "text", "text", "call"], "the text's pieces, then the call: {deltas:?}");
-        let said: String = deltas.iter().filter_map(|d| d["content"].as_str()).collect();
-        assert_eq!(said, NARRATION);
-        let call = deltas.iter().find(|d| d["tool_calls"].is_array()).unwrap();
-        assert_eq!(call["tool_calls"][0]["function"]["name"], "terminal");
-        assert_eq!(serde_json::from_str::<Value>(call["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap(), json!({ "command": "echo narrated-ran" }));
-        assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
-
-        // a budget that cuts the text: no call, and it ends `length`
-        let short = stream("m", &reply, &mut 0, used, Some(4), false, 1);
-        assert!(!short.contains("tool_calls\":[") && short.contains("\"finish_reason\":\"length\""), "{short}");
-
-        // unstreamed, one message carries both
+    /// Goal: a plain streamed text comes in pieces, and a directive's call
+    /// streams as a model streams one; both through the server. Method: the
+    /// streamed answers' deltas.
+    #[test]
+    fn a_plain_stream_comes_in_pieces() {
         let ai = WorkersAi::start(0).unwrap();
-        ai.transcripts(true);
-        let body = serde_json::to_vec(&asked).unwrap();
-        let mut socket = std::net::TcpStream::connect(ai.url.trim_start_matches("http://")).unwrap();
-        let head = format!("POST /run/m HTTP/1.1\r\nhost: fake\r\ncontent-length: {}\r\n\r\n", body.len());
-        std::io::Write::write_all(&mut socket, &[head.as_bytes(), &body].concat()).unwrap();
-        let mut answer = String::new();
-        std::io::Read::read_to_string(&mut socket, &mut answer).unwrap();
-        let r: Value = serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
-        let message = &r["choices"][0]["message"];
-        assert_eq!((message["content"].clone(), r["choices"][0]["finish_reason"].clone()), (json!(NARRATION), json!("tool_calls")), "{r}");
-        assert_eq!(message["tool_calls"][0]["function"]["name"], "terminal", "{r}");
+        let post = |body: &Value| {
+            let body = serde_json::to_vec(body).unwrap();
+            let mut socket = std::net::TcpStream::connect(ai.url.trim_start_matches("http://")).unwrap();
+            let head = format!("POST /run/{} HTTP/1.1\r\nhost: fake\r\ncontent-length: {}\r\n\r\n", fragment_core::models::CHEAP_MODEL, body.len());
+            std::io::Write::write_all(&mut socket, &[head.as_bytes(), &body].concat()).unwrap();
+            let mut answer = String::new();
+            std::io::Read::read_to_string(&mut socket, &mut answer).unwrap();
+            answer.split_once("\r\n\r\n").unwrap().1.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str::<Value>(d).unwrap()).collect::<Vec<Value>>()
+        };
+        let lines = post(&json!({ "stream": true, "messages": [{ "role": "user", "content": "a long thought about gardens" }] }));
+        let texts: Vec<&str> = lines.iter().filter_map(|l| l["choices"][0]["delta"]["content"].as_str()).filter(|t| !t.is_empty()).collect();
+        assert_eq!((texts.len(), texts.concat()), (PIECES, "echo: a long thought about gardens".to_string()));
+        let lines = post(&json!({ "stream": true, "tools": lookup_tools(), "messages": [{ "role": "user", "content": "[[call lookup {\"word\": \"a\"}]]" }] }));
+        let call = lines.iter().find_map(|l| l["choices"][0]["delta"]["tool_calls"][0].as_object().cloned()).unwrap();
+        assert_eq!((call["function"]["name"].clone(), call["function"]["arguments"].clone()), (json!("lookup"), json!("{\"word\":\"a\"}")));
+        assert!(lines.iter().any(|l| l["choices"][0]["finish_reason"] == "tool_calls"));
+    }
+
+    /// Goal: Clef answers as its catalog's output schema says, decided
+    /// from the words of its input, and refuses what it would. Method: each
+    /// question type, decided both ways, and refused inputs.
+    #[test]
+    fn clef_decides_from_the_words_of_its_input() {
+        let input = json!({
+            "model": "clef-flash", "state": "We planned the garden: tomatoes and basil, all minor work.",
+            "questions": {
+                "garden": { "type": "noul", "instructions": "Plants or garden?" },
+                "money": { "type": "noul", "instructions": "Money or taxes, any?" },
+                "room": { "type": "choice", "instructions": "Which room?", "criteria": { "kitchen": "cooking", "garden": "outside", "attic": null } },
+                "nothing": { "type": "choice", "instructions": "Which?", "criteria": { "b": "", "a": "" } },
+                "size": { "type": "score", "instructions": "How big?", "criteria": ["none", "minor work", "major work"] },
+            },
+        });
+        let a = clef_answer(fragment_core::decide::CLEF_FLASH_MODEL, &input, None).unwrap();
+        assert_eq!(a["model"], "clef-flash");
+        assert_eq!((a["answers"]["garden"]["noul"].clone(), a["answers"]["money"]["noul"].clone()), (json!(0.9), json!(0.1)), "'garden' is in the state; 'any' is no word over 3 letters");
+        assert_eq!(a["answers"]["room"]["choice"], "garden", "the option the state names");
+        assert_eq!(a["answers"]["room"]["probabilities"]["garden"], 0.9);
+        assert_eq!(a["answers"]["nothing"]["choice"], "a", "none named: the first by id");
+        assert_eq!((a["answers"]["size"]["score"].clone(), a["answers"]["size"]["legend"]["2"].clone()), (json!(1.0), json!("major work")));
+        assert_eq!(a["usage"]["output_tokens"], 5);
+        let used = clef_answer(fragment_core::decide::CLEF_MODEL, &json!({ "model": "clef", "state": { "k": "v" }, "questions": { "q": { "type": "noul", "instructions": "?" } } }), Some(Used { prompt: 70, cached: 0, completion: 1 })).unwrap();
+        assert_eq!(used["usage"], json!({ "input_tokens": 70, "output_tokens": 1 }));
+        let refused = |model: &str, input: Value| clef_answer(model, &input, None).unwrap_err();
+        assert!(refused(fragment_core::decide::CLEF_MODEL, json!({ "model": "clef-flash", "state": "s", "questions": { "q": { "type": "noul", "instructions": "?" } } })).contains("/model"));
+        assert!(refused(fragment_core::decide::CLEF_MODEL, json!({ "model": "clef", "state": "s", "questions": {} })).contains("/questions"));
+        assert!(refused(fragment_core::decide::CLEF_MODEL, json!({ "model": "clef", "questions": { "q": { "type": "noul", "instructions": "?" } } })).contains("/state"));
+        assert!(refused(fragment_core::decide::CLEF_MODEL, json!({ "model": "clef", "state": "s", "questions": { "q": { "type": "rank" } } })).contains("noul, choice or score"));
     }
 
     /// Goal: the image model answers as its catalog says, a JPEG the cell
@@ -713,71 +753,13 @@ mod tests {
         }
         let no_url = json!({ "messages": [{ "role": "user", "content": [{ "type": "image_url", "image_url": {} }] }] });
         assert!(image_refusal(flash, &no_url).is_some());
-        // over HTTP: 400 for the medium tier's model, the image described by the vision model's
+        // over HTTP: 400 for the medium tier's model, an answer from the vision model's
         let ai = WorkersAi::start(0).unwrap();
-        ai.transcripts(true);
         let post = |model: &str, body: &Value| crate::http::post(&format!("{}/run/{model}", ai.url), &[("content-type", "application/json")], body.to_string().as_bytes()).unwrap();
         assert_eq!(post(glm, &shown(&png_url())), 400);
         assert_eq!(post(flash, &shown(&png_url())), 200);
         let calls = ai.calls();
         assert_eq!(calls.len(), 2, "each call recorded, the refused one too");
         assert!(calls[1].model == flash && calls[1].body["messages"][0]["content"][1]["image_url"]["url"] == png_url().as_str());
-    }
-
-    /// Goal: what a model says of an image tells which image it was:
-    /// its kind and size. Method: a PNG, JPEGs of two sizes, and bytes
-    /// that are none.
-    #[test]
-    fn an_image_is_described_from_its_bytes() {
-        assert_eq!(describe_image(&png_url()), "I see an image, a 1x1 PNG");
-        let jpeg = |prompt: &str| format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(image_bytes(prompt)));
-        assert_eq!(describe_image(&jpeg("a wide screen")), "I see an image, a 1536x1024 JPEG");
-        assert_eq!(describe_image(&jpeg("a screen")), "I see an image, a 1024x1024 JPEG");
-        assert_eq!(describe_image("data:image/png;base64,aGk="), "I see an image I cannot read");
-        assert!(matches!(transcript_reply(&shown(&jpeg("a wide screen"))), Reply::Text(t) if t == "scripted: I see an image, a 1536x1024 JPEG"));
-    }
-
-    /// Goal: `look at your screen` is a computer_use capture, called as
-    /// Hermes offers the tool (directly, or deferred behind its
-    /// `tool_search` and called through `tool_call`), and its answer quotes
-    /// what the vision model said of the screenshot. Method: each way it is
-    /// offered, and a capture's result as Hermes gives it.
-    #[test]
-    fn a_look_at_the_screen_is_a_capture() {
-        let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
-        let ask = |tools: Value| json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools });
-        let direct = json!([{ "type": "function", "function": { "name": "computer_use" } }]);
-        assert!(matches!(transcript_reply(&ask(direct)), Reply::Tools(c) if c == vec![("computer_use".to_string(), capture.clone())]));
-        let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… computer_use: Background desktop control …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
-        assert!(matches!(transcript_reply(&ask(bridged)), Reply::Tools(c) if c == vec![("tool_call".to_string(), json!({ "calls": [{ "name": "computer_use", "arguments": capture }] }))]));
-        assert!(matches!(transcript_reply(&ask(json!([]))), Reply::Text(t) if t == "scripted: no computer_use among my tools"));
-        // the capture's result: Hermes' JSON, the vision model's words in it
-        let result = json!({ "mode": "vision", "width": 1456, "summary": "capture mode=vision 1456x816", "vision_analysis": "scripted: I see an image, a 1456x816 PNG", "vision_analysis_routed_via": "auxiliary.vision" }).to_string();
-        let ran = json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": json!([{ "result": result }]).to_string() }] });
-        assert!(matches!(transcript_reply(&ran), Reply::Text(t) if t == "scripted: the screen: I see an image, a 1456x816 PNG"));
-    }
-
-    /// Goal: a runtime's transcript decides its answer, whatever else it
-    /// asked meanwhile. Method: each rule, from its transcript alone.
-    #[test]
-    fn a_transcript_decides_its_answer() {
-        let say = |text: &str| json!({ "messages": [{ "role": "user", "content": text }] });
-        assert!(matches!(transcript_reply(&say("[paul] hi there\nnotes")), Reply::Text(t) if t == "scripted: hi there [1]"));
-        let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
-        let run = json!({ "messages": [{ "role": "user", "content": "[paul] run: echo tool-ran" }], "tools": tools });
-        assert!(matches!(transcript_reply(&run), Reply::Tools(c) if c == vec![("terminal".to_string(), json!({ "command": "echo tool-ran" }))]));
-        let ran = json!({ "messages": [{ "role": "user", "content": "run: echo x" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools });
-        assert!(matches!(transcript_reply(&ran), Reply::Text(t) if t == "scripted: the tool ran: tool-ran"));
-        assert!(matches!(transcript_reply(&say("Respond with exactly one word: APPROVE, DENY, or ESCALATE.")), Reply::Text(t) if t == "ESCALATE"));
-        let image = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "look" }, { "type": "image_url", "image_url": { "url": png_url() } }] }] });
-        assert!(matches!(transcript_reply(&image), Reply::Text(t) if t == "scripted: I see an image, a 1x1 PNG"));
-        // without a terminal tool, `run:` is only words
-        assert!(matches!(transcript_reply(&say("run: ls")), Reply::Text(t) if t == "scripted: run: ls [1]"));
-        // a command quoted after the first line is a note, not a request
-        let quoted = json!({ "messages": [{ "role": "user", "content": "[paul] do you remember\n> run: rm -rf x" }], "tools": tools });
-        assert!(matches!(transcript_reply(&quoted), Reply::Text(t) if t == "scripted: do you remember [1]"));
-        // two of a person's messages merged into one: the newest is the request
-        let merged = json!({ "messages": [{ "role": "user", "content": "[paul] run: rm -rf x\n\n[paul] do you remember" }], "tools": tools });
-        assert!(matches!(transcript_reply(&merged), Reply::Text(t) if t == "scripted: do you remember [1]"));
     }
 }

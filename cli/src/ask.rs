@@ -30,9 +30,9 @@ use crate::api::{Client, Code, CodedError};
 /// so a chat's label made here leaves room for its owner's username.
 pub const HOST_LABEL_MAX: usize = 63;
 /// `--wait`'s longest wait, in seconds. Its default, main.rs's flag's, is
-/// 150: under Hermes' terminal tool's own default of 180 s, so an agent's
-/// call says "no answer yet" rather than being cut; a longer wait needs the
-/// tool call's own timeout above it.
+/// 150: under an agent's terminal tool's own timeout, so an agent's call
+/// says "no answer yet" rather than being cut; a longer wait needs the tool
+/// call's own timeout above it.
 pub const WAIT_S_MAX: u64 = 1_800;
 /// How often `--wait` reads the chat's `work`.
 pub const POLL_MS: u64 = 2_000;

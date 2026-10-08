@@ -2,7 +2,7 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script), and
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=goose|script), and
 //!                          its screens on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
-use fragment_bridge::runtime::relay::{Relay, RelayConfig};
+use fragment_bridge::runtime::goose::{Goose, GooseConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
-use fragment_bridge::{ev, limits, screen};
+use fragment_bridge::{ev, limits, screen, screens};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -42,24 +42,23 @@ fn parse_ms(name: &str, default: u64) -> u64 {
 }
 
 fn runtime() -> Box<dyn Runtime> {
-    match env_or("BRIDGE_RUNTIME", "relay").as_str() {
-        "relay" => {
-            let listen: SocketAddr = env_or("BRIDGE_RELAY_LISTEN", "127.0.0.1:8650").parse().unwrap_or_else(|_| fail("BRIDGE_RELAY_LISTEN is not host:port"));
-            let secret_file = env("BRIDGE_RELAY_SECRET_FILE").unwrap_or_else(|| fail("BRIDGE_RELAY_SECRET_FILE names the Relay secret's file"));
-            let secret = std::fs::read_to_string(&secret_file).unwrap_or_else(|e| fail(&format!("{secret_file}: {e}"))).trim().to_string();
-            if secret.len() < 32 {
-                fail("the Relay secret is at least 32 characters");
-            }
-            let config = RelayConfig {
-                listen,
-                gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
-                secret,
-                media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
-            };
-            Box::new(Relay { config })
-        }
+    match env_or("BRIDGE_RUNTIME", "goose").as_str() {
+        "goose" => Box::new(Goose::new(GooseConfig {
+            command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
+            args: vec!["acp".into(), "--with-builtin".into(), env_or("BRIDGE_GOOSE_BUILTINS", "developer,skills")],
+            work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
+            home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
+            root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
+            api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
+            model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
+            tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
+            cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
+            ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+            desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),
+            skills: env("BRIDGE_GOOSE_SKILLS").is_some_and(|v| v == "1"),
+        })),
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
-        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
+        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),
     }
 }
 
@@ -79,9 +78,20 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     if env("BRIDGE_SCREEN_RFB").is_some() {
         fail("BRIDGE_SCREEN_RFB is gone: name each agent's display in BRIDGE_SCREENS_FILE");
     }
-    let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
+    let screens = match (env("BRIDGE_SCREENS_FILE"), env("BRIDGE_SCREENS_DIR")) {
+        (None, None) => None,
+        (Some(file), None) => Some(screens::Source::File(PathBuf::from(file))),
+        (None, Some(dir)) => {
+            let dir = PathBuf::from(dir);
+            if !screens::dir_ok(&dir) {
+                fail(&format!("BRIDGE_SCREENS_DIR is an absolute path of at most {} bytes (its agents' sockets are under it)", screens::DIR_PATH_MAX_BYTES));
+            }
+            Some(screens::Source::Dir(dir))
+        }
+        (Some(_), Some(_)) => fail("BRIDGE_SCREENS_FILE or BRIDGE_SCREENS_DIR names the screens, not both"),
+    };
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
+    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens, start })
 }
 
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within
@@ -124,10 +134,9 @@ async fn main() {
                 held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
                 left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
-                agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
                 screen: screen_config(),
             };
-            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
+            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending });
             match driver::run(cfg, runtime(), stop).await {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {

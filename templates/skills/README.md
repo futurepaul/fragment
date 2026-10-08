@@ -24,13 +24,12 @@ default agent. A fragment on it names it and holds nothing else:
 - **A skill** is `skills/<category>/<name>/SKILL.md`, or
   `skills/<name>/SKILL.md` with no category, with the files its skill uses
   beside it. Its frontmatter's `name` is its directory's, and says what it
-  is for (`description`). Its helpers are named from `${HERMES_SKILL_DIR}`,
-  which Hermes fills in with the skill's directory.
+  is for (`description`). Its helpers are named from `${SKILL_DIR}`, the
+  skill's own directory (where its `SKILL.md` was found).
 - **Who reads it.** Its owner (the shell's Skills section in settings), and
-  their agents' computers: our Hermes image installs `skills/` into every
-  profile, as the computer's first agent acting for its owner
-  (docs/computers.md, "Skills and the CLI"). The platform knows nothing of
-  Hermes: this template is data, served as any fragment's files are.
+  their agents' computers, whose image installs it as it chooses
+  (docs/computers.md, "Our images"). The platform knows no agent runtime:
+  this template is data, served as any fragment's files are.
 - Bounds: at most 1,000 files and 4 MiB of data, each file at most 256 KiB
   (`blessed::DATA_*`; a test holds the template to them).
 
@@ -39,7 +38,7 @@ default agent. A fragment on it names it and holds nothing else:
 All of `finite-mono/finite-skills/skills` (47 skills) but
 `shared-skills-finite`, which git replaces (decision 17), and the ones
 gone below, under the same categories and names: 41 skills. Names keep
-finite-skills' `-finite` suffix, so none collides with a skill Hermes
+finite-skills' `-finite` suffix, so none collides with a skill a runtime
 bundles or one an agent makes.
 
 `powerpoint-finite` (Anthropic's `pptx` skill) is gone: its license
@@ -88,7 +87,7 @@ with `python-pptx` (ocr-and-documents-finite says so).
 - Skill paths: `/profile-assets/hermes-local/managed-skills/…`,
   `~/.finite/managed-skills/current/…` and
   `${FINITECHAT_HOME:-/data/agent}/managed-skills/finite/current/…` are
-  `${HERMES_SKILL_DIR}`; a helper of another skill is named by that skill.
+  `${SKILL_DIR}`; a helper of another skill is named by that skill.
 - Runtime claims: `/home/node/`, `~/.hermes/venv` and "the Finite runtime
   includes …" are a virtualenv of the agent's own in its home; Telegram
   location pins and `MEDIA:` notes name chats generally.

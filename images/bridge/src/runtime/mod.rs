@@ -2,8 +2,8 @@
 //! core speaks only these commands and events; each runtime translates them
 //! into its own protocol. Two ship here:
 //!
-//! - `relay`: Hermes' Relay (docs/hermes-relay.md). Hermes dials the
-//!   bridge, which is its connector.
+//! - `goose`: goose over ACP on its stdio, one `goose acp` per agent and a
+//!   fresh session per turn (docs/optchat.md; our goose image).
 //! - `script`: a deterministic scripted agent (the stub image), so the
 //!   platform's lanes run without any agent runtime at all.
 //!
@@ -18,8 +18,9 @@
 //! `turn.start`), and a turn is claimed only while the runtime says it can
 //! take one (`Event::Connected`).
 
-pub mod relay;
+pub mod goose;
 pub mod script;
+pub mod skills;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -111,8 +112,7 @@ pub struct TurnStart {
     /// doing any of it again. Built from the chat's journal alone
     /// (crate::note), by the driver, before the runtime hears of the turn;
     /// `None` when that turn ended any other way. Every runtime is handed
-    /// it: Relay as the inbound's read-only `context`, the scripted agent
-    /// echoes it.
+    /// it; the scripted agent echoes it.
     pub note: Option<String>,
 }
 
@@ -141,11 +141,11 @@ pub enum Command {
 pub enum Event {
     /// The runtime can take turns now (true), or cannot (false). The bridge
     /// claims a turn only while it can, so a turn claimed is one the runtime
-    /// is there to run (Relay: Hermes has dialed and said hello). A runtime
-    /// that can always take one says so as it starts.
+    /// is there to run. A runtime that can always take one says so as it
+    /// starts.
     Connected(bool),
     /// The reply being written, its whole text so far (shown live, never
-    /// stored).
+    /// stored); empty, the draft stops.
     Draft { turn: String, text: String },
     /// Reply `part` (from 1, in order) of the turn, its whole text now. A
     /// later part, a step, a prompt, or the end posts it.
@@ -173,7 +173,7 @@ pub enum Event {
 /// Why a runtime stopped.
 #[derive(Debug)]
 pub enum RuntimeError {
-    /// It could not listen (Relay's port), or read its configuration.
+    /// It could not start, or read its configuration.
     Setup(String),
     /// Its loop failed for good.
     Failed(String),

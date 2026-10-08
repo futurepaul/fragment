@@ -53,13 +53,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fragment_core::secrets::placeholders;
-use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
+use fragment_core::steps::{records_window, Fetch, NextStep, PageRecord, Pager, Records, RecordsPage, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
@@ -423,7 +424,7 @@ impl FragmentCell {
     /// Workflow binding is shared by every fragment, and a vendor scopes
     /// idempotency keys by account) and across a deleted fragment's
     /// reincarnations.
-    fn run_key(&self, run: i64) -> CellResult<String> {
+    pub(crate) fn run_key(&self, run: i64) -> CellResult<String> {
         let [npub, created_at] = self.metas([MetaKey::Npub, MetaKey::CreatedAt])?;
         let (npub, created_at) = (npub.ok_or_else(|| missing(MetaKey::Npub))?, created_at.ok_or_else(|| missing(MetaKey::CreatedAt))?);
         Ok(format!("{}-{}-r{run}", &npub[5..25], created_at))
@@ -816,8 +817,16 @@ impl FragmentCell {
         Ok(json!({ "kept": index }))
     }
 
-    /// Performs one step of `run`.
+    /// Performs one step of `run`. An unclaimed draft reaches nothing
+    /// outside and pays for nothing (drafts.rs): its fetch, AI and owner
+    /// steps fail for good, and a replay after its claim takes them.
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
+        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {} | Step::OwnerFragments {} | Step::OwnerCall { .. }) {
+            self.draft_refuses("fetches nothing, runs no AI step, and reaches no other fragment").map_err(|e| match e.code {
+                ErrorCode::Forbidden => permanent(e.message),
+                _ => StepFail::Retry(e.message),
+            })?;
+        }
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
             Step::Fetch(f) => self.step_fetch(run, index, f).await,
@@ -842,12 +851,24 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
+            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) => {
                 self.step_ai(run, index, &ai).await
             }
             // what the fragment's own page reads, read for its code: who is
             // in it, their names, and who is here
-            Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),
+            // each with `here`: a live socket of theirs is open now (an
+            // agent's: its bridge follows here, its computer awake)
+            Step::Members {} => self
+                .member_list()
+                .map(|l| {
+                    let mut v = json!(l);
+                    for m in v["members"].as_array_mut().into_iter().flatten() {
+                        let here = m["principal"].as_str().is_some_and(|p| self.here(p));
+                        m["here"] = json!(here);
+                    }
+                    v
+                })
+                .map_err(|e| StepFail::Retry(e.message)),
             Step::People { ids } => {
                 if ids.len() > fragment_core::steps::PEOPLE_MAX {
                     return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));
@@ -859,6 +880,11 @@ impl FragmentCell {
                 }
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
+            Step::Blob { sha256 } => self.step_blob(&sha256).await,
+            Step::Records(r) => self.step_records(run, r),
+            // as its owner, on their other fragments (owner.rs)
+            Step::OwnerFragments {} => self.step_owner_fragments().await,
+            Step::OwnerCall { fragment, op, input } => self.step_owner_call(run, index, &fragment, &op, input).await,
         }
     }
 
@@ -958,6 +984,93 @@ impl FragmentCell {
         }
         let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
         Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
+    }
+
+    /// `job.blob(sha256)`: one of this fragment's blobs (a page's upload, a
+    /// chat's attachment), its first `BLOB_READ_MAX_BYTES` read as text when
+    /// they are UTF-8 (`steps::blob_read`). Its bytes are under the
+    /// fragment's own npub, so another fragment's hash is not found.
+    async fn step_blob(&self, sha: &str) -> Result<Value, StepFail> {
+        if !fragment_core::blob::valid_sha(sha) {
+            return Err(permanent("a blob is named by its SHA-256, 64 lowercase hex characters"));
+        }
+        let max = fragment_core::steps::BLOB_READ_MAX_BYTES;
+        let key = self.blob_key(sha).map_err(|e| StepFail::Retry(e.message))?;
+        let found = js::blob_get(&self.env, &key, Some(&format!("bytes=0-{}", max - 1))).await.map_err(|e| StepFail::Retry(e.message))?;
+        let b = found.ok_or_else(|| permanent(format!("this fragment has no blob {sha}")))?;
+        let mut resp = Response::from_body(ResponseBody::Stream(b.body)).map_err(|e| StepFail::Retry(e.to_string()))?;
+        let mut head = resp.bytes().await.map_err(|e| StepFail::Retry(e.to_string()))?;
+        head.truncate(max);
+        Ok(fragment_core::steps::blob_read(sha, b.size, &head))
+    }
+
+    /// `job.records(channel, {after, limit, turn})`: a page of the
+    /// fragment's own records on a channel its fragment.json declares, as a
+    /// reader with the run's role may read them. A page looks over at most
+    /// `RECORDS_SCAN_MAX` seqs past `after` (`steps::records_window`), so a
+    /// `turn` (matched in SQL, `json_extract` over the stretch's bodies)
+    /// reads a bounded stretch however few records match, and stops at the
+    /// page's limit or bytes (`steps::Pager`).
+    fn step_records(&self, run: &RunRow, r: Records) -> Result<Value, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let ask = r.checked().map_err(permanent)?;
+        let decl = self
+            .declared_channel(&ask.channel)
+            .map_err(retry)?
+            .ok_or_else(|| permanent(format!("no channel {:?} in fragment.json: a job reads the channels its fragment declares", ask.channel)))?;
+        if run.role < decl.read {
+            return Err(permanent(format!("reading {} needs the {} role; this run acts as {}", ask.channel, decl.read.as_str(), run.role.as_str())));
+        }
+        #[derive(Deserialize)]
+        struct Kept {
+            first: Option<i64>,
+            last: Option<i64>,
+        }
+        let kept: Vec<Kept> = self
+            .typed(
+                "SELECT (SELECT MIN(seq) FROM records WHERE channel = ?) AS first, (SELECT MAX(seq) FROM records WHERE channel = ?) AS last",
+                vec![ask.channel.as_str().into(), ask.channel.as_str().into()],
+            )
+            .map_err(retry)?;
+        let kept = kept.into_iter().next().expect("a SELECT of two subqueries answers one row");
+        let bounds = match (kept.first, kept.last) {
+            (Some(first), Some(last)) => Some((first, last)),
+            (None, None) => None,
+            _ => return Err(StepFail::Retry(format!("{}: a channel's first and last records disagree", ask.channel))),
+        };
+        let Some((from, to)) = records_window(ask.after, bounds) else { return Ok(json!(RecordsPage::end())) };
+        let (_, last) = bounds.expect("a window is of a channel with records");
+        let channel = SqlStorageValue::from(ask.channel.as_str());
+        // one past the limit, so a page that fills knows a record was left for the next
+        let take = SqlStorageValue::Integer(i64::try_from(ask.limit + 1).expect("a page's limit is small"));
+        let (filter, binds) = match &ask.turn {
+            Some(turn) => (
+                " AND json_extract(body, '$.turn') = ?",
+                vec![channel, SqlStorageValue::Integer(from), SqlStorageValue::Integer(to), turn.as_str().into(), take],
+            ),
+            None => ("", vec![channel, SqlStorageValue::Integer(from), SqlStorageValue::Integer(to), take]),
+        };
+        let q = format!("SELECT seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? AND seq <= ?{filter} ORDER BY seq LIMIT ?");
+        #[derive(Deserialize)]
+        struct Row {
+            seq: i64,
+            at: i64,
+            principal: String,
+            kind: String,
+            body: String,
+        }
+        let cursor = self.sql().exec(&q, binds).map_err(|e| StepFail::Retry(e.to_string()))?;
+        let mut pager = Pager::new(ask.limit, to, last);
+        // read one row at a time: the page stops reading where it is full
+        for row in cursor.next::<Row>() {
+            let row = row.map_err(|e| StepFail::Retry(e.to_string()))?;
+            let body = RawValue::from_string(row.body).map_err(|e| StepFail::Retry(format!("record {}#{}: its stored body is not JSON: {e}", ask.channel, row.seq)))?;
+            let record = PageRecord { seq: row.seq, at: row.at, principal: npub::display(&row.principal), kind: row.kind, body };
+            if !pager.take(record) {
+                break;
+            }
+        }
+        Ok(json!(pager.page()))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
@@ -1112,12 +1225,15 @@ impl FragmentCell {
     /// overdraft, each due tick is a blocked run that says why. The
     /// standing is read first, and only when a schedule is due; the due
     /// schedules are read after it, so what fires and what moves them on
-    /// is one turn (a deploy that replaced them meanwhile is seen).
+    /// is one turn (a deploy that replaced them meanwhile is seen). An
+    /// unclaimed draft's skip every tick: a run a minute all day is the one
+    /// start its capped writes do not bound (drafts.rs).
     pub(crate) async fn fire_cron(&self) -> CellResult<()> {
         if self.count_of("SELECT COUNT(*) AS n FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])? == 0 {
             return Ok(());
         }
         let read_only = self.read_only().await?;
+        let draft = self.draft()?.is_some();
         let now = js::now_ms();
         let due = self.rows("SELECT idx, op, cron, next_at FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(now)])?;
         // bounded: one row per declared cron trigger
@@ -1130,7 +1246,7 @@ impl FragmentCell {
             )? > 0;
             if busy {
                 self.event("cron.skipped", &format!("{op} ({expr}): the previous run is still going"), json!({ "op": op }));
-            } else if !self.is_paused(op)? {
+            } else if !draft && !self.is_paused(op)? {
                 self.start_run(NewRun {
                     op,
                     via: Via::Cron,

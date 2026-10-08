@@ -11,6 +11,51 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## A computer's browser forgets its sign-ins at every sleep
+
+- **Observed:** 2026-10-07, the goose image's desktops (docs/optchat.md).
+  Each agent's Chromium profile lives in `/run/desktop`, outside `/data`,
+  so a save never copies a profile Chromium is writing.
+- **Risk:** sites the agent signed in to ask again after each sleep.
+- **First proof:** a hand-off that needs a site it signed in to before
+  a sleep, asking for the sign-in again.
+- **Delete when:** a profile is saved under the hold (Chromium stopped
+  or its profile copied whole), or sign-ins go through connections.
+
+## goose's web search scrapes DuckDuckGo and Bing
+
+- **Observed:** 2026-10-07, `images/goose/desktop/src/web.rs` and the
+  mind's no-key search (templates/mind/applib/web.mjs). No search API
+  key is configured; the HTML endpoints rate-limit and serve CAPTCHAs to
+  some addresses (DuckDuckGo locks one out for ~12 minutes after about a
+  dozen quick searches).
+- **Risk:** searches that fail, or return CAPTCHA pages, mid-task.
+- **First proof:** a hand-off whose search answered nothing on a
+  preview.
+- **Delete when:** a search API (Perplexity, Brave, Tavily) is a
+  connection or a deployment secret the computer reaches.
+
+## cua-driver reads no accessibility tree, and is behind upstream
+
+- **Observed:** 2026-10-07, the goose image pins cua-driver 0.28.3 (the
+  latest is 0.34.0) and runs no D-Bus session or at-spi2-core, so its
+  accessibility tools are not offered; `screen_click` grounds clicks on
+  a screenshot grid through Clef instead.
+- **Risk:** clicks on desktop apps miss where an accessibility tree
+  would have named the element.
+- **First proof:** a desktop task Clef's grid cannot click through.
+- **Delete when:** the image runs at-spi2 with Chromium's accessibility
+  on and a newer cua-driver, and its tree tools are offered.
+
+## The screen's lease file is Hermes' format
+
+- **Observed:** 2026-10-07, #230's Take over lease (images/bridge/src/
+  lease.rs) kept for goose's desktops: a person's hold is a file shaped
+  as Hermes read it.
+- **Risk:** none until another runtime reads it; the shape names Hermes.
+- **First proof:** n/a (naming only).
+- **Delete when:** the lease is redesigned as the bridge's own.
+
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
@@ -25,6 +70,42 @@ fragment.club until cutover (decisions 34–35).
   said nothing was left.
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
+
+## A replayed refresh token does not end its connection
+
+- **Observed:** 2026-10-07, connected clients (docs/api.md, Connected
+  clients). A refresh token is replaced at each use, and the one it
+  replaced is refused (`invalid_grant`), but the connection stays: OAuth
+  2.1's reuse detection (a replaced refresh token presented again ends
+  the whole connection, since a thief or its client holds a copy) is not
+  done. The registry keeps only the current token's hash.
+- **Risk:** a refresh token stolen and used before its client next
+  refreshes keeps the thief connected (as the person, on its one
+  resource) until the person ends it in their settings; the client finds
+  itself refused and connects again, and the person sees two.
+- **First proof:** a person's list showing a connection of a client they
+  connected once, used after they reconnected it.
+- **Delete when:** each connection keeps the hash of the refresh token it
+  replaced last, and that token presented again ends the connection
+  (and a lost answer to a refresh, which looks the same, asks its person
+  to connect again).
+
+## A connected client's calls share `events` with the platform's own records
+
+- **Observed:** 2026-10-07, a fragment's MCP server (docs/api.md). Each
+  mutation or job a connected client runs appends `client.called` to
+  `events`, which keeps its newest 10 000 records (`limits::AUDIT_KEPT`)
+  for 90 days, beside the platform's own (deploys, refused code, runs
+  held, members changed).
+- **Risk:** a client calling a fragment's mutations thousands of times a
+  day pushes its deploys and refusals out of `events` within the day, so
+  `fragment events` and an agent reading it no longer see why its code
+  was refused.
+- **First proof:** a fragment whose `events` page holds only
+  `client.called` records, its last `code.installed` gone.
+- **Delete when:** a call's client is named where the call is already
+  recorded (its `ops` record and its run, beside their principal), and
+  `events` keeps only what no other record says.
 
 ## The browser half of web push is not driven by a test
 
@@ -270,7 +351,8 @@ fragment.club until cutover (decisions 34–35).
   (cell/src/registry.rs, `NAME`): one round trip each, never more, and
   none for a page or file anyone who may see the fragment gets alike
   (the signin and identities lanes count them). A CLI or agent call, a
-  model call, an operation, an app route, a socket's connect: 1 each (a
+  model call, an operation, an app route, a socket's connect, a
+  connected client's MCP request (its access token): 1 each (a
   `__live` socket 1 more a minute while it sends frames); a members-only
   fragment's page: 1 a file; the shell's load (cell/shell/shell.js
   `start`, `load`): 4, then up to 3 a chat (its members, its channels,
@@ -290,7 +372,8 @@ fragment.club until cutover (decisions 34–35).
   answers every chat under one resolved identity), which takes the 3 a
   chat away; then, if still near the line, sessions and keys move to
   objects named by what they resolve (a session by its token's hash, a
-  key by itself), written by the registry as they change, which keeps
+  key by itself, a connection by its access token's), written by the
+  registry as they change, which keeps
   only what must be unique (usernames, sign-in subjects, identities).
   Each lookup stays one live round trip: no cache outlives a revocation
   (rule 7).
@@ -410,8 +493,8 @@ fragment.club until cutover (decisions 34–35).
 - **Observed:** the cut (2026-10-02) took the lane that drove
   `PUT /api/f/<name>/channels/<channel>/draft` (cell/src/channels.rs
   `draft_api`: a record its poster is writing, sent to the channel's
-  readers as `draft` frames, never stored). Phase 4's computers and
-  real-Hermes lanes drive it again through the bridge, and a page's
+  readers as `draft` frames, never stored). Phase 4's computers lane
+  drives it again through the bridge, and a page's
   socket hears the frames; nothing drafts as a stranger or past the pace.
 - **Risk:** a change lets a stranger draft on a channel, or drops the
   pace, and nothing says so.
@@ -468,6 +551,28 @@ fragment.club until cutover (decisions 34–35).
   database size or bound it (a facet storage limit), and the meter
   samples it, with a test of a query that writes past the cap.
 
+## An app may declare a 1 GiB database that no meter counts
+
+- **Observed:** 2026-10-07, the optchat spike (docs/optchat.md,
+  "Importing chats"). A long history imported into a mind outgrows the
+  16 MiB cap, so `fragment.json` may declare up to 1 GiB
+  (`storage.maxBytes`; docs/api.md, Apps), and the mind does. The cap is
+  the app realm's courtesy as before (the entry above), and the storage
+  meter still does not sample an app's database, so a declared GiB is
+  stored unbilled.
+- **Risk:** the platform pays for up to 1 GiB of SQLite a fragment
+  ($0.20 a month at list) for each mind, and a mind's loaded memory
+  (applib/optmem.mjs keeps every node's text on its instance) grows with
+  its log toward the isolate's 128 MB long before its database reaches a
+  GiB.
+- **First proof:** a mind whose `status` reports more than about 30 000
+  messages, or a Fragment namespace's stored bytes well over its sampled
+  `sqlite`.
+- **Delete when:** the meter samples an app's database (the entry above),
+  and a mind keeps only its view's texts on its instance (the rest read
+  from SQLite as a zoom or a merge needs them), or its log moves out of
+  SQLite (docs/optchat.md, "Not in the spike").
+
 ## A blob larger than the zone's request limit cannot be uploaded
 
 - **Observed:** phase 2. A blob route takes up to 256 MiB, but
@@ -490,164 +595,13 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the hosted lane checks the 413 itself, or miniflare
   passes the early answer through.
 
-## The Hermes image patches Hermes' own boot
-
-- **Observed:** phase 4 (`images/hermes/Dockerfile`). The preloaded
-  gateway is hermes-boot's main program (spike S3b), so the image removes
-  upstream's `/etc/cont-init.d/02-reconcile-profiles`, whose
-  `hermes_cli.container_boot` would start an s6-supervised gateway beside
-  it from a restored `gateway_state.json`. The build fails if that script
-  is not there to remove, or another cont-init script names
-  `container_boot`.
-- **Risk:** a Hermes release that starts a gateway at boot some other
-  way: two gateways serve one home.
-- **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream lets a container whose main program is the
-  gateway skip its reconciler (or ships a preloadable, unsupervised
-  gateway main program: S3b's "Upstream Hermes" list), proven by the
-  real-Hermes lane on an image without the removal.
-
-## A Hermes turn's end is read from its reactions
-
-- **Observed:** phase 4, against the real image. Relay has no
-  turn-level end; the bridge reads its processing hooks' reactions
-  (`👀` off, then `✅`/`❌`). Hermes brackets a message it took while its
-  gateway was starting twice, the first empty (docs/hermes-relay.md), so
-  the relay runtime ends a turn at `❌`, at `✅` only once it said
-  something (Hermes ends no person's turn without a word), and, stopped,
-  at `👀` off. No clock (#156 cut the 1.5 s and 20 s windows).
-- **Risk:** a Hermes release that ends a person's turn saying nothing,
-  or cancels one the bridge did not stop, leaves it running until the
-  idle bound (15 minutes, then an error); one that stops reacting does
-  so for every turn (loudly: the Docker rung's turns never end). Hermes'
-  clarify questions are read by their glyphs (`❓`, `✏️`) the same way.
-- **First proof:** a turn that ends "the agent stopped answering" though
-  Hermes answered,
-  or a reply posted under a `said` turn rather than its message's.
-- **Delete when:** Hermes' Relay sends a turn's end and its questions as
-  structure, proven by the real-Hermes lane.
-
-## Hermes' tool steps are its progress text
-
-- **Observed:** phase 4. v0.21.5 sends `task_card` only for Slack chats,
-  so a Relay turn's steps are the lines of its progress message: a tool's
-  name and its preview, `ok` always true, no excerpt of its result.
-- **Risk:** a step card cannot say a tool failed or what it returned; a
-  change to the progress lines' format changes the cards.
-- **First proof:** phase 5's chat template showing a failed tool as ok.
-- **Delete when:** Hermes sends structured tool events (task cards, or
-  their like) to Relay connectors other than Slack's, and the relay
-  runtime maps them, proven by the real-Hermes lane's step assertions.
-
-## A quick tool's step can be lost in Hermes
-
-- **Observed:** the Docker rung's `the_hermes_image`, twice, warm.
-  Hermes v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) takes a tool's progress line from
-  its queue every 0.3 s; when the turn's cleanup cancels it, it edits a
-  progress message it already sent but never sends a first one. A turn
-  that ends before the sender's next poll after its tool starts sends no
-  progress line at all, as a message or in a draft (its one draft is the
-  answer's), so the relay runtime has no step to record; a probe of that
-  code in the image lost 21 of 48 lines whose turns ended within 0.35 s
-  of their tool's start. The scripted model answers at once and `echo` is
-  quick: the failing turns took about 350 ms, and a passing one sent its
-  line 65 ms before its answer. So the rung's terminal command sleeps 2 s
-  first (`images/bridge/tests/support/model.rs`). The e2e's `hermes` lane
-  runs `run: echo tool-ran` through the Workers AI fake and has the same
-  race, so far unseen.
-- **Risk:** a real turn whose tool and next model call take under 0.3 s
-  together shows its answer with no step. Rare with a real model, whose
-  next call alone is slower.
-- **First proof:** a Hermes turn with a tool call in its session and no
-  `turn.step` on work.
-- **Delete when:** Hermes sends what its progress queue holds when its
-  sender is cancelled (or the entry above goes), proven by the Docker
-  rung with an instant command.
-
-## The Hermes image patches Hermes' progress sender
-
-- **Observed:** the hosted `agent-smoke` (2026-10-06): asked to list
-  fragments with the CLI, 2 runs of 3 recorded only the skill read's step
-  though the reply named the fragments a terminal call listed. Hermes
-  v0.21.5's progress sender (`gateway/run_turn_runner.py`,
-  `TurnRunner.send_progress_messages`) edits at most every 1.5 s: a line
-  that comes sooner waits out the interval, then the sender goes back to
-  its queue and sends that line only with a newer one. A tool call within
-  1.5 s of the last progress line that is its turn's last (a skill read,
-  then a quick model call to the terminal) is never sent, and the next
-  text segment's new-message marker clears it. A probe of that code in
-  the image (the sender driven with a scripted queue) lost the line in
-  each such order and sent it once the patch removes the loop's
-  `continue` after the wait; the Docker rung's `use the terminal twice`
-  turn proves the patched image. The image applies it with Python before
-  its bytecode step (`images/hermes/Dockerfile`), and the build fails if
-  the loop no longer reads as it did.
-- **Risk:** a Hermes release changes the loop: the build fails (loudly).
-  Edits stay at most one per 1.5 s; the patch only stops a held line
-  from waiting for a newer one.
-- **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream sends a held progress line once its edit
-  interval passes, proven by the Docker rung's `use the terminal twice`
-  turn on an unpatched image.
-
-## The screen writes Hermes' lease file, not through Hermes
-
-- **Observed:** 2026-10-07 (`images/bridge/src/lease.rs`,
-  `images/hermes/boot/src/desktop.rs`). Take over is each agent's Hermes
-  Bot Desktop lease, so its `computer_use` refuses while a person holds
-  the screen; but Hermes changes its lease only in its own process
-  (`tools/bot_desktop/lease.py`) or through its TUI gateway's
-  `display.lease.*` RPCs, which this image does not run. The bridge
-  writes the file as Hermes' `_transition` does (its `lease.lock` flock,
-  `lease.json.tmp` renamed over it, the epoch one on): Hermes' file
-  format, not an interface it promises. Likewise the idle stop reads the
-  desktop's `activity` and `env` files' times as Hermes' `stop_if_idle`
-  does (that watcher too is its TUI gateway's), and the screen touches
-  `activity` as Hermes' own viewer does.
-- **Risk:** a Hermes release that changes the lease's file, path or
-  lock: the screen and the agent's tools then disagree on who holds it
-  (a person typing while the agent acts, or an agent refused for good);
-  or that renames the activity file: desktops stop under their viewers,
-  or never.
-- **First proof:** the Docker rung's `two_agents_two_desktops` on a new
-  Hermes: it reads the lease with Hermes' own code, has the agent's
-  `computer_use` refuse while a person holds the screen, and has an
-  unwatched desktop stop and a watched one stay.
-- **Delete when:** Hermes offers a lease and an idle stop outside its TUI
-  gateway (a gateway control verb, or its RPCs on the messaging gateway),
-  and the image uses them, proven by the same test.
-
-## Each agent's Hermes profile config is rewritten at every boot
-
-- **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
-  its model block (tier, the model intercept, `x-fragment-agent`), its
-  skills' directories, its vision model, its browser and its terminal,
-  written whole at each boot; anything Hermes or the agent wrote there
-  is lost. Hermes' managed scope (`/etc/hermes/config.yaml`, which the
-  boot writes for what every profile shares) cannot carry the rest: it
-  is one layer for every profile, its `${VAR}`s expand against the
-  gateway's own environment, never a profile's `.env`, and Hermes v0.21.5
-  reads some keys (`browser.*`) with `read_raw_config`, past it. A merge
-  into the profile's file would need a YAML parser in the boot, or
-  Hermes' own Python per profile per boot.
-- **Risk:** an agent's own `hermes config set` lasts until the computer
-  sleeps.
-- **First proof:** an agent that changes its own Hermes settings.
-- **Delete when:** an agent's settings live in its fragment (its
-  `agent.json`, phase 5's agent template) and the boot merges them into
-  the profile's config rather than replacing it, proven by a setting
-  that survives a wake.
-
 ## The swap's HTTPS is proven only under wrangler dev
 
 - **Observed:** phase 4 (`cell/src/computer.rs` `egress_swap`). The
   computers lane drives the swap from the stub's scripted agent over
-  plain HTTP; the real-Hermes lane sends a stock `curl https://…` from
-  Hermes' terminal, with the placeholder from its environment, through
-  `interceptOutboundHttps` with Cloudflare's local CA. Both send the
-  swapped request to `FRAGMENT_SWAP_UPSTREAM`, not a real provider, and
-  neither runs on Containers. The four operator keys and the Google
+  plain HTTP, to `FRAGMENT_SWAP_UPSTREAM`, not a real provider, and not
+  on Containers. No lane drives `interceptOutboundHttps` since the lane
+  that sent a `curl https://…` from a real image went (docs/optchat.md). The four operator keys and the Google
   connection have never reached their real vendors through it.
 - **Risk:** Containers' CA, or a real provider's TLS and auth, differ
   from the local proxy's, so a connection works in dev and not hosted.
@@ -672,27 +626,6 @@ fragment.club until cutover (decisions 34–35).
   body, as the model route reads tokens) and settles the vendor's own
   units against a hold of its worst case, each catalog row naming how,
   proven by a lane whose upstream fake answers usage and is charged by it.
-
-## Hermes keeps its providers' variable names from its terminal
-
-- **Observed:** Paul, 2026-10-04 (`images/hermes/boot`: `hermes.rs`
-  `credentials_sh`). Hermes v0.21.5 never passes a name of its own
-  providers' keys to its terminal (`_HERMES_PROVIDER_ENV_BLOCKLIST`:
-  `PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY` among them),
-  whatever `terminal.env_passthrough` lists. The image also writes them to
-  the profile's `credentials.sh`, which its terminal sources as a session's
-  shell starts (`terminal.shell_init_files`), so they are in its snapshot.
-- **Risk:** a Hermes release that scrubs those names from the snapshot, or
-  ignores `shell_init_files`, takes the operator keys from the agents'
-  terminals (their skills say the key is not offered); and one sourced at
-  a session's start keeps a value removed meanwhile until the session
-  ends (a placeholder then refused at the swap, never a key).
-- **First proof:** the hermes lane's check that a stock curl in Hermes'
-  terminal finds `$PERPLEXITY_API_KEY`, failing on a Hermes upgrade.
-- **Delete when:** Hermes lets a profile pass a name it keeps (an
-  allowlist of its own), or the catalog's names for those providers are
-  ones Hermes does not keep, proven by the same check with no
-  `credentials.sh`.
 
 ## Own keys are kept by the person's computer
 
@@ -737,7 +670,7 @@ fragment.club until cutover (decisions 34–35).
 ## An agent's sync and deploy reach code.storage directly
 
 - **Observed:** decision 17's branch (`claude/skills`). The fragment CLI
-  in our Hermes image acts as its agent through the API egress, with no
+  in a computer's image acts as its agent through the API egress, with no
   key (cli/GUIDE.md, "As an agent"), but `fragment sync`, `deploy`,
   `rollback` and `drafts` still go to code.storage itself, with the
   15-minute, repo-scoped token the platform mints for the agent.
@@ -749,7 +682,7 @@ fragment.club until cutover (decisions 34–35).
   app from a chat, on a preview.
 - **Delete when:** a computer's sync and deploy go through its API egress
   (the files and deploy routes, or a code.storage intercept that swaps
-  the token in), proven by the hermes lane deploying an app from a chat.
+  the token in), proven by a lane deploying an app from a chat.
 
 ## `fragment rollback` right after a two-step deploy picks its first step
 
@@ -777,14 +710,13 @@ fragment.club until cutover (decisions 34–35).
 
 - **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
   his agent stopped answering: the idle sleep under the card cut its
-  turn, and Hermes folded every later message into the cut request,
+  turn, and its runtime folded every later message into the cut request,
   asking its approval again. The bridge now holds the keepalive while a
   turn waits on its card (images/bridge/src/engine.rs, `finish`;
   docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
   Paul agreed (docs/durable-computers.md). The fold itself is closed by
-  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
-  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
-  in images/bridge/tests/docker.rs).
+  P5 (2026-10-06: the next turn is told what was cut;
+  docs/durable-computers.md).
 - **Risk:** an unanswered card costs its life awake (an hour by default;
   a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
   other reason while a card is open (an owner's sleep, a crash, a deploy,
@@ -796,8 +728,8 @@ fragment.club until cutover (decisions 34–35).
   happen.
 - **Delete when:** P6 lands: a card outlives its turn (a late answer
   starts a new turn, told what was cut), so the keepalive can be let go
-  while a card waits again, proven on the real-Hermes lane by a sleep
-  under a card whose answer, after the wake, is acted on once.
+  while a card waits again, proven by a sleep under a card whose answer,
+  after the wake, is acted on once.
 
 ## Preview cards drive Browser Rendering over a CDP client of our own
 

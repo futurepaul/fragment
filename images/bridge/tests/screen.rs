@@ -1,13 +1,13 @@
 //! The bridge's screens, in process, against fake displays: each agent's
 //! screen is its own display, routed by the `agent` its sockets name; Take
-//! over is that agent's lease file, written as Hermes writes its own, and
-//! the screen's input gate follows the file whoever changes it. Method: a
-//! fake API with agents on one computer, a screens file (as our Hermes
-//! image writes it) naming, for each agent, a fake RFB server
-//! (support/display.rs, named `hermes:<profile>` as Hermes names its
-//! desktops), its lease and its activity file; the bridge with its screen
-//! on a loopback port; and viewers and control sockets as the screen's
-//! page opens them (support/rfb.rs).
+//! over is that agent's lease file (lease.rs), and the screen's input gate
+//! follows the file whoever changes it. Method: a fake API with agents on
+//! one computer, a screens file naming, for each agent, a fake RFB server
+//! (support/display.rs, named for its agent's desktop), its lease and its
+//! activity file, or a screens directory naming them by convention (our
+//! goose image's); the bridge with its screen on a loopback port; and
+//! viewers and control sockets as the screen's page opens them
+//! (support/rfb.rs).
 
 mod support;
 
@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use fragment_bridge::lease::{self, Holder, LeaseFile};
 use fragment_bridge::net::Base;
 use fragment_bridge::screen::ScreenConfig;
+use fragment_bridge::screens::{self, Source};
 use support::display::Display;
 use support::fake::Fake;
 use support::rfb::{Control, Viewer};
@@ -49,25 +50,24 @@ fn write_screens(dir: &Path, screens: &[(&str, &str, String)]) {
     std::fs::rename(dir.join("screens.tmp"), dir.join("screens.json")).unwrap();
 }
 
-fn write_ready(dir: &Path, agents: &[&str]) {
-    std::fs::write(dir.join("ready.tmp"), json!({ "agents": agents }).to_string()).unwrap();
-    std::fs::rename(dir.join("ready.tmp"), dir.join("agents.json")).unwrap();
+/// A bridge whose screen listens on a loopback port, reading `dir`'s
+/// screens file; its start command notes each agent it starts.
+async fn bridge(fake: &Fake, dir: &Path) -> (support::Running, Base) {
+    bridge_naming(fake, dir, Source::File(dir.join("screens.json"))).await
 }
 
-/// A bridge whose screen listens on a loopback port, reading `dir`'s
-/// screens and ready files; its start command notes each agent it starts.
-async fn bridge(fake: &Fake, dir: &Path) -> (support::Running, Base) {
+/// The same, its screens named by `screens`.
+async fn bridge_naming(fake: &Fake, dir: &Path, screens: Source) -> (support::Running, Base) {
     let port = Display::free_port().await;
     let page = dir.join("page");
     std::fs::create_dir_all(&page).unwrap();
     std::fs::write(page.join("index.html"), "<p>the screen</p>").unwrap();
     let mut cfg = support::config(&fake.url(), dir, support::settings());
-    cfg.agents_file = Some(dir.join("agents.json"));
     let started = dir.join("started");
     cfg.screen = Some(ScreenConfig {
         listen: format!("127.0.0.1:{port}").parse().unwrap(),
         dir: page,
-        screens_file: Some(dir.join("screens.json")),
+        screens: Some(screens),
         // the agent's fragment comes last: `$0` to sh
         start: Some(vec!["/bin/sh".into(), "-c".into(), format!("echo \"$0\" >> {}", started.display())]),
     });
@@ -115,7 +115,6 @@ async fn each_agent_has_its_own_screen() {
     let juniper = Display::start(0, "hermes:juniper-paul").await;
     let fred_port = Display::free_port().await;
     write_screens(&dir, &[("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", format!("tcp:127.0.0.1:{fred_port}"))]);
-    write_ready(&dir, &["juniper.paul", "fred.paul", "oak.paul"]);
     // juniper's desktop last used an hour ago
     let activity = desktop(&dir, "juniper-paul").join("activity");
     std::fs::write(&activity, b"").unwrap();
@@ -178,7 +177,6 @@ async fn take_over_is_the_agents_lease() {
     let juniper = Display::start(0, "hermes:juniper-paul").await;
     let fred = Display::start(0, "hermes:fred-paul").await;
     write_screens(&dir, &[("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", fred.target())]);
-    write_ready(&dir, &["juniper.paul", "fred.paul"]);
     let (running, base) = bridge(&fake, &dir).await;
     let (jl, fl) = (lease_of(&dir, "juniper-paul"), lease_of(&dir, "fred-paul"));
 
@@ -255,7 +253,6 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     let fred = Display::start(0, "hermes:fred-paul").await;
     let screens = [("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", fred.target())];
     write_screens(&dir, &screens);
-    write_ready(&dir, &["juniper.paul", "fred.paul"]);
     let (jl, fl) = (lease_of(&dir, "juniper-paul"), lease_of(&dir, "fred-paul"));
     for _ in 0..4 {
         jl.change(|l| if l.holder == Holder::Agent { lease::take(l, "gone", 1.0) } else { lease::give(l, None, 2.0) }).unwrap();
@@ -274,7 +271,6 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     assert_eq!(next(&mut fc).await["agent"], "fred.paul");
     fake.remove_agent("fred");
     write_screens(&dir, &screens[..1]);
-    write_ready(&dir, &["juniper.paul"]);
     let closed = fc.next().await;
     assert!(closed.is_err(), "fred gone, its screen's socket closes: {closed:?}");
     let why = fragment_bridge::net::connect_ws(&base, "/control?viewer=w&agent=fred.paul", &[]).await.err().unwrap_or_default();
@@ -283,4 +279,54 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     assert_eq!(next(&mut jc).await["holder"], Value::Null, "juniper's screen stays");
     drop((juniper, fred));
     running.stop().await;
+}
+
+/// Goal: a screens directory names every agent's screen by convention (our
+/// goose image's), whether or not its desktop has started: juniper's socket
+/// is juniper's display under its own directory; fred's, never started, is
+/// started for its first viewer, naming fred, and is fred's once up there;
+/// an agent the computer does not run is refused. Take over writes the
+/// lease in the agent's directory, and no other.
+#[tokio::test]
+async fn a_screens_directory_names_every_agents_screen() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "fred"]).await;
+    let dir = support::dir("screens-dir");
+    // a short directory: its sockets' paths must fit a Unix socket's
+    let desks = std::env::temp_dir().join(format!("sd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&desks);
+    let rfb = |agent: &str| match screens::in_dir(&desks, agent).rfb {
+        fragment_bridge::screen::Target::Unix(p) => p,
+        t => panic!("a socket: {t:?}"),
+    };
+    let juniper = Display::start_unix(&rfb("juniper.paul"), "juniper.paul").await;
+    let (running, base) = bridge_naming(&fake, &dir, Source::Dir(desks.clone())).await;
+
+    let mut c = control(&base, "w", "juniper.paul").await;
+    assert_eq!(next(&mut c).await, json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }));
+    let nobody = fragment_bridge::net::connect_ws(&base, "/control?viewer=w&agent=nobody.paul", &[]).await.err().unwrap_or_default();
+    assert!(nobody.contains("404"), "an agent the computer does not run: {nobody}");
+    let j = Viewer::open(&base, "w", "juniper.paul", WAIT).await.unwrap();
+    assert_eq!(j.name, "juniper.paul", "juniper's socket shows juniper's desktop");
+
+    // fred's desktop has never started: its first viewer starts it
+    let opening = {
+        let base = base.clone();
+        tokio::spawn(async move { Viewer::open(&base, "w", "fred.paul", Duration::from_secs(20)).await })
+    };
+    let started = dir.join("started");
+    until("fred's desktop started", || std::fs::read_to_string(&started).is_ok_and(|s| s.contains("fred.paul"))).await;
+    let fred = Display::start_unix(&rfb("fred.paul"), "fred.paul").await;
+    let f = opening.await.unwrap().unwrap_or_else(|e| panic!("fred's screen: {e}"));
+    assert_eq!(f.name, "fred.paul", "fred's socket shows fred's desktop");
+
+    // Take over is the lease in juniper's directory
+    c.say("take").await.unwrap();
+    assert_eq!(next(&mut c).await["holder"], "w");
+    let jl = LeaseFile::new(screens::in_dir(&desks, "juniper.paul").lease.unwrap());
+    assert!(jl.read().holder.is("w"), "juniper's lease names the viewer");
+    let fl = LeaseFile::new(screens::in_dir(&desks, "fred.paul").lease.unwrap());
+    assert_eq!(fl.read(), lease::Lease::default(), "fred's is untouched");
+    drop((j, f, juniper, fred));
+    running.stop().await;
+    let _ = std::fs::remove_dir_all(&desks);
 }

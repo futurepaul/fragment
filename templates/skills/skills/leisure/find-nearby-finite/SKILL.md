@@ -3,9 +3,8 @@ name: find-nearby-finite
 description: Find nearby places (restaurants, cafes, bars, pharmacies, etc.) using OpenStreetMap. Works with coordinates, addresses, cities, zip codes, or a location the person shares. No API keys needed.
 version: 1.0.0
 metadata:
-  hermes:
-    tags: [location, maps, nearby, places, restaurants, local]
-    related_skills: []
+  tags: [location, maps, nearby, places, restaurants, local]
+  related_skills: []
 ---
 
 # Find Nearby — Local Place Discovery

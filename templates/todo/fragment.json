@@ -4,6 +4,7 @@
     "add": {
       "kind": "mutation",
       "role": "public",
+      "description": "Add a todo to the list. Answers its id.",
       "input": {
         "type": "object",
         "required": ["text"],
@@ -14,6 +15,7 @@
     "toggle": {
       "kind": "mutation",
       "role": "public",
+      "description": "Mark a todo done, or not done again, by its id. Answers whether it is done now.",
       "input": {
         "type": "object",
         "required": ["id"],
@@ -24,6 +26,7 @@
     "remove": {
       "kind": "mutation",
       "role": "public",
+      "description": "Delete a todo from the list, by its id.",
       "input": {
         "type": "object",
         "required": ["id"],
@@ -31,7 +34,12 @@
         "properties": { "id": { "type": "integer", "minimum": 1 } }
       }
     },
-    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+    "list": {
+      "kind": "query",
+      "role": "public",
+      "description": "The list: the newest 500 todos, oldest first, each with its id, its text, and whether it is done.",
+      "input": { "type": "object", "additionalProperties": false }
+    }
   },
   "channels": { "activity": { "read": "public" } },
   "meta": { "title": "Todo", "description": "A shared todo list, live for everyone who has it open." }

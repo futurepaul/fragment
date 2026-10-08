@@ -4,13 +4,15 @@
 //! steps' reserve, settle and release (bugs 2 and 3), zero credit and the
 //! overdraft (past it, no new fragments, and cron and triggers start no
 //! runs until a top-up), a fragment's cap, the meters that reach the
-//! ledger through the queue, and the model route, streamed and not. The model is the Workers AI fake behind the model route (a lower
+//! ledger through the queue, and the model route, streamed and not, and
+//! its decisions. The model is the Workers AI fake behind the model route (a lower
 //! rung at the vendor boundary, labeled so); a test sets the usage each
 //! answer reports, so every charge is checked against the price book.
 
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::decide::CLEF_FLASH_MODEL;
 use fragment_core::price::{PriceBook, Usage};
 use fragment_fakes::workers_ai::{image_bytes, Used, IMAGE_MODEL};
 use fragment_nip98::Keys;
@@ -566,6 +568,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "@cf/zai-org/glm-5.3", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("a model id is never a tier", r.status == 400, &r);
     vision(s, api, wait)?;
+    decisions(s, api, wait)?;
     let r = api.signed(&owner, "POST", route, Some(&chat(false)))?;
     s.ok("a person does not call the model route (an agent does, for whom its owner pays)", r.status == 403, &r);
     let elsewhere = s.named(api, &visitor, "ledger-elsewhere")?;
@@ -601,9 +604,9 @@ fn png_url(bytes: usize) -> String {
 
 /// The model route's `vision` (Paul, 2026-10-05): the deployment's vision
 /// model, GLM-5.3 Flash unless its config names another, for a runtime's
-/// calls about an image (Hermes' screenshots: the hermes lane drives one),
-/// metered on the payer's ledger as any call; and a call as large as
-/// Hermes' shrunk screenshot fits the route, one past its cap refused
+/// calls about an image (a screenshot), metered on the payer's ledger as
+/// any call; and a call carrying the largest image the route allows
+/// (`IMAGE_DATA_URL_MAX_BYTES`) fits the route, one past its cap refused
 /// before anything is reserved or sent. Its payer is a person of its own,
 /// whose credit covers the large call's worst case (its bytes as tokens).
 fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
@@ -633,14 +636,13 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let r = api.signed(hand, "POST", route, Some(&json!({ "model": "medium", "messages": look(&small)["messages"] })))?;
     s.ok("an image sent to the medium tier is the model's refusal (GLM-5.3 reads none), passed through", r.status == 400 && r.text.contains("takes no image input"), &r);
 
-    // Hermes shrinks a screenshot a call refused as too large to 5 MiB of
-    // data URL and tries once more: that call fits
+    // the largest image the route allows, 5 MiB of data URL: that call fits
     let calls = s.ai.calls().len();
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
     s.ok(
-        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
+        &format!("a call carrying the largest image allowed ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
         r.status == 200 && sent == Some(shrunk.len()),
         json!({ "status": r.status, "sent": sent, "message": r.message() }),
     );
@@ -651,6 +653,56 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         "one past the route's cap is refused, 413, nothing reserved or sent",
         r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
         json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
+    );
+    Ok(())
+}
+
+/// The decision route (`POST /api/models/v1/decide`): a job's `ai.decide`
+/// input from an agent, `clef-flash` unless it names `clef`, answered as
+/// the step is and settled on its payer's ledger from its input tokens;
+/// a body that is no decision is refused, 400, nothing reserved or sent.
+/// Its payer is a person of its own, as `vision`'s is.
+fn decisions(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let route = "/api/models/v1/decide";
+    let aig = || entries(api, &owner_id, "aig:");
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let ask = json!({
+        "state": "The invoice is overdue; billing should look.",
+        "questions": {
+            "late": { "type": "noul", "instructions": "Is the invoice overdue?" },
+            "team": { "type": "choice", "instructions": "Which team?", "criteria": { "billing": "Payments", "technical": null } },
+        },
+    });
+    s.ai.set_usage(&[Used { prompt: 300, cached: 0, completion: 2 }]);
+    let r = api.signed(hand, "POST", route, Some(&ask))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let sent = call.as_ref().is_some_and(|c| c.model == CLEF_FLASH_MODEL && c.body["model"] == "clef-flash" && c.body["questions"] == ask["questions"]);
+    let priced = charge(&tokens(CLEF_FLASH_MODEL, 300, 0, 2));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == priced));
+    s.ok(
+        "an agent's decision is Clef Flash unless it names a size, answered as a job's step is, and settled on its payer's ledger from its input tokens",
+        r.status == 200
+            && r.body["answers"]["late"]["noul"] == 0.9
+            && r.body["answers"]["team"]["choice"] == "billing"
+            && r.body["model"] == CLEF_FLASH_MODEL
+            && r.body["usage"] == json!({ "input_tokens": 300, "output_tokens": 2 })
+            && sent
+            && settled,
+        json!({ "answer": r.body, "model": call.map(|c| c.model), "entries": aig() }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let r = api.signed(hand, "POST", route, Some(&json!({ "state": "s", "questions": {} })))?;
+    let r2 = api.signed(hand, "POST", route, Some(&json!({ "model": "@cf/cloudflare/clef", "state": "s", "questions": ask["questions"] })))?;
+    s.ok(
+        "a body that is no decision (no questions, a model that is no size) is refused, 400, nothing reserved or sent",
+        r.status == 400 && r.message().contains("1 to 64") && r2.status == 400 && r2.message().contains("clef-flash") && s.ai.calls().len() == calls && aig().len() == before,
+        json!({ "questions": r.body, "model": r2.body, "calls": s.ai.calls().len() - calls, "entries": aig().len() - before }),
     );
     Ok(())
 }

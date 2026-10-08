@@ -1,5 +1,5 @@
 //! What the bridge's integration tests share: the fake fragment API, the
-//! scripted Hermes, and a bridge run in process (stopped and started again
+//! scripted model, and a bridge run in process (stopped and started again
 //! over the same state, as a restart does; or killed, as a crash does).
 //!
 //! The tools of the failure cases (docs/explorations/pi-durable.md,
@@ -18,9 +18,9 @@
 
 #![allow(dead_code)]
 
+pub mod acp;
 pub mod display;
 pub mod fake;
-pub mod hermes;
 pub mod model;
 pub mod rfb;
 
@@ -67,7 +67,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None, screen: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, screen: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run

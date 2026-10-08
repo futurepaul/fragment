@@ -26,6 +26,18 @@ use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
 pub const JOB_ID_PREFIX: &str = "job:";
+
+/// Whether a connected client asks (an MCP client, as its person: docs/api.md,
+/// Connected clients).
+pub(crate) fn connected(caller: &Caller) -> bool {
+    caller.signed.as_ref().is_some_and(|s| s.through.is_some())
+}
+
+/// Whether a connected client's person let it change things (else it only
+/// reads; a caller that is no connected client is not one this limits).
+pub(crate) fn writes(caller: &Caller) -> bool {
+    caller.signed.as_ref().and_then(|s| s.through.as_ref()).is_some_and(|t| t.writes)
+}
 /// A browser posts to a channel at `__op/channels/<channel>` (`call_op`).
 const SITE_POST_PREFIX: &str = "channels/";
 /// How long the facet's ledger recognizes an id: a call with it within
@@ -89,7 +101,7 @@ pub(crate) fn input_sha(op: &str, canonical_input: &str) -> String {
 /// The facet refused a call: nothing of the call committed.
 fn refused(why: Refusal, op: &str) -> CellError {
     let message = match why {
-        Refusal::StorageFull => format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
+        Refusal::StorageFull => "the app's database is at its cap (16 MiB, or its fragment.json's storage.maxBytes): the mutation was rolled back".to_string(),
         Refusal::ConflictingBody => "this operation id was already used with a different input".to_string(),
         Refusal::UnknownOperation => format!("the app has no method {op:?}"),
     };
@@ -209,6 +221,36 @@ impl FragmentCell {
         json_response(&result)
     }
 
+    /// `GET /mcp/tools`, the router's for a connected client (cell/src/mcp.rs):
+    /// its tools, by name: the operations this fragment describes that the
+    /// caller may call, its mutations and jobs only when its person let it
+    /// change things (`fragment_core::mcp::served`, the rule `fragment mcp`
+    /// keeps). A fragment it may not see is refused.
+    pub(crate) fn mcp_tools(&self, caller: &Caller) -> CellResult<Response> {
+        let facts = self.facts()?;
+        let standing = self.standing(caller, false)?;
+        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        let tools = fragment_core::mcp::tools_of(&self.operations()?, writes(caller), |d| {
+            let purpose = if d.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
+            decide(facts.visibility, standing, purpose, d.role).is_ok()
+        });
+        json_response(&json!({ "tools": tools }))
+    }
+
+    /// `POST /mcp/tools/<op>`, the router's for a connected client: a call of
+    /// one of its tools, which is `POST /api/ops/<op>` once the operation is
+    /// one (an operation that is none is `unknown_operation`, saying why).
+    pub(crate) async fn mcp_call(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
+        let facts = self.facts()?;
+        decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Public)?;
+        let decl = self.declared(op)?;
+        let writes = writes(caller);
+        if !fragment_core::mcp::served(&decl, writes) {
+            return Err(CellError::new(ErrorCode::UnknownOperation, fragment_core::mcp::not_served(op, &decl, writes)));
+        }
+        self.api_op(caller, op, body).await
+    }
+
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link. The caller's standing is read once and
@@ -232,6 +274,11 @@ impl FragmentCell {
         // mutation or a job acts, which takes a membership of one's own
         let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
         let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        // a connected client its person let only read runs no mutation or
+        // job, by whichever server it asks (docs/api.md, Connected clients)
+        if decl.kind != OpKind::Query && connected(caller) && !writes(caller) {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{op} changes things, and this connected client may only read: its person connects it again and allows changes")));
+        }
         // a mutation or a job writes: past its owner's overdraft the fragment
         // takes none, and its queries still answer
         if decl.kind != OpKind::Query {
@@ -246,8 +293,15 @@ impl FragmentCell {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
+        let acts = decl.kind != OpKind::Query;
+        let id = body.id.clone();
         let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
+        // what a connected client does names it (docs/api.md, Connected clients)
+        if let (Some(through), true, false) = (caller.signed.as_ref().and_then(|s| s.through.as_ref()), acts, result.replayed) {
+            let summary = format!("{op} {id} by {} through {}", npub::display(principal), through.client);
+            self.event("client.called", &summary, json!({ "op": op, "id": id, "principal": npub::display(principal), "client": through.client, "connection": through.connection }));
+        }
         self.launch_queued().await;
         Ok(result)
     }
@@ -298,6 +352,7 @@ impl FragmentCell {
                     "agent": agent,
                     "role": inv.role,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "dbMax": self.app_db_max()?,
                 });
                 self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
             }
@@ -392,6 +447,15 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::AppFailed, format!("{} committed, but the platform refused its effects: {why}", inv.op)));
         }
         bounded(Answered { result: ran.result, replayed: false })
+    }
+
+    /// The app's database cap: the platform's, or what live's manifest
+    /// declares (`storage.maxBytes`, checked when the manifest was read).
+    fn app_db_max(&self) -> CellResult<u64> {
+        let declared = self.meta(MetaKey::AppDbMax)?.and_then(|v| v.parse::<u64>().ok());
+        let cap = declared.unwrap_or(limits::APP_DB_MAX_BYTES);
+        assert!((limits::APP_DB_MAX_BYTES..=limits::APP_DB_DECLARED_MAX_BYTES).contains(&cap), "a stored cap was checked when its manifest was read");
+        Ok(cap)
     }
 
     /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or
@@ -509,6 +573,12 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
+            Some("abort-app") => {
+                // its app's instance ends, as an eviction ends it: the next
+                // call starts a fresh one on the same database
+                js::abort_app_facet(&self.raw, &self.app_facet()?, "a test hook")?;
+                json!({ "ok": true })
+            }
             Some("meter-now") => {
                 // every counted minute closed, a storage sample taken, and
                 // the batch sent now (a waiting one again: the ledger
@@ -533,6 +603,14 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due })
             }
+            Some("expire-draft") => {
+                // an unclaimed draft's end, now: its alarm ends it (drafts.rs)
+                let mut draft = self.draft()?.ok_or_else(|| CellError::invalid("expire-draft is an unclaimed draft's"))?;
+                draft.until = js::now_ms();
+                self.set_meta(MetaKey::Draft, &serde_json::to_string(&draft).expect("a draft serializes"))?;
+                self.schedule().await?;
+                json!({ "until": draft.until })
+            }
             Some("poll-now") => {
                 // the next alarm is a poll pass (the blob collection's), so a
                 // test need not wait a quiet fragment's day for one
@@ -542,7 +620,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, abort-app, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, expire-draft, or ended")),
         })
     }
 }

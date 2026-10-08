@@ -1,0 +1,64 @@
+/* The platform's stylesheet (./__fragment.css), for a page that links it:
+   the platform adds it to no page, since a fragment's page is its
+   author's. The shell's look (cell/shell/shell.css): Funnel Sans, its warm
+   greys and its one blue, pill buttons; light or dark as the system says
+   (a page chooses with `color-scheme` on :root, or `data-theme="light"`
+   or `"dark"`, which the mind's page sets as the shell tells it). Theme
+   variables and a few base styles, every rule of zero specificity, so a
+   page's own rules override any of it. The variables' names hold across
+   releases (docs/api.md, Serving). */
+@import url("https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#f7f6f3, #212121);
+  --fg: light-dark(#171717, #ececec);
+  --muted: light-dark(#66615b, #a6a19d);
+  --faint: light-dark(#918a82, #706d69);
+  --line: light-dark(rgba(20, 20, 20, .105), rgba(255, 255, 255, .085));
+  --line-strong: light-dark(rgba(20, 20, 20, .18), rgba(255, 255, 255, .16));
+  --surface: light-dark(#fffdfa, #2b2b2a);
+  --soft: light-dark(#f0eee9, #262625);
+  --accent: light-dark(#315fbd, #8ab4ff);
+  --on-accent: light-dark(#fff, #121212);
+  --success: light-dark(#167a52, #39d98a);
+  --danger: light-dark(#81112f, #f3b3b3);
+  --font: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: var(--font);
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-sm: .8125rem; --text-lg: 1.0625rem; --text-xl: 1.25rem;
+  --radius: 10px;
+  accent-color: var(--accent);
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+:where(*, *::before, *::after) { box-sizing: border-box; }
+/* what a page hides stays hidden, whatever display a rule here gives it */
+[hidden] { display: none !important; }
+:where(body) { margin: 0; background: var(--bg); color: var(--fg); font: .9375rem/1.5 var(--font); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; }
+/* an app is mostly seen in a narrow pane under a titlebar that names it:
+   its content starts at the top, and a heading is a modest one */
+:where(main) { max-width: 40rem; margin: 0 auto; padding: 1rem 1rem 3rem; }
+:where(h1, h2, h3) { margin: 0 0 .5rem; font-family: var(--font-display); font-weight: 600; line-height: 1.25; }
+:where(h1) { font-size: var(--text-xl); letter-spacing: -.01em; }
+:where(h2) { font-size: var(--text-lg); }
+:where(h3) { font-size: 1rem; }
+:where(small) { color: var(--muted); font-size: var(--text-sm); }
+:where(a) { color: var(--accent); text-underline-offset: 2px; }
+:where(code, kbd, pre) { font-family: var(--font-mono); font-size: .875em; }
+:where(code) { padding: .1em .35em; border-radius: 5px; background: var(--soft); }
+:where(pre) { padding: .75rem 1rem; border-radius: var(--radius); background: var(--soft); overflow-x: auto; }
+:where(pre code) { padding: 0; background: none; }
+:where(hr) { margin: 1.5rem 0; border: 0; border-top: 1px solid var(--line); }
+:where(img, video) { max-width: 100%; height: auto; }
+:where(input, textarea, select, button) { font: inherit; color: inherit; }
+:where(input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file]), textarea, select) { min-width: 0; padding: .5rem .75rem; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); }
+:where(textarea) { resize: vertical; }
+::placeholder { color: var(--faint); }
+/* the main action: a pill of the text's color, as the shell's */
+:where(button) { display: inline-flex; align-items: center; justify-content: center; gap: .4em; min-height: 2.25rem; padding: 0 1rem; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg); font-weight: 600; cursor: pointer; }
+:where(button:disabled) { opacity: .5; cursor: default; }
+:where(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+:where(*) { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--fg) 26%, transparent) transparent; }
+/* a phone zooms into a field whose text is under 16 px */
+@media (pointer: coarse) { :where(input, textarea, select) { font-size: max(16px, 1em); } }

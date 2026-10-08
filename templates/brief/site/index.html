@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brief</title>
+  <link rel="stylesheet" href="./__fragment.css">
+  <style>
+    .wrap { max-width: 64rem; margin: 0 auto; padding: 1rem 1rem 3rem; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem; padding-bottom: .9rem; border-bottom: 1px solid var(--line); }
+    #when { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+    .buttons { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .quiet { border: 1px solid var(--line-strong); background: transparent; color: inherit; padding: 0 .9rem; font-size: .875rem; font-weight: 500; }
+    .link { min-height: 0; padding: 0; border: 0; background: none; color: var(--muted); font-size: .8rem; font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+    #status { color: var(--muted); font-size: var(--text-sm); margin: .5rem 0 0; max-width: 22rem; }
+    #status:empty { display: none; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: 3rem; margin-top: 1.25rem; }
+    #brief { max-width: none; margin: 0; padding: 0; }
+    .date { margin: 0 0 .75rem; color: var(--muted); font-size: var(--text-sm); }
+    #said { max-width: 38rem; font-size: 1rem; line-height: 1.6; }
+    #said p { margin: 0 0 1rem; }
+    #said ul { margin: 0 0 1rem; padding-left: 1.1rem; }
+    #said li { margin-bottom: .6rem; padding-left: .2rem; }
+    #said li::marker { color: var(--accent); }
+    h2 { margin: 2rem 0 .6rem; color: var(--muted); font-size: .75rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    #items { list-style: none; padding: 0; margin: 0; max-width: 38rem; }
+    #items li { padding: .55rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+    #items a { color: inherit; text-decoration: none; }
+    #items a:hover { text-decoration: underline; }
+    #items small, .feeds small { display: block; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+    .failed { color: var(--muted); font-size: var(--text-sm); margin-top: 1rem; }
+    .empty { color: var(--muted); }
+    aside > h2:first-child { margin-top: 0; }
+    #time { display: grid; grid-template-columns: 1fr auto; }
+    #tz { grid-column: 1 / -1; }
+    .feeds { list-style: none; padding: 0; margin: 0 0 .75rem; }
+    .feeds li { display: flex; gap: .5rem; align-items: start; justify-content: space-between; padding: .45rem 0; border-top: 1px solid var(--line); font-size: .9rem; }
+    .feeds li > span { min-width: 0; }
+    .feeds .problem { color: var(--danger); }
+    form { display: flex; gap: .4rem; flex-wrap: wrap; }
+    input, select { flex: 1; font-size: .9rem; }
+    #error { color: var(--danger); font-size: var(--text-sm); min-height: 1.2rem; margin-top: .35rem; }
+    #archive { list-style: none; padding: 0; margin: 0; }
+    #archive button { display: block; width: 100%; min-height: 0; text-align: left; padding: .45rem 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; color: inherit; font-size: .9rem; font-weight: 400; }
+    #archive button.on { color: var(--accent); }
+    #archive small { color: var(--muted); }
+    @media (max-width: 46rem) {
+      .layout { grid-template-columns: 1fr; gap: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <p id="when">connecting…</p>
+      <div>
+        <div class="buttons">
+          <button class="primary" id="now" hidden>Brief me now</button>
+          <button class="quiet" id="notify">Notify me</button>
+        </div>
+        <p id="status"></p>
+      </div>
+    </header>
+    <div class="layout">
+      <main id="brief"></main>
+      <aside>
+        <h2>Feeds</h2>
+        <ul class="feeds" id="feeds"></ul>
+        <form id="add" hidden><input id="url" type="url" placeholder="A feed, or a site that has one" required autocomplete="off"><button class="quiet">Add</button></form>
+        <div id="settings" hidden>
+          <h2>When</h2>
+          <form id="time">
+            <select id="hour" aria-label="hour"></select>
+            <button class="quiet">Save</button>
+            <select id="tz" aria-label="time zone"></select>
+          </form>
+        </div>
+        <div id="error"></div>
+        <h2>Earlier</h2>
+        <ul id="archive"></ul>
+      </aside>
+    </div>
+  </div>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, cls, text) => Object.assign(document.createElement(tag), cls ? { className: cls } : {}, text === undefined ? {} : { textContent: text });
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+    const here = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const clock = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    for (let h = 0; h < 24; h++) $("hour").append(Object.assign(el("option", null, clock(h)), { value: h }));
+    for (const z of new Set([here, "UTC", ...(Intl.supportedValuesOf?.("timeZone") ?? [])])) $("tz").append(Object.assign(el("option", null, z.replaceAll("_", " ")), { value: z }));
+
+    let editor = false;
+    let state = null;
+    const briefs = [];
+    let shown = null; // the seq of an earlier brief being read, else the newest
+    let asked = 0; // when "Brief me now" was pressed, until its brief comes
+
+    // the brief's text: lines that start with "- " are points, the rest
+    // paragraphs; **bold** is kept, everything else is text
+    function said(text) {
+      const box = el("div");
+      box.id = "said";
+      let list = null;
+      for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const point = /^[-*•]\s+/.test(line);
+        if (point && !list) box.append((list = el("ul")));
+        if (!point) list = null;
+        const p = el(point ? "li" : "p");
+        line.replace(/^[-*•]\s+/, "").split(/\*\*(.+?)\*\*/).forEach((part, i) => p.append(i % 2 ? el("strong", null, part) : part));
+        (point ? list : box).append(p);
+      }
+      return box;
+    }
+
+    function renderBrief() {
+      const b = briefs.find((r) => r.seq === shown) ?? briefs[0];
+      if (!b) {
+        $("brief").replaceChildren(el("p", "empty", editor ? "No brief yet. Add a few feeds, then brief yourself now, or wait for the morning." : "No brief yet: the first comes in the morning."));
+        return;
+      }
+      const items = el("ol");
+      items.id = "items";
+      for (const i of b.body.items) {
+        const li = el("li");
+        const a = el(i.link ? "a" : "span", null, i.title);
+        if (i.link) Object.assign(a, { href: i.link, target: "_blank", rel: "noopener noreferrer" });
+        li.append(a, el("small", null, i.feed));
+        items.append(li);
+      }
+      const parts = [el("p", "date", b.body.date), said(b.body.text)];
+      if (b.body.items.length) parts.push(el("h2", null, "From your feeds"), items);
+      if (b.body.failed.length) parts.push(el("p", "failed", `Couldn't read ${b.body.failed.map((f) => `${f.feed} (${f.why})`).join(", ")}.`));
+      $("brief").replaceChildren(...parts);
+    }
+
+    function renderArchive() {
+      $("archive").replaceChildren(...briefs.slice(0, 30).map((b, n) => {
+        const btn = el("button", (shown ?? briefs[0].seq) === b.seq ? "on" : "");
+        btn.append(b.body.date, " ", el("small", null, n === 0 ? "· latest" : `· ${b.body.items.length} items`));
+        btn.onclick = () => { shown = n === 0 ? null : b.seq; renderBrief(); renderArchive(); };
+        const li = el("li");
+        li.append(btn);
+        return li;
+      }));
+      if (!briefs.length) $("archive").append(el("li", "empty", "Nothing yet."));
+    }
+
+    function renderState() {
+      const tz = state.tz ?? "UTC";
+      $("when").textContent = `Every morning at ${clock(state.hour)}${tz === here ? "" : ` (${tz})`}`;
+      $("feeds").replaceChildren(...state.feeds.map((f) => {
+        const li = el("li");
+        const what = el("span", null, f.title ?? new URL(f.url).hostname);
+        what.append(el("small", f.problem ? "problem" : "", f.problem ?? (f.title ? new URL(f.url).hostname : "reading it…")));
+        li.append(what);
+        if (editor) {
+          const x = el("button", "link", "Remove");
+          x.onclick = () => fragment.call("remove_feed", { id: f.id }).then(() => show(), show);
+          li.append(x);
+        }
+        return li;
+      }));
+      if (!state.feeds.length) $("feeds").append(el("li", "empty", "No feeds yet."));
+      if (document.activeElement !== $("hour") && document.activeElement !== $("tz")) {
+        $("hour").value = state.hour;
+        if (![...$("tz").options].some((o) => o.value === tz)) $("tz").append(Object.assign(el("option", null, tz), { value: tz }));
+        $("tz").value = tz;
+      }
+    }
+
+    // the brief comes in its first editor's morning, until one says otherwise
+    let adopted = false;
+    function adopt() {
+      if (adopted || !editor || !state || state.tz !== null) return;
+      adopted = true;
+      fragment.call("set_time", { hour: state.hour, tz: here }).catch(show);
+    }
+
+    fragment.live("state", {}, (s) => {
+      state = s;
+      renderState();
+      adopt();
+    }, show);
+    fragment.subscribe("briefs", (r) => {
+      briefs.unshift(r);
+      if (asked && r.at >= asked) {
+        asked = 0;
+        shown = null;
+        $("status").textContent = "";
+      }
+      renderBrief();
+      renderArchive();
+    }, { last: 60 });
+    renderBrief();
+    renderArchive();
+
+    fragment.me().then((me) => {
+      editor = me.role === "editor" || me.role === "owner";
+      $("now").hidden = $("add").hidden = $("settings").hidden = !editor;
+      adopt();
+      if (state) renderState();
+      renderBrief();
+    });
+
+    $("add").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const { id } = await fragment.call("add_feed", { url: $("url").value.trim() });
+        await fragment.call("probe", { id });
+        $("url").value = "";
+        show();
+      } catch (err) {
+        show(err);
+      }
+    };
+    $("time").onsubmit = (e) => {
+      e.preventDefault();
+      fragment.call("set_time", { hour: Number($("hour").value), tz: $("tz").value }).then(() => { show(); $("hour").blur(); }, show);
+    };
+    $("now").onclick = async () => {
+      asked = Date.now() - 60000;
+      $("status").textContent = "Reading your feeds and writing your brief…";
+      try {
+        await fragment.call("brief", {});
+      } catch (err) {
+        asked = 0;
+        $("status").textContent = err.message;
+      }
+    };
+    $("notify").onclick = async () => {
+      $("status").textContent = "Asking…";
+      const r = await fragment.push.register("briefs");
+      $("status").textContent = r.ok === false
+        ? { unsupported: "This browser can't get notifications here (on an iPhone, add this page to your Home Screen first).", denied: "Notifications are blocked for this site in your browser's settings." }[r.reason] ?? `That didn't work: ${r.error || r.reason}.`
+        : "You'll get a notification when your brief is ready.";
+    };
+  </script>
+</body>
+</html>

@@ -43,12 +43,29 @@ pub struct Signed {
     /// (`fragment_core::access`).
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub acting_for: Option<String>,
+    /// A connected client asking as its person (docs/api.md, Connected
+    /// clients): which connection, and what its client calls itself. What
+    /// it does names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<Through>,
+}
+
+/// The connection a client's request came through.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Through {
+    /// The connection's id (16 hex).
+    pub connection: String,
+    /// What its client calls itself.
+    pub client: String,
+    /// Whether its person let it change things (the consent page's
+    /// choice): without, it only reads (docs/api.md, Connected clients).
+    pub writes: bool,
 }
 
 impl Signed {
     /// Who signed, acting as themselves.
     pub fn new(identity: Identity, key: Option<String>) -> Signed {
-        Signed { identity, key, acting_for: None }
+        Signed { identity, key, acting_for: None, through: None }
     }
 }
 
@@ -159,6 +176,10 @@ impl Routed {
                 if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || signed.kind != IdentityKind::Agent || signed.owner.is_none()) {
                     return Err(CellError::host("the router named a malformed `for`"));
                 }
+                // a connected client asks as a person, with no key and for no one else
+                if signed.through.is_some() && (signed.kind != IdentityKind::Person || signed.key.is_some() || signed.acting_for.is_some()) {
+                    return Err(CellError::host("the router named a malformed connected client"));
+                }
                 Some(signed)
             }
             None => None,
@@ -194,6 +215,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
+    } else if path.starts_with("owner/") {
+        Ok(Some((crate::owner::OWNER_HEADER, "1")))
     } else if path.starts_with("test/") {
         Ok(None)
     } else {

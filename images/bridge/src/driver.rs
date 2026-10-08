@@ -37,7 +37,6 @@ use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings
 use crate::limits;
 use crate::net::Backoff;
 use crate::note;
-use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo, TurnStart};
 use crate::screen::{self, Named, ScreenConfig};
@@ -67,9 +66,6 @@ pub struct Config {
     /// files the image keeps another way. None by default.
     pub left_out: Vec<String>,
     pub settings: Settings,
-    /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
-    /// none, every agent the platform lists.
-    pub agents_file: Option<PathBuf>,
     /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
     /// (screen.rs); none, no screen.
     pub screen: Option<ScreenConfig>,
@@ -290,7 +286,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let (keep_tx, keep_rx) = watch::channel(false);
     let shared = Arc::new(Shared::default());
 
-    // The runtime starts at once (Hermes dials it while the bridge reads the
+    // The runtime starts at once (goose starts while the bridge reads the
     // platform), and its events go to the inbox.
     let name = runtime.name();
     let mut runtime_task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
@@ -307,24 +303,13 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
 
     // The agents, before any record: a turn is handed to an agent it names.
-    // With a ready file, only those the image made ready (ready.rs).
-    let mut ready = cfg.agents_file.clone().map(Ready::new);
-    if let Some(r) = ready.as_mut() {
-        r.refresh();
-    }
-    let gated = |agents: Vec<Agent>, ready: &Option<Ready>| match ready {
-        Some(r) => crate::ready::gate(agents, r.agents()),
-        None => agents,
-    };
     let computer = tokio::select! {
         c = ask_until(&api, stop.clone()) => c,
         r = &mut runtime_task => return runtime_result(r, name),
     };
-    let Some(mut computer) = computer else { return Ok(()) };
-    let listed = computer.agents.len();
-    computer.agents = gated(computer.agents, &ready);
+    let Some(computer) = computer else { return Ok(()) };
     screen_agents.send_replace(Some(named(&computer.agents)));
-    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
+    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
@@ -380,11 +365,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let step = match m {
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c, only) => {
-                        let agents = gated(c.agents, &ready);
+                        let agents = c.agents;
                         let now = Some(named(&agents));
                         screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
-                        // An agent that left this computer (or is not ready) is followed no more.
+                        // An agent that left this computer is followed no more.
                         follows.keep_only(&agents);
                         match only {
                             Some(agent) => agents.iter().filter(|a| a.fragment == agent).for_each(|a| follows.discover(a.clone())),
@@ -403,11 +388,8 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     break Err(e);
                 }
                 // The computer's agents are read again this often: one assigned
-                // to it while it is awake is followed from then. A ready file
-                // that changed is read at once: an agent the image just made
-                // ready is followed within a tick.
-                let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
-                if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
+                // to it while it is awake is followed from then.
+                if computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
                     reread(&api, &inbox_tx, None);
                 }

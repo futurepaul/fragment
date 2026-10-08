@@ -7,8 +7,9 @@ Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
-Your **agents** are fragments too, run by a computer of your own (today,
-Hermes profiles), and act on other fragments as their members.
+Your **agents** are fragments too, run by a computer of your own (on
+this branch, goose: [docs/optchat.md](docs/optchat.md)), and act on other
+fragments as their members.
 Fragments run on Cloudflare: each is a Durable Object that sleeps when
 idle, its app in a Worker of its own
 ([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers
@@ -34,9 +35,14 @@ it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
 ## Use it
 
-fragment.club is invite-only for now. Install the CLI (macOS or Linux,
-no sudo; put `~/.local/bin` on your PATH if it is not), then pair it
-with you:
+fragment.club is invite-only for now. To start, tell your agent:
+
+```
+Read https://fragment.club/llms.txt and help me make my first fragment.
+```
+
+Or install the CLI yourself (macOS or Linux, no sudo; put
+`~/.local/bin` on your PATH if it is not), then pair it with you:
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
@@ -125,7 +131,7 @@ crates/fakes   code.storage, Workers AI, WorkOS, and push-service fakes
 
 crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite
-templates/     blank, calories, inbox, notes, todo; the blessed agent, brain, chat, skills
+templates/     blank, board, brief, calories, hook, inbox, notes, split, todo, wall, watch, when, wiki; the blessed agent, brain, chat, skills
 xtask/         build, dev, try, check, e2e, deploy, teardown
 deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
 docs/          the plan (cloudflare-v1.md), model, contract, the debt ledger

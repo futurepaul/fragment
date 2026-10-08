@@ -1,0 +1,53 @@
+{
+  "name": "when",
+  "operations": {
+    "setup": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["question", "mode", "options"],
+        "additionalProperties": false,
+        "properties": {
+          "question": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "mode": { "enum": ["times", "choice"] },
+          "options": { "type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } }
+        }
+      }
+    },
+    "vote": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["name", "picks"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "picks": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+              "type": "object",
+              "required": ["option", "answer"],
+              "additionalProperties": false,
+              "properties": { "option": { "type": "integer", "minimum": 1 }, "answer": { "enum": ["yes", "maybe"] } }
+            }
+          }
+        }
+      }
+    },
+    "close": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["closed"],
+        "additionalProperties": false,
+        "properties": { "closed": { "type": "boolean" }, "chosen": { "type": ["integer", "null"], "minimum": 1 } }
+      }
+    },
+    "poll": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "meta": { "title": "When", "description": "Find a time, or run a quick poll: anyone with the link votes, and the results move as they do." }
+}

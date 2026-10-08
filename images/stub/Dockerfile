@@ -2,19 +2,21 @@
 # The stub computer image (docs/computers.md): the bridge with its `script`
 # runtime and a screen page on 6080, nothing else. The platform's own lanes
 # run against it, which is the proof that the platform needs nothing
-# Hermes-specific (docs/cloudflare-v1.md, the rule).
+# runtime-specific (docs/cloudflare-v1.md, the rule).
 #
 # Build from images/: docker build --platform linux/amd64 -f stub/Dockerfile .
 
 # The bridge, static (Alpine's Rust targets musl), built where it runs. Its
 # sources are touched first: the target cache is every build's on this
 # Docker, and cargo takes a path crate as built when its sources are older
-# than its last build (images/hermes/Dockerfile).
+# than its last build.
 FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY bridge bridge
-COPY hermes/boot hermes/boot
+# the workspace's other member, so cargo reads the workspace (only the
+# bridge is built)
+COPY goose/desktop goose/desktop
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     find bridge -type f -exec touch {} + \

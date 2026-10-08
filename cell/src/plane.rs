@@ -90,7 +90,11 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
             None => SqlStorageValue::Null,
         };
         let ephemeral = SqlStorageValue::Integer(d.ephemeral.into());
-        sql.exec("INSERT INTO code_ops (op, kind, role, input, ephemeral) VALUES (?, ?, ?, ?, ?)", vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input, ephemeral])?;
+        let description = d.description.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from);
+        sql.exec(
+            "INSERT INTO code_ops (op, kind, role, input, ephemeral, description) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input, ephemeral, description],
+        )?;
     }
     for (channel, d) in code.channels {
         assert!(d.post.is_none_or(|p| p >= d.read), "a checked manifest's post role is never looser than its read");
@@ -128,6 +132,7 @@ struct OpRow {
     role: String,
     input: Option<String>,
     ephemeral: i64,
+    description: Option<String>,
 }
 
 /// One way to fail for a stored row that does not decode: the cell wrote
@@ -143,7 +148,7 @@ fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
         Some(text) => Some(serde_json::from_str(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
         None => None,
     };
-    Ok((row.op, OpDecl { kind, role, input, ephemeral: row.ephemeral != 0 }))
+    Ok((row.op, OpDecl { kind, role, input, ephemeral: row.ephemeral != 0, description: row.description }))
 }
 
 #[derive(Deserialize)]
@@ -329,6 +334,7 @@ impl FragmentCell {
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::Blessed)?;
+            self.del_meta(MetaKey::Capabilities)?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
@@ -347,7 +353,11 @@ impl FragmentCell {
         // a blessed template's fragment runs the release's manifest, with its own face
         let blessed = manifest.template.clone();
         let manifest = match &blessed {
-            None => manifest,
+            // a capability is lent to the platform's own release code alone
+            None => match manifest::own_code(&manifest) {
+                Ok(()) => manifest,
+                Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
+            },
             Some(t) => match blessed::manifest(t).and_then(|b| manifest::on_template(&manifest, &b)) {
                 Ok(m) => m,
                 Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
@@ -378,6 +388,14 @@ impl FragmentCell {
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
+        }
+        match manifest.storage {
+            Some(n) => self.set_meta(MetaKey::AppDbMax, &n.to_string())?,
+            None => self.del_meta(MetaKey::AppDbMax)?,
+        }
+        match manifest.capabilities.as_slice() {
+            [] => self.del_meta(MetaKey::Capabilities)?,
+            caps => self.set_meta(MetaKey::Capabilities, &json!(caps.iter().map(|c| c.as_str()).collect::<Vec<_>>()).to_string())?,
         }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
@@ -783,7 +801,7 @@ impl FragmentCell {
 
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
-        self.typed::<OpRow>("SELECT op, kind, role, input, ephemeral FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
+        self.typed::<OpRow>("SELECT op, kind, role, input, ephemeral, description FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
     }
 
     /// The declared operation, or why there is none: no code, or no such
@@ -796,14 +814,17 @@ impl FragmentCell {
             role: Option<String>,
             input: Option<String>,
             ephemeral: Option<i64>,
+            description: Option<String>,
         }
-        let rows: Vec<Found> =
-            self.typed("SELECT o.op, o.kind, o.role, o.input, o.ephemeral FROM code c LEFT JOIN code_ops o ON o.op = ? WHERE c.id = 1", vec![op.into()])?;
+        let rows: Vec<Found> = self.typed(
+            "SELECT o.op, o.kind, o.role, o.input, o.ephemeral, o.description FROM code c LEFT JOIN code_ops o ON o.op = ? WHERE c.id = 1",
+            vec![op.into()],
+        )?;
         let Some(found) = rows.into_iter().next() else {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
         };
         match (found.op, found.kind, found.role, found.ephemeral) {
-            (Some(op), Some(kind), Some(role), Some(ephemeral)) => Ok(op_decl(OpRow { op, kind, role, input: found.input, ephemeral })?.1),
+            (Some(op), Some(kind), Some(role), Some(ephemeral)) => Ok(op_decl(OpRow { op, kind, role, input: found.input, ephemeral, description: found.description })?.1),
             (None, None, None, None) => Err(CellError::new(ErrorCode::UnknownOperation, format!("no operation named {op:?}"))),
             _ => Err(stored(&format!("operation {op}"), "a partial row")),
         }

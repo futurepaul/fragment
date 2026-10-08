@@ -27,21 +27,20 @@ pub enum Need {
     LocalDocker,
     /// Headless Chrome on this machine.
     Chrome,
-    /// Computers: the stub image locally, the deployment's own (Hermes) hosted.
+    /// Computers: the stub image locally, the deployment's own hosted.
     Computers,
     /// Real models through the deployment's gateway: hosted, each call is
     /// paid, from the run's budget (`--max-paid-calls`).
     Models,
+    /// Real models (GLM through the model route, Clef) answering the
+    /// deployment's own computer image and apps: a preview's alone. A local
+    /// run's models, and a rehearsal's, are the Workers AI fake's.
+    RealModels,
     /// The platform on a site of its own, cross-site from the fragments (as
     /// fragment.club is from fragment.boats, and the local node's
     /// 127.0.0.1 from `*.fragment.localhost`). A branch preview puts both
     /// in one zone: one site.
     TwoSites,
-    /// A real agent: the deployment's own image (our Hermes) answered by a
-    /// real model, as a person's agent runs. Only a preview has one: a
-    /// local run's computers answer through the scripted model (the stub,
-    /// or the hermes section's Hermes), and so do a rehearsal's.
-    RealAgent,
     /// An operator key of the deployment's that no person holds (its
     /// config's `operators` lists it; the run's `--operator-key-file` holds
     /// it): a wipe's (docs/api.md, Operators). A local run makes one; a
@@ -51,7 +50,7 @@ pub enum Need {
 
 impl Need {
     pub const ALL: [Need; 11] =
-        [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent, Need::Operator];
+        [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::RealModels, Need::TwoSites, Need::Operator];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -63,8 +62,8 @@ impl Need {
             Need::Chrome => "chrome",
             Need::Computers => "computers",
             Need::Models => "models",
+            Need::RealModels => "real-models",
             Need::TwoSites => "two-sites",
-            Need::RealAgent => "real-agent",
             Need::Operator => "operator",
         }
     }
@@ -80,11 +79,11 @@ pub struct Offers {
     /// The deployment calls models (its config's `ai_gateway`), and the run
     /// may lend paid calls.
     pub models: bool,
+    /// Its models are real (a preview's, with paid calls to lend), not a
+    /// rehearsal's fake.
+    pub real_models: bool,
     /// Chrome is installed here.
     pub chrome: bool,
-    /// Its computers are real agents (a preview's own image on a real
-    /// model, with paid calls to lend), not a rehearsal's scripted ones.
-    pub real_agent: bool,
     /// The run holds an operator key the deployment lists and no person
     /// holds (`--operator-key-file`).
     pub operator: bool,
@@ -103,7 +102,7 @@ pub enum Rung {
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let Rung::Hosted(offers) = rung else {
         return match need {
-            Need::RealAgent => Some("it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model"),
+            Need::RealModels => Some("it needs real models (GLM, Clef) and the deployment's own image on them, which only a preview has: a local run's answer through the Workers AI fake"),
             _ => None,
         };
     };
@@ -117,13 +116,13 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Chrome if !offers.chrome => Some("it needs Chrome, and none is installed here"),
         Need::Computers if !offers.computers => Some("it needs computers, and the deployment makes none (no `computers` in its config)"),
         Need::Models if !offers.models => Some("it needs models, and the deployment calls none (no `ai_gateway` in its config), or the run lends no paid calls"),
-        Need::RealAgent if !offers.real_agent => {
-            Some("it needs a real agent (the deployment's own image on a real model), and this run has none: a rehearsal's computers answer through the scripted model, or the deployment makes no computers or calls no models")
+        Need::RealModels if !offers.real_models => {
+            Some("it needs real models (a preview's, with paid calls to lend), and this run has none: a rehearsal's answer through the Workers AI fake")
         }
         Need::Operator if !offers.operator => {
             Some("it needs an operator key the deployment lists and no person holds (`--operator-key-file <file>`, its npub in the config's `operators`), and the run has none")
         }
-        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent | Need::Operator => None,
+        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealModels | Need::Operator => None,
     }
 }
 
@@ -141,30 +140,30 @@ pub fn unmet(needs: &[Need], rung: Rung) -> Option<(Need, &'static str)> {
 mod tests {
     use super::*;
 
-    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true, real_agent: true, operator: true };
-    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false, real_agent: false, operator: false };
+    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, real_models: true, chrome: true, operator: true };
+    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, real_models: false, chrome: false, operator: false };
 
-    /// A local run has everything but a real agent: every other need is
-    /// met, as before.
+    /// A local run has everything but real models.
     #[test]
-    fn a_local_run_has_everything_but_a_real_agent() {
-        let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
+    fn a_local_run_has_everything_but_real_models() {
+        let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealModels).collect();
         assert_eq!(unmet(&local, Rung::Local), None);
         for need in local {
             assert_eq!(missing(need, Rung::Local), None, "{need:?}");
         }
     }
 
-    /// A real agent (our Hermes on a real model) is a preview's alone: a
-    /// local run and a rehearsal answer through the scripted model.
+    /// Real models are a preview's alone: a local run and a rehearsal
+    /// answer through the Workers AI fake.
     #[test]
-    fn a_real_agent_is_a_previews_alone() {
-        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local).expect("no real agent locally");
-        assert_eq!(need, Need::RealAgent);
-        assert!(why.contains("scripted model"), "{why}");
-        let rehearsal = Offers { real_agent: false, ..EVERYTHING };
-        assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(rehearsal)).map(|(n, _)| n), Some(Need::RealAgent));
-        assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(EVERYTHING)), None);
+    fn real_models_are_a_previews_alone() {
+        let needs = [Need::Levers, Need::Computers, Need::Models, Need::RealModels];
+        let (need, why) = unmet(&needs, Rung::Local).expect("no real models locally");
+        assert_eq!(need, Need::RealModels);
+        assert!(why.contains("fake"), "{why}");
+        let rehearsal = Offers { real_models: false, ..EVERYTHING };
+        assert_eq!(unmet(&needs, Rung::Hosted(rehearsal)).map(|(n, _)| n), Some(Need::RealModels));
+        assert_eq!(unmet(&needs, Rung::Hosted(EVERYTHING)), None);
     }
 
     /// A hosted run never has what stands in for a vendor or controls the
@@ -177,10 +176,10 @@ mod tests {
         }
     }
 
-    /// Levers, Chrome, computers, models and a real agent are there when offered.
+    /// Levers, Chrome, computers, models and an operator key are there when offered.
     #[test]
     fn a_hosted_run_has_what_its_deployment_offers() {
-        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models, Need::RealAgent, Need::Operator] {
+        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models, Need::RealModels, Need::Operator] {
             assert_eq!(missing(need, Rung::Hosted(EVERYTHING)), None, "{need:?}");
             assert!(missing(need, Rung::Hosted(NOTHING)).is_some(), "{need:?}");
         }

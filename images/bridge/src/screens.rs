@@ -1,23 +1,27 @@
-//! Each agent's screen, as the image names it (`BRIDGE_SCREENS_FILE`,
-//! docs/bridge.md): an image whose agents each have a desktop of their own
-//! (ours: Hermes gives every profile its own) lists, per agent, the RFB
+//! Each agent's screen, as the image names it (docs/bridge.md): an image
+//! whose agents each have a desktop of their own names, per agent, the RFB
 //! server that is its display, and the files its runtime keeps about it:
 //! the lease of who drives it (lease.rs), and the file whose time says when
 //! it was last used (which the screen touches while a person watches it,
-//! so a desktop being watched is never idle). Without the setting no agent
-//! has a display (the stub).
+//! so a desktop being watched is never idle). It names them one of two
+//! ways (`Source`); with neither, no agent has a display (the stub).
 //!
-//! The file is `{"screens": [{"agent", "rfb", "lease"?, "activity"?}]}`,
-//! the image's, written whole and renamed into place, so a read never sees
-//! half of one. A missing file names no screen. One that does not read
-//! keeps the screens before it (an image's bug must not take away the
-//! screens it had named), and says so.
+//! - A file (`BRIDGE_SCREENS_FILE`): `{"screens": [{"agent", "rfb",
+//!   "lease"?, "activity"?}]}`, the image's, written whole and renamed into
+//!   place, so a read never sees half of one. A missing file names no
+//!   screen. One that does not read keeps the screens before it (an
+//!   image's bug must not take away the screens it had named), and says so.
+//! - A directory (`BRIDGE_SCREENS_DIR`), by convention: every agent the
+//!   bridge runs has a screen, its files in a directory of its own there
+//!   (`in_dir`), whether or not its desktop has started. Our goose image's
+//!   (images/goose/desktop), which starts each desktop at its first use.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::limits;
 use crate::screen::Target;
@@ -29,6 +33,48 @@ pub const SCREENS_FILE_MAX_BYTES: usize = 64 * 1024;
 pub const PATH_MAX_BYTES: usize = 512;
 
 const _: () = assert!(limits::AGENTS_MAX * (3 * PATH_MAX_BYTES + crate::screen::AGENT_MAX_BYTES + 64) < SCREENS_FILE_MAX_BYTES);
+
+/// Where an image names its agents' screens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    /// A file listing them (`parse`).
+    File(PathBuf),
+    /// A directory holding one per agent, by convention (`in_dir`).
+    Dir(PathBuf),
+}
+
+/// The hex digits of an agent's directory's name under a screens
+/// directory: its fragment's name is up to 96 bytes, and the RFB socket's
+/// whole path must fit a Unix socket's 107.
+pub const DIR_KEY_HEX: usize = 16;
+/// A screens directory's path is at most this long: with its key and
+/// `/rfb.sock`, a Unix socket's path.
+pub const DIR_PATH_MAX_BYTES: usize = 64;
+
+const _: () = assert!(DIR_PATH_MAX_BYTES + 1 + DIR_KEY_HEX + "/rfb.sock".len() < 108, "the socket's path fits sockaddr_un");
+
+/// The directory of `agent`'s screen under a screens directory: `<dir>/<16
+/// hex of SHA-256 of its fragment's name>`. The image's desktop names it
+/// the same way (it calls this).
+pub fn agent_dir(dir: &Path, agent: &str) -> PathBuf {
+    let digest = Sha256::digest(agent.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    dir.join(&hex[..DIR_KEY_HEX])
+}
+
+/// `agent`'s screen under a screens directory, by convention: its display
+/// `rfb.sock`, its lease `lease.json` and its activity `activity`, all in
+/// `agent_dir`.
+pub fn in_dir(dir: &Path, agent: &str) -> Display {
+    let d = agent_dir(dir, agent);
+    Display { rfb: Target::Unix(d.join("rfb.sock")), lease: Some(d.join("lease.json")), activity: Some(d.join("activity")) }
+}
+
+/// Whether `dir` can be a screens directory: absolute, and short enough
+/// for its sockets.
+pub fn dir_ok(dir: &Path) -> bool {
+    dir.is_absolute() && dir.as_os_str().len() <= DIR_PATH_MAX_BYTES
+}
 
 /// One agent's screen.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +227,26 @@ mod tests {
         }
         let many: Vec<String> = (0..=limits::AGENTS_MAX).map(|i| format!(r#"{{"agent": "a{i}.paul", "rfb": "unix:/a"}}"#)).collect();
         assert!(parse(format!(r#"{{"screens": [{}]}}"#, many.join(",")).as_bytes()).is_err(), "past AGENTS_MAX");
+    }
+
+    /// Valid: a directory names every agent's screen in a directory of its
+    /// own, the same each time; one agent's never another's. Invalid: a
+    /// relative or overlong directory.
+    #[test]
+    fn a_directory_names_each_agents_screen_by_convention() {
+        let dir = Path::new("/run/desktop");
+        let j = in_dir(dir, "juniper.paul");
+        let d = agent_dir(dir, "juniper.paul");
+        assert_eq!(j, Display { rfb: Target::Unix(d.join("rfb.sock")), lease: Some(d.join("lease.json")), activity: Some(d.join("activity")) });
+        assert_eq!(in_dir(dir, "juniper.paul"), j, "the same each time");
+        assert_ne!(agent_dir(dir, "fred.paul"), d);
+        assert_eq!(d.parent(), Some(dir));
+        assert_eq!(d.file_name().unwrap().len(), DIR_KEY_HEX);
+        let longest = format!("{}.{}", "a".repeat(63), "b".repeat(32));
+        let Target::Unix(sock) = in_dir(Path::new(&format!("/{}", "d".repeat(DIR_PATH_MAX_BYTES - 1))), &longest).rfb else { panic!("a socket") };
+        assert!(sock.as_os_str().len() < 108, "{}", sock.display());
+        assert!(dir_ok(dir));
+        assert!(!dir_ok(Path::new("run/desktop")) && !dir_ok(Path::new(&format!("/{}", "d".repeat(DIR_PATH_MAX_BYTES)))));
     }
 
     /// Replay and restart: the file read again when it changes, a missing

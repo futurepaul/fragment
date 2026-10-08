@@ -518,11 +518,13 @@ fn fill(selector: &str, value: &str) -> String {
 }
 
 /// The shell in a browser (phase 5's exit, at desktop and phone sizes):
-/// first run (a username, the first agent), the agent's chat framed and
-/// signed in on its own origin with the agent's answer in it, a second
-/// agent, an app's window, settings (at `/settings`, which the address
-/// keeps), and the phone's layout. The agents run on the stub image
-/// (Docker), as the computers section's do.
+/// first run (a username, the first agent and the person's mind), then the
+/// shell at `/` with the mind in its middle column, its sidebar the
+/// mind's (docs/optchat.md); an agent's chat framed and signed in on its
+/// own origin with the agent's answer in it, a second agent, an app's
+/// window, settings (at `/settings`, which the address keeps), and the
+/// phone's layout. The agents run on the stub image (Docker), as the
+/// computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker]) {
         return Ok(());
@@ -546,35 +548,119 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
 
-    // first run: a username, then the default agent, made while the shell
-    // waits with no question asked (Paul, 2026-10-03)
+    // first run: a username, then the default agent and the person's mind,
+    // made while the shell waits with no question asked (Paul, 2026-10-03),
+    // and then the shell with the mind in its middle column (docs/optchat.md)
     let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
     s.ok("signed in with no username, the shell asks for one", asked, "");
     let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
     b.eval(&page, &fill("#first-run-card input[name=username]", &username))?;
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
     let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
-    s.ok("then the shell makes their default agent, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
+    s.ok("then the shell makes their default agent and their mind, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
     let _ = b.screenshot(&page, &shots.join("creating.png"));
-    let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
+    let mind = format!("mind.{username}");
+    let mind_host = format!("{}.", fragment_proto::flat_name(&mind).unwrap_or_default());
+    // the mind's page tells the shell its personas, which the sidebar lists
+    let home = format!(
+        "location.pathname === '/' && !document.getElementById('layout').hidden && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment === {}) && document.querySelectorAll('#personas .persona-row').length === 4 && document.querySelector(\"#personas [data-key='persona:mind'] .meta\")?.textContent === 'default'",
+        js(&mind)
+    );
+    let landed = b.until(&page, &home, agent_wait);
+    if !landed {
+        let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
+    }
+    let listed = shell(api, &session, "GET", "/api/fragments", None, &[])?;
+    let rows = listed.body["fragments"].as_array().cloned().unwrap_or_default();
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let agent = computers.body["computers"][0]["agents"][0].clone();
+    let members = shell(api, &session, "GET", &format!("/api/f/{mind}/members"), None, &[])?;
+    let editor = members.body["members"].as_array().is_some_and(|l| l.iter().any(|m| m["principal"] == agent["identity"] && m["role"] == "editor"));
+    s.ok(
+        "the shell opens at / with their mind in its middle column and its four personas in the sidebar, Mind the default: their agent is on their computer and an editor of the mind, and no chat is made",
+        landed && rows.iter().any(|f| f["name"] == mind.as_str() && f["kind"] == "mind" && f["role"] == "owner") && rows.iter().all(|f| f["kind"] != "chat") && editor,
+        json!({ "at": b.eval(&page, "location.href")?, "fragments": rows, "agent": agent, "members": members.body, "sidebar": b.eval(&page, "[...document.querySelectorAll('#personas .row, #mind-links .row')].map((r) => r.textContent)")? }),
+    );
+    // in the shell the mind's page has no rail of its own, and goes where
+    // the sidebar says: the address and the topbar follow it
+    let bare = b.eval_in_frame(&page, &mind_host, "getComputedStyle(document.querySelector('.rail')).display === 'none' && document.querySelector('.app').classList.contains('embedded')").ok() == Some(Value::Bool(true));
+    b.click(&page, "#mind-links [data-key='mind:search']")?;
+    let searched = b.until(&page, "location.hash === '#/search' && document.getElementById('chat-title').textContent === 'Search' && document.querySelector(\"#mind-links [data-key='mind:search']\").classList.contains('active')", wait);
+    b.click(&page, "#personas [data-key='persona:builder'] .persona-pick")?;
+    let builder = b.until(&page, "location.hash === '#/new' && document.querySelector('#personas .persona-row.active')?.dataset.key === 'persona:builder'", wait);
+    let asks = b.eval_in_frame(&page, &mind_host, "document.querySelector('.composer textarea')?.placeholder ?? null").unwrap_or(Value::Null);
+    s.ok(
+        "in the shell the mind's page has no rail of its own, and the sidebar drives it: its Search, then a new chat with Builder",
+        bare && searched && builder && asks == "Message Builder…",
+        json!({ "bare": bare, "searched": searched, "builder": builder, "placeholder": asks, "at": b.eval(&page, "location.href")? }),
+    );
+    let _ = b.screenshot(&page, &shots.join("desktop-mind.png"));
+    // a file with a message: dropped on the mind's composer, uploaded as one
+    // of the mind's blobs, and named in the `say` record's attachments
+    b.click(&page, "#mind-links [data-key='mind:new']")?;
+    let fresh = s.eventually(wait, || b.eval_in_frame(&page, &mind_host, "document.querySelector('.composer textarea')?.placeholder ?? null").is_ok_and(|p| p == "Message Mind…"));
+    let drop = "(() => { const dt = new DataTransfer(); dt.items.add(new File(['hello mind'], 'notes.txt', { type: 'text/plain' })); \
+         document.querySelector('.screen.new').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); \
+         const t = document.querySelector('.composer textarea'); t.value = 'here are my notes'; t.dispatchEvent(new Event('input', { bubbles: true })); \
+         if (document.querySelectorAll('.composer .tray .file-chip').length !== 1) return false; document.querySelector('.composer').requestSubmit(); return true; })()";
+    let sent = fresh && b.eval_in_frame(&page, &mind_host, drop).ok() == Some(Value::Bool(true));
+    let said_file = || -> Value {
+        let r = shell(api, &session, "GET", &format!("/api/f/{mind}/channels/say?after=0&limit=100"), None, &[]).map(|r| r.body).unwrap_or_default();
+        r["records"].as_array().and_then(|l| l.iter().find(|x| x["body"]["text"] == "here are my notes").cloned()).unwrap_or(Value::Null)
+    };
+    let posted = sent && s.eventually(wait, || said_file()["body"]["attachments"][0]["name"] == "notes.txt");
+    let record = said_file();
+    let file = &record["body"]["attachments"][0];
+    let sha = file["sha256"].as_str().unwrap_or("");
+    let bytes = if sha.len() == 64 { shell_site(s, api, &session, &mind, &format!("__blob/{sha}")).ok() } else { None };
+    // the message as the log has it (its msg record names the file) is a download in the thread
+    let chip = format!("[...document.querySelectorAll('.msg.you:not(.pending) a.file-chip')].some((a) => a.download === 'notes.txt' && a.getAttribute('href') === {})", js(&format!("./__blob/{sha}")));
+    let shown = posted && s.eventually(wait, || b.eval_in_frame(&page, &mind_host, &chip).ok() == Some(Value::Bool(true)));
+    s.ok(
+        "a file dropped on the mind's composer goes with the message: uploaded as the mind's blob, named in say's attachments, and a download in the thread",
+        posted && shown && file["type"] == "text/plain" && file["size"] == 10 && bytes.as_ref().is_some_and(|r| r.status == 200 && r.text == "hello mind"),
+        json!({ "fresh": fresh, "sent": sent, "shown": shown, "record": record, "blob": bytes.map(|r| r.status) }),
+    );
+    let _ = b.screenshot(&page, &shots.join("desktop-mind-file.png"));
+    // the first agent's direct chat, made as the shell's new agent makes
+    // one: the shell's list shows it, live, and it opens in the middle
+    // column in the mind's place
+    let agent_fragment = agent["fragment"].as_str().unwrap_or("").to_string();
+    let title = rows.iter().find(|f| f["name"] == agent_fragment.as_str()).and_then(|f| f["title"].as_str()).unwrap_or("").to_string();
+    let label = agent_fragment.split('.').next().unwrap_or("");
+    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": format!("{label}-chat"), "template": "chat", "title": title })), &[])?;
+    let joined = shell(api, &session, "PUT", &format!("/api/f/{label}-chat.{username}/members/{}", agent["identity"].as_str().unwrap_or("")), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(made.status == 200 && joined.status == 200, "the first agent's chat: {made} {joined}");
+    let listed = b.until(&page, "!document.getElementById('agents').hidden && document.querySelectorAll('#chats .agent-row').length === 1", agent_wait);
+    if listed {
+        b.click(&page, "#chats .agent-row")?;
+    }
+    let opened = listed && b.until(&page, "document.querySelector('#chats .agent-row.active') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && 'chat:' + f.dataset.fragment === document.querySelector('#chats .agent-row').dataset.key)", wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
     if !opened {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
-    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
-    s.ok("the agent is made, named, and its chat opens once it is ready", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
+    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, at: location.href, apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
+    s.ok("the agent's chat shows in the sidebar, named, and opens in the middle column", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     // the chat's name as the sidebar holds it: a title like "Starfire 40K"
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
     let first_label = chat.split('.').next().unwrap_or("").trim_end_matches("-chat").to_string();
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
-    // ready is ready: its computer awake, and the agent following its chat
-    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
-    let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
-    let awake = computers.body["computers"][0]["phase"] == "awake";
-    let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"));
-    s.ok("as it opens, its computer is awake and the agent follows the chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
+    // ready is ready: its computer awake (the first run woke it), and the
+    // agent following its chat
+    let ready = || -> (Value, Value) {
+        let computers = shell(api, &session, "GET", "/api/computers", None, &[]).map(|r| r.body).unwrap_or_default();
+        let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[]).map(|r| r.body).unwrap_or_default();
+        (computers["computers"][0]["phase"].clone(), subs["subscriptions"].clone())
+    };
+    let up = s.eventually(agent_wait, || {
+        let (phase, subs) = ready();
+        phase == "awake" && subs.as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"))
+    });
+    let (phase, subs) = ready();
+    s.ok("its computer wakes, and the agent follows the chat", up, json!({ "computer": phase, "subscriptions": subs }));
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
     // the person's first message, answered by an agent already up
     let t0 = std::time::Instant::now();
@@ -647,6 +733,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    // the mind takes the middle column again, the app's window still beside it
+    b.click(&page, "#mind-links [data-key='mind:memory']")?;
+    let beside = b.until(&page, "location.hash === '#/memory' && document.getElementById('chat-title').textContent === 'Memory' && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment.startsWith('mind.')) && document.querySelector('.viewer iframe')", wait);
+    s.ok("the mind's Memory opens in the middle column, the app's window still beside it", beside, b.eval(&page, "location.href")?);
+    let _ = b.screenshot(&page, &shots.join("desktop-mind-app.png"));
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
     // settings, at /settings: what a person needs of their account
@@ -675,6 +766,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    mind_settings_ui(s, api, &mut b, &page, &session, &mind, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -684,12 +776,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
     s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
     b.click(&page, "#chats .agent-row")?;
-    let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
+    let home = b.until(&page, "location.pathname + location.search === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
     b.eval(&page, "history.back(), true")?;
     let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
     b.eval(&page, "history.forward(), true")?;
-    let forward = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
-    s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname")?);
+    let forward = b.until(&page, "location.pathname + location.search === '/' && document.getElementById('settings-page').hidden", wait);
+    s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname + location.search")?);
+    templates_narrow(s, &mut b, &page, &shots)?;
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;
@@ -717,7 +810,218 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
+    // the mind on a phone: the shell's sidebar over it opens its screens,
+    // and closes as it does
+    b.click(&page, "#toggle-left")?;
+    let drawer = b.until(&page, "document.getElementById('layout').classList.contains('left-open')", wait);
+    let _ = b.screenshot(&page, &shots.join("phone-sidebar.png"));
+    if drawer {
+        b.click(&page, "#mind-links [data-key='mind:topics']")?;
+    }
+    let topics = drawer && b.until(&page, "location.hash === '#/topics' && !document.getElementById('layout').classList.contains('left-open') && document.getElementById('chat-title').textContent === 'Topics'", wait);
+    s.ok("on a phone the sidebar opens over the mind, and its Topics opens the mind's, the sidebar closing", topics, b.eval(&page, "location.href")?);
+    let _ = b.screenshot(&page, &shots.join("phone-mind-topics.png"));
+    // settings on a phone, the mind's among them
+    b.viewport(&page, 390, 844, true)?;
+    b.eval(&page, "(location.href = '/settings', true)")?;
+    let phone_settings = b.until(&page, "location.pathname === '/settings' && (() => { const f = document.querySelector('#settings-mind iframe'); return !!f && f.getBoundingClientRect().height > 400; })()", wait);
+    s.ok("on a phone, settings show the mind's section, its frame as tall as its page", phone_settings, "");
+    b.eval(&page, "(document.getElementById('settings-mind')?.scrollIntoView({ block: 'start' }), true)")?;
+    b.color_scheme(&page, "light")?;
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let _ = b.screenshot(&page, &shots.join("phone-settings-mind-light.png"));
+    b.color_scheme(&page, "dark")?;
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let _ = b.screenshot(&page, &shots.join("phone-settings-mind-dark.png"));
+    b.color_scheme(&page, "light")?;
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// A Claude Code session of `pairs` turns, as `~/.claude/projects` keeps
+/// one: a JS expression that makes it a File, named `name`.
+fn claude_code_session(id: &str, pairs: usize, name: &str) -> String {
+    format!(
+        "(() => {{ const t0 = Date.parse('2025-03-01T12:00:00Z'); const lines = []; \
+         for (let k = 0; k < {pairs}; k++) {{ \
+           lines.push(JSON.stringify({{ type: 'user', sessionId: {id}, uuid: 'u' + k, timestamp: new Date(t0 + k * 60000).toISOString(), message: {{ role: 'user', content: 'Seed swap question ' + k + ': which beds get the tomatoes?' }} }})); \
+           lines.push(JSON.stringify({{ type: 'assistant', sessionId: {id}, timestamp: new Date(t0 + k * 60000 + 30000).toISOString(), message: {{ id: 'm' + k, role: 'assistant', model: 'claude', content: [{{ type: 'text', text: 'Answer ' + k + ': the fence bed, after the last frost.' }}] }} }})); \
+         }} return new File([lines.join('\\n')], {name}); }})()",
+        id = js(id),
+        name = js(name),
+    )
+}
+
+/// The mind's settings are a section of the shell's own Settings (Paul,
+/// 2026-10-07: "I don't see settings -> import"; "I prefer using the
+/// center column rather than a modal"): the mind's page framed there
+/// (`?embed=settings`), with about you, its memory and Export memory,
+/// Import chats, and Connect another agent, as tall as it says it is.
+/// Method: a Claude Code session made in the frame and given to its
+/// upload, as a person picks one; settings drawn again; the mind opened,
+/// and its heading menu's Mind settings. Valid: every message of the
+/// session lands (the mind's `imported`), and the frame stays the one it
+/// was, never loaded again (an import in it goes on), the menu scrolling
+/// the page to it.
+fn mind_settings_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, mind: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.viewport(page, 1280, 860, false)?;
+    // settings beside no window: the viewer closed
+    b.eval(page, "(document.getElementById('layout').classList.contains('right-open') && document.getElementById('toggle-right').click(), true)")?;
+    const FRAME: &str = "embed=settings";
+    let flat = fragment_proto::flat_name(mind).unwrap_or_default();
+    let framed = b.until(page, "(() => { const f = document.querySelector('#settings-mind iframe.mind-settings'); return !!f && f.getBoundingClientRect().height > 400; })()", wait);
+    // what the frame shows, once its page has read the mind
+    let shows = "(() => { const t = document.body.innerText; return ['About you', 'Memory', 'Export memory', 'Import chats', 'Choose a file', 'Connect another agent'].every((w) => t.includes(w)) && /messages?, /.test(t) ? [...document.querySelectorAll('.cmd-line code')].map((c) => c.textContent).join('\\n') : null; })()";
+    let mut lines = Value::Null;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < wait && !lines.is_string() {
+        lines = b.eval_in_frame(page, FRAME, shows).unwrap_or(Value::Null);
+        if !lines.is_string() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    if !lines.is_string() {
+        println!("      (the mind's settings frame said: {:?})", b.eval_in_frame(page, FRAME, "document.body.innerText.slice(0, 600)"));
+    }
+    let text = lines.as_str().unwrap_or("");
+    s.ok(
+        "the shell's Settings has the mind's, in the middle column: about you, its memory and Export memory, Import chats, and Connect another agent (its connector's URL, Claude Code's line, the CLI's), as tall as its page says",
+        framed && text.contains(&format!("//{flat}.")) && text.contains("/__mcp") && text.contains("claude mcp add --transport http") && text.contains(&format!("fragment mcp {mind}")),
+        json!({ "framed": framed, "lines": lines }),
+    );
+
+    // a session picked in its upload, and imported
+    let id = format!("e2e-settings-{}", crate::api::now_ms());
+    let pick = format!(
+        "(() => {{ const input = document.querySelector('.import-slot input[type=file]'); if (!input) return false; const dt = new DataTransfer(); dt.items.add({}); input.files = dt.files; input.dispatchEvent(new Event('change')); return true; }})()",
+        claude_code_session(&id, 8, "seed-swap.jsonl")
+    );
+    let picked = b.eval_in_frame(page, FRAME, &pick).ok() == Some(Value::Bool(true));
+    let read = "(() => { const f = document.querySelector('.imp-facts'); return !!f && !f.hidden && f.textContent.startsWith('1 conversation, 16 messages'); })()";
+    let ready = picked && s.eventually(wait, || b.eval_in_frame(page, FRAME, read).ok() == Some(Value::Bool(true)));
+    if ready {
+        b.eval_in_frame(page, FRAME, "(document.querySelector('.imp-btn.primary').click(), true)")?;
+    }
+    let going = "/^(Imported 16 messages|Summarizing|Your memory has summarized)/.test(document.querySelector('.imp-status')?.textContent ?? '')";
+    let sent = ready && s.eventually(wait, || b.eval_in_frame(page, FRAME, going).ok() == Some(Value::Bool(true)));
+    // the import, in view, its frame grown to it
+    b.color_scheme(page, "light")?;
+    b.eval(page, "(() => { document.getElementById('settings-mind').scrollIntoView({ block: 'start' }); document.getElementById('settings-page').scrollTop += 300; return true; })()")?;
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let _ = b.screenshot(page, &shots.join("desktop-settings-import.png"));
+    let landed = || shell(api, session, "POST", &format!("/api/f/{mind}/ops/imported"), Some(&json!({ "id": format!("imported-{}", crate::api::now_ms()), "input": { "conversations": [{ "source": "claude-code", "id": id }] } })), &[]);
+    let all = sent && s.eventually(wait, || landed().is_ok_and(|r| r.body["result"]["landed"][0] == 16));
+    s.ok(
+        "a Claude Code session picked in its Import chats is read in the frame and lands whole: its 16 messages, the person's words and the final replies",
+        all,
+        json!({ "picked": picked, "ready": ready, "sent": sent, "status": b.eval_in_frame(page, FRAME, "document.querySelector('.imp-status')?.textContent ?? null").unwrap_or(Value::Null), "imported": landed().map(|r| r.body).unwrap_or_default() }),
+    );
+
+    // the frame stays the one it was: settings drawn again, the mind
+    // opened, and its heading menu's Mind settings
+    b.eval(page, "(() => { const f = document.querySelector('#settings-mind iframe'); f.__kept = true; window.__settingsLoads = 0; f.addEventListener('load', () => window.__settingsLoads++); return true; })()")?;
+    b.click(page, "#settings")?;
+    let redrawn = b.until(page, "document.getElementById('settings-page').innerText.includes('ACCOUNT') && document.querySelector('#settings-mind iframe')?.__kept === true", wait);
+    b.click(page, "#mind-links [data-key='mind:new']")?;
+    let left = b.until(page, "document.getElementById('settings-page').hidden && location.hash === '#/new' && !document.getElementById('agent-heading').hidden", wait);
+    b.click(page, "#agent-heading")?;
+    b.eval(page, "([...document.querySelectorAll('#menu button')].find((x) => x.textContent === 'Mind settings')?.click(), true)")?;
+    let back = b.until(
+        page,
+        "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.querySelector('#settings-mind iframe')?.__kept === true && window.__settingsLoads === 0 && (() => { const r = document.getElementById('settings-mind').getBoundingClientRect(); return r.top >= 0 && r.top < 200; })()",
+        wait,
+    );
+    s.ok(
+        "the frame is never loaded again (an import in it goes on): settings drawn again, the mind opened, and its heading menu's Mind settings back to it, scrolled there",
+        redrawn && left && back,
+        json!({ "redrawn": redrawn, "left": left, "back": back, "loads": b.eval(page, "window.__settingsLoads ?? null")? }),
+    );
+    b.color_scheme(page, "light")?;
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let _ = b.screenshot(page, &shots.join("desktop-settings-mind-light.png"));
+    b.color_scheme(page, "dark")?;
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let _ = b.screenshot(page, &shots.join("desktop-settings-mind-dark.png"));
+    b.color_scheme(page, "light")?;
+    Ok(())
+}
+
+/// The templates the shell's catalog makes apps from (shell.js `CATALOG`,
+/// less the blessed brain).
+const CATALOG_TEMPLATES: [&str; 11] = ["todo", "inbox", "when", "wall", "board", "watch", "brief", "hook", "wiki", "split", "blank"];
+
+/// The catalog's templates as they are mostly seen (Paul, 2026-10-07):
+/// each app alone in the viewer, a pane 384 px wide under a titlebar that
+/// names it. Valid: its page is no wider than its pane, links the
+/// platform's stylesheet and is in its look (Funnel Sans), and shows no
+/// heading that names the app. Todo, when and board are shot, light and
+/// dark.
+fn templates_narrow(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.viewport(page, 1280, 860, false)?;
+    // the viewer 400 px wide, open, and no window in it
+    b.eval(page, "(localStorage.setItem('finite.layout.v1', JSON.stringify({ ...JSON.parse(localStorage.getItem('finite.layout.v1') || '{}'), right: 400, rightOpen: true })), localStorage.removeItem('finite.viewer.v1'), true)")?;
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, "!document.getElementById('layout').hidden && document.getElementById('layout').classList.contains('right-open')", wait), "the shell, its viewer open");
+    let close_all = "(document.querySelectorAll('.pane-head button[aria-label=Close]').forEach((x) => x.click()), true)";
+    let mut seen = Vec::new();
+    for t in CATALOG_TEMPLATES {
+        b.eval(page, close_all)?;
+        let before = b.eval(page, "[...document.querySelectorAll('#apps .row[data-key]')].map((r) => r.dataset.key)")?;
+        b.eval(page, "(document.getElementById('add-app').click(), true)")?;
+        if !b.until(page, "document.querySelector('.catalog form')", wait) {
+            let _ = b.screenshot(page, &shots.join("catalog-failed.png"));
+            anyhow::bail!("the catalog for {t}");
+        }
+        b.eval(page, &format!("([...document.querySelectorAll('.catalog form')].find((f) => f.querySelector('input').placeholder === {}).requestSubmit(), true)", js(t)))?;
+        let new_row = format!("[...document.querySelectorAll('#apps .row[data-key]')].map((r) => r.dataset.key).find((k) => !{before}.includes(k))");
+        anyhow::ensure!(b.until(page, &format!("{new_row} && !document.querySelector('.catalog') && document.querySelector('.viewer iframe')"), wait), "{t}'s app opens in the viewer");
+        let key = b.eval(page, &new_row)?;
+        let name = key.as_str().and_then(|k| k.strip_prefix("app:")).unwrap_or("").to_string();
+        let host = format!("{}.", fragment_proto::flat_name(&name).unwrap_or_default());
+        let look = format!(
+            "(() => {{ if (document.readyState !== 'complete' || !document.body) return null; \
+             const named = [...document.querySelectorAll('h1')].some((h) => h.offsetParent && h.textContent.trim().toLowerCase() === {t}); \
+             return {{ width: innerWidth, wide: document.documentElement.scrollWidth, sheet: !!document.querySelector('link[href=\"./__fragment.css\"]'), font: getComputedStyle(document.body).fontFamily.includes('Funnel Sans'), named }}; }})()",
+            t = js(t)
+        );
+        let mut got = Value::Null;
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < wait && !got.is_object() {
+            got = b.eval_in_frame(page, &host, &look).unwrap_or(Value::Null);
+            if !got.is_object() {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        if ["todo", "when", "board"].contains(&t) {
+            // a little in it, as a person would have
+            let add = match t {
+                "todo" => "(['Water the tomatoes', 'Book the train to Lyon'].forEach((x, k) => setTimeout(() => { document.getElementById('text').value = x; document.getElementById('add').requestSubmit(); }, k * 400)), true)",
+                "board" => "(() => { document.getElementById('title').value = 'Take out the bins'; document.getElementById('add').requestSubmit(); return true; })()",
+                _ => "true",
+            };
+            let _ = b.eval_in_frame(page, &host, add);
+            b.color_scheme(page, "light")?;
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = b.screenshot(page, &shots.join(format!("desktop-viewer-{t}-light.png")));
+            b.color_scheme(page, "dark")?;
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let _ = b.screenshot(page, &shots.join(format!("desktop-viewer-{t}-dark.png")));
+            b.color_scheme(page, "light")?;
+        }
+        seen.push(json!({ "template": t, "fragment": name, "page": got }));
+    }
+    b.eval(page, close_all)?;
+    let fits = |v: &Value| {
+        let p = &v["page"];
+        p["width"].as_i64().is_some_and(|w| (300..=400).contains(&w) && p["wide"].as_i64().is_some_and(|x| x <= w)) && p["sheet"] == true && p["font"] == true && p["named"] == false
+    };
+    s.ok(
+        "every catalog template's page fits a 384-px pane in the viewer, on the platform's stylesheet (Funnel Sans), with no heading that names the app",
+        seen.len() == CATALOG_TEMPLATES.len() && seen.iter().all(fits),
+        json!(seen),
+    );
     Ok(())
 }
 
@@ -783,7 +1087,8 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    let _ = b.screenshot(page, &s.dir("shell-ui").join("desktop-connections.png"));
+    // the lane's folder, made at its start (`dir` would empty it)
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui").join("desktop-connections.png"));
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
@@ -825,7 +1130,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let keys = fragment_nip98::Keys::generate();
     api.approve(session, &keys)?;
     let (agent, _) = super::delegation::agent_of(api, &keys)?;
-    let second = b.open(&format!("{}/", api.base))?;
+    let second = b.open(&format!("{}/?apps", api.base))?;
     let ready = b.until(&second, "!document.getElementById('layout').hidden && document.querySelectorAll('#apps .row[data-key]').length === 1", wait);
     // what the first tab shows: its open chat (counting its frame's loads) and its rows, marked
     let marked = b.eval(
@@ -1337,8 +1642,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// `fragment ask` as a person (an agent's runs in its computer: the hosted
-/// lane's, and our Hermes image's): their direct chat with the agent, its
+/// `fragment ask` as a person (an agent's runs in its computer): their direct chat with the agent, its
 /// answer waited for and printed; the same `--id` again posts nothing and
 /// finds the same answer; `--chat` adds the agent to a chat it is not in
 /// first. Invalid: an agent that is none of theirs, an empty question.

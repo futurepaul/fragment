@@ -26,6 +26,10 @@
 //!
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
+//!
+//! A fragment's `__mcp` (its MCP server, for a connected client) is
+//! mcp.rs's: a bearer token the registry resolves for that fragment
+//! alone, never a cookie.
 
 mod ai;
 mod auth;
@@ -36,6 +40,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod drafts;
 mod ended;
 mod cs;
 mod error;
@@ -48,9 +53,12 @@ mod ledger;
 mod levers;
 mod live;
 mod members;
+mod mcp;
 mod meter;
 mod models;
+mod oauth;
 mod ops;
+mod owner;
 mod plane;
 mod principal;
 mod publish;
@@ -100,6 +108,14 @@ const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-versio
 /// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
 const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
 
+/// The agent docs on the platform's origin, for an agent with no CLI yet
+/// (llmstxt.org): `fragment skill`'s text and `fragment guide`'s, the same
+/// files, so they cannot drift.
+const LLMS_TXT: &str = include_str!("../../cli/SKILL.md");
+const LLMS_FULL_TXT: &str = include_str!("../../cli/GUIDE.md");
+const LLMS_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_TXT.as_bytes());
+const LLMS_FULL_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_FULL_TXT.as_bytes());
+
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -143,7 +159,7 @@ pub const SHELL_HEADER: &str = "x-fragment-shell";
 /// Who asks an API request, unresolved: the key that signed it (NIP-98),
 /// or, from the platform's own page (the shell), the person's platform
 /// session.
-enum Caller {
+pub(crate) enum Caller {
     Key(String),
     Session(String),
 }
@@ -151,7 +167,7 @@ enum Caller {
 /// A request's caller: its signature when it has one; else the platform
 /// session, only for the shell's own requests (`shell_session`); else the
 /// unsigned request's 401.
-fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
+pub(crate) fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
     if req.headers().get("authorization")?.is_none() {
         if let Some(token) = shell_session(Config::from_env(env), req, url)? {
             return Ok(Caller::Session(token));
@@ -269,7 +285,7 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
     if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
         return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
     }
-    Ok(Signed { identity, key, acting_for })
+    Ok(Signed { identity, key, acting_for, through: None })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -440,6 +456,52 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     Ok(made)
 }
 
+/// `POST /api/drafts` (docs/api.md, Drafts): a draft, signed by a key no one
+/// holds. The registry counts its start against the day's caps (once a
+/// key; its address's, Cloudflare's `CF-Connecting-IP`, and the
+/// deployment's), then the draft its key names is made, that key its maker
+/// (`fragment_core::drafts`).
+async fn make_draft(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let asked: fragment_proto::MakeDraft = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    if acting_for(url)?.is_some() {
+        return Err(CellError::invalid("a draft is its key's own: `for` means nothing here"));
+    }
+    let key = authenticate(&req, url, Payload::Read(&body))?;
+    // a template that is copied, never a blessed one (a chat, an agent): asked before a start counts
+    if let Some(t) = asked.template.as_deref().filter(|t| publish::template(t).is_none()) {
+        let names: Vec<&str> = publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
+        return Err(CellError::invalid(format!("a draft starts from {}, not {t:?}", names.join(", "))));
+    }
+    // a request no edge named an address for (a node of our own) counts in one bucket
+    let address = req.headers().get("cf-connecting-ip")?.as_deref().and_then(fragment_core::drafts::address).unwrap_or_else(|| "unknown".into());
+    ask_registry(env, &calls::StartDraft { key: key.clone(), address }).await?;
+    let routed = Routed { name: fragment_core::drafts::name(&key), url: url.clone(), signed: Some(draft_maker(key)), credential: None };
+    // a fresh request: nothing of the caller's but what the router decided
+    let bare = Request::new(url.as_str(), Method::Post)?;
+    let asked = serde_json::to_vec(&asked).map_err(|e| CellError::host(e.to_string()))?;
+    forward(env, &bare, bytes_body(asked), Forward { routed, inner: "/draft".into(), extra: vec![] }).await
+}
+
+/// A draft's maker: the key that made it, which no one holds until the
+/// draft is claimed, as the principal its key names.
+fn draft_maker(key: String) -> Signed {
+    let identity = fragment_proto::Identity { id: fragment_core::drafts::maker(&key), kind: IdentityKind::Person, owner: None, username: None, held: None };
+    Signed::new(identity, Some(key))
+}
+
+/// `signer_for`, or, on a draft's routes, a key no one holds as the
+/// draft's maker: the draft admits it only if it made it and no one has
+/// claimed it (drafts.rs `draft_gate`).
+async fn signer_or_maker(env: &Env, req: &Request, url: &Url, body: &[u8], name: &str) -> CellResult<Signed> {
+    match signer_for(env, req, url, body).await {
+        Err(e) if e.code == ErrorCode::Unauthenticated && fragment_proto::is_draft_name(name) && acting_for(url)?.is_none() => {
+            Ok(draft_maker(authenticate(req, url, Payload::Read(body))?))
+        }
+        signed => signed,
+    }
+}
+
 /// `GET /api/fragments/watch`: a socket on which the caller's list says
 /// it changed (principal.rs, Watching). A key signs it (the CLI's); the
 /// shell opens it with the platform session, which a socket carries
@@ -478,12 +540,13 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(&identity)?.fetch_with_request(watch).await?)
 }
 
-/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
-/// its refusal is theirs to read, 403 for a guest and 402 past the
-/// overdraft. A ledger that does not answer refuses nothing, as a write's
-/// does (meter.rs `writable`): making a fragment is the product, and an
-/// outage lets at most a guest's fragment through, billed nothing.
-async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
+/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`), or
+/// claim a draft (share.rs): its refusal is theirs to read, 403 for a guest
+/// and 402 past the overdraft. A ledger that does not answer refuses
+/// nothing, as a write's does (meter.rs `writable`): making a fragment is
+/// the product, and an outage lets at most a guest's fragment through,
+/// billed nothing.
+pub(crate) async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
     let may = ledger::MaySpend { spend: fragment_core::ledger::Spend::Create, fragment: None, by_owner: true };
     match ledger::ask(env, maker, &may).await {
         Ok(_) => Ok(()),
@@ -568,7 +631,7 @@ pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
 }
 
 /// An identity's fragments, as its `Principal` cell lists them.
-async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
 }
@@ -763,7 +826,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
 
 /// A fragment named in an API path: `<label>.<username>`, or a bare label
 /// for a signed caller's own (under its username; an agent's owner's).
-fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
+pub(crate) fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
     if valid_fragment_name(name) {
         return Ok(name.to_string());
     }
@@ -786,12 +849,12 @@ fn check_name(name: &str) -> CellResult<()> {
 
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
-struct Forward {
-    routed: Routed,
+pub(crate) struct Forward {
+    pub routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
-    inner: String,
+    pub inner: String,
     /// Headers this route passes on purpose (the inbox's token and hop count).
-    extra: Vec<(&'static str, String)>,
+    pub extra: Vec<(&'static str, String)>,
 }
 
 /// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
@@ -807,12 +870,12 @@ fn blob_length(req: &Request) -> CellResult<()> {
 }
 
 /// Bytes the router read, as a body to forward.
-fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
+pub(crate) fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
 }
 
 /// Hands a request to the fragment's supervisor.
-async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
+pub(crate) async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
     let cookies = fetched(req)?.site;
     for k in PASSED_HEADERS {
@@ -972,6 +1035,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
+        // its MCP server, for a connected client: never a page's (mcp.rs)
+        if mcp::is_fragment_route(&rest) {
+            return mcp::fragment(req, env, cfg, &url, &name, &rest).await;
+        }
         return serve(req, env, cfg, &url, &name, &rest).await;
     }
     // a computer's own origin: its ports, for its owner (computer.rs)
@@ -1014,9 +1081,25 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
-        (_, ["share" | "join", _]) => {
+        (_, ["share" | "join" | "claim", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
+        }
+        (Method::Get | Method::Head, ["llms.txt"]) => serve::compiled_in(&req, LLMS_TXT, LLMS_TXT_HASH, "text/plain; charset=utf-8"),
+        (Method::Get | Method::Head, ["llms-full.txt"]) => serve::compiled_in(&req, LLMS_FULL_TXT, LLMS_FULL_TXT_HASH, "text/plain; charset=utf-8"),
+        // the platform's MCP server, for a connected client (mcp.rs)
+        (_, ["mcp"]) | (Method::Get | Method::Head, [".well-known", "oauth-protected-resource"] | [".well-known", "oauth-protected-resource", "mcp"]) => {
+            let segs = segments.clone();
+            mcp::platform(req, env, cfg, &url, &segs).await
+        }
+        // connected clients' authorization server (oauth.rs)
+        (_, [".well-known", "oauth-authorization-server"] | ["oauth", _]) => {
+            let segs = segments.clone();
+            oauth::route(req, env, cfg, &url, &segs).await
+        }
+        (_, ["api", "oauth", "connections", rest @ ..]) => {
+            let rest = rest.to_vec();
+            oauth::connections(&req, env, &url, &rest).await
         }
         (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
@@ -1033,6 +1116,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             create_fragment(env, cfg, &url, create, principal).await
         }
+        (Method::Post, ["api", "drafts"]) => make_draft(req, env, &url).await,
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
@@ -1073,6 +1157,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             ledger_route(req, env, cfg, &url, &rest).await
         }
         (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
+        (Method::Post, ["api", "models", "v1", "decide"]) => models::decide_route(req, env, &url).await,
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await
@@ -1139,7 +1224,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                     }
                     None
                 }
-                _ => Some(signer_for(env, &req, &url, &body).await?),
+                _ => Some(signer_or_maker(env, &req, &url, &body, name).await?),
             };
             // An agent on a reserved route: deleting and the cap are never
             // its, and it shares only for its own owner, unheld (Paul,

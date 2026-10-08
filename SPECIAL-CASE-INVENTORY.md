@@ -9,14 +9,18 @@ a fragment could build the same thing on top of those APIs. The list
 stays short (Paul, 2026-10-02).
 
 Adding an entry needs its reason and its API. Removing one is always
-welcome. Nothing here may name an agent runtime (Hermes), a template or
+welcome. Nothing here may name an agent runtime, a template or
 a vendor's product beyond the credential it holds.
 
 | Surface | Why it is platform | Built on |
 |---|---|---|
-| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`; a stranger's fragment asks first, at `/auth/fragment`) | Security: it mints the credentials every other surface trusts. Which of a browser's cookies count on a fragment's origin is the router's (Fetch Metadata), so another fragment's page reaches it as a stranger (docs/api.md, Sign-in). | WorkOS AuthKit; the registry |
+| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`; a stranger's fragment asks first, at `/auth/fragment`; a draft's claim, `/claim/<name>`, approves the key that made it) | Security: it mints the credentials every other surface trusts. Which of a browser's cookies count on a fragment's origin is the router's (Fetch Metadata), so another fragment's page reaches it as a stranger (docs/api.md, Sign-in). | WorkOS AuthKit; the registry |
+| The platform's MCP server (`/mcp`) | The thin page users can't break, for a chat client: each tool is one public route, asked as the person (docs/api.md, The platform's MCP server). | The public fragment and identity APIs |
+| Connected clients: MCP's OAuth (`/.well-known/oauth-authorization-server`, `/oauth/*`, `/api/oauth/connections`) | Security: it mints the tokens a client (Claude, ChatGPT) acts as a person with, after asking them on a page no fragment may frame or post to (docs/api.md, Connected clients). | Sign-in; the registry |
+| A draft's bar on its pages (`#fragment-draft`, docs/api.md, Drafts) | Abuse: a page no account stands behind is a phishing host, so every visitor of one sees that it is a draft, when it ends, and where it is claimed; its claim takes it away. | The draft's status (`GET /api/f/{name}/status`) |
 | The shell (`/`, `/settings`): sidebar, tabs, profile and settings, search, first run; to a page of a fragment you own that asks, your agents, and adding one of them to that fragment (docs/api.md, The shell) | Security: it holds your session and frames your fragments and computers. The thin page users can't break. A page asks it, never grants: the shell checks the page is your own fragment's, at its own origin, offers only your own agents, and adds one only once you confirm it in the shell's own dialog, every time. | The public fragment, computer, identity and ledger APIs |
 | Identity and delegation | Security: who an agent acts for, and at what role. | The registry |
+| The `owner` capability (`job.owner.*`: a fragment's jobs acting as its owner on their other fragments) | Security: it lends a person's reach over all their fragments, so only code none of the fragment's members can change gets it (a blessed template's release, decision 40; a fragment with its own code is refused it at deploy), and only while no one but its owner reads or drives that fragment (docs/api.md, Jobs and triggers). | The operations API, recorded as an agent's call `for` its owner is (R17) |
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | The share sheet and invites (`/share/<name>`, `/join/<name>`) | Security: it acts as the fragment's owner, so no fragment's code (which its author or an agent rewrites) may frame, fetch or script it (docs/api.md, Sharing). | The members and invites API |
@@ -32,8 +36,8 @@ still holds a place of the shell's, as a page of its own. `/` and
 ## Fragment plumbing (not special cases)
 
 Every fragment gets these routes (docs/api.md, Serving), and none of
-them knows what a fragment is for: `__fragment.js`, `__signin` and
-`__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
+them knows what a fragment is for: `__fragment.js` and
+`__fragment.css`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
 `__blob`, `__files` and `__file` (the vault UI), `__sw.js` and
 `__push-*`, `__preview.svg`, people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the
@@ -51,4 +55,5 @@ These are fragments or computers, or components any fragment may use:
 - A computer's screen is a page its image serves, reached through the
   generic port proxy.
 - Platform components any fragment may use: the vault UI (files and
-  notes, used by brains) and the browser library (`__fragment.js`).
+  notes, used by brains), the browser library (`__fragment.js`), and
+  the stylesheet a page may link (`__fragment.css`).

@@ -13,6 +13,8 @@
 //! Routes (inner paths; the router maps the public ones onto them):
 //!
 //!   POST   /create                        create (the signer owns it)
+//!   POST   /draft                         a draft (its maker, a key no one holds: drafts.rs)
+//!   GET    /claim  POST /claim            a draft's claim, as the platform's page asks it (share.rs)
 //!   DELETE /delete                        delete (owner)
 //!   GET    /api/status                    viewer
 //!   GET    /api/manifest                  viewer: fragment.json at main
@@ -35,6 +37,8 @@
 //!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
 //!   PUT    /api/channels/<channel>/draft  the channel's post role ({turn, text}: shown live, never stored)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
+//!   GET    /mcp/tools                     the described operations the caller may call, as MCP tools (the router's, for `__mcp`)
+//!   POST   /mcp/tools/<operation>         a call of one of them, as /api/ops/<operation> (the router's, for `__mcp`)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
@@ -46,6 +50,7 @@
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
+//!   POST   /owner/ops  /owner/call        another fragment's job, acting as its owner here (owner.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::borrow::Cow;
@@ -112,7 +117,7 @@ CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
   modules TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0, description TEXT);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
@@ -179,6 +184,8 @@ pub struct FragmentCell {
     /// refused (publish.rs).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
+    /// An unclaimed draft's writes this minute (drafts.rs).
+    pub(crate) draft_rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
     /// The ledger ids a call or a sweep is settling now (channels.rs).
@@ -207,6 +214,7 @@ impl DurableObject for FragmentCell {
         sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
+        let draft_rate = fragment_core::ratelimit::Rate::new(limits::DRAFT_WRITES_PER_MIN, limits::DRAFT_WRITES_PER_MIN);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
         FragmentCell {
             state,
@@ -216,6 +224,7 @@ impl DurableObject for FragmentCell {
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
+            draft_rate: RefCell::new(draft_rate),
             swept: Cell::new(false),
             settling: RefCell::default(),
             app,
@@ -392,6 +401,9 @@ pub(crate) enum MetaKey {
     Searched,
     /// Why live's code was not installed.
     CodeError,
+    /// The app's database cap live's manifest declares (`storage.maxBytes`),
+    /// when it declares one.
+    AppDbMax,
     /// When the blob collection runs next.
     BlobsGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
@@ -429,9 +441,16 @@ pub(crate) enum MetaKey {
     StorageSampledAt,
     /// The preview card and its schedule (card.rs: `fragment_core::card::Cards`, as JSON).
     Cards,
+    /// A draft's key, end, claim code and claimer (drafts.rs:
+    /// `fragment_core::drafts::Draft`, as JSON); none on any other fragment.
+    Draft,
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// The capabilities live's manifest declares (a blessed template's
+    /// alone: `manifest::own_code`), as a JSON array of names, when it
+    /// declares any.
+    Capabilities,
 }
 
 impl MetaKey {
@@ -464,6 +483,7 @@ impl MetaKey {
             MetaKey::Face => "face",
             MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
+            MetaKey::AppDbMax => "app_db_max",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
             MetaKey::TestLedgerMs => "test_ledger_ms",
@@ -482,7 +502,9 @@ impl MetaKey {
             MetaKey::MeterClosed => "meter_closed",
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
+            MetaKey::Draft => "draft",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::Capabilities => "capabilities",
         }
     }
 
@@ -727,6 +749,12 @@ impl FragmentCell {
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
             return self.standing_for(signed, link);
         }
+        self.own_standing(principal, link)
+    }
+
+    /// An identity's standing as itself: its membership, or an agent of
+    /// its own that is a member.
+    pub(crate) fn own_standing(&self, principal: &str, link: bool) -> CellResult<Standing> {
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
@@ -908,6 +936,15 @@ impl FragmentCell {
             let bytes = req.bytes().await?;
             return json_response(&self.wipe_route(&route, &bytes).await?);
         }
+        if let Some(route) = path.strip_prefix("/owner/") {
+            // Only another fragment's `owner` step sets the header; the router never passes it.
+            if req.headers().get(crate::owner::OWNER_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let route = route.to_string();
+            let bytes = req.bytes().await?;
+            return json_response(&self.owner_route(&route, &bytes).await?);
+        }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
         let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
@@ -931,13 +968,33 @@ impl FragmentCell {
         let query = |k: &str| caller.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
         let segments: Vec<String> = path.trim_start_matches('/').split('/').map(decode_segment).collect();
         let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
-        match (req.method(), segs.as_slice()) {
+        let method = req.method();
+        if !matches!(segs.as_slice(), ["create" | "draft" | "claim"]) {
+            self.draft_gate(&caller, &req.method(), &segs)?;
+        }
+        // a connected client its person let only read changes nothing here
+        // (an operation's call decides by its kind: ops.rs `call_op`)
+        let reads = matches!(method, Method::Get | Method::Head) || matches!(segs.as_slice(), ["api", "ops", _] | ["mcp", "tools", _]);
+        if crate::ops::connected(&caller) && !crate::ops::writes(&caller) && !reads {
+            return Err(CellError::new(ErrorCode::Forbidden, "this connected client may only read: its person connects it again and allows changes"));
+        }
+        let answered = match (req.method(), segs.as_slice()) {
             (Method::Post, ["create"]) => {
                 let body: CreateFragment = body_json(&mut req).await?;
                 if body.name != routed_name {
                     return Err(CellError::host("the router addressed a different fragment than the body names"));
                 }
-                self.create(&caller, body).await
+                self.create(&caller, body, None).await
+            }
+            (Method::Post, ["draft"]) => {
+                let body = body_json(&mut req).await?;
+                self.make_draft(&caller, &routed_name, body).await
+            }
+            // the platform's claim page (share.rs), never routed from outside
+            (Method::Get, ["claim"]) => json_response(&self.claim_view()?),
+            (Method::Post, ["claim"]) => {
+                let body: Value = body_json(&mut req).await?;
+                json_response(&self.claim(&caller, body["code"].as_str().unwrap_or_default()).await?)
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
             (Method::Get, ["api", "status"]) => self.status(&caller),
@@ -1019,6 +1076,13 @@ impl FragmentCell {
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
             }
+            // the router's own, for a connected client (cell/src/mcp.rs): never routed from outside
+            (Method::Get, ["mcp", "tools"]) => self.mcp_tools(&caller),
+            (Method::Post, ["mcp", "tools", op]) => {
+                let body = body_json(&mut req).await?;
+                let op = op.to_string();
+                self.mcp_call(&caller, &op, body).await
+            }
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
                 self.put_blob(&caller, &sha, &req).await
@@ -1057,10 +1121,30 @@ impl FragmentCell {
                 self.inbox(&token, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
+        };
+        if let Ok(resp) = &answered {
+            self.noted_client(&caller, &method, &path, resp.status_code());
         }
+        answered
     }
 
-    async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
+    /// What a connected client changes names it (docs/api.md, Connected
+    /// clients): each write it made here that was taken, as `client.acted`.
+    /// An operation's call says so itself (`client.called`, ops.rs), its
+    /// replays and queries saying nothing.
+    fn noted_client(&self, caller: &Caller, method: &Method, path: &str, status: u16) {
+        let Some((signed, through)) = caller.signed.as_ref().and_then(|s| s.through.as_ref().map(|t| (s, t))) else { return };
+        if matches!(method, Method::Get | Method::Head) || path.starts_with("/api/ops/") || path.starts_with("/mcp/") || !(200..300).contains(&status) {
+            return;
+        }
+        let principal = npub::display(&signed.id);
+        let summary = format!("{} {path} by {principal} through {}", method.as_ref(), through.client);
+        self.event("client.acted", &summary, json!({ "method": method.as_ref(), "route": path, "principal": principal, "client": through.client, "connection": through.connection }));
+    }
+
+    /// A create, or a draft's (`draft`: its maker's key, end and claim
+    /// code, kept beside its facts from the start: drafts.rs).
+    pub(crate) async fn create(&self, caller: &Caller, body: CreateFragment, draft: Option<fragment_core::drafts::Draft>) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
@@ -1090,12 +1174,18 @@ impl FragmentCell {
         self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             // the one place a repo's name is derived: its owner's, so a
-            // username held later by another identity never finds it
-            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
+            // username held later by another identity never finds it; a
+            // draft's, its own life's, so the same key's draft made again
+            // never finds the repo its life before ended with (drafts.rs)
+            let named_for = match &draft {
+                Some(_) => fragment_core::drafts::repo_owner(&pubkey),
+                None => owner.clone(),
+            };
+            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &named_for)
                 .ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>, and its owner an identity"))?;
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
         let (repo, fragment_pub, sealed) = match made.await {
@@ -1112,6 +1202,9 @@ impl FragmentCell {
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
+        if let Some(d) = &draft {
+            self.set_meta(MetaKey::Draft, &serde_json::to_string(d).expect("a draft serializes"))?;
+        }
         for (k, v) in [
             (MetaKey::Owner, owner.as_str()),
             (MetaKey::Npub, fragment_npub.as_str()),
@@ -1167,6 +1260,7 @@ impl FragmentCell {
             inbox_token,
             repo,
             canonical: self.cfg.canonical(&caller.url, &body.name),
+            draft: draft.map(|d| self.draft_status(&body.name, &d, true)),
         })
     }
 
@@ -1176,7 +1270,8 @@ impl FragmentCell {
     async fn delete(&self, caller: &Caller) -> CellResult<Response> {
         let name = self.name()?;
         self.require(caller, false, Role::Owner)?;
-        let ended = self.end_life()?;
+        // an unclaimed draft's repo is its life's alone: it goes with it (drafts.rs)
+        let ended = if self.draft()?.is_some() { self.end_life_wiped()? } else { self.end_life()? };
         self.tell_ended(Some(&ended.owner)).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
@@ -1209,6 +1304,8 @@ impl FragmentCell {
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
+            page: self.cards()?.page,
+            draft: self.draft()?.map(|d| self.draft_status(&facts.name, &d, role >= Role::Editor)),
             name: facts.name,
         })
     }
@@ -1245,7 +1342,8 @@ impl FragmentCell {
     }
 
     /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
-    /// life was made since; then the life's index, search, joined and
+    /// life was made since, and ends a draft no one claimed by its end
+    /// (drafts.rs); then the life's index, search, joined and
     /// delivery outboxes, due schedules, queued runs, and the pass: the
     /// trims, the poll backstop (while the pins may lag), the blob
     /// collection, running runs checked, and the storage sample. The next
@@ -1255,7 +1353,7 @@ impl FragmentCell {
     /// meanwhile. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
-        if self.meta(MetaKey::CreatedAt)?.is_none() {
+        if self.meta(MetaKey::CreatedAt)?.is_none() || self.end_expired_draft().await? {
             // what an ended life still has to clean, if anything
             return self.schedule().await;
         }
@@ -1331,7 +1429,19 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, ended, also];
+        let due = [
+            outbox,
+            self.search_due_at()?,
+            self.joined_due_at()?,
+            self.runs_due_at()?,
+            self.pending_due_at()?,
+            self.outbox_due_at()?,
+            self.meter_due_at()?,
+            self.card_due_at()?,
+            self.draft_due_at()?,
+            ended,
+            also,
+        ];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

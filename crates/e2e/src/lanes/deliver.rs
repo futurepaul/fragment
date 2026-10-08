@@ -2,10 +2,11 @@
 //! the delivery queue to a push service that checks VAPID and decrypts as
 //! a browser would; subscriptions that are gone, retries, the dead-letter
 //! report; and AI as a job's steps: text through the model
-//! route and images on its transport (both the Workers AI fake, a lower
-//! rung at the vendor boundary), generated images stored as files, video
-//! steps refused, and the calories template's text step. What each paid
-//! step costs is the ledger section's.
+//! route (its tools, its drafts as it streams), decisions (Clef) and images
+//! on its transport (all the Workers AI fake, a lower rung at the vendor
+//! boundary), generated images stored as files, video steps refused, and
+//! the calories template's text step. What each paid step costs is the
+//! ledger section's.
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs::{settle, started};
-use crate::api::{Api, Call, Reply};
+use crate::api::{Api, Call, Reply, Socket};
 use crate::Suite;
 
 const MEDIA_APP: &[u8] = include_bytes!("../../fixtures/media.mjs");
@@ -184,7 +185,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ai", &[crate::Need::Fakes]) {
+    if !s.section("ai", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -214,6 +215,8 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
     s.ok("a step on the high tier is refused, saying why (decision 23)", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("high tier is off")), &r);
+    tools_and_drafts(s, api, &owner, &c, &run)?;
+    decisions(s, api, &name, &run)?;
 
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
@@ -287,6 +290,154 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     calories(s, api, wait)
+}
+
+/// A text step's tools, as a turn uses them: the model's tool call is the
+/// step's message, and the conversation it is passed back in (the call, the
+/// tool's result) reaches the model as it came. A step with a draft streams,
+/// and a socket on the channel sees its text so far as the fragment's drafts.
+fn tools_and_drafts(s: &mut Suite, api: &Api, owner: &Keys, c: &Value, run: &dyn Fn(&str, &str, Value) -> Result<Value>) -> Result<()> {
+    let name = c["name"].as_str().unwrap_or_default();
+    let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
+    let calls = s.ai.calls().len();
+    let r = run("tool1", "tool_turn", json!({ "ask": "what is a shard? [[call lookup {\"word\": \"shard\"}]]" }))?;
+    let (first, second) = (&r["output"]["first"], &r["output"]["second"]);
+    let call = &first["message"]["tool_calls"][0];
+    s.ok(
+        "a text step offering tools answers the model's tool call as its message (OpenAI's shape), saying why it stopped",
+        r["status"] == "succeeded"
+            && first["finish_reason"] == "tool_calls"
+            && first["message"]["role"] == "assistant"
+            && call["type"] == "function"
+            && call["function"]["name"] == "lookup"
+            && call["id"].as_str().is_some_and(|i| !i.is_empty())
+            && call["function"]["arguments"].as_str().and_then(|a| serde_json::from_str::<Value>(a).ok()) == Some(json!({ "word": "shard" })),
+        &r,
+    );
+    let sent: Vec<Value> = s.ai.chats().into_iter().skip(calls).collect();
+    s.ok(
+        "the model is offered the tools as the job gave them, and the next call carries the assistant's tool call and the tool's result as they came",
+        sent.len() == 2
+            && sent[0]["tools"][0]["function"]["name"] == "lookup"
+            && sent[0]["tool_choice"] == "auto"
+            && sent[1]["messages"][1]["tool_calls"][0]["id"] == call["id"]
+            && sent[1]["messages"][2] == json!({ "role": "tool", "tool_call_id": call["id"], "content": "shard: a small piece broken off" }),
+        json!(sent),
+    );
+    s.ok(
+        "and the model's answer from the tool's result is the next step's text, with no tool call",
+        second["text"].as_str().is_some_and(|t| t.contains("shard: a small piece broken off")) && second["finish_reason"] == "stop" && second["message"].get("tool_calls").is_none(),
+        &r,
+    );
+    let tools = |n: usize| -> Vec<Value> { (0..n).map(|i| json!({ "type": "function", "function": { "name": format!("t{i}") } })).collect() };
+    let calls = s.ai.calls().len();
+    let many = run("tool-many", "ask_text", json!({ "prompt": "p", "tools": tools(65) }))?;
+    let choice = run("tool-choice", "ask_text", json!({ "prompt": "p", "tool_choice": "required" }))?;
+    let nowhere = run("draft-nowhere", "ask_text", json!({ "prompt": "p", "draft": { "channel": "elsewhere", "turn": "t" } }))?;
+    let held = |r: &Value, says: &str| r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains(says)) && cost(r) == 0;
+    s.ok(
+        "more than 64 tools, a tool choice with no tools, or a draft to a channel the app does not declare is refused, saying why, before any call",
+        held(&many, "at most 64 tools") && held(&choice, "tool_choice") && held(&nowhere, "declares no \"elsewhere\"") && s.ai.calls().len() == calls,
+        json!([many, choice, nowhere]),
+    );
+
+    // a draft: the step streams, its text so far the channel's draft
+    let mut page = Socket::open(api, name, "__live", Some(owner), None)?;
+    page.until("hello", 5)?;
+    page.send(&json!({ "type": "subscribe", "channel": "thinking", "after": 0 }))?;
+    page.until("subscribed", 5)?;
+    let said = "a long thought about gardens and the light on them";
+    let whole = format!("echo: {said}");
+    let calls = s.ai.calls().len();
+    let r = api.op(owner, name, "ask_text", "draft1", json!({ "prompt": said, "draft": { "channel": "thinking", "turn": "turn:t_1" } }))?;
+    let mut drafts = vec![];
+    // bounded: each frame within the socket's wait, until the whole answer
+    while let Ok(frame) = page.next() {
+        if frame["type"] == "draft" {
+            drafts.push(frame.clone());
+            if frame["text"] == whole.as_str() {
+                break;
+            }
+        }
+    }
+    page.close();
+    let done = settle(api, owner, name, started(&r), &["succeeded", "held"], Duration::from_secs(40));
+    let streamed = s.ai.calls().get(calls).is_some_and(|c| c.body["stream"] == true && c.body["stream_options"]["include_usage"] == true);
+    s.ok(
+        "a text step with a draft streams: a socket on the channel sees its text so far as the fragment's drafts under the step's turn, the last its whole answer",
+        streamed
+            && !drafts.is_empty()
+            && drafts.iter().all(|d| d["channel"] == "thinking" && d["turn"] == "turn:t_1" && d["principal"] == c["npub"] && d["text"].as_str().is_some_and(|t| whole.starts_with(t)))
+            && drafts.last().is_some_and(|d| d["text"] == whole.as_str()),
+        json!({ "drafts": drafts }),
+    );
+    s.ok(
+        "and the step answers the streamed text and message, metered from the stream's last usage",
+        done["status"] == "succeeded" && done["output"]["text"] == whole.as_str() && done["output"]["message"] == json!({ "role": "assistant", "content": whole }) && done["output"]["finish_reason"] == "stop" && cost(&done) > 0,
+        &done,
+    );
+    s.ai.break_next();
+    let calls = s.ai.calls().len();
+    let r = run("draft-broken", "ask_text", json!({ "prompt": "after a break", "draft": { "channel": "thinking", "turn": "turn:t_2" } }))?;
+    s.ok(
+        "a stream that breaks before its answer ends is called again, and answers",
+        r["status"] == "succeeded" && r["output"]["text"] == "echo: after a break" && s.ai.calls().len() == calls + 2,
+        &r,
+    );
+    Ok(())
+}
+
+/// A decision step: Clef's answers, one per question, charged its input
+/// tokens, kept (a step tried again after its call never calls again), and
+/// refused before any call outside its bounds.
+fn decisions(s: &mut Suite, api: &Api, name: &str, run: &dyn Fn(&str, &str, Value) -> Result<Value>) -> Result<()> {
+    let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
+    let questions = json!({
+        "garden": { "type": "noul", "instructions": "Plants or garden?" },
+        "taxes": { "type": "noul", "instructions": "Money or taxes?" },
+        "room": { "type": "choice", "instructions": "Which room?", "criteria": { "kitchen": "cooking", "garden": "outside" } },
+        "size": { "type": "score", "instructions": "How big?", "criteria": ["none", "small", "large"] },
+    });
+    let asked = json!({ "model": "clef-flash", "state": "We planned the small garden: tomatoes and basil.", "questions": questions });
+    let calls = s.ai.calls().len();
+    let r = run("dec1", "sort", asked.clone())?;
+    let a = &r["output"]["answers"];
+    s.ok(
+        "a decision step answers Clef's answers, one per question of each type, charged its input tokens",
+        r["status"] == "succeeded"
+            && r["output"]["model"] == "@cf/cloudflare/clef-flash"
+            && a["garden"] == json!({ "type": "noul", "noul": 0.9 })
+            && a["taxes"]["noul"] == 0.1
+            && a["room"]["choice"] == "garden"
+            && a["size"]["score"] == 1.0
+            && r["output"]["usage"]["input_tokens"].as_u64().is_some_and(|n| n > 0)
+            && cost(&r) > 0,
+        &r,
+    );
+    let call = s.ai.calls().get(calls).cloned();
+    s.ok(
+        "Clef is called with the catalog's input, on the model route's transport (the payer by an opaque id)",
+        call.as_ref().is_some_and(|c| c.model == "@cf/cloudflare/clef-flash" && c.body == asked && c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16)),
+        format!("{call:?}"),
+    );
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-after-paid", "times": 1 })))?;
+    let calls = s.ai.calls().len();
+    let r = run("dec-kept", "sort", json!({ "model": "clef", "state": "a kept garden", "questions": { "garden": { "type": "noul", "instructions": "A garden?" } } }))?;
+    s.ok(
+        "a decision step that failed after its paid call answers from what it kept: one call",
+        lever.status == 200 && r["status"] == "succeeded" && r["output"]["answers"]["garden"]["noul"] == 0.9 && s.ai.calls().len() == calls + 1,
+        &r,
+    );
+    let none = run("dec-none", "sort", json!({ "model": "clef", "state": "s", "questions": {} }))?;
+    let pro = run("dec-pro", "sort", json!({ "model": "clef-pro", "state": "s", "questions": { "q": { "type": "noul", "instructions": "?" } } }))?;
+    let two = run("dec-two", "sort", json!({ "model": "clef", "state": "s", "questions": { "q": { "type": "choice", "instructions": "?", "criteria": { "only": null } } } }))?;
+    let held = |r: &Value, says: &str| r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains(says)) && cost(r) == 0;
+    s.ok(
+        "a decision with no questions, on a model that is no Clef, or a choice of one option is refused, saying why, before any call",
+        held(&none, "1 to 64 questions") && held(&pro, "unknown variant `clef-pro`") && held(&two, "2 to 255 options") && s.ai.calls().len() == calls + 1,
+        json!([none, pro, two]),
+    );
+    Ok(())
 }
 
 /// The calories template, with no agent (Paul, 2026-10-07): a signed-in
