@@ -3,6 +3,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod connect;
 mod import;
 mod mcp;
 mod mind;
@@ -289,6 +290,23 @@ enum Cmd {
         /// Serve its described mutations and jobs too (else its queries only)
         #[arg(long)]
         write: bool,
+    },
+    /// Connect a model provider to your own models (Settings, Models):
+    /// `chatgpt` signs in with ChatGPT here (its sign-in comes back to this
+    /// machine) and hands your tokens to the platform, which keeps them
+    /// sealed and refreshes them; --forget signs out
+    Connect {
+        /// The provider: chatgpt
+        provider: String,
+        /// Print the sign-in's link without opening a browser
+        #[arg(long)]
+        no_browser: bool,
+        /// The loopback port the sign-in comes back to (default 1455, else a free one)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Sign out: the platform revokes the refresh token and forgets them
+        #[arg(long)]
+        forget: bool,
     },
     /// Your mind (docs/optchat.md): import other agents' chats into it
     Mind {
@@ -1646,6 +1664,21 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Mcp { name, write } => {
             // stdout carries the protocol's messages and nothing else
             mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
+        }
+        Cmd::Connect { provider, no_browser, port, forget } => {
+            if provider != "chatgpt" {
+                return Err(usage(format!("fragment connect takes chatgpt (a Claude or OpenAI key is pasted in Settings, Models), not {provider:?}")));
+            }
+            if forget {
+                let v = connect::forget(&c)?;
+                json_exit(j, &v);
+                let confirmed = if v["revoked"] == true { "OpenAI confirmed it" } else { "OpenAI did not confirm it: disconnect fragment in ChatGPT's settings too" };
+                println!("signed out of ChatGPT ({confirmed})");
+            } else {
+                let v = connect::chatgpt(&c, no_browser, port)?;
+                json_exit(j, &v);
+                println!("ChatGPT is connected{}: choose its models in Settings, Models", v["account"].as_str().map(|a| format!(" as {a}")).unwrap_or_default());
+            }
         }
         Cmd::Ask { agent, text, chat, wait, id } => {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));

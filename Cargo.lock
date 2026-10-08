@@ -525,6 +525,7 @@ name = "fragment-cli"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "dirs",
  "fragment-core",
@@ -543,6 +544,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tungstenite",
+ "url",
 ]
 
 [[package]]
