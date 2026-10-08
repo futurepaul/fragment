@@ -234,7 +234,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
         return Err(CellError::invalid("`for` is named once"));
     }
     match first {
-        Some(id) if !npub::is_identity(&id) => Err(CellError::invalid(format!("`for` names an identity (id:…), not {id:?}"))),
+        Some(id) if !npub::is_identity(&id) => Err(CellError::invalid(format!("`for` names an identity (an npub), not {id:?}"))),
         first => Ok(first),
     }
 }
@@ -381,7 +381,7 @@ fn named_identity(who: &str) -> CellResult<Option<String>> {
     if npub::is_identity(who) {
         return Ok(Some(who.to_string()));
     }
-    Err(CellError::invalid(format!("{who:?} is not an identity (id:…) or `me`")))
+    Err(CellError::invalid(format!("{who:?} is not an identity (an npub) or `me`")))
 }
 
 /// An operator's undo of a username taken by mistake (it was chosen once,
@@ -640,7 +640,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         "me" => who.id.clone(),
         id if npub::is_identity(id) => id.to_string(),
         username if fragment_proto::valid_username(username) => ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?.identity.id,
-        other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (id:…), or `me`"))),
+        other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (an npub), or `me`"))),
     };
     match *command {
         "grant" => {

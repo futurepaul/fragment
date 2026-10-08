@@ -584,8 +584,8 @@ impl ViewCache {
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
-        let mut ids: Vec<String> = members.iter().filter(|m| m.kind != "agent" && m.principal.starts_with("id:")).map(|m| m.principal.clone()).collect();
-        if let Some(w) = writer.filter(|w| w.starts_with("id:") && !ids.iter().any(|i| i == w)) {
+        let mut ids: Vec<String> = members.iter().filter(|m| m.kind != "agent" && records::is_identity(&m.principal)).map(|m| m.principal.clone()).collect();
+        if let Some(w) = writer.filter(|w| records::is_identity(w) && !ids.iter().any(|i| i == w)) {
             ids.push(w.to_string());
         }
         match api.people(&agent.fragment, fragment, &ids).await {
@@ -777,7 +777,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         let since = i64::try_from(crate::log::now_ms().saturating_sub(limits::TASKS_BACKLOG_MS)).expect("ms fit");
         (None, since)
     } else {
-        let unknown = record.principal.starts_with("id:") && !view.view.names.contains_key(&record.principal) && !view.view.agents.contains(&record.principal);
+        let unknown = records::is_identity(&record.principal) && !view.view.names.contains_key(&record.principal) && !view.view.agents.contains(&record.principal);
         if !view.fresh(shared.joined_at(fragment)) || unknown {
             if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
                 crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });

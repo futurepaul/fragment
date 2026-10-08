@@ -624,7 +624,7 @@ mod tests {
             }
             let (addr, _stop) = fake::start(repo.clone()).await;
             let api = Api::new(&format!("http://{addr}")).unwrap();
-            let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
+            let agent = Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
             let root = std::env::temp_dir().join(format!("hermes-boot-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             // the boot makes the profile before its first round (main.rs, `write_profile`)

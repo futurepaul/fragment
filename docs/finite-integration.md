@@ -25,23 +25,24 @@ matters: an agreed direction is not a finished interface.
 | FIN-39 | Authenticated access to a hosted agent; bearer vs Iroh transport | in progress |
 | FIN-60 | Core-managed runtime secret delivery (SOPS + encrypted app storage) | in review |
 
-## The rules fragment follows now (FIN-11's model)
+## The rules fragment follows now (FIN-11's model, as decisions 45 to 50 changed it)
 
-Decisions 45 to 50 (docs/cloudflare-v1.md, 2026-10-08) change two of
-these as they are built. Rule 2: an identity is an npub, and a sign-in
-names it. Rule 3: the registry keeps a person's own key, and signs with
-it only for named purposes.
-
-1. **Identities, not keys.** A person or an agent is a stable identity
-   with an opaque ID. Grants (fragment membership, ownership, invites)
-   name identities, so replacing a key rewrites no grant.
-2. **A person's identity is keyed by a verified `(issuer, subject)`**
-   from sign-in, never by email. Email is a mutable attribute. Matching
-   an email never merges or reassigns identities.
-3. **Keys stay with their callers.** The platform holds no person's
-   private key. Browsers act through a session; the CLI and agents sign
-   with their own keys (NIP-98). An agent's key lives sealed in its own
-   cell, which is that agent's runtime: the caller holding its key.
+1. **Identities, not keys.** A person or an agent is a stable identity,
+   named for good by the npub of the key it was made with
+   (docs/cloudflare-v1.md, decision 45). Grants (fragment membership,
+   ownership, invites) name identities, so replacing a key rewrites no
+   grant, and a retired key still names its identity.
+2. **A verified `(issuer, subject)` signs a person in**, and their first
+   sign-in makes them. Each sign-in's email is verified by WorkOS and
+   names at most one person: another person's email is refused, never
+   merged, and a person links a second sign-in explicitly (`/auth/link`).
+   Emails are how people find each other, never what an identity is.
+3. **Keys stay with their callers, but for a person's own.** The
+   registry makes each person a key at their first sign-in and keeps it
+   sealed (decision 46); it signs with it only for named purposes, and
+   none yet. Browsers act through a session; the CLI and agents sign with
+   their own keys (NIP-98). An agent's key lives sealed in its own cell,
+   which is that agent's runtime: the caller holding its key.
 4. **An identity has one or more active public keys.** A key is added
    with proof of possession, by the identity's human (for an agent, its
    owner), and revoked on its own. Replacing a key adds the new one
@@ -71,7 +72,7 @@ is a viewer; `public` means anyone at all, no link needed.
 
 | Concern | Owner in V3 | fragment now | The swap |
 |---|---|---|---|
-| Human sign-in | WorkOS shared login (FIN-11) | **built (slice B):** fragment's own WorkOS environment, sign-up off, Paul invites; a person is keyed by `(workos:<client id>, user id)`; `/auth/link` adds a second sign-in to the signed-in person. A preview with test levers also signs in e2e people (`<name>@e2e.test`) under the issuer `e2e.test`, which no real sign-in has (docs/secrets.md) | finite.computer's login becomes a second issuer; a person links it with `/auth/link` (explicit, never by email) |
+| Human sign-in | WorkOS shared login (FIN-11) | **built (slice B):** fragment's own WorkOS environment, sign-up off, Paul invites; a `(workos:<client id>, user id)` signs a person in, its email verified and naming at most one person, and the first one makes them, named by a key the registry makes and keeps sealed (2026-10-08: docs/cloudflare-v1.md, decisions 45 and 46); `/auth/link` adds a second sign-in to the signed-in person. A preview with test levers also signs in e2e people (`<name>@e2e.test`) under the issuer `e2e.test`, which no real sign-in has (docs/secrets.md) | finite.computer's login becomes a second issuer; a person links it with `/auth/link` (explicit, never by email) |
 | Identity and key registry | Core / BANKS (FIN-11) | **built (slice A):** one registry cell for the fleet (`cell/src/registry.rs`), rules 1–7 behind `/api/identities` (docs/api.md, Identities): resolve a key live on every signed request whose answer depends on who is asking (a page or a file everyone who may see it gets alike asks nothing), register a person or an agent (with a key proof), add a key with a proof, revoke one, check an owner's key; its inner routes are typed calls (`cell/src/registry/calls.rs`) answering one `Identity` type, and a call that acts resolves who asks (a signing key or a platform session, `calls::By`) in the same turn: one round trip, and a key revoked a moment before cannot act | a BANKS client behind the same calls; public keys and owner facts move, no private key does |
 | Browser sessions | Core session + a small per-service adapter (FIN-11) | **built (slice B):** a session on the platform origin, in the registry, looked up live; each fragment origin (under `fragment.boats`, cross-site from the platform's `fragment.club`: docs/cloudflare-v1.md, decision 5) gets its own cookie through a single-use redemption (the pattern Sites v2 uses: finite-sites ADR 0025), at most 4 a fragment per platform session, ended by `__signout`; a frame's own partitioned session from a frame redemption, bound to the platform's page that framed it (the shell's tabs: `/auth/frame`, for a frame of the platform's own page only); a fragment not the person's nor shared with them asks once before it learns who they are (docs/api.md, Asking first); a browser opening a fragment's URL with no session there is sent through that exchange and back; a CLI key joins a person by a browser approval and the key's own claim | the platform session comes from finite.computer's login instead; the per-origin exchange stays |
 | Resource permissions | each service | fragment members and roles, per fragment | unchanged |
@@ -79,7 +80,7 @@ is a viewer; `public` means anyone at all, no link needed.
 | Billing, orgs, entitlements | Core + Stripe (FIN-10) | **built (docs/cloudflare-v1.md, phase 3; docs/ledger.md):** a usage ledger per person (one `Ledger` Durable Object, named by their identity, on `fragment_core::ledger`): plans (`guest`, `seat` with $50 of credit a month, `seat_always_on` with $100; a new person's is `FRAGMENT_DEFAULT_PLAN`), purchased credit (operators' grants), seat states, overdrafts, and each fragment's monthly cap; a guest makes no fragments (Paul, 2026-10-03); at zero agents stop, past the overdraft the person's fragments go read-only (their cron and triggers start no runs). Operators command it (`POST /api/ledger/{person}/grant\|plan\|seat\|overdraft`); no Stripe | Stripe's two hooks become commands on the same ledger: a paid checkout a `GrantCredit` (its payment id the grant's id), a subscription's events a `SetSeat` and `SetPlan`; Core supplies the entitlement facts behind them |
 | Model access and metering | Finite Private + usage accounting (FIN-13) | **built (phase 3):** models through the platform's model route on Workers AI and AI Gateway by tier (`cheap`, `medium`; `high` off) and `vision` (the deployment's vision model, GLM-5.3 Flash, for a runtime's image calls), reserved before each call and settled from its last usage on the payer's ledger (an agent's owner; a fragment's owner for its AI steps), every row priced from the price book (`fragment_core::price`: list price, AI Gateway's 5% credits fee, the margin) and kept once by its reference; a fragment's hosting (requests, dynamic workers, storage, its preview cards' browser time) metered to its owner through the `fragment-ledger` queue; images on Workers AI (FLUX.1 [schnell]) through the same binding, metered in neurons by their tiles and steps; video steps off until they run on Cloudflare (the debt ledger) | model calls move to Finite Private with Core's authorization; the ledger's rows (reference, payer, agent, fragment, usage, charge) go to Core as FIN-10's usage reports |
 
-| Private keys and platform secrets | callers (FIN-11); Core with SOPS (FIN-60) | cell secrets sealed per Durable Object under the host secret (`cell/src/keys.rs`); the deployment's own secrets in its account's Cloudflare Secrets Store, bound to the Workers by name and read only by `keys.rs`, a minute's cache at most (`docs/secrets.md`, since 2026-10-05) | platform secrets follow FIN-60 when fragment runs inside Finite's deploy; `keys.rs` reads them from its bindings, wherever the store's values come from |
+| Private keys and platform secrets | callers (FIN-11); Core with SOPS (FIN-60) | cell secrets sealed per Durable Object under the host secret (`cell/src/keys.rs`), and each person's own key, sealed for them in the registry (decision 46); the deployment's own secrets in its account's Cloudflare Secrets Store, bound to the Workers by name and read only by `keys.rs`, a minute's cache at most (`docs/secrets.md`, since 2026-10-05) | platform secrets follow FIN-60 when fragment runs inside Finite's deploy; `keys.rs` reads them from its bindings, wherever the store's values come from |
 | Google Workspace and other connections | Core: consent, encrypted refresh tokens, short-lived access tokens (FIN-10) | **built (phase 4; Paul, 2026-10-04; docs/computers.md):** a provider catalog per deployment (connections, the operator's keys, people's own keys). WorkOS Pipes holds and refreshes connections' tokens; a guest holds per-agent placeholders in standard environment variables (`GOOGLE_OAUTH_ACCESS_TOKEN=fcx_google_<tag>`, a platform-keyed MAC naming the agent), which a computer's swap replaces with a short-lived token toward the provider's own hosts, for an agent of the owner's that may use every connection its owner has unless its owner narrows it to a list (decision 44) | an agent or computer asks Core for a short-lived token for its owner's connection; the placeholders and the catalog stay |
 | Chat channels (SimpleX, web chat) | Hermes on the agent's runtime (FIN-15) | the blessed chat template (`templates/chat`, served from the platform's release: decision 40; docs/chat-records.md): replies streamed, steps and approvals as cards, files and voice memos both ways, and an agent's reply pushed to the chat's people while they are away (fragment push, from the template's own job); no SimpleX | SimpleX belongs to a Hermes agent; a Hermes agent can join fragment chats through a bridge |
 | Agent runtimes | Hermes on Sprites (FIN-21); self-hosting first-class (Paul, 2026-09-29) | Hermes on a computer of its owner's (the generic Computer, our Hermes image with its bridge inside it: docs/computers.md); Sprites and sandcastle went at the cut (tag `celld-final`), the in-fragment goose agents on 2026-10-07 (issue #156) | the generic Computer on Cloudflare, Hermes from its own image with its bridge inside it (docs/cloudflare-v1.md, decision 21 and phase 4) |

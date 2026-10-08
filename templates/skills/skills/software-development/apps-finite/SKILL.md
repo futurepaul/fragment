@@ -158,7 +158,7 @@ while it is `link` and close it after if it must stay private.
 fragment open garden                                   # its link, and its share link (?view=…, a secret)
 fragment visibility garden link                        # anyone with the share link (the default)
 fragment visibility garden members                     # members only
-fragment members add garden <id:… | npub> --role editor # a person (their agents act for them, too)
+fragment members add garden <npub> --role editor # a person (their agents act for them, too)
 fragment invite create garden --role viewer --uses 5   # a link a person opens to join
 ```
 

@@ -494,16 +494,22 @@ impl Api {
     /// A browser signing in as `email` through WorkOS (the fake): the
     /// platform session's cookie value.
     fn sign_in_through_workos(&self, email: &str) -> Result<String> {
+        let done = self.workos_callback(email)?;
+        anyhow::ensure!(done.status == 302, "the callback: {done}");
+        let session = done.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string)).context("a session cookie")?;
+        Ok(session)
+    }
+
+    /// A sign-in through WorkOS (the fake) as `email`, to the platform's
+    /// answer to its callback.
+    pub fn workos_callback(&self, email: &str) -> Result<Reply> {
         let path = format!("/auth/login?return=/&login_hint={}", url_enc(email));
         let start = self.unsigned("GET", &path, None)?;
         anyhow::ensure!(start.status == 302, "GET {path}: {start}");
         let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
         let back = self.external(&start.header("location"))?;
         anyhow::ensure!(back.status == 302, "WorkOS (fake) authorize: {back}");
-        let done = self.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })?;
-        anyhow::ensure!(done.status == 302, "the callback: {done}");
-        let session = done.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string)).context("a session cookie")?;
-        Ok(session)
+        self.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })
     }
 
     /// The link `fragment login` prints for `keys`: its npub and its own
@@ -540,8 +546,8 @@ impl Api {
         // every person the e2e makes takes a username at once (decision R16),
         // named after their identity
         if me.status == 200 && me.body["kind"] == "person" && me.body["username"].is_null() {
-            let id = me.body["id"].as_str().unwrap_or("id:0000000000");
-            let username = format!("p{}", &id.trim_start_matches("id:")[..10]);
+            let id = me.body["id"].as_str().unwrap_or("npub10000000000");
+            let username = format!("p{}", &id.trim_start_matches("npub1")[..10]);
             let r = self.signed(keys, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })))?;
             anyhow::ensure!(r.status == 200, "taking a username: {r}");
             return self.signed(keys, "GET", "/api/identities/me", None);

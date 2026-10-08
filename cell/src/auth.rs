@@ -296,7 +296,16 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
     let issuer = workos.issuer();
-    let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await?;
+    let done = match ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await {
+        Ok(done) => done,
+        // a sign-in the registry refuses for who it is (an email WorkOS has
+        // not verified, or another person's; a person being wiped): said on
+        // a page, for a browser
+        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::AlreadyExists) => {
+            return page(e.code.status(), "Sign-in did not finish", &format!("<p>{}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&e.message)));
+        }
+        Err(e) => return Err(e),
+    };
     redirect(
         &back_to(&format!("{}/", cfg.platform()), Some(&done.return_to))?,
         &[

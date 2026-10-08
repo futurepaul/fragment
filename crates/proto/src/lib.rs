@@ -688,7 +688,7 @@ pub struct FragmentList {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
-    /// The member's identity (`id:…`).
+    /// The member's identity (an npub).
     pub principal: String,
     pub role: Role,
     /// The identity that granted it (the owner), or `invite:<id>`.
@@ -775,7 +775,8 @@ impl IdentityKind {
 /// router's signer, a fragment's caller, a member being added).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
-    /// `id:` and 32 hex.
+    /// The npub of the key it was made with (docs/cloudflare-v1.md,
+    /// decision 45).
     pub id: String,
     pub kind: IdentityKind,
     /// An agent's owner.
@@ -898,7 +899,7 @@ pub struct CreateInvite {
     /// Seconds until it expires (default 7 days).
     #[serde(default)]
     pub ttl_s: Option<i64>,
-    /// The identity (`id:…`) it is for: only they may accept it. `None`:
+    /// The identity (an npub) it is for: only they may accept it. `None`:
     /// anyone who holds its token.
     #[serde(default)]
     pub invitee: Option<String>,
@@ -1345,9 +1346,9 @@ mod tests {
         assert_eq!(who.kind, IdentityKind::Agent);
         assert_eq!(who.owner.as_deref(), Some("id:ffffffffffffffffffffffffffffffff"));
         assert_eq!(who.username, None);
-        let bare: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"person"}"#).unwrap();
+        let bare: Identity = serde_json::from_str(r#"{"id":"npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6","kind":"person"}"#).unwrap();
         assert_eq!((bare.owner, bare.username), (None, None));
-        assert!(serde_json::from_str::<Identity>(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"robot"}"#).is_err(), "an unknown kind is refused");
+        assert!(serde_json::from_str::<Identity>(r#"{"id":"npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6","kind":"robot"}"#).is_err(), "an unknown kind is refused");
         for kind in [IdentityKind::Person, IdentityKind::Agent] {
             assert_eq!(IdentityKind::parse(kind.as_str()), Some(kind), "a kind's column reads back as itself");
         }

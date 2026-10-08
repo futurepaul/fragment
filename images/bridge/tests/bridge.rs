@@ -51,10 +51,10 @@ async fn a_reply() {
         let r = replies(w, &chat);
         assert_eq!(r, vec![json!({ "text": "echo: [paul] hi", "turn": turn })]);
         let reply_record = w.records(&chat, "chat").into_iter().find(|x| x["body"]["turn"] == turn).expect("the reply");
-        assert_eq!(reply_record["principal"], "id:juniper", "the agent answers, never its owner");
+        assert_eq!(reply_record["principal"], "npub1juniper", "the agent answers, never its owner");
         let work: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
         assert_eq!(work, vec!["turn.start", "turn.end"]);
-        assert_eq!(w.bodies(&chat, "work", "turn.start")[0]["asker"], "id:paul");
+        assert_eq!(w.bodies(&chat, "work", "turn.start")[0]["asker"], "npub1paul");
         assert_eq!(w.bodies(&chat, "work", "turn.end")[0]["outcome"], "idle");
     });
     fake.until(WAIT, "the keepalive held, then let go", |w| w.keepalive_log.first() == Some(&true) && w.keepalive_open == 0).await;
@@ -152,7 +152,7 @@ async fn an_approval_answered() {
     fake.say(&chat, &person("paul"), json!({ "text": "do something risky" }));
     fake.until(WAIT, "the prompt", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
     let prompt = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
-    assert_eq!(prompt["asks"], "id:paul");
+    assert_eq!(prompt["asks"], "npub1paul");
     assert_eq!(prompt["options"].as_array().map(Vec::len), Some(2));
     let id = prompt["prompt"].as_str().unwrap().to_string();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -168,7 +168,7 @@ async fn an_approval_answered() {
         assert!(replies(w, &chat)[0]["text"].as_str().unwrap().ends_with("(approved)"), "the first answer won");
         let closed = w.bodies(&chat, "work", "turn.prompt.closed");
         assert_eq!(closed.len(), 1);
-        assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0]["by"].as_str()), (Some("answered"), Some("once"), Some("id:paul")));
+        assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0]["by"].as_str()), (Some("answered"), Some("once"), Some("npub1paul")));
     });
     fake.until(WAIT, "held through the card, dropped at the turn's end", |w| w.keepalive_log == [true, false]).await;
     bridge.stop().await;
@@ -402,7 +402,7 @@ async fn two_agents_on_one_computer() {
     fake.until(WAIT, "both replies", |w| replies(w, &talk).len() == 1 && replies(w, &notes).len() == 1).await;
     fake.with(|w| {
         let by = |chat: &str| w.records(chat, "chat").into_iter().find(|r| r["body"].get("turn").is_some()).unwrap()["principal"].clone();
-        assert_eq!((by(&talk), by(&notes)), (json!("id:juniper"), json!("id:rowan")));
+        assert_eq!((by(&talk), by(&notes)), (json!("npub1juniper"), json!("npub1rowan")));
     });
     bridge.stop().await;
 }
@@ -457,7 +457,7 @@ async fn agents_the_image_makes_ready() {
         let end = w.bodies(&talk, "work", "turn.end").into_iter().find(|e| e["turn"] == slow_turn).unwrap();
         assert_eq!(end["outcome"], "idle", "juniper's turn ran on through the change: {end}");
         assert!(replies(w, &talk).iter().any(|r| r["turn"] == slow_turn.as_str() && r["text"].as_str().is_some_and(|t| t.contains("while maple arrives"))));
-        assert_eq!(w.records(&grove, "chat").iter().filter(|r| r["principal"] == "id:maple").count(), 1, "maple answered as itself");
+        assert_eq!(w.records(&grove, "chat").iter().filter(|r| r["principal"] == "npub1maple").count(), 1, "maple answered as itself");
     });
 
     // Replay: the file written again with the same agents changes nothing.
@@ -494,7 +494,7 @@ async fn an_agent_that_just_joined_answers_its_mention() {
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     fake.with(|w| {
         let by: Vec<Value> = w.records(&talk, "chat").into_iter().filter(|r| r["body"].get("turn").is_some()).map(|r| r["principal"].clone()).collect();
-        assert_eq!(by, vec![json!("id:juniper"), json!("id:rowan")], "rowan answers its mention, the lead does not");
+        assert_eq!(by, vec![json!("npub1juniper"), json!("npub1rowan")], "rowan answers its mention, the lead does not");
     });
     bridge.stop().await;
 }
@@ -516,14 +516,14 @@ async fn a_group_mention_picks_the_agent() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     fake.with(|w| {
         let who: Vec<String> = w.records(&group, "chat").into_iter().filter(|r| r["body"].get("turn").is_some()).map(|r| r["principal"].as_str().unwrap().to_string()).collect();
-        assert_eq!(who, vec!["id:juniper", "id:rowan"]);
+        assert_eq!(who, vec!["npub1juniper", "npub1rowan"]);
     });
     // juniper's reply names rowan (the script echoes what it was told)
-    fake.say(&group, &person("paul"), json!({ "text": "juniper, ask @rowan too", "to": ["id:juniper"] }));
+    fake.say(&group, &person("paul"), json!({ "text": "juniper, ask @rowan too", "to": ["npub1juniper"] }));
     fake.until(WAIT, "juniper's hand-off, and rowan's answer to it", |w| replies(w, &group).len() == 4).await;
     fake.with(|w| {
         let r = replies(w, &group);
-        assert_eq!(r[2]["to"], json!(["id:rowan"]), "juniper's reply hands off");
+        assert_eq!(r[2]["to"], json!(["npub1rowan"]), "juniper's reply hands off");
         assert_eq!(r[2]["hop"], 1);
         assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [someone]"), "rowan answers juniper's message");
     });
@@ -543,23 +543,23 @@ async fn a_scripted_hand_off_loop_stops_at_the_cap() {
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
     following(&fake, 4).await;
     // each echoes what it was told, so each reply names both agents
-    fake.say(&group, &person("paul"), json!({ "text": "loop @juniper @rowan", "to": ["id:juniper"] }));
+    fake.say(&group, &person("paul"), json!({ "text": "loop @juniper @rowan", "to": ["npub1juniper"] }));
     let cap = 1 + fragment_bridge::limits::HOPS_MAX as usize;
     fake.until(WAIT, "the loop's replies up to the cap", |w| replies(w, &group).len() == cap).await;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let by = |w: &World| -> Vec<String> { w.records(&group, "chat").into_iter().filter(|r| r["body"].get("turn").is_some()).map(|r| r["principal"].as_str().unwrap().to_string()).collect() };
     fake.with(|w| {
-        assert_eq!(by(w), vec!["id:juniper", "id:rowan", "id:juniper", "id:rowan"], "A, B, A, B, then nothing");
+        assert_eq!(by(w), vec!["npub1juniper", "npub1rowan", "npub1juniper", "npub1rowan"], "A, B, A, B, then nothing");
         let hops: Vec<Value> = replies(w, &group).iter().map(|r| r["hop"].clone()).collect();
         assert_eq!(hops, vec![json!(1), json!(2), json!(3), json!(4)], "each hands on, the last past the cap");
     });
     // juniper posts around the bridge, as `fragment post` does: no hop
-    fake.say(&group, "id:juniper", json!({ "text": "@rowan once more, then back to @juniper", "to": ["id:rowan"] }));
+    fake.say(&group, "npub1juniper", json!({ "text": "@rowan once more, then back to @juniper", "to": ["npub1rowan"] }));
     fake.until(WAIT, "rowan's one answer", |w| replies(w, &group).len() == cap + 1).await;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     fake.with(|w| {
         assert_eq!(replies(w, &group).len(), cap + 1, "answered once, the loop not started again: {:?}", by(w));
-        assert_eq!(replies(w, &group)[cap]["to"], json!(["id:juniper"]), "its answer names juniper, who does not take it");
+        assert_eq!(replies(w, &group)[cap]["to"], json!(["npub1juniper"]), "its answer names juniper, who does not take it");
     });
     bridge.stop().await;
 }
@@ -599,7 +599,7 @@ async fn a_routine_is_a_turn() {
     let dir = support::dir("routine");
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
     following(&fake, 2).await;
-    fake.with(|w| w.append("juniper.paul", "tasks", "id:paul", json!({ "kind": "routine", "text": "water the plants", "chat": chat })));
+    fake.with(|w| w.append("juniper.paul", "tasks", "npub1paul", json!({ "kind": "routine", "text": "water the plants", "chat": chat })));
     fake.until(WAIT, "the routine's reply", |w| replies(w, &chat).len() == 1).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat)[0]["text"], "echo: [your routine] water the plants");
@@ -975,7 +975,7 @@ async fn a_claim_the_agent_may_not_post_runs_nothing() {
     let runs = support::Runs::default();
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
     following(&fake, 2).await;
-    let role = |w: &mut World, role: &str| w.fragments.get_mut(&chat).expect("the chat").members.iter_mut().find(|m| m.principal == "id:juniper").expect("juniper's membership").role = role.to_string();
+    let role = |w: &mut World, role: &str| w.fragments.get_mut(&chat).expect("the chat").members.iter_mut().find(|m| m.principal == "npub1juniper").expect("juniper's membership").role = role.to_string();
     fake.with(|w| role(w, "viewer"));
     let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
     let t1 = turn_of("juniper", &chat, seq(&one));

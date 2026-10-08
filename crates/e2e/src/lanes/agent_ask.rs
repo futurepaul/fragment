@@ -67,7 +67,7 @@ fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul:
     let name = made.body["name"].as_str().context("a fragment's name")?.to_string();
     let assigned = api.signed(keys, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    anyhow::ensure!(identity.starts_with("id:"), "{name} assigned: {assigned}");
+    anyhow::ensure!(fragment_core::npub::is_identity(&identity), "{name} assigned: {assigned}");
     let files = json!({ "key": "agent-ask", "message": "its job", "files": [{ "path": "SOUL.md", "text": soul }, { "path": "agent.json", "text": "{\n  \"tier\": \"medium\"\n}\n" }] });
     let wrote = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;

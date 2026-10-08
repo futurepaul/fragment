@@ -229,7 +229,7 @@ mod tests {
     use super::*;
     use crate::records::{turn_end, turn_prompt_closed, turn_start, turn_step, Closed, Outcome, Step};
 
-    const ME: &str = "id:juniper";
+    const ME: &str = "npub1juniper";
     const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
     /// A `work` channel, as the agent `ME` (and another agent) post it.
@@ -245,7 +245,7 @@ mod tests {
 
         fn start(&mut self, by: &str, turn: &str, seq: u64) -> u64 {
             let cause = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq };
-            self.post(by, turn_start(turn, "id:paul", by, &cause, LIFE))
+            self.post(by, turn_start(turn, "npub1paul", by, &cause, LIFE))
         }
 
         fn end(&mut self, by: &str, turn: &str, outcome: Outcome) -> u64 {
@@ -272,9 +272,9 @@ mod tests {
         w.end(ME, "t1", Outcome::Idle);
         w.start(ME, "cut", 3);
         w.post(ME, turn_step("cut", 1, &step("terminal", "`ls -la`", true)));
-        w.post("id:rowan", turn_step("other", 1, &step("search", "not mine", true)));
+        w.post("npub1rowan", turn_step("other", 1, &step("search", "not mine", true)));
         w.post(ME, turn_step("cut", 2, &step("terminal", "rm -rf /tmp/x", false)));
-        w.post(ME, json!({ "kind": "turn.prompt", "turn": "cut", "prompt": "p1", "text": "Run `rm -rf /tmp/x`?", "options": [], "asks": "id:paul", "expiresAt": 1 }));
+        w.post(ME, json!({ "kind": "turn.prompt", "turn": "cut", "prompt": "p1", "text": "Run `rm -rf /tmp/x`?", "options": [], "asks": "npub1paul", "expiresAt": 1 }));
         w.post(ME, turn_prompt_closed("cut", "p1", Closed::Expired, None));
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         let next = w.start(ME, "next", 9);
@@ -331,17 +331,17 @@ mod tests {
             w.start(ME, &t, 2 + i as u64);
             w.end(ME, &t, Outcome::Error(why.into()));
         }
-        w.start("id:rowan", "rowans", 5);
-        w.end("id:rowan", "rowans", Outcome::Error(LOST.into()));
+        w.start("npub1rowan", "rowans", 5);
+        w.end("npub1rowan", "rowans", Outcome::Error(LOST.into()));
         let n = w.start(ME, "n", 6);
         assert!(matches!(previous(w.before(n), ME, true), Before::Cut(c) if c.turn == "cut"), "refusals and another agent's turns passed over");
-        assert!(matches!(previous(w.before(n), "id:rowan", true), Before::Cut(c) if c.turn == "rowans"), "rowan's turn before is rowan's own");
+        assert!(matches!(previous(w.before(n), "npub1rowan", true), Before::Cut(c) if c.turn == "rowans"), "rowan's turn before is rowan's own");
 
         // a forged start (another principal naming this agent) is no turn of its
         let mut w = Work::default();
         let cause = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 1 };
-        w.post("id:mallory", turn_start("forged", "id:paul", ME, &cause, LIFE));
-        w.post("id:mallory", turn_end("forged", &Outcome::Error(LOST.into())));
+        w.post("npub1mallory", turn_start("forged", "npub1paul", ME, &cause, LIFE));
+        w.post("npub1mallory", turn_end("forged", &Outcome::Error(LOST.into())));
         let n = w.start(ME, "n", 2);
         assert_eq!(previous(w.before(n), ME, true), Before::Kept);
     }
@@ -355,8 +355,8 @@ mod tests {
         w.start(ME, "cut", 1);
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         for i in 0..5 {
-            w.start("id:rowan", &format!("r{i}"), 10 + i);
-            w.end("id:rowan", &format!("r{i}"), Outcome::Idle);
+            w.start("npub1rowan", &format!("r{i}"), 10 + i);
+            w.end("npub1rowan", &format!("r{i}"), Outcome::Idle);
         }
         let n = w.start(ME, "n", 20);
         let before = w.before(n);
@@ -377,7 +377,7 @@ mod tests {
             w.post(ME, turn_step("cut", n, &step(&"t".repeat(140), &"a".repeat(140), true)));
         }
         for n in 0..20 {
-            w.post(ME, json!({ "kind": "turn.prompt", "turn": "cut", "prompt": format!("p{n}"), "text": "x".repeat(2000), "options": [], "asks": "id:paul", "expiresAt": 1 }));
+            w.post(ME, json!({ "kind": "turn.prompt", "turn": "cut", "prompt": format!("p{n}"), "text": "x".repeat(2000), "options": [], "asks": "npub1paul", "expiresAt": 1 }));
         }
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         let n = w.start(ME, "n", 2);
@@ -394,13 +394,13 @@ mod tests {
         assert!(note.len() <= limits::NOTE_MAX_BYTES, "{}", note.len());
         assert!(note.starts_with("Your previous turn in this chat was cut short") && note.lines().next().unwrap().ends_with("the message below is new."));
         // what was asked, read strictly from its record
-        let msg = Record { channel: "chat".into(), seq: 1, at: 0, principal: "id:paul".into(), kind: "message".into(), body: json!({ "text": "do\nthe risky thing" }) };
+        let msg = Record { channel: "chat".into(), seq: 1, at: 0, principal: "npub1paul".into(), kind: "message".into(), body: json!({ "text": "do\nthe risky thing" }) };
         assert_eq!(asked(&msg).as_deref(), Some("do\nthe risky thing"));
         let routine = Record { channel: "tasks".into(), body: json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" }), ..msg.clone() };
         assert_eq!(asked(&routine).as_deref(), Some("your routine: water the plants"));
         assert_eq!(asked(&Record { body: json!({ "kind": "stop" }), ..msg.clone() }), None);
         let reply = |turn: &str, by: &str, text: &str| Record { principal: by.into(), body: json!({ "text": text, "turn": turn }), ..msg.clone() };
-        assert_eq!(replies(&[reply("cut", ME, "one"), reply("other", ME, "x"), reply("cut", "id:rowan", "y"), reply("cut", ME, "two")], ME, "cut"), vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(replies(&[reply("cut", ME, "one"), reply("other", ME, "x"), reply("cut", "npub1rowan", "y"), reply("cut", ME, "two")], ME, "cut"), vec!["one".to_string(), "two".to_string()]);
         // on one line, so the note's lines stay its own
         assert!(text(&c, Some("a\n\nb"), &[]).contains("It was answering: “a b”"));
     }

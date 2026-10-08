@@ -368,6 +368,22 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let k4 = Keys::generate();
     let r = api.approve(&other, &k4)?;
     s.ok("another WorkOS user is another person, whatever their email looks like", r.status == 200 && r.body["id"] != paul_id.as_str(), &r);
+    // an email names one person (decision 45), and WorkOS must have verified it
+    let twin = s.workos.user("paul-twin@e2e.test");
+    let start = api.unsigned("GET", "/auth/login?return=/&login_hint=paul-twin%40e2e.test", None)?;
+    let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login="));
+    let back = api.external(&start.header("location"))?;
+    s.workos.set_email(&twin.id, "paul@renamed.test");
+    let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let page = |r: &Reply, says: &str| r.header("content-type").starts_with("text/html") && String::from_utf8_lossy(&r.bytes).contains(says);
+    s.ok("another WorkOS user with a person's email is refused, never merged into them (409, on a page)", r.status == 409 && page(&r, "another account"), &r);
+    s.workos.set_email(&twin.id, "paul-twin@e2e.test");
+    s.workos.set_verified(&twin.id, false);
+    let r = api.workos_callback("paul-twin@e2e.test")?;
+    s.ok("an email WorkOS has not verified signs no one in (403, on a page)", r.status == 403 && page(&r, "not verified"), &r);
+    s.workos.set_verified(&twin.id, true);
+    let r = api.workos_callback("paul-twin@e2e.test")?;
+    s.ok("verified, it signs in: a new person", r.status == 302, &r);
 
     // linking a second sign-in: explicit, from a signed-in session
     let r = with_session(api, "GET", "/auth/link", &renamed)?;
