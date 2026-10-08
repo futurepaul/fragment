@@ -524,9 +524,10 @@ fn rehearse_sweeps(s: &mut Suite) -> Result<()> {
     let stranger = api.person_paying(0)?;
     let theirs = api.qualified(&stranger, &sweep::label(other, "decoy"))?;
     let older = api.qualified(&stranger, "e2e-decoy-older")?;
-    for label in [sweep::label(other, "decoy"), "e2e-decoy-older".to_string()] {
-        let r = api.create(&stranger, &label)?;
-        anyhow::ensure!(r.status == 200, "making {label}: {r}");
+    // by the names asked for: a label alone is given a suffix of the platform's
+    for name in [&theirs, &older] {
+        let r = api.create(&stranger, name)?;
+        anyhow::ensure!(r.status == 200, "making {name}: {r}");
     }
     let there = |name: &str| api.status(&stranger, name).map(|r| r.status);
     let decoys = |swept: &sweep::Swept| {
