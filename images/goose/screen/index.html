@@ -3,20 +3,132 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>goose's computer</title>
+<title>Screen</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f6f5f2; --fg: #1d1c1a; --muted: #6b6862; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #161513; --fg: #ecebe7; --muted: #9a968e; } }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
-    font: 15px/1.5 system-ui, sans-serif; }
-  main { padding: 24px; max-width: 32rem; text-align: center; }
-  p { color: var(--muted); }
+  :root { color-scheme: light dark; --bg: #f6f5f2; --fg: #1d1c1a; --muted: #6b6862; --bar: #ebe9e4; --accent: #2f5bd3; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161513; --fg: #ecebe7; --muted: #9a968e; --bar: #22211e; --accent: #7c9cff; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--bar); }
+  #status { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+  button[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+  button:disabled { opacity: .5; cursor: default; }
+  #screen { flex: 1; min-height: 0; }
 </style>
 </head>
-<body>
-<main>
-  <h1>This computer has no screen yet</h1>
-  <p>goose works here in a shell: its steps show in the chat that asked.</p>
-</main>
+<body data-state="connecting">
+<header>
+  <span id="status">Connecting to the screen…</span>
+  <button id="control" type="button" aria-pressed="false" disabled>Take over</button>
+</header>
+<div id="screen"></div>
+<script type="module">
+  // An agent's screen (decision 11): its own desktop, the agent named by
+  // the page's `?agent=` (its fragment), as its chat opens it. Everyone
+  // here sees it; only the viewer holding control sends input, and the
+  // server enforces that: Take over is the agent's own lease, so its
+  // screen tools wait while a person holds it.
+  import RFB from "./novnc/core/rfb.js";
+
+  const agent = new URLSearchParams(location.search).get("agent");
+  const viewer = crypto.randomUUID().replaceAll("-", "");
+  const base = new URL(".", location.href);
+  const socket = (path) => {
+    const u = new URL(path, base);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    u.searchParams.set("viewer", viewer);
+    u.searchParams.set("agent", agent);
+    return u.href;
+  };
+  const status = document.getElementById("status");
+  const button = document.getElementById("control");
+  const screen = document.getElementById("screen");
+  // For a person, and for checks: the page's state (body's data-state) and
+  // the agent it shows (#screen's data-agent).
+  const say = (state, text) => {
+    document.body.dataset.state = state;
+    status.textContent = text;
+  };
+  if (!agent) {
+    say("none", "Open an agent's screen from its chat.");
+    throw new Error("no ?agent=");
+  }
+  screen.dataset.agent = agent;
+  // the agent's name, as the screen's control socket says it; its fragment until then
+  let name = agent;
+  const titled = () => (document.title = `${name}'s screen`);
+  titled();
+
+  // The screen is shown once its RFB stream connects; Take over works once
+  // the control socket is open too (a click before would be lost).
+  // The stream follows the desktop: one that closes while the control
+  // socket is open (the desktop stopped or restarted on a computer still
+  // up) is opened again, after RETRY_MIN_MS, doubling to RETRY_MAX_MS, and
+  // the bridge starts the desktop for it. The control socket is the
+  // computer's: once it closes, nothing is opened again until a reload.
+  const RETRY_MIN_MS = 1000, RETRY_MAX_MS = 10000;
+  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null;
+  const control = new WebSocket(socket("control"));
+  const show = () => {
+    // a holder may give back while the stream reconnects
+    const ready = control.readyState === WebSocket.OPEN && (shown || mine);
+    button.disabled = !ready || closed !== null;
+    if (closed !== null) return say("closed", closed);
+    if (!shown) return connects === 0 ? say("connecting", `Connecting to ${name}'s screen…`) : say("reconnecting", `${name}'s screen restarted. Reconnecting…`);
+    if (mine) return say("mine", `You have ${name}'s screen`);
+    if (holder) return say("theirs", `Someone else has ${name}'s screen`);
+    say("watching", `Watching ${name}'s screen`);
+  };
+
+  const connect = () => {
+    rfb = new RFB(screen, socket("websockify"), { shared: true });
+    rfb.viewOnly = !mine;
+    rfb.scaleViewport = true;
+    rfb.addEventListener("connect", () => {
+      shown = true;
+      retry = RETRY_MIN_MS;
+      connects += 1;
+      // how many streams this page has opened, for its checks
+      screen.dataset.connects = String(connects);
+      show();
+    });
+    rfb.addEventListener("disconnect", () => {
+      shown = false;
+      rfb = null;
+      if (closed === null) {
+        setTimeout(again, retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
+      }
+      gone();
+    });
+  };
+  // The stream again, unless the control socket closed meanwhile; and what
+  // the page says once both are closed.
+  const again = () => (closed === null ? connect() : gone());
+  const gone = () => {
+    if (closed !== null && !shown) closed = `${name}'s screen closed. Reload to see it again.`;
+    show();
+  };
+  connect();
+
+  control.addEventListener("open", show);
+  control.addEventListener("close", () => { closed ??= "Take over is unavailable. Reload to try again."; gone(); });
+  control.addEventListener("message", (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type !== "control" || m.agent !== agent) return;
+    if (typeof m.name === "string" && m.name) {
+      name = m.name;
+      titled();
+    }
+    holder = m.holder;
+    mine = holder === viewer;
+    if (rfb) rfb.viewOnly = !mine;
+    button.textContent = mine ? "Give back" : "Take over";
+    button.setAttribute("aria-pressed", String(mine));
+    show();
+  });
+  button.addEventListener("click", () => control.send(JSON.stringify({ type: mine ? "give" : "take" })));
+</script>
 </body>
 </html>

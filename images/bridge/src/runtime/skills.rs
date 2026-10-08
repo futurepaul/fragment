@@ -97,7 +97,8 @@ description: Search the web and read pages. Use your web tools (web_search, web_
   everything on it: lists, tables, search pages). Long pages come in
   parts: `start` names the next. `links: true` lists its links.
 - When a page needs JavaScript, a login, or clicking: the browser tools
-  (`browser_navigate`, then `browser_snapshot` and the refs it shows). Your
+  (`browser_navigate`, then `browser_snapshot`, and act on the refs it shows
+  as `target`). Your
   owner watches your browser on your screen.
 - To gather a list from a site: `web_read` its listing page with
   `mode: \"page\"` (and `links: true` to follow items); in the browser,

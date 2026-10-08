@@ -1,0 +1,8 @@
+{
+  "name": "fragment-goose-browser",
+  "private": true,
+  "description": "The goose image's browser tools: Microsoft's Playwright MCP, pinned (images/goose/Dockerfile)",
+  "dependencies": {
+    "@playwright/mcp": "0.0.83"
+  }
+}

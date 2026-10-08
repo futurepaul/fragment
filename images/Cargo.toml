@@ -3,7 +3,7 @@
 # bridge's dependencies are only these (no TLS, no async runtime but tokio).
 [workspace]
 resolver = "2"
-members = ["bridge"]
+members = ["bridge", "goose/desktop"]
 
 [workspace.package]
 edition = "2021"

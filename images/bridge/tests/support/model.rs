@@ -7,6 +7,8 @@
 //!   extension's `…__shell`) with that command;
 //! - `zoom: <id> <n>` is a call of the zoom tool offered (a mind's, through
 //!   `fragment mcp`);
+//! - `call: <tool> <JSON arguments>` is a call of the tool offered named
+//!   `<tool>` (or an extension's `…__<tool>`) with those arguments;
 //! - once a tool's result is in the transcript, the answer quotes it:
 //!   `scripted: the tool said: <result>`;
 //! - anything else is answered `scripted: <the line>`.
@@ -111,6 +113,11 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     if let (Some(command), Some(shell)) = (said.strip_prefix("run: "), offered(body, "shell")) {
         return (String::new(), Some(call(shell, json!({ "command": command }))));
     }
+    if let Some((tool, args)) = said.strip_prefix("call: ").and_then(|rest| rest.split_once(' ')) {
+        if let (Some(name), Ok(args)) = (offered(body, tool), serde_json::from_str::<Value>(args)) {
+            return (String::new(), Some(call(name, args)));
+        }
+    }
     if let (Some(at), Some(zoom)) = (said.strip_prefix("zoom: "), offered(body, "zoom")) {
         let n: Vec<u64> = at.split_whitespace().filter_map(|w| w.parse().ok()).collect();
         return (String::new(), Some(call(zoom, json!({ "id": n.first().copied().unwrap_or(0), "n": n.get(1).copied().unwrap_or(1) }))));
@@ -175,6 +182,8 @@ fn answers_are_the_transcripts() {
     assert_eq!(call.unwrap()["function"]["arguments"], json!({ "id": 4, "n": 2 }).to_string());
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "hi\n" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: the tool said: hi", None));
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "call: web_read {\"url\": \"https://example.com\"}" }], "tools": [{ "type": "function", "function": { "name": "web__web_read" } }] }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "url": "https://example.com" }).to_string());
     // no such tool offered: answered in words
     assert_eq!(answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }] })).0, "scripted: run: echo hi");
 }

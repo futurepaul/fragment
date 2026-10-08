@@ -34,7 +34,9 @@ repository, `git-finite`. `fragment guide` is the whole manual.
 - **Browser** (`browser_navigate`, `browser_snapshot`, `browser_click`,
   `browser_type`, …): Chromium on your desktop, which your owner can
   watch. `browser_snapshot` reads the page as an accessibility tree with
-  a `ref` for each element; act on refs, never guess coordinates. Use it
+  a ref for each element (`[ref=f1e5]`): pass it as `target` to
+  `browser_click`, `browser_type` or `browser_fill_form`, never guess
+  coordinates; `browser_find` searches a long page. Use it
   for pages that need JavaScript, a login, a form, or clicks.
 - **Computer** (`screen_look`, `screen_click`, and the keyboard and mouse
   tools beside them): the whole desktop, for apps and pages the browser
