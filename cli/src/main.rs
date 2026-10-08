@@ -3,7 +3,9 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod import;
 mod mcp;
+mod mind;
 mod operator;
 mod sync;
 mod watch;
@@ -282,6 +284,11 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// Your mind (docs/optchat.md): import other agents' chats into it
+    Mind {
+        #[command(subcommand)]
+        sub: MindCmd,
+    },
     /// Ask another of your agents (an agent: of its owner's) something, in
     /// a chat of the two of you and your owner, made the first time (a
     /// person: their direct chat with it), or in --chat; prints the chat
@@ -359,6 +366,43 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MindCmd {
+    /// Play your chats with other agents into your mind, oldest first, as
+    /// if they were said there: your words and the agents' final replies
+    /// (no tool calls, no repeated pastes), each chat a thread. Then follow
+    /// its compactor until every message is summarized. A rerun sends only
+    /// what the mind lacks.
+    Import {
+        /// Files or folders: Claude Code's ~/.claude/projects, Codex's
+        /// ~/.codex/sessions, claude.ai's export conversations.json, a
+        /// `hermes sessions export` file (or Hermes's older sessions folder)
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// claude-code | claude-export | codex | hermes | auto (each file's own)
+        #[arg(long, default_value = "auto")]
+        from: String,
+        /// Only chats begun on or after this date (YYYY-MM-DD, UTC)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only the first N chats (the oldest)
+        #[arg(long, value_name = "N")]
+        limit_conversations: Option<usize>,
+        /// Count what would go, estimate what compacting it costs, send nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// With --dry-run: print the first N chats as they would go, a line a message
+        #[arg(long, value_name = "N", requires = "dry_run")]
+        show: Option<usize>,
+        /// The mind to import into
+        #[arg(long, default_value = "mind")]
+        mind: String,
+        /// Return once the messages are in, without following the compactor
+        #[arg(long)]
+        no_wait: bool,
     },
 }
 
@@ -923,6 +967,30 @@ fn run(cli: Cli) -> Result<()> {
             println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
+            return Ok(());
+        }
+        Cmd::Mind { sub: MindCmd::Import { paths, from, since, limit_conversations, dry_run, show, mind, no_wait } } => {
+            let from = match from.as_str() {
+                "auto" => None,
+                f => Some(import::Source::parse(f).ok_or_else(|| usage(format!("--from is claude-code, claude-export, codex, hermes or auto, not {f:?}")))?),
+            };
+            let since = since.as_deref().map(import::since).transpose().map_err(|e| usage(e.to_string()))?;
+            let o = mind::Options { paths, from, since, limit: limit_conversations, mind, wait: !no_wait };
+            let (convs, found) = mind::read(&o)?;
+            if dry_run {
+                json_exit(j, &mind::report(&convs, &found));
+                mind::print_report(&convs, &found);
+                mind::show(&convs, show.unwrap_or(0));
+                return Ok(());
+            }
+            let c = require_client(&cli.host, cli.verbose)?;
+            let (conversations, messages) = mind::send(&c, &o, &convs, j)?;
+            let status = if o.wait { Some(mind::wait(&c, &o.mind)?) } else { None };
+            json_exit(j, &json!({ "conversations": conversations, "messages": messages, "status": status }));
+            println!("imported {messages} messages of {conversations} chats into {}", o.mind);
+            if !o.wait {
+                println!("its compactor summarizes them now: `fragment call {} status` shows how far", o.mind);
+            }
             return Ok(());
         }
         _ => {}
@@ -1619,7 +1687,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Mind { .. } => unreachable!(),
     }
     Ok(())
 }
