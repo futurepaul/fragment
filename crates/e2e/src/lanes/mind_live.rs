@@ -30,9 +30,11 @@
 //! 7. the run says its latencies, tool calls and paid calls.
 //!
 //! Between 4 and 5, measured and not checked (docs/optchat.md, "Latency"):
-//! `WORDS.len()` short asks answered in words in thread E, and
+//! `WORDS.len()` short asks answered in words in thread E,
 //! `HANDS_MEASURED` simple shell hand-offs in thread F with the computer
-//! awake. The run prints each turn's timing (its `turn` record on `log`:
+//! awake, and two in thread G from asleep: one cold (its task's record
+//! wakes the computer), one whose person opened the mind's page `TYPING`
+//! before (its socket pre-wakes the computer). The run prints each turn's timing (its `turn` record on `log`:
 //! its wait, each model call's first data line and whole answer, its tries
 //! and hedge), each hand-off's marks (the task on `chat`, goose's claim, its
 //! `turn.timing` and steps on `work`, its reply, the report, the follow-up),
@@ -94,6 +96,11 @@ const WORDS: [&str; 6] = [
 ];
 /// Simple hand-offs measured with the computer awake (thread F).
 const HANDS_MEASURED: usize = 2;
+/// A computer put to sleep, asleep (its save first).
+const ASLEEP: Duration = Duration::from_secs(180);
+/// How long the person "types" with the mind's page open before a
+/// hand-off from asleep (thread G): its socket pre-wakes the computer.
+const TYPING: Duration = Duration::from_secs(8);
 /// Hacker News's front page, as this process reads it to compare.
 const HN: &str = "https://news.ycombinator.com/";
 /// A front page's titles a report's are compared with: its top this many
@@ -324,12 +331,27 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
     let wholes: Vec<f64> = calls.iter().filter_map(|c| c.1).collect();
     let hedged = calls.iter().filter(|c| c.2).count();
     let (fell, of) = timing::fell_back(&turns.iter().map(|(_, t)| t).collect::<Vec<_>>());
-    let reports: Vec<f64> = handoffs.iter().filter(|(l, _)| l != "D").filter_map(|(_, h)| h.total()).collect();
+    // simple ones, the computer awake (not D's browsing, nor G's from asleep)
+    let reports: Vec<f64> = handoffs.iter().filter(|(l, _)| l.starts_with('C') || l.starts_with('F')).filter_map(|(_, h)| h.total()).collect();
     let follows: Vec<f64> = handoffs.iter().filter_map(|(_, h)| h.follow_up()).collect();
     let goose: Vec<f64> = handoffs.iter().flat_map(|(_, h)| h.goose_calls()).collect();
     for (l, h) in handoffs {
         println!("      (hand-off {l}: {})", h.line());
     }
+    // a message said (its `say` record) to logged (its `hear` step): the
+    // trigger, its run's start, and the steps before it
+    let said: Vec<(String, i64)> = m.records("say").iter().filter_map(|r| Some((r["body"]["text"].as_str()?.to_string(), r["at"].as_i64()?))).collect();
+    let mut heard = Vec::new();
+    for (id, _) in threads {
+        for msg in m.messages(id).iter().filter(|x| x["kind"] == "user") {
+            if let (Some(text), Some(at)) = (msg["text"].as_str(), msg["at"].as_i64()) {
+                if let Some((_, s)) = said.iter().find(|(t, _)| t == text) {
+                    heard.push((at - s) as f64 / 1000.0);
+                }
+            }
+        }
+    }
+    println!("      (said → logged, the trigger and the steps before hear: {})", timing::stats(&heard));
     let holds = entries(api, identity, "");
     let hedges = holds.iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains("hedge"))).count();
     // which models answered (a fallback's when a tier's own was busy), the ledger's rows
@@ -508,6 +530,37 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
     let (most, ready, took) = m.pumps(Duration::from_secs(60));
     println!("      (the compactor after thread F: up to {most} pumps at work at once, with up to {ready} nodes ready, all built in {took:.1} s)");
 
+    // ---- from asleep, measured: a hand-off to a computer asleep, cold (the
+    // task's record wakes it), then one whose person opened the mind's page
+    // and typed a while first (the page's socket pre-wakes it)
+    let g = thread_id();
+    for (k, prewoken) in [(0, false), (1, true)] {
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        if within(ASLEEP, || (phase(api, &owner, &id) == "asleep").then_some(())).is_none() {
+            println!("      (thread G, hand-off {k}: the computer did not sleep: {})", phase(api, &owner, &id));
+            break;
+        }
+        let page = if prewoken { crate::api::Socket::open(api, &m.name, "__live", Some(&owner), None).ok() } else { None };
+        if prewoken {
+            std::thread::sleep(TYPING);
+        }
+        let before = m.task(&g, false).and_then(|t| t["id"].as_str().map(str::to_string));
+        let woke = phase(api, &owner, &id);
+        m.say(&format!("g{k}"), &g, &format!("Use the computer: run `echo woken-{k}` in the shell and tell me its output exactly."), Some(builder.as_str()).filter(|b| !b.is_empty()))?;
+        let opened = within(REPLY, || m.task(&g, false).filter(|t| t["id"].as_str() != before.as_deref()));
+        let done = opened.and_then(|o| within(HANDOFF, || m.task(&g, true).filter(|t| t["id"] == o["id"])));
+        let Some(done) = done else {
+            println!("      (thread G, hand-off {k}: no report)");
+            break;
+        };
+        let _ = within(REPLY, || m.answered(&g).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == done["id"])));
+        let h = m.handoff(&done);
+        let how = if prewoken { format!("its page open {TYPING:?} before the ask (pre-woken: {woke})") } else { format!("cold: {woke}") };
+        println!("      (thread G, hand-off {k} from asleep, {how}, {}: {})", done["state"].as_str().unwrap_or("?"), h.line());
+        handoffs.push((format!("G{k}"), h));
+        drop(page);
+    }
+
     // ---- thread D: Builder hands browsing to goose
     let d = thread_id();
     m.say("d1", &d, BROWSE, Some(builder.as_str()).filter(|b| !b.is_empty()))?;
@@ -569,7 +622,7 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // ---- what it took
-    latency(&m, &[(&a, "A"), (&b, "B"), (&c, "C"), (&d, "D"), (&e, "E"), (&f, "F")], &word_secs, &handoffs, &identity, api);
+    latency(&m, &[(&a, "A"), (&b, "B"), (&c, "C"), (&d, "D"), (&e, "E"), (&f, "F"), (&g, "G")], &word_secs, &handoffs, &identity, api);
     let (models, ai_steps) = (entries(api, &identity, "aig:").len(), entries(api, &identity, "step:").len());
     println!(
         "      (mind-live: thread A answered in {reply_a:.1} s; settled {settle:.0} s later; thread B answered in {reply_b:.1} s with {looked} zoom/search calls; \
