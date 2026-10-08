@@ -1073,6 +1073,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             ledger_route(req, env, cfg, &url, &rest).await
         }
         (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
+        (Method::Post, ["api", "models", "v1", "decide"]) => models::decide_route(req, env, &url).await,
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await

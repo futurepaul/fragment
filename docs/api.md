@@ -1034,8 +1034,8 @@ charged (none when nothing was).
 
 ### Models (docs/cloudflare-v1.md, decision 23)
 
-One OpenAI-shaped chat completion on a tier's model, metered on its
-payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
+One OpenAI-shaped chat completion on a tier's model, or one Clef
+decision, metered on its payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
 `@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
 both on Workers AI through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
@@ -1050,6 +1050,7 @@ tier an agent or a job's step may name.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `POST /api/models/v1/decide[?fragment=<name>]` | the same | a decision, `{model?, state, questions, images?}` → `{answers, model, usage}` (below) |
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
@@ -1071,6 +1072,23 @@ call settles after its answer whether or not the client read to its end.
 Nothing of the request or its answer is kept: only the usage, on the
 ledger. A refusal of the payer's ledger is its own (402
 `budget_used_up`, 403 for a guest), with its message.
+
+A decision is Clef on the same transport (`models::decide_route`), as
+an agent asks it: its body is a job's `ai.decide` input (AI, above),
+`model` `clef` or `clef-flash` (the default), and its answer is that
+step's: `answers` by question id, `model` the catalog id, `usage` Clef's
+`{input_tokens, output_tokens}`. Its caller, payer, `fragment` and 6 MiB
+limit are the chat route's. A body that is no decision (not an object,
+a field missing or unknown, a `model` that is neither size, a bound of
+the step's past) is 400 saying why, nothing reserved or sent. It
+reserves its input's bytes as tokens, at most Clef's 65,536-token
+window, under an `aig:<hex>` reference of its own, as an agent's turn,
+and settles from the input tokens Clef counted (its output is free:
+`fragment_core::decide`). A call the model refuses is released and its
+refusal passed through as it came; an answer that does not answer every
+question is 502 `upstream_failed`, charged its reservation. A
+computer's guest asks it as `POST /v1/decide` on its model intercept
+(docs/computers.md, Models).
 
 The same call, as a Rust function the cell's other parts make
 (`models::complete`: the payer, the agent, the fragment, the tier, the

@@ -2180,14 +2180,18 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 
 /// The guest's model call (docs/computers.md, Models): `POST
 /// /v1/chat/completions`, OpenAI's shape, with `model` a tier and
-/// `x-fragment-agent`. It is the platform's model route as that agent
-/// (`models::route`, signed as egress_api signs), which bounds it, meters
-/// it to the agent's owner, and refuses at zero credit. Its auth headers
-/// are the guest's and go nowhere; any other path is 404, unmetered.
+/// `x-fragment-agent`, or `POST /v1/decide`, a Clef decision. It is the
+/// platform's model route as that agent (`models::route` or
+/// `models::decide_route`, signed as egress_api signs), which bounds it,
+/// meters it to the agent's owner, and refuses at zero credit. Its auth
+/// headers are the guest's and go nowhere; any other path is 404,
+/// unmetered.
 async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
-    if req.method() != Method::Post || req.path() != "/v1/chat/completions" {
-        return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions"));
-    }
+    let api = match (req.method(), req.path().as_str()) {
+        (Method::Post, "/v1/chat/completions") => "http://api.fragment.internal/api/models/v1/chat/completions",
+        (Method::Post, "/v1/decide") => "http://api.fragment.internal/api/models/v1/decide",
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions and POST /v1/decide")),
+    };
     if req.headers().get(AGENT_HEADER)?.is_none() {
         return Err(CellError::new(ErrorCode::Unauthenticated, "name the agent this call is for (x-fragment-agent): its owner pays for it"));
     }
@@ -2200,8 +2204,7 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let body = crate::read_body(&mut req, crate::models::MODEL_BODY_MAX_BYTES).await?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
-    let api = Request::new_with_init("http://api.fragment.internal/api/models/v1/chat/completions", &init)?;
-    egress_api(api, env, ctx, computer).await
+    egress_api(Request::new_with_init(api, &init)?, env, ctx, computer).await
 }
 
 /// Headers a hop answers for itself, never sent on.
