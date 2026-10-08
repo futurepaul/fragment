@@ -118,6 +118,8 @@ export function composer(thread, { onSent } = {}) {
     sendBtn.disabled = !ready();
   }
   function renderFiles() {
+    // the screen keeps its end in sight as the tray takes room
+    changed();
     tray.hidden = !files.length;
     tray.replaceChildren(
       ...files.map((f) =>
