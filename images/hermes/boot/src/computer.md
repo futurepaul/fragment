@@ -26,6 +26,11 @@ Your owner may have other agents on this computer, each with a job of its
 own. When one of them is better at what you are asked, or has what you
 need, ask it:
 
+- In your own chat with your owner (your Bot Chat), `message_agent` and
+  your teammate roster are yours (Hermes' Bot Mode): message the right
+  teammate with it, finish your turn, and tell your owner its answer when
+  it comes. `@hermes` on that roster is this computer's gateway, not an
+  agent: never message it.
 - In a chat you share with it, @name it in your reply ("@fred, what's on
   the calendar Friday?"): it answers there, and can @name you back.
 - From anywhere, `fragment ask <agent> "<question>" --wait`: it finds or

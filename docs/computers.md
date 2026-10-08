@@ -1024,6 +1024,56 @@ settings and state):
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 
+### Bot Mode in our Hermes image
+
+Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
+Hermes' teammate roster (each other agent of the computer, by name and
+role) and its `message_agent` tool, with which it messages another agent.
+Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
+`tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
+titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
+carries `ui_meta: {hermes-bots: …}`. A headless gateway, ours, meets
+neither on its own (Hermes' `website/docs/user-guide/bot-mode.md`, "What
+actually makes a chat a Bot Chat"), so the image does both
+(`images/hermes/boot/src/bots.rs`):
+
+- Each agent's `profile.yaml`, written by the boot with its profile (and
+  again when a sync pulls its `SOUL.md`): its name as its display name
+  and its bot's title, its job's first line (its `SOUL.md`'s, at most 120
+  characters) as its description. Hermes' roster reads both. Its roster
+  always lists the gateway's own profile too, as `@hermes`; that profile
+  runs no agent's turns, and its `profile.yaml` says so ("this computer's
+  gateway, not an agent: never message it").
+- An agent's Bot Chat is its own chat with its owner: the chat the shell
+  makes with it, `<label>-chat` beside its `<label>` (`bots::bot_chat`,
+  the one place the image names it; the shell's `makeAgent` and
+  `fragment ask`'s `direct_label` make and find the same). Hermes'
+  gateway makes that chat's session at its first message, and builds a
+  session's prompt once, at its first turn, keeping it with the turn's
+  agent for the next ones; so the title has to be there before. The image's
+  gateway hook (`images/hermes/hooks/fragment-bot-chat`, linked into each
+  profile's `hooks/` by the boot; Hermes' gateway/hooks.py) does it: as
+  each of the agent's turns starts (`agent:start`), before its prompt is
+  built, a turn in its own chat (the boot's bots file,
+  `/var/lib/fragment-run/bots.json`, names it, its profile's home, and the
+  key Hermes keeps its session under) titles that session `Bot Chat`
+  through Hermes' session API, as a person's `/title` would: its row
+  recorded with its gateway identity first when the turn has not yet
+  written it, and any other session of the agent's holding the title made
+  to give it up (its history kept). So the agent's first turn there has
+  the roster. The title follows a compression to the new session (Hermes'
+  own). Event: `botmode.titled` (the gateway's output).
+- A message one agent sends another reaches the other's Bot Chat through
+  Hermes' own path: a background process runs one turn there (`hermes -p
+  <agent> chat -c "Bot Chat" -Q`), as that agent (its model calls name it,
+  so they are metered to it); its answer, that process's output, wakes the
+  sender, whose turn then says it in the sender's own chat (a message of
+  its runtime's own: docs/chat-records.md).
+- An agent with no such chat (made by other means than the shell) has no
+  Bot Chat of ours: Hermes makes one of its own for a teammate's message,
+  which the person sees nowhere until the agent has its own chat, whose
+  session then takes the title.
+
 ### Skills and the CLI in our Hermes image
 
 The platform serves skills as any fragment's files; what installs them,

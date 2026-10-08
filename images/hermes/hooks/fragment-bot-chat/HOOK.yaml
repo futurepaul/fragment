@@ -1,0 +1,5 @@
+# The Hermes image's (images/hermes/boot/src/bots.rs): linked into each
+# agent's profile's hooks/ by hermes-boot.
+name: fragment-bot-chat
+description: "Titles an agent's own chat's session Bot Chat as its turn starts (Hermes' Bot Mode)"
+events: ["agent:start"]

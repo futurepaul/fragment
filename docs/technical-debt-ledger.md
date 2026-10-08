@@ -767,6 +767,60 @@ fragment.club until cutover (decisions 34–35).
   script's temp file in the gateway's scratch, which then holds it to the
   work with the rest.
 
+## An agent's Bot Chat is found by its chat's name
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image
+  (docs/computers.md, "Bot Mode in our Hermes image"). Which chat is an
+  agent's own, and so its Hermes Bot Chat, the image reads from names
+  alone: `<label>-chat` beside the agent's `<label>`, as the shell's
+  `makeAgent` makes it (`bots::bot_chat`; `fragment ask`'s `direct_label`
+  reads the same). Nothing on the platform says which chat is an agent's.
+- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+  of ours, and Hermes makes one of its own that the person never sees; a
+  rename of fragments (the identity work's `<label>--<suffix>`) that the
+  three places do not follow together leaves every agent with none.
+- **First proof:** a bot whose roster and `message_agent` never appear in
+  its own chat (no `botmode.titled` event for it).
+- **Delete when:** the agent fragment names its own chat (its
+  `agent.json`, written by whatever makes the two), and the image, the
+  shell and the CLI read that.
+
+## Bot Mode's roster lists the gateway as a teammate
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image. Hermes lists its
+  default profile in every bot's roster as `@hermes`, always
+  (`tools/bot_mode_probe.py`, `_roster`); in our image that profile is the
+  gateway's own, which runs no agent's turns. Its `profile.yaml` says so
+  ("this computer's gateway, not an agent: never message it").
+- **Risk:** a model messages `@hermes` anyway: Hermes runs a turn as the
+  default profile, whose model calls name no agent, so the model route
+  refuses them and the sender is told the delivery failed, having spent
+  a turn on it.
+- **First proof:** a `message_agent` call whose target is `hermes` in a
+  hosted run's model calls.
+- **Delete when:** Hermes lets an install leave its default profile out
+  of the roster, or our gateway's own profile is an agent's.
+
+## A message between bots runs outside the bridge
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image. A bot's
+  `message_agent` reaches its teammate through Hermes' own path: a
+  background process runs one turn in the teammate's Bot Chat
+  (`hermes -p <agent> chat -c "Bot Chat" -Q`), not the gateway, so not
+  the bridge.
+- **Risk:** the person sees the teammate's turn nowhere until the sender
+  says its answer; it has no cards (an approval it needs fails), no Stop,
+  and no hop count or chat budget (Hermes' roster tells a bot not to
+  ping-pong, and nothing else bounds two bots messaging each other); it
+  writes the teammate's Bot Chat session beside a turn the gateway may be
+  running there at once; a sleep cuts it with no record of it.
+- **First proof:** two bots' messages to each other outrunning a chat's
+  budget, or a teammate's session holding two turns' rows interleaved.
+- **Delete when:** each Bot Chat's turns are the bridge's: the image owns
+  each agent's Bot Chat as Hermes' live owner and posts a teammate's
+  message into the agent's own chat as a hand-off (Hermes'
+  `tools/bot_live_delivery.py`).
+
 ## Own keys are kept by the person's computer
 
 - **Observed:** Paul, 2026-10-04 (`computer.rs` `own_keys`). A person's
