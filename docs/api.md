@@ -1411,6 +1411,19 @@ platform is elsewhere (`Cache-Control: no-store`, so the platform can
 still move); any other name under the suffix, 404; anything else, the
 platform.
 
+## Agent docs
+
+For an agent with no CLI yet (llmstxt.org), the platform's own host
+answers `GET /llms.txt` with `cli/SKILL.md`, the text `fragment skill`
+prints (what fragment is, the install, pairing, the daily commands),
+and `GET /llms-full.txt` with `cli/GUIDE.md`, the text `fragment guide`
+prints (the whole manual). Both are compiled into the cell from the
+CLI's own files, so they never drift from it. They answer anyone, as
+`text/plain; charset=utf-8` with `Cache-Control: no-cache` and an ETag
+of their build-time hash (304 when `If-None-Match` names it), as
+`__fragment.js` does. On a fragment's host the same paths are the
+fragment's own.
+
 ## Connections (decisions 22 and 37)
 
 Every provider of the deployment's catalog (`FRAGMENT_PROVIDERS`): a

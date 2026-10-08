@@ -100,6 +100,14 @@ const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-versio
 /// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
 const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
 
+/// The agent docs on the platform's origin, for an agent with no CLI yet
+/// (llmstxt.org): `fragment skill`'s text and `fragment guide`'s, the same
+/// files, so they cannot drift.
+const LLMS_TXT: &str = include_str!("../../cli/SKILL.md");
+const LLMS_FULL_TXT: &str = include_str!("../../cli/GUIDE.md");
+const LLMS_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_TXT.as_bytes());
+const LLMS_FULL_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_FULL_TXT.as_bytes());
+
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -1020,6 +1028,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
+        (Method::Get | Method::Head, ["llms.txt"]) => serve::compiled_in(&req, LLMS_TXT, LLMS_TXT_HASH, "text/plain; charset=utf-8"),
+        (Method::Get | Method::Head, ["llms-full.txt"]) => serve::compiled_in(&req, LLMS_FULL_TXT, LLMS_FULL_TXT_HASH, "text/plain; charset=utf-8"),
         (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;

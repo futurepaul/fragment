@@ -15,8 +15,9 @@ sudo (the same command updates it):
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 ```
 
-If `fragment` is then not found, put `~/.local/bin` on your PATH:
-`export PATH="$HOME/.local/bin:$PATH"`, in `~/.zshrc` or `~/.bashrc`.
+If `fragment` is then not found, run it as `~/.local/bin/fragment`, or
+put `~/.local/bin` on your PATH: `export PATH="$HOME/.local/bin:$PATH"`,
+in `~/.zshrc` or `~/.bashrc`.
 `fragment skill` prints a SKILL.md for a coding agent (Claude Code,
 Codex) that points it here.
 
@@ -155,6 +156,19 @@ gives it its own title; any other is copied in as its first commit.
 `fragment status my-thing` shows the URLs, the view token (the share
 link's `?view=`), and the inbox token. `fragment open my-thing` prints
 the links again.
+
+Making one for someone, go in this order:
+
+1. State the app in one sentence: who it is for, and the job it does.
+2. Build the smallest version that does that job, and deploy it.
+3. Check its state lives in the app, not the page: reload, and it is all
+   still there. Then check a second person sees it: open it in two tabs
+   (or keep one open and change it with `fragment call`), and a change
+   in one shows in the other without a reload. Live multiplayer is what
+   a fragment has that a static page doesn't: use it (`fragment.live`,
+   Pages below).
+4. Hand back the link, with one suggested next step.
+5. Add nothing they didn't ask for.
 
 ## The folder
 
@@ -368,6 +382,23 @@ every browser registered with that `who` (`*` for all).
 
 The share link's `?view=` token is a secret. If your app renders links
 into its own pages, don't leak it into places the page doesn't need.
+
+## Design
+
+A page should look made for its job, by someone who cared.
+
+- **Design for the job.** Put what the person came for first: who owes
+  whom, the vote so far, today's chores. A list with an add button is
+  rarely it.
+- **Mobile first.** Links get opened on phones: one column, thumb-sized
+  targets, nothing that needs a hover. Then widen.
+- **Warm neutrals** for the page (an off-white, warm greys, a warm
+  near-black in the dark), and **one accent color**, used sparingly: the
+  main action, the current state.
+- **A real type hierarchy:** a title clearly larger than the body, muted
+  small text for what matters less, sizes from a short scale. Spacing
+  from a scale too, with more space between groups than within them.
+- **None of:** gradients, glow, decorative emoji, heavy shadows.
 
 ## The inbox (webhooks in)
 
