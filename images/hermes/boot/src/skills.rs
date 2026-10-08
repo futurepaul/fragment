@@ -368,7 +368,7 @@ mod tests {
     use super::*;
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned }
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
     }
 
     fn file(path: &str, size: u64, version: &str) -> FileEntry {

@@ -13,7 +13,9 @@
 //! `message_agent`; the image posts the message into Maple's chat as
 //! Juniper, naming Maple; Maple's turn there makes the app, which goes
 //! live, and opens it on her desktop; and her answer comes back to Juniper,
-//! who tells the person in her own chat. Both chats and both screens are
+//! who tells the person in her own chat, once: what either says after (a
+//! second relay, an acknowledgement) is counted as redundant. Both agents
+//! are on the tier the shell makes one on. Both chats and both screens are
 //! shot for the evidence (Maple's screen checked to connect). Then the
 //! computer sleeps (`--sweep` deletes the run's `e2e-<run>-` fragments).
 //!
@@ -39,6 +41,12 @@ pub const SECTION: &str = "bot-mode";
 /// and deployed, her browser opened: a dozen tool calls or so), Hermes'
 /// titles and guardian among them.
 const PAID_CALLS: u64 = 50;
+/// The tier the shell makes a new agent on (cell/shell/shell.js,
+/// `DEFAULT_AGENT_TIER`), so the agents answer as a person's would.
+const AGENT_TIER: &str = "cheap";
+/// How long the chats are watched after Juniper tells the person, for
+/// what either says again (a second relay, an acknowledgement).
+const SETTLE: Duration = Duration::from_secs(90);
 /// A new computer's first start on a preview, to its agents following.
 const FIRST_START: Duration = Duration::from_secs(10 * 60);
 /// A turn that answers in words.
@@ -75,8 +83,8 @@ fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul:
     let name = made.body["name"].as_str().context("a fragment's name")?.to_string();
     let assigned = api.signed(keys, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    anyhow::ensure!(identity.starts_with("id:"), "{name} assigned: {assigned}");
-    let files = json!({ "key": "bot-mode", "message": "its job", "files": [{ "path": "SOUL.md", "text": soul }, { "path": "agent.json", "text": "{\n  \"tier\": \"medium\"\n}\n" }] });
+    anyhow::ensure!(identity.starts_with("npub1"), "{name} assigned: {assigned}");
+    let files = json!({ "key": "bot-mode", "message": "its job", "files": [{ "path": "SOUL.md", "text": soul }, { "path": "agent.json", "text": format!("{{\n  \"tier\": \"{AGENT_TIER}\"\n}}\n") }] });
     let wrote = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
     anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "{name}'s SOUL: {wrote} {deployed}");
@@ -194,6 +202,24 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (asked to Juniper telling the person: {:.1?}; Maple's turn spent {} paid calls with Juniper's)", t1.elapsed(), paid(api, &owner_id).saturating_sub(calls));
     s.ok("Maple's answer comes back to Juniper, who tells the person in her own chat (model-dependent)", told.is_some(), told.clone().unwrap_or_default());
 
+    // each says the answer once: Juniper relays it once in her chat, and
+    // Maple says nothing more in hers after answering (what they said
+    // after it is counted, once both chats have been quiet a while)
+    if told.is_some() {
+        std::thread::sleep(SETTLE);
+    }
+    let after = |chat: &str, agent: &str, since: i64, not: &str| -> Vec<String> {
+        agent_replies(&records(api, &keys, chat, "chat"), agent).into_iter().filter(|r| r["body"]["turn"] != not && r["seq"].as_i64().is_some_and(|q| q > since)).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect()
+    };
+    let relays = after(&jchat, &juniper_id, asked_at, &turn);
+    let more = after(&mchat, &maple_id, handed["seq"].as_i64().unwrap_or(0), &mturn);
+    let back = mwork.iter().filter(|w| w["kind"] == "turn.step" && w["tool"].as_str().is_some_and(|t| t.starts_with("message_agent"))).count();
+    let redundant = relays.len().saturating_sub(1) + more.len();
+    println!("      (after the ask: Juniper said {} in her chat, 1 wanted; Maple said {} more in hers, 0 wanted; Maple messaged Juniper back {back} times; {redundant} redundant)", relays.len(), more.len());
+    let line = |t: &String| t.chars().take(160).collect::<String>().replace('\n', " ");
+    println!("      (Juniper's: {:?}; Maple's more: {:?})", relays.iter().map(line).collect::<Vec<_>>(), more.iter().map(line).collect::<Vec<_>>());
+    s.ok("each says the answer once: Juniper relays it once, and Maple says nothing more (model-dependent)", relays.len() == 1 && more.is_empty(), json!({ "juniper": relays, "maple": more, "mapleMessagedBack": back }));
+
     // both chats, and both screens, as the person sees them
     let mut shots = vec![];
     if let Some(mut b) = s.browser()? {
@@ -228,7 +254,7 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         s.skip("both chats and both screens shot", "no Chrome is installed here (set CHROME_BIN)");
     }
-    let detail = json!({ "juniperWork": jwork, "handed": handed, "mapleWork": mwork, "mapleAnswer": manswer, "told": told, "live": live, "shots": shots });
+    let detail = json!({ "juniperWork": jwork, "handed": handed, "mapleWork": mwork, "mapleAnswer": manswer, "told": told, "relays": relays, "mapleMore": more, "redundant": redundant, "live": live, "shots": shots });
     std::fs::write(evidence.join("bot-mode.json"), serde_json::to_vec_pretty(&detail)?)?;
     let spent = paid(api, &owner_id);
     s.ok(&format!("its paid calls stay within the {PAID_CALLS} lent"), spent as u64 <= PAID_CALLS, spent);

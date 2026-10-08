@@ -1039,9 +1039,13 @@ actually makes a chat a Bot Chat"), so the image does both
 (`images/hermes/boot/src/bots.rs`):
 
 - Each agent's `profile.yaml`, written by the boot with its profile (and
-  again when a sync pulls its `SOUL.md`): its name as its display name
-  and its bot's title, its job's first line (its `SOUL.md`'s, at most 120
-  characters) as its description. Hermes' roster reads both. Its roster
+  again when a sync pulls its `SOUL.md`): its agent fragment's title as
+  its display name and its bot's title (the shell titles an agent fragment
+  by the agent's name; with none, its name on the computer, its label),
+  its job's first line (its `SOUL.md`'s, at most 120 characters) as its
+  description. Hermes' roster reads both, and signs a bot's messages to
+  its teammates with its title (`Message from 🤖 Juniper
+  (@juniper--k3x9): …`). Its roster
   always lists the gateway's own profile too, as `@hermes`; that profile
   runs no agent's turns, and its `profile.yaml` says so ("this computer's
   gateway, not an agent: never message it").
@@ -1082,14 +1086,17 @@ actually makes a chat a Bot Chat"), so the image does both
   own chat's) with an active-session lease marked as a live-delivery
   consumer, and takes each message waiting in its mailbox: it posts it
   into the agent's own chat as the agent that sent it, naming the agent
-  in `to` (`fragment ask <agent> --chat <its chat> --id dm-<delivery>
-  --wait 1800`, acting as the sender, which adds the sender to the chat),
-  and once the agent's turn of it ends, settles the delivery with its
+  in `to` (id `dm-<delivery>`, acting as the sender for their owner, as
+  `fragment ask --chat` posts a question, but adding the sender to no
+  chat: the bridge answers a record by `to`, and the chat's page names an
+  agent that is no member by its profile), and once the agent's turn of
+  it ends (read from the chat's `work`, as `fragment ask --wait` reads it,
+  for up to 30 minutes), settles the delivery with its
   replies (up to 16,000 characters; a failure with why). That wakes the
   sender, whose turn says the answer in the sender's own chat (a message
   of its runtime's own: docs/chat-records.md). The message's text is
   Hermes' own, its attribution first (`Message from 🤖 Juniper
-  (@juniper-paul): …`). At most four messages per agent are delivered at
+  (@juniper--k3x9): …`). At most four messages per agent are delivered at
   once; the rest wait in its mailbox. While the platform holds the
   computer the keeper writes nothing. Events: `botmode.owned`,
   `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).
@@ -1098,11 +1105,20 @@ actually makes a chat a Bot Chat"), so the image does both
   Bot Chat of its own, outside the bridge, which the person sees nowhere
   until the agent has its own chat, whose session then takes the title.
   So does every agent while the keeper is down.
-- Hermes' roster tells a bot that a teammate messaged to answer with
-  `message_agent` too, so a sender often hears an answer twice: the
-  teammate's own message (a hand-off in the sender's chat) and its
-  delivery's settlement (the wake). The second one usually only says
-  that it already passed the answer on.
+- A bot answers a teammate once. Hermes' roster tells a bot that a
+  teammate messaged to answer with `message_agent`, and the delivery's
+  answer wakes the sender too, so each said it twice (the sender relaying
+  the answer again, the teammate acknowledging that: two redundant lines
+  a run on the preview). So the posted message ends with a line telling
+  the bot its reply there goes back to the sender on its own, and not to
+  message the sender about it (`ANSWER_HERE`). When a bot messages its
+  sender back anyway while answering (the keeper sees its message taken
+  while it answers the sender's, or within 3 s of that turn's end), both
+  deliveries settle with their answer under a line telling the woken bot it
+  has had it already, and to end its turn with exactly `[SILENT]` if it
+  adds nothing (`HAD_IT`), Hermes' silence marker, for which its gateway
+  says nothing (gateway/response_filters.py). Event: `botmode.delivered`'s
+  `had` (`answered`, `reply`).
 
 Proven by the Docker lane's `bots_message_each_other` (the scripted
 model: the roster and the tool from an agent's first turn in its own

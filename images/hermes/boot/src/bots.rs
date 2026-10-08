@@ -75,13 +75,16 @@ pub fn description(soul: &str) -> String {
 
 /// An agent's `profile.yaml`: Hermes' profile metadata, which its roster
 /// reads (each teammate's name and role, `_profile_role`) and which marks
-/// the install as Bot-Mode-managed (`ui_meta.hermes-bots`). Its name is its
-/// display name and its bot's title; its description is its job's first
-/// line (`description`). Written whole at every boot, and for an agent
-/// assigned while the computer runs.
-pub fn profile_yaml(agent: &Agent, soul: Option<&str>) -> String {
-    let name = agent.name.trim();
-    let name = if name.is_empty() { label(&agent.fragment) } else { name };
+/// the install as Bot-Mode-managed (`ui_meta.hermes-bots`). Its name, its
+/// display name and its bot's title, is its agent fragment's title (`title`:
+/// "Juniper", as the shell titles it), else its name on the computer, else
+/// its fragment's label: Hermes signs its messages to teammates with it
+/// (`Message from 🤖 Juniper (@juniper-k3x9): …`). Its description is its
+/// job's first line (`description`). Written whole at every boot, for an
+/// agent assigned while the computer runs, and when a sync pulls its job.
+pub fn profile_yaml(agent: &Agent, title: Option<&str>, soul: Option<&str>) -> String {
+    let name = [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty());
+    let name = name.unwrap_or_else(|| label(&agent.fragment));
     let about = soul.map(description).unwrap_or_default();
     let mut y = format!("# Written by hermes-boot for {} at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n", agent.fragment);
     y.push_str(&format!("display_name: {}\n", q(name)));
@@ -121,10 +124,10 @@ pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
 }
 
 /// The bots file: for each agent whose Bot Chat is found (`chats`, by
-/// `bot_chat`), its profile's home, that chat, and the session key Hermes
-/// keeps that chat's session under (`wire::session_key`), whose session the
-/// hook titles `Bot Chat`. An agent with none yet is left out: the hook and
-/// the keeper leave it alone.
+/// `bot_chat`), its identity and owner, its profile's home, that chat, and
+/// the session key Hermes keeps that chat's session under
+/// (`wire::session_key`), whose session the hook titles `Bot Chat`. An
+/// agent with none yet is left out: the hook and the keeper leave it alone.
 pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
     let bots: Vec<serde_json::Value> = agents
         .iter()
@@ -133,6 +136,7 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
             let chat = chats.get(&a.fragment)?;
             Some(json!({
                 "agent": a.fragment,
+                "identity": a.identity,
                 "owner": a.owner,
                 "profile": profile,
                 "home": crate::hermes::profile_dir(home, &a.fragment).display().to_string(),
@@ -153,7 +157,7 @@ mod tests {
     }
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned }
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
     }
 
     /// Valid: the chat its owner owns labelled `<label>-chat`, whatever its
@@ -193,13 +197,13 @@ mod tests {
         assert_eq!(description(&wide).chars().count(), DESCRIPTION_MAX_CHARS, "cut on a character, never inside one");
     }
 
-    /// Valid: name, title and description, each a YAML double-quoted
-    /// scalar (a JSON string) whatever it holds; with no job, no
-    /// description; with no name, the label. Replay: the same agent writes
-    /// the same bytes.
+    /// Valid: name (its fragment's title), title and description, each a
+    /// YAML double-quoted scalar (a JSON string) whatever it holds; with no
+    /// job, no description; with no title, its name on the computer; with
+    /// neither, the label. Replay: the same agent writes the same bytes.
     #[test]
     fn a_profile_says_who_the_bot_is() {
-        let y = profile_yaml(&agent("juniper", "Juniper"), Some("You tend the garden: \"weeds\" first.\n"));
+        let y = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some("You tend the garden: \"weeds\" first.\n"));
         assert_eq!(
             y,
             "# Written by hermes-boot for juniper--k3x9 at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n\
@@ -207,10 +211,12 @@ mod tests {
              description: \"You tend the garden: \\\"weeds\\\" first.\"\n\
              ui_meta:\n  hermes-bots:\n    title: \"Juniper\"\n    description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
         );
-        assert_eq!(y, profile_yaml(&agent("juniper", "Juniper"), Some("You tend the garden: \"weeds\" first.\n")));
-        let bare = profile_yaml(&agent("fred", " "), None);
+        assert_eq!(y, profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some("You tend the garden: \"weeds\" first.\n")));
+        let untitled = profile_yaml(&agent("juniper", "juniper"), Some(" "), None);
+        assert!(untitled.contains("display_name: \"juniper\"\n"), "no title: its name on the computer: {untitled}");
+        let bare = profile_yaml(&agent("fred", " "), None, None);
         assert!(bare.contains("display_name: \"fred\"\n") && bare.contains("    title: \"fred\"\n") && !bare.contains("description"), "{bare}");
-        let odd = profile_yaml(&agent("x", "a: b\n# c"), Some("line: one"));
+        let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), Some("line: one"));
         assert!(odd.contains("display_name: \"a: b\\n# c\"\n"), "a name is one scalar, never more YAML: {odd}");
         assert!(GATEWAY_PROFILE_YAML.contains("description: ") && !GATEWAY_PROFILE_YAML.contains("hermes-bots"), "the gateway is no bot");
     }
@@ -255,6 +261,7 @@ mod tests {
             f["bots"][0],
             json!({
                 "agent": "juniper--k3x9",
+                "identity": "npub1juniper",
                 "owner": "npub1paul",
                 "profile": "juniper--k3x9",
                 "home": "/data/hermes/profiles/juniper--k3x9",
