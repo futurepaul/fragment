@@ -293,7 +293,8 @@ pub(super) fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let mut page = Socket::open(api, &mind, "__live", Some(&owner), None)?;
     page.until("hello", 5)?;
     page.send(&json!({ "type": "subscribe", "channel": "log", "after": 0 }))?;
-    page.until("subscribed", 5)?;
+    // the two turns' records come first (from the start of log)
+    page.until("subscribed", 500)?;
     page.patience(TURN)?;
     say("c3", "open the first message [[call zoom {\"id\":0,\"n\":1}]]".into())?;
     let mut drafts = vec![];
@@ -362,7 +363,7 @@ pub(super) fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent's streamed call (goose's) runs on its owner's model for hands, answered as OpenAI's chunks with the usage last, then [DONE]",
         r.status == 200 && text == "echo: hands, say hi" && r.text.trim_end().ends_with("data: [DONE]")
             && lines.last().is_some_and(|l| l["choices"] == json!([]) && l["usage"]["prompt_tokens"].as_u64().is_some())
-            && sent.len() == 1 && sent[0].body["model"] == SONNET,
+            && sent.iter().filter(|c| c.body.to_string().contains("hands, say hi")).map(|c| c.body["model"].clone()).collect::<Vec<_>>() == [json!(SONNET)],
         &r.text,
     );
     let tools = json!([{ "type": "function", "function": { "name": "shell", "parameters": { "type": "object", "properties": { "cmd": { "type": "string" } } } } }]);

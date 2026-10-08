@@ -1662,6 +1662,19 @@ function modelProvider(p) {
     const terms = el("p", "muted", CHATGPT_TERMS);
     terms.dataset.terms = "chatgpt";
     row.append(terms);
+    if (p.state !== "not_connected") {
+      // signing out here is the CLI's --forget: revoked at OpenAI, forgotten here
+      const out = el("button", "quiet", "Sign out of ChatGPT");
+      out.type = "button";
+      out.onclick = async () => {
+        out.disabled = true;
+        await api("DELETE", "/api/connections/chatgpt/tokens").catch(() => {});
+        await openSettings(false);
+      };
+      const actions = el("div", "settings-actions");
+      actions.append(out);
+      row.append(actions);
+    }
   }
   if (p.error) row.append(el("p", "settings-warning", p.error));
   return row;
