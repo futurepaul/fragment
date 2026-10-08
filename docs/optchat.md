@@ -257,11 +257,15 @@ reads are its steps, not the log's, as a subagent's are (spec 9).
     api.perplexity.ai/search`), Brave Search (`BRAVE_API_KEY`), Tavily
     (`TAVILY_API_KEY`), then **with no key** DuckDuckGo's HTML page
     (`html.duckduckgo.com/html/`, read for its results, its ads left
-    out). When DuckDuckGo gives nothing (it may answer a datacenter's
-    address with a "prove you are human" page, which is read as such),
-    Wikipedia's search, which answers any server; its results say they
-    are Wikipedia's alone and name the keys. A keyed provider that
-    fails (a refused key, a 5xx) is noted and the next is tried.
+    out). When DuckDuckGo gives nothing, Wikipedia's search, which
+    answers any server; its results say they are Wikipedia's alone and
+    name the keys. DuckDuckGo answers a datacenter's address with a
+    "prove you are human" page (2026-10-07: its duck CAPTCHA, fetched
+    from a datacenter; a home address gets results), which is read as
+    such, and DuckDuckGo is passed over for the rest of the turn: on
+    Workers the no-key search is, in practice, Wikipedia's. A keyed
+    provider that fails (a refused key, a 5xx) is noted and the next is
+    tried.
   - `research`: with `PERPLEXITY_API_KEY`, one call of Perplexity's
     `sonar` (`POST api.perplexity.ai/chat/completions`), which searches
     and cites itself; its sources are its `search_results` (or
@@ -271,7 +275,12 @@ reads are its steps, not the log's, as a subagent's are (spec 9).
 - **`web_fetch`** sends a browser-like `user-agent`, follows at most 3
   redirects itself (a step's fetch answers them), and asks a page over
   a fetch's 1 MiB again with `range: bytes=0-524287` (honoured by some
-  servers). HTML becomes text: its `<main>` (else its `<article>`s, else
+  servers). A Wikipedia article (`<lang>.wikipedia.org/wiki/…`) is read
+  through Wikipedia's API instead (`prop=extracts`, plain text, its
+  headings as `#`s): its page is up to megabytes of HTML, sent whole
+  whatever range is asked (United States: 2.9 MB, past a fetch; its
+  text, 94 KB), and Wikipedia is the no-key search's source on Workers.
+  HTML becomes text: its `<main>` (else its `<article>`s, else
   its body), less scripts, styles, media, `nav`, `footer`, `aside`, and
   elements hidden or marked as chrome by a role or a class (menus,
   dropdowns, navboxes, a Wikipedia section's "edit"); headings as `#`,
@@ -631,9 +640,11 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
   page its scripts draw reads as next to nothing, and a PDF is the
   computer's. Cloudflare's Browser Rendering is no step a job has
   (its REST API would take the owner's own Cloudflare token).
-- Whether DuckDuckGo answers Workers' addresses: from a home address
-  its HTML page answers (`lite.duckduckgo.com` asks to prove it is
-  human); from a Worker it is untried, so the no-key search falls back
-  to Wikipedia's when it does not.
+- A whole-web search with no key from a Worker. DuckDuckGo's HTML page
+  answers a home address and CAPTCHAs a datacenter's (checked
+  2026-10-07; from a Worker itself it is untried), so the no-key search
+  there is Wikipedia's. Bing's `format=rss` answers both, but its feed
+  says its results are for a personal RSS reader alone (decision for
+  Paul). A key (Perplexity's, Brave's or Tavily's) is the way.
 - Images to the main agent (the `vision` model is no tier a job names),
   and `search` over a file's words (FTS indexes the message's own).

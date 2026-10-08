@@ -52,7 +52,9 @@ release of this code, and its repo holds only its face.
   and goose's reply's files come back on its report.
 - **Keys** for the web are the owner's, as the mind's secrets:
   `fragment secret set <mind> PERPLEXITY_API_KEY` (or `BRAVE_API_KEY`,
-  `TAVILY_API_KEY`). With none, search is DuckDuckGo's, then Wikipedia's.
+  `TAVILY_API_KEY`). With none, search is DuckDuckGo's, then Wikipedia's
+  (DuckDuckGo CAPTCHAs a datacenter's address, so on Workers it is, in
+  practice, Wikipedia's).
 - **`pump`** builds what is ready, the level-0 node alone first (a turn
   waits on it), merges when none is: each node one conversation of up to
   TRIES `cheap` calls, written by `node_built` (first write wins). A job's

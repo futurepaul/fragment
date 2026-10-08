@@ -8,15 +8,17 @@
 // secret nor which exist: a fetch names one as `{{NAME}}` in a header, and
 // the platform adds it at the egress point or fails the step "no secret
 // named NAME". So the keyed providers are tried in turn, and a secret found
-// missing is passed over for the rest of the turn (`io.missing`). With no
+// missing is passed over for the rest of the turn (`io.passed`). With no
 // key it is DuckDuckGo's HTML page; when DuckDuckGo asks this server to
-// prove it is human (it may, of a datacenter's address), Wikipedia's
-// search, saying so.
+// prove it is human (it does, of a datacenter's address), Wikipedia's
+// search, saying so, and DuckDuckGo is passed over for the rest of the
+// turn too.
 //
 // `io` is the turn's: `fetch(url, init)` and `text(opts)` are its steps,
-// `room(n)` whether n more steps may be taken, `missing` the secrets found
-// missing. A fetch's answer is kept whole in the run's 4 MiB of answers (a
-// page up to 1 MiB), so `io.fetch` refuses past a run's room for one.
+// `room(n)` whether n more steps may be taken, `passed` the providers (by
+// their secret, or their name) passed over. A fetch's answer is kept whole
+// in the run's 4 MiB of answers (a page up to 1 MiB), so `io.fetch`
+// refuses past a run's room for one.
 import { fence } from "./files.mjs";
 import { RESEARCH, SONAR } from "./prompts.mjs";
 
@@ -205,12 +207,37 @@ export function page(url, type, body) {
   return { url, error: `it is ${mime || "of no type"}, not a page or text: hand it to the computer to open` };
 }
 
+const WIKIPEDIA_HOST = /^([a-z][a-z0-9-]*)(?:\.m)?\.wikipedia\.org$/;
+
+// A Wikipedia article: its page is up to megabytes of HTML (past a fetch's
+// 1 MiB, whatever range is asked), so its plain text comes from
+// Wikipedia's own API, a twentieth of it, its `== headings ==` as `#`s.
+// Null when that does not answer: the page is read as any other.
+async function wikipediaText(io, u) {
+  const host = WIKIPEDIA_HOST.exec(u.hostname);
+  if (host === null || !u.pathname.startsWith("/wiki/") || !io.room(2)) return null;
+  try {
+    const title = decodeURIComponent(u.pathname.slice("/wiki/".length));
+    const api = `https://${host[1]}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&format=json&formatversion=2&titles=${enc(title)}`;
+    const res = await io.fetch(api, { headers: { "user-agent": UA, accept: "application/json" } });
+    const p = res.status === 200 ? res.json()?.query?.pages?.[0] : null;
+    if (typeof p?.extract !== "string" || !p.extract.trim()) return null;
+    const text = p.extract.replace(/^(={2,6}) *(.+?) *\1 *$/gm, (_, eq, h) => `${"#".repeat(eq.length)} ${h}`);
+    return { url: u.href, title: `${p.title} - Wikipedia`, text };
+  } catch {
+    return null;
+  }
+}
+
 /// web_fetch: a page fetched (following at most REDIRECTS_MAX redirects;
 /// one over a fetch's 1 MiB asked again for its head, where the server
-/// honours a range) and read as text. Answers {url, title, text} or {url, error}.
+/// honours a range) and read as text; a Wikipedia article from Wikipedia's
+/// API. Answers {url, title, text} or {url, error}.
 export async function read(io, raw) {
   let u = httpUrl(String(raw ?? "").trim());
   if (u === null) return { url: String(raw ?? ""), error: "web_fetch takes an http(s) URL" };
+  const wiki = await wikipediaText(io, u);
+  if (wiki !== null) return wiki;
   let ranged = false;
   for (let hops = 0; ; ) {
     if (!io.room(1)) return { url: u.href, error: "this turn is out of steps for the web" };
@@ -264,13 +291,13 @@ function results(list, one) {
   return out;
 }
 
+const REFUSED = "it asked this server to prove it is human";
+
 /// DuckDuckGo's HTML results page, read: each result's link (its target,
 /// out of DuckDuckGo's redirect; an ad has none) and its snippet. Throws
 /// when the page is DuckDuckGo asking this server to prove it is human.
 export function ddgResults(status, html) {
-  if (status === 202 || /anomaly-modal|challenge-form|g-recaptcha/.test(html)) {
-    throw new Error("it asked this server to prove it is human");
-  }
+  if (status === 202 || /anomaly-modal|challenge-form|g-recaptcha/.test(html)) throw new Error(REFUSED);
   const out = [];
   let last = null;
   for (const m of String(html).matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
@@ -330,13 +357,17 @@ const WIKIPEDIA = {
 
 /// web_search: the first provider that answers with results, its keyed
 /// ones first (a missing secret passed over, and remembered in
-/// `io.missing`), then DuckDuckGo, then Wikipedia. Answers {provider,
-/// results: [{title, url, snippet}], notes}: `notes` says what failed on
-/// the way (a key that was refused, a provider down).
+/// `io.passed`), then DuckDuckGo (remembered there too when it refuses
+/// this server), then Wikipedia. Answers {provider, results: [{title, url,
+/// snippet}], notes}: `notes` says what failed on the way (a key that was
+/// refused, a provider down).
 export async function search(io, q, n = SEARCH_DEFAULT) {
   const notes = [];
   for (const p of [...SEARCHERS, WIKIPEDIA]) {
-    if (p.secret !== null && io.missing.has(p.secret)) continue;
+    if (io.passed.has(p.secret ?? p.name)) {
+      if (p.secret === null) notes.push(`${p.name}: passed over (it refused this server this turn)`);
+      continue;
+    }
     if (!io.room(1)) {
       notes.push("this turn is out of steps for the web");
       break;
@@ -346,7 +377,7 @@ export async function search(io, q, n = SEARCH_DEFAULT) {
       res = await io.fetch(...p.request(q, n));
     } catch (e) {
       const why = describe(e);
-      if (p.secret !== null && why.includes(`no secret named ${p.secret}`)) io.missing.add(p.secret);
+      if (p.secret !== null && why.includes(`no secret named ${p.secret}`)) io.passed.add(p.secret);
       else notes.push(`${p.name}: ${why}`);
       continue;
     }
@@ -357,7 +388,9 @@ export async function search(io, q, n = SEARCH_DEFAULT) {
       if (!read) throw new Error(`it answered ${res.status}${res.status === 401 || res.status === 403 ? " (is its key right?)" : ""}`);
       found = p.results(res);
     } catch (e) {
-      notes.push(`${p.name}: ${describe(e)}`);
+      const why = describe(e);
+      if (why === REFUSED) io.passed.add(p.name);
+      notes.push(`${p.name}: ${why}`);
       continue;
     }
     if (found.length) return { provider: p.name, results: found.slice(0, n), notes };
@@ -385,7 +418,7 @@ export function searchText(q, r) {
 /// has room), and one cheap call that answers from them alone.
 export async function research(io, question) {
   const notes = [];
-  if (!io.missing.has("PERPLEXITY_API_KEY") && io.room(2)) {
+  if (!io.passed.has("PERPLEXITY_API_KEY") && io.room(2)) {
     try {
       const res = await io.fetch(
         "https://api.perplexity.ai/chat/completions",
@@ -401,7 +434,7 @@ export async function research(io, question) {
       notes.push(`Perplexity: it answered ${res.status}${res.status === 200 ? " with no answer" : ""}`);
     } catch (e) {
       const why = describe(e);
-      if (why.includes("no secret named PERPLEXITY_API_KEY")) io.missing.add("PERPLEXITY_API_KEY");
+      if (why.includes("no secret named PERPLEXITY_API_KEY")) io.passed.add("PERPLEXITY_API_KEY");
       else notes.push(`Perplexity: ${why}`);
     }
   }

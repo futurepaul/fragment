@@ -1126,7 +1126,8 @@ export class App extends DurableObject {
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
       const hands = b.persona.hands === true && agent !== null;
       const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, ...(hands ? [TOOLS.computer] : [])];
-      // the web's steps (applib/web.mjs), and the secrets found missing this turn
+      // the web's steps (applib/web.mjs), and the providers it passes over
+      // this turn (a secret found missing, DuckDuckGo found refusing)
       const web = {
         fetch: (url, init) => {
           if (s.bytes > FETCH_ROOM_BYTES) throw new Error("this turn has read all the web its run can keep; answer with what you have");
@@ -1134,7 +1135,7 @@ export class App extends DurableObject {
         },
         text: (opts) => s.text(opts),
         room: (n) => s.left() - WEB_KEEP_STEPS >= n,
-        missing: new Set(),
+        passed: new Set(),
       };
       const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [] };
       const messages = [
