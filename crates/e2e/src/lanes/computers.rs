@@ -380,7 +380,7 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 10] = [
+const RECOVERY_CHECKS: [&str; 11] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
     "its owner's restart, its save failing too: it starts again at once, from its last save",
@@ -391,6 +391,7 @@ const RECOVERY_CHECKS: [&str; 10] = [
     "its next wake goes back to that save, told once, the same notice; and its agent answers",
     "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
     "asleep, its owner's restart starts it, fresh from its save",
+    "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from a sleep's failed save to its bound, or to the restart that ended it; the time before and after is",
 ];
 
 /// What its owner is told, and the way back to working (rung 4 of
@@ -427,6 +428,9 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let t0 = crate::api::now_ms();
     let r = failing_sleep(s)?;
     let t1 = crate::api::now_ms();
+    // its free window opens at the failure (the lever says when)
+    let unsaved_since = || lever(api, c.id, "saves").ok().and_then(|r| r.body["unsavedSince"].as_i64());
+    let first_free = unsaved_since();
     let unsaved = notice(&r.body, "unsaved");
     let stops = unsaved["stopsAt"].as_i64().unwrap_or(0);
     s.ok(
@@ -443,6 +447,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
     // its owner restarts it: the restart's own save fails, so it goes back
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
+    let restarted_at = crate::api::now_ms();
     let r = restart()?;
     let restored = r.body["restored"].clone();
     s.ok(
@@ -478,6 +483,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let zebra_ran = s.eventually(c.wake, || replied(zebra_seq).is_some());
     // the bound runs out: no save works, and nothing uses it
     let r = failing_sleep(s)?;
+    let second_free = unsaved_since();
     let stops = notice(&r.body, "unsaved")["stopsAt"].as_i64().unwrap_or(i64::MAX);
     let wait = Duration::from_millis((stops - crate::api::now_ms()).clamp(0, bound + 5_000) as u64) + Duration::from_secs(30);
     let slept = s.eventually(wait, || view()["phase"] == "asleep");
@@ -496,6 +502,28 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             && pending["save"] == newest["number"]
             && pending["endedAt"].as_i64().is_some_and(|at| at >= stops - 1_000),
         format!("stops at {stops}, asleep by {asleep_at}; {v}"),
+    );
+    // its awake time, as its owner's ledger has it (each interval's
+    // reference ends with where it starts): none in either free window
+    let awake = || -> Vec<(i64, i64)> {
+        entries(api, c.owner_id, &format!("awake:{}:", c.id))
+            .iter()
+            .filter_map(|e| {
+                let from = e["ref"].as_str()?.rsplit(':').next()?.parse::<i64>().ok()?;
+                Some((from, from + e["entry"]["row"]["usage"]["ms"].as_i64()?))
+            })
+            .collect()
+    };
+    let windows: Vec<(i64, i64)> = [first_free.map(|f| (f, restarted_at)), second_free.map(|f| (f, f + bound))].into_iter().flatten().collect();
+    // the stop's seconds past the bound reach the ledger as it goes to sleep
+    let after = |rows: &[(i64, i64)]| second_free.is_some_and(|f| rows.iter().any(|(from, _)| *from >= f + bound));
+    s.eventually(Duration::from_secs(15), || after(&awake()));
+    let rows = awake();
+    let overlapping: Vec<&(i64, i64)> = rows.iter().filter(|(from, to)| windows.iter().any(|(a, b)| from < b && to > a)).collect();
+    s.ok(
+        RECOVERY_CHECKS[10],
+        windows.len() == 2 && overlapping.is_empty() && second_free.is_some_and(|f| rows.iter().any(|(_, to)| *to <= f)) && after(&rows),
+        json!({ "windows": windows, "overlapping": overlapping, "rows": rows }),
     );
     // saves work again; its next wake goes back to that save, told once
     lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;

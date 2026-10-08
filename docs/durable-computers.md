@@ -115,7 +115,9 @@ file is the newer word, and decision 18 points here.
   open pages, and the shell shows them over every chat with the way back:
   Restart, a sleep that saves if it can and a fresh start from the newest
   good save (never the snapshot), asked twice made once. The shell no
-  longer wakes a computer that won't on the person's presence. The agent
+  longer wakes a computer that won't on the person's presence. The time a
+  computer is kept for its failed saves, up to the bound, is not metered
+  (Paul, 2026-10-08). The agent
   is told too: after a rollback, its next turn in a chat says what turns
   another life ran there since the save (their claims answer 409), from
   the journal (docs/bridge.md, "What a rollback forgot").

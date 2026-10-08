@@ -287,7 +287,9 @@ speaking Cloudflare's APIs) returns once this product works.
     when it stops), told afterwards what a start went back to (once), and
     has one way back, Restart (a sleep that saves if it can, then a fresh
     start from the newest good save; asked twice, made once): docs/computers.md,
-    "What its owner is told".
+    "What its owner is told". The time a computer is kept for its failed
+    saves, up to the bound, is free to its owner (Paul, 2026-10-08): not
+    metered.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

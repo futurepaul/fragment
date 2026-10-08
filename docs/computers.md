@@ -108,7 +108,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 |---|---|---|---|
 | **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
-| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart |
+| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, up to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
 | **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
 | **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
@@ -154,7 +154,8 @@ work on the computer after the save is what went.
 platform posts none there (the rule; docs/chat-records.md), and a notice
 in it would need a new platform record kind every template is to show.
 Every chat is shown in the shell, under its band; a chat opened in a tab
-of its own shows the turn a crash cut, as before.
+of its own shows the turn a crash cut, as before. Notices in a chat
+outside the shell are parked (Paul, 2026-10-08).
 
 **One way back: Restart** (`POST /api/computers/{id}/restart
 {generation}`; Settings' "Restart computer", asked once more, and every
@@ -177,13 +178,23 @@ only when nothing holds it: no screen or other port tab open, no keepalive
 (a turn running, or waiting on its card), no record or page's presence
 within its hold (20 minutes after the last message), and no always-on
 plan. While anything holds it the sleep waits, and `stopsAt` moves past
-the hold or says none. So what the bound limits is the idle time a failing
-computer is kept, at its owner's cost (its awake time is metered as any),
-to `unsaved_max_ms` past its first failed sleep: a hard cap. Re-arming the
-bound after use would keep an idle container longer for a person who is
-not there, and could not save their work: a stop never saves, so a longer
-window only postpones the loss unless saves recover by then. So the bound
-is kept as decision 18 has it, with no pricing question.
+the hold or says none. So what the bound limits is the time a failing
+computer is kept, to `unsaved_max_ms` past its first failed sleep: a hard
+cap, which is also the cost's. Re-arming the bound after use would keep
+an idle container longer for a person who is not there, and could not
+save their work: a stop never saves, so a longer window only postpones
+the loss unless saves recover by then. So the bound is kept as decision
+18 has it.
+
+**The window is free** (Paul, 2026-10-08: the time a computer is kept
+for saves the platform failed is the platform's). Its awake time from a
+sleep's failed save to the bound is not metered: the lifecycle meters up
+to the failure, then passes the window over (`Lifecycle::unmetered`, its
+meters at most two intervals, before it and after it), so nothing is
+charged and nothing refunded. The window ends early when a save works,
+its owner restarts it, or its container goes; what comes after it, and
+whatever holds it past the bound (its person using it), is metered as
+any.
 
 **The agent.** A turn a restart cut ends as lost, and the agent's next
 turn there is told what was cut (docs/bridge.md, "The turn after a cut one
@@ -1081,7 +1092,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   an interval every five minutes awake and one at each sleep, kept by the
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
-  charged.
+  charged. Nor is the time a computer is kept for its failed saves: from
+  a sleep's failed save to `computers.unsaved_max_ms` after it, or to the
+  save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
   route. Each operator key's call is held on the agent's owner's ledger
   before it is made, and settled once the provider answered, at the key's
@@ -1121,7 +1134,11 @@ for a host) and finds the same `HOME`, `~` and modes.
   winning; its failed save stopping unsaved and told as the restart's;
   its start fresh from the image, no snapshot kept until one comes up.
   The simulation restarts too, and checks every notice against the state
-  (a loss told is unseen and a life it had; never a stop before the bound).
+  (a loss told is unseen and a life it had; never a stop before the bound),
+  and that no meter falls in a free window. The free window: nothing
+  metered from a sleep's failed save to its bound, before and after it as
+  any, a late report or an alarm again metering nothing twice, the same
+  across a restart of the DO.
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker. A crash is the
   lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
@@ -1134,8 +1151,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   lane's recovery checks see it run out: a failed sleep told at once with
   its stop time, a restart asked twice (its save failing too) going back
   once and saying so until seen, the unsaved stop at the time it said and
-  the wake after told once, a restart of a sleeping computer, and one
-  refused at zero credit. The `shell-ui` lane sees the same in Chrome:
+  the wake after told once, a restart of a sleeping computer, one
+  refused at zero credit, and no awake time on its owner's ledger in
+  either free window. The `shell-ui` lane sees the same in Chrome:
   the warning on Settings with no reload, its Restart, the notice of what
   it went back to and its OK (gone after a reload), and Settings' Restart
   computer. On a preview, the hosted `agent-restart` section (by name)

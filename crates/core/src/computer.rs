@@ -445,6 +445,13 @@ pub struct Lifecycle {
     /// and why (none once one works).
     #[serde(default)]
     failing: Option<Failing>,
+    /// Awake time its owner is not charged: from a sleep's failed save to
+    /// the bound after it (Paul, 2026-10-08: the time a computer is kept
+    /// for saves the platform failed is the platform's), `[from, to)` in
+    /// ms; none once the window ends (a save works, or it stops). Set and
+    /// ended beside `unsaved_since_ms`.
+    #[serde(default)]
+    unmetered: Option<(i64, i64)>,
 }
 
 impl Default for Lifecycle {
@@ -479,6 +486,7 @@ impl Lifecycle {
             restore_fallbacks: 0,
             restarting: false,
             failing: None,
+            unmetered: None,
         }
     }
 
@@ -569,6 +577,7 @@ impl Lifecycle {
         self.save_asked_ms = now_ms;
         self.save_failures = 0;
         self.unsaved_since_ms = None;
+        self.unmetered = None;
         self.restore_fallbacks = 0;
         self.restarting = false;
         self.failing = None;
@@ -630,11 +639,32 @@ impl Lifecycle {
     /// A save worked: nothing of this life is unsaved since it was asked,
     /// and what its view said of its saves goes, whichever life said it (a
     /// life before it that slept unsaved says so until a save works).
-    fn saved(&mut self, step: &mut Step) {
+    fn saved(&mut self, now_ms: i64, step: &mut Step) {
         self.save_failures = 0;
         self.failing = None;
-        self.unsaved_since_ms = None;
+        self.end_unsaved(now_ms, step);
         step.note = SaveNote::Clear;
+    }
+
+    /// A sleep's save failed, the first since one worked: its unsaved
+    /// window opens, and the awake time in it, up to the bound, is free
+    /// (metered up to here, then none of it).
+    fn begin_unsaved(&mut self, now_ms: i64, rules: &Rules, step: &mut Step) {
+        assert!(self.unsaved_since_ms.is_none() && self.unmetered.is_none(), "one unsaved window at a time");
+        self.meter(now_ms, step);
+        self.unsaved_since_ms = Some(now_ms);
+        self.unmetered = Some((now_ms, now_ms + rules.unsaved_max_ms));
+    }
+
+    /// The unsaved window ends (a save worked, it stops, or its container
+    /// went): its free time is passed over up to here, and what comes
+    /// after is metered as any.
+    fn end_unsaved(&mut self, now_ms: i64, step: &mut Step) {
+        if self.unmetered.is_some() {
+            self.meter(now_ms, step);
+        }
+        self.unsaved_since_ms = None;
+        self.unmetered = None;
     }
 
     /// The pause before the next try of a save that failed `save_failures`
@@ -652,13 +682,16 @@ impl Lifecycle {
     fn sleep_save_failed(&mut self, generation: u64, why: &str, now_ms: i64, rules: &Rules, step: &mut Step) {
         self.save_failed(why, now_ms);
         if self.restarting {
-            self.unsaved_since_ms = None;
+            self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
             step.actions.push(Action::Stop { generation, saved: false });
             step.note = SaveNote::Says(format!("its restart could not save /data first ({why}), so it started again from its last save"));
             return;
         }
-        let since = *self.unsaved_since_ms.get_or_insert(now_ms);
+        if self.unsaved_since_ms.is_none() {
+            self.begin_unsaved(now_ms, rules, step);
+        }
+        let since = self.unsaved_since_ms.expect("its window is open");
         let bound = since + rules.unsaved_max_ms;
         if now_ms < bound {
             self.phase = Phase::Awake { generation, since_ms: now_ms };
@@ -670,7 +703,7 @@ impl Lifecycle {
             step.actions.push(Action::Unhold { generation });
             step.note = SaveNote::Says(format!("its sleep could not save /data ({why}): it stays awake and tries again, for up to {} minutes", rules.unsaved_max_ms / 60_000));
         } else {
-            self.unsaved_since_ms = None;
+            self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
             step.actions.push(Action::Stop { generation, saved: false });
             step.note = SaveNote::Says(format!(
@@ -718,11 +751,21 @@ impl Lifecycle {
         Some(since.max(self.save_asked_ms) + SAVE_EVERY_MS)
     }
 
-    /// Awake time up to `now`, once.
+    /// Awake time up to `now`, once, but what falls in the unsaved window
+    /// (`unmetered`): its owner pays for none of it (at most two intervals,
+    /// before the window and after it).
     fn meter(&mut self, now_ms: i64, step: &mut Step) {
         if now_ms > self.metered_to_ms {
             if !self.always_on {
-                step.actions.push(Action::Meter { from_ms: self.metered_to_ms, to_ms: now_ms });
+                let (from, to) = (self.metered_to_ms, now_ms);
+                let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
+                assert!(free_from <= free_to, "a window runs forward");
+                if from < free_from.min(to) {
+                    step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
+                }
+                if free_to.max(from) < to && self.unmetered.is_some() {
+                    step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
+                }
             }
             self.metered_to_ms = now_ms;
         }
@@ -755,7 +798,9 @@ impl Lifecycle {
         self.owner_sleep = false;
         self.save_due_ms = None;
         self.busy_since_ms = None;
+        // metered above, its unsaved window passed over: it ends here
         self.unsaved_since_ms = None;
+        self.unmetered = None;
         self.restarting = false;
         self.failing = None;
         self.save_failures = 0;
@@ -922,6 +967,7 @@ impl Lifecycle {
                     self.save_due_ms = None;
                     self.busy_since_ms = None;
                     self.unsaved_since_ms = None;
+                    self.unmetered = None;
                     self.restarting = false;
                     self.failing = None;
                     self.save_failures = 0;
@@ -942,11 +988,11 @@ impl Lifecycle {
             }
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 self.saving = None;
-                self.saved(&mut step);
+                self.saved(now_ms, &mut step);
                 step.actions.push(Action::Unhold { generation });
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
-                self.saved(&mut step);
+                self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
                 step.actions.push(Action::Stop { generation, saved: true });
             }
@@ -1125,6 +1171,12 @@ impl Lifecycle {
         assert!(self.restore_fallbacks as usize <= SAVES_KEPT, "each fallback is to an older save");
         if self.restarting {
             assert!(matches!(self.phase, Phase::Sleeping { .. }) && self.owner_sleep && self.wake_after_sleep, "a restart is its owner's sleep, a start after it");
+        }
+        // a free window is its unsaved window's (one stored before windows
+        // were free has none: its time is metered as it was)
+        if let Some((from, to)) = self.unmetered {
+            assert_eq!(self.unsaved_since_ms, Some(from), "the free window opens with the unsaved one");
+            assert!(from <= to, "a window runs forward");
         }
         // (a lifecycle stored before `failing` was kept may count failures
         // with none told: its next failure tells it)
@@ -2512,7 +2564,8 @@ mod tests {
             if s.actions.iter().any(|a| matches!(a, Action::Stop { .. })) {
                 break s;
             }
-            assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "it keeps its container: {s:?}");
+            let metered = s.actions.iter().filter(|a| matches!(a, Action::Meter { .. })).count();
+            assert!(s.actions.last() == Some(&Action::Unhold { generation: g }) && metered == usize::from(tries == 1), "it keeps its container, metered up to its first failure only: {s:?}");
             assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g), "the same container, awake");
             assert!(matches!(&s.note, SaveNote::Says(why) if why.contains("could not save") && why.contains("R2 is down")), "{:?}", s.note);
             assert_eq!(l.unsaved_since_ms(), Some(first + 2_000));
@@ -2533,7 +2586,9 @@ mod tests {
             s = l.apply_with(Event::Alarm, at, &rules);
         };
         assert!(at - first >= rules.unsaved_max_ms && at - first < rules.unsaved_max_ms + 10_000, "it gave up at its bound, its last try at the bound itself: {} ms", at - first);
-        assert_eq!(stopped.actions, vec![Action::Stop { generation: g, saved: false }]);
+        // free to its bound (Paul, 2026-10-08); its stop's seconds past it are its owner's
+        let bound = first + 2_000 + rules.unsaved_max_ms;
+        assert_eq!(stopped.actions, vec![Action::Meter { from_ms: bound, to_ms: at }, Action::Stop { generation: g, saved: false }]);
         assert!(matches!(&stopped.note, SaveNote::Says(why) if why.contains("slept unsaved")), "{:?}", stopped.note);
         let s = l.apply_with(Event::Asleep { generation: g }, at + 5_000, &rules);
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false }), "its next wake is a rollback");
@@ -2552,7 +2607,7 @@ mod tests {
         l.apply(Event::Sleep, T + 10_000);
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 10_500));
         let s = l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, T + 11_000);
-        assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "an owner's sleep keeps its container too");
+        assert_eq!(s.actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: T + 11_000 }, Action::Unhold { generation: g }], "an owner's sleep keeps its container too, metered to its failure");
         assert_eq!(s.alarm_ms, Some(T + 11_000 + SAVE_RETRY_MS));
         let s = l.apply(Event::Alarm, T + 11_000 + SAVE_RETRY_MS);
         assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g }), "unwanted still, its retry is a sleep");
@@ -2571,6 +2626,89 @@ mod tests {
         assert_eq!((s.actions, s.alarm_ms), (vec![Action::Unhold { generation: g }], Some(T + 41_000 + SAVE_RETRY_MS)));
         let s = l.apply(Event::Alarm, T + 41_000 + SAVE_RETRY_MS);
         assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "wanted (a tab is open), it saves awake: {s:?}");
+    }
+
+    /// Goal (Paul, 2026-10-08): the awake time a computer is kept for saves
+    /// the platform failed is free. From a sleep's failed save to its bound
+    /// nothing is metered; before it, and after it (held past the bound by a
+    /// record, and once a save works), it is metered as any. Replay: a late
+    /// failure's report, and an alarm asked again, meter nothing twice and
+    /// move nothing. Restart: its lifecycle stored and read back mid-window
+    /// meters the same. Method: one computer's alarms, every meter kept.
+    #[test]
+    fn the_time_kept_for_failed_saves_is_free() {
+        let rules = Rules { unsaved_max_ms: 10 * 60_000 };
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let mut metered: Vec<(i64, i64)> = vec![];
+        let keep = |s: &Step, metered: &mut Vec<(i64, i64)>| {
+            for a in &s.actions {
+                if let Action::Meter { from_ms, to_ms } = a {
+                    metered.push((*from_ms, *to_ms));
+                }
+            }
+        };
+        // a hold the lifecycle asked for, answered: the save works, or fails
+        let answer = |l: &mut Lifecycle, s: &Step, at: i64, works: bool, metered: &mut Vec<(i64, i64)>| {
+            if s.actions.contains(&Action::Hold { generation: g }) {
+                let (_, _, seq) = save_asked(&l.apply_with(Event::Held { generation: g, held: true }, at + 500, &rules));
+                let done = match works {
+                    true => Event::Saved { generation: g, seq },
+                    false => Event::SaveFailed { generation: g, seq, why: "R2 is down".into() },
+                };
+                keep(&l.apply_with(done, at + 1_000, &rules), metered);
+            }
+        };
+        let s = l.apply_with(Event::Alarm, T + IDLE_MS, &rules);
+        keep(&s, &mut metered);
+        assert!(s.actions.contains(&Action::Sleep { generation: g }));
+        let (_, _, seq) = save_asked(&l.apply_with(Event::Held { generation: g, held: true }, T + IDLE_MS + 500, &rules));
+        let f = T + IDLE_MS + 2_000;
+        let s = l.apply_with(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, f, &rules);
+        keep(&s, &mut metered);
+        assert_eq!(metered.last(), Some(&(T + IDLE_MS, f)), "metered up to the failure");
+        assert_eq!(l.unmetered, Some((f, f + rules.unsaved_max_ms)));
+        // replay: the same failure's late report is nothing
+        let before = l.clone();
+        assert!(l.apply_with(Event::SaveFailed { generation: g, seq, why: "late".into() }, f + 100, &rules).actions.is_empty() && l == before);
+        // a record holds it past the bound; its alarms within the window meter nothing
+        keep(&l.apply_with(Event::Wake { why: Wake::Record }, f + 500, &rules), &mut metered);
+        let at = f + 5 * 60_000;
+        let s = l.apply_with(Event::Alarm, at, &rules);
+        keep(&s, &mut metered);
+        answer(&mut l, &s, at, false, &mut metered);
+        let s = l.apply_with(Event::Alarm, at, &rules);
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Meter { .. })), "an alarm again meters nothing twice: {s:?}");
+        assert!(metered.iter().all(|(_, to)| *to <= f), "nothing in the window is metered: {metered:?}");
+        // restart: stored mid-window and read back, it meters the same
+        let mut l: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(l.unmetered, Some((f, f + rules.unsaved_max_ms)));
+        // past the bound, still held by the record: metered from the bound on
+        let at = f + rules.unsaved_max_ms + 60_000;
+        let s = l.apply_with(Event::Alarm, at, &rules);
+        keep(&s, &mut metered);
+        assert!(metered.contains(&(f + rules.unsaved_max_ms, at)), "from the bound on: {metered:?}");
+        // a save that works ends the window; what comes after is metered as any
+        answer(&mut l, &s, at, true, &mut metered);
+        let at = if l.unmetered.is_some() {
+            // its next awake try, that one working
+            let due = l.save_due_ms.expect("a try is due");
+            let s = l.apply_with(Event::Alarm, due, &rules);
+            keep(&s, &mut metered);
+            answer(&mut l, &s, due, true, &mut metered);
+            due
+        } else {
+            at
+        };
+        assert_eq!((l.unmetered, l.unsaved_since_ms()), (None, None), "a save worked: the window is over");
+        let end = at + 5 * 60_000;
+        keep(&l.apply_with(Event::Alarm, end, &rules), &mut metered);
+        // every metered interval runs forward, none overlaps another or the window
+        metered.sort();
+        assert!(metered.iter().all(|(a, b)| a < b) && metered.windows(2).all(|w| w[0].1 <= w[1].0), "{metered:?}");
+        assert!(metered.iter().all(|(a, b)| *b <= f || *a >= f + rules.unsaved_max_ms), "none in the window: {metered:?}");
+        let total: i64 = metered.iter().map(|(a, b)| b - a).sum();
+        assert_eq!(total, (metered.last().unwrap().1 - (T + 3_000)) - rules.unsaved_max_ms, "all but the window: {metered:?}");
     }
 
     /// Goal (F5): a start whose save will not restore (its archive gone or
@@ -2713,7 +2851,7 @@ mod tests {
         assert!(s.actions.contains(&Action::Sleep { generation: g }), "{s:?}");
         let (_, _, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
         let s = c.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() });
-        assert_eq!(s.actions, vec![Action::Unhold { generation: g }], "kept, within its bound");
+        assert_eq!(s.actions.last(), Some(&Action::Unhold { generation: g }), "kept, within its bound");
         // its owner restarts it: the restart's save fails too, and it stops
         assert_eq!(c.apply(Event::Restart { generation: g }).actions, vec![Action::Sleep { generation: g }]);
         let (_, _, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
@@ -3064,7 +3202,7 @@ mod tests {
         }
         // the sim's bound is shorter than the default, so it is reached
         let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-        let mut reached = [0u32; 9];
+        let mut reached = [0u32; 10];
         for seed0 in 1..=8u64 {
             let mut seed = seed0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let mut l = Lifecycle::new();
@@ -3135,6 +3273,8 @@ mod tests {
                     _ => None,
                 };
                 let cancels = matches!(&event, Event::Opened { socket: Socket::Keepalive }) && matches!(l.phase, Phase::Sleeping { .. }) && !l.owner_sleep && matches!(l.saving, Some(Saving::Hold { .. }));
+                let free_before = l.unmetered;
+                reached[9] += u32::from(free_before.is_some());
                 let s = l.apply_with(event, now, &rules);
                 if let Some(seq) = kept {
                     // the save the DO keeps, as it reports it kept
@@ -3178,6 +3318,11 @@ mod tests {
                         Action::Meter { from_ms, to_ms } => {
                             assert!(from_ms < to_ms && *to_ms <= now, "an interval runs forward, up to now");
                             assert!(metered.last().is_none_or(|(_, last)| from_ms >= last), "intervals never overlap");
+                            // the time kept for failed saves is free: no interval
+                            // overlaps the window open before or after this step
+                            for (a, b) in [free_before, l.unmetered].into_iter().flatten() {
+                                assert!(*to_ms <= a || *from_ms >= b.min(now), "metered {from_ms}..{to_ms} in the free window {a}..{b} (seed {seed0})");
+                            }
                             metered.push((*from_ms, *to_ms));
                         }
                         Action::Sleep { generation: g } | Action::Hold { generation: g } => {
@@ -3256,6 +3401,6 @@ mod tests {
             assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
         }
         // every kind of save the lifecycle has was reached, across the seeds
-        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told: {reached:?}");
+        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows: {reached:?}");
     }
 }
