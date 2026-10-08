@@ -321,15 +321,19 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && released == 1 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
         json!({ "run": run, "ledger": v }),
     );
-    s.ai.fail_next(&[503, 503, 503, 503, 503]);
+    // each of its five tries is two calls: a 503 before a call begins is
+    // its hedge's cue (fragment_core::hedge), whose hold goes back with it
+    s.ai.fail_next(&[503; 10]);
     let r = api.op(&owner, &name, "summarize", "t-503", json!({ "text": "flaky", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
-    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
+    let ended = entries(api, &owner_id, &format!("step:{name}@"));
+    let (hedges, steps): (Vec<&Value>, Vec<&Value>) = ended.iter().partition(|e| e["ref"].as_str().is_some_and(|r| r.contains("/hedge/")));
+    let released = steps.iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step whose retries run out gives its reservation back too (bug 3)",
-        run["status"] == "held" && released == 2 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
-        json!({ "run": run, "ledger": v }),
+        "a step whose retries run out gives its reservation back too (bug 3), and each try's hedge's",
+        run["status"] == "held" && released == 2 && hedges.len() == 5 && hedges.iter().all(|e| end_of(e) == "released") && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        json!({ "run": run, "ledger": v, "hedges": hedges }),
     );
 
     // ---- bug 2: a step tried again after its call was paid never buys again

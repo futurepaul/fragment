@@ -573,6 +573,13 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
+            // whether `principal` has a live socket here now (a job's
+            // `members` step's `here`): an agent's bridge opens one once it
+            // has caught up on a channel it follows
+            Some("here") => {
+                let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("here names a principal"))?;
+                json!({ "here": self.here(principal) })
+            }
             Some("abort-app") => {
                 // its app's instance ends, as an eviction ends it: the next
                 // call starts a fresh one on the same database
