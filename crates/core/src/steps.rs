@@ -400,6 +400,10 @@ pub struct AiText {
     /// The call streams, and its text so far is that channel's draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<Draft>,
+    /// Whose model the payer's choice gives it (crate::providers::Role):
+    /// `chat` or `memory`; unnamed, its tier's (`cheap` memory, else chat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// A function the model may call, in OpenAI's shape.

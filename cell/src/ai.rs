@@ -343,6 +343,15 @@ impl FragmentCell {
         if body_bytes > MODEL_BODY_MAX_BYTES {
             return Err(permanent(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES).message));
         }
+        // the payer's choice for the step's role: a tier, or their own provider (providers/step.rs)
+        let tier = match crate::providers::step::chosen_for_step(&self.env, &p.owner, t, tier, !p.capped).await? {
+            crate::providers::Chosen::Fragment(tier) => tier,
+            crate::providers::Chosen::Own(own) => {
+                let draft = drafting.as_ref().map(|d| crate::providers::step::DraftTo { channel: &d.channel, turn: &d.turn, principal: &d.principal });
+                let at = crate::providers::step::StepAt { key: &p.key, run: p.run, payer: &p.owner, tier, draft };
+                return self.step_text_own(at, t, own, body).await;
+            }
+        };
         let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, drafting.is_some())).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
         let (answer, used, log_id) = match &drafting {

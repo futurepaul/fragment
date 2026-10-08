@@ -15,7 +15,11 @@
 //!   the provider's).
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
 //!   person's own key for an `own` provider, kept sealed by their computer
-//!   (one computer per person for now: decision 13), which swaps it in.
+//!   (one computer per person for now: decision 13), which swaps it in,
+//!   and which the model route reads for their own models (providers/).
+//! - `PUT /api/connections/chatgpt/tokens` and `DELETE …/tokens`: their
+//!   Sign in with ChatGPT tokens, for the model route alone
+//!   (providers/mod.rs).
 
 use std::collections::BTreeMap;
 
@@ -75,6 +79,8 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
     let provider_of = |name: &str| cfg.providers.get(name).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no provider {name:?} here (this deployment offers {:?})", offered())));
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
+        // Sign in with ChatGPT's tokens, from `fragment connect chatgpt` (providers/mod.rs)
+        (Method::Put | Method::Delete, ["chatgpt", "tokens"]) => crate::providers::chatgpt(env, who, method, body).await,
         (Method::Get, []) => {
             let states = connection_states(env, cfg, workos_user(env, cfg, who)).await?;
             // the person's computer keeps them, for its guest's next read; one

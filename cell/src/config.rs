@@ -132,6 +132,11 @@ pub struct Config {
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
+    /// `FRAGMENT_MODELS_UPSTREAM` (dev and the e2e only): a person's own
+    /// providers' calls (Anthropic's, OpenAI's, and the refreshes of their
+    /// ChatGPT sign-in) go here, their host in `x-fragment-upstream-host`,
+    /// instead of to their host (crates/fakes `vendors`).
+    pub models_upstream: Option<String>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -262,6 +267,7 @@ impl Config {
             vision_model: fragment_core::models::vision_model(var(env, "FRAGMENT_VISION_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
                 .unwrap_or_else(|e| panic!("FRAGMENT_VISION_MODEL: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
+            models_upstream: var(env, "FRAGMENT_MODELS_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
 

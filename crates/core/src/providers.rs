@@ -48,6 +48,9 @@ use crate::price::Usage;
 pub const MODEL_ID_MAX_BYTES: usize = 128;
 /// The models a provider's list is read for, at most.
 pub const MODELS_LISTED_MAX: usize = 200;
+/// An own provider's call, bounded as the route bounds a tier's
+/// (`models::bound_hinted`): the cap on what one call writes.
+pub const OWN: crate::models::Capped = crate::models::Capped { model: "own", max_tokens: crate::models::MAX_TOKENS };
 /// A content part's hint for the vendors' translations (the module's doc).
 pub const CACHE_HINT: &str = "cache";
 /// Its one value: a growing text, sent in blocks with a cache mark.
@@ -379,6 +382,41 @@ pub trait Translate {
     }
 }
 
+/// The request `vendor`'s API takes for `input` (a chat completion bounded
+/// for the route, its hints kept: `models::bound_hinted`) on `model`.
+pub fn request(vendor: Vendor, input: &Value, model: &str) -> Result<Value, Untranslatable> {
+    match vendor {
+        Vendor::Anthropic => anthropic::request(input, model),
+        Vendor::Openai => responses::request(input, model, false),
+        Vendor::Chatgpt => responses::request(input, model, true),
+        Vendor::Fragment => Err(Untranslatable("Fragment's models take the chat completion as it is".into())),
+    }
+}
+
+/// The path `vendor`'s calls go to, on its host.
+pub const fn path(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::Anthropic => "/v1/messages",
+        _ => "/v1/responses",
+    }
+}
+
+/// `vendor`'s stream, read as OpenAI's.
+pub fn translator(vendor: Vendor, model: &str) -> Box<dyn Translate> {
+    match vendor {
+        Vendor::Anthropic => Box::new(anthropic::Stream::new(model)),
+        _ => Box::new(responses::Stream::new(model)),
+    }
+}
+
+/// A refusal of `vendor`'s, as a failure.
+pub fn failure_of(vendor: Vendor, status: u16, body: &[u8]) -> Failure {
+    match vendor {
+        Vendor::Anthropic => anthropic::failure_of(status, body),
+        _ => responses::failure_of(status, body),
+    }
+}
+
 /// An answer's assistant message (`Answer::message`), with its thinking
 /// blocks when it has any.
 pub fn message_of(answer: &Answer, thinking: &[Value]) -> Value {
@@ -399,6 +437,134 @@ pub fn completion(chunks: &Chunks, answer: &Answer, thinking: &[Value], counted:
         c["usage"] = u.openai();
     }
     c
+}
+
+/// `PUT /api/models/choices`'s body: a role's choice, `null` for the
+/// default (Fragment's GLM-5.3 Flash); a role not named is left as it is.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleChoices {
+    #[serde(default, with = "named")]
+    pub chat: Option<Option<Choice>>,
+    #[serde(default, with = "named")]
+    pub memory: Option<Option<Choice>>,
+    #[serde(default, with = "named")]
+    pub hands: Option<Option<Choice>>,
+}
+
+impl RoleChoices {
+    /// The roles it names, each with its choice (`None`: the default).
+    pub fn named(self) -> Vec<(Role, Option<Choice>)> {
+        [(Role::Chat, self.chat), (Role::Memory, self.memory), (Role::Hands, self.hands)].into_iter().filter_map(|(r, c)| c.map(|c| (r, c))).collect()
+    }
+}
+
+/// A field named with `null` (`Some(None)`), apart from one not named (`None`).
+mod named {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
+}
+
+// ---- Sign in with ChatGPT (developers.openai.com/siwc/token-sharing-open-source,
+// read 2026-10-08): the CLI signs in (its redirect is a loopback), the
+// person's computer keeps the tokens and refreshes them ----
+
+/// OpenAI's issuer: its discovery is `<issuer>/.well-known/openid-configuration`.
+pub const CHATGPT_ISSUER: &str = "https://auth.openai.com";
+/// The token endpoint, where a code is exchanged and a token refreshed.
+pub const CHATGPT_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+/// The resource every grant names.
+pub const CHATGPT_RESOURCE: &str = "https://api.openai.com/v1";
+/// The scopes asked: identity, a refresh token, and plan usage.
+pub const CHATGPT_SCOPES: &str = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+/// The scope plan usage needs: tokens without it are refused.
+pub const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
+/// The first-time registration's client id: never the one kept.
+pub const DYNAMIC_CLIENT: &str = "dynamic_agent_client";
+/// The name a registration shows the person (`agent_name_hint`).
+pub const CHATGPT_APP_NAME: &str = "Fragment";
+/// A token, at most (a JWT of a few KiB).
+pub const TOKEN_MAX_BYTES: usize = 16 * 1024;
+
+/// What `fragment connect chatgpt` hands the platform: the issued client's
+/// id, the tokens and the access token's lifetime, the scopes granted, and
+/// the account's email (shown, and the next sign-in's `login_hint`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatgptTokens {
+    pub client_id: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+    pub scope: String,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+/// Whether `id` is an issued client's id (`oaiapp_…`): never the dynamic one.
+pub fn valid_client_id(id: &str) -> bool {
+    (1..=200).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') && id != DYNAMIC_CLIENT
+}
+
+/// Why `t` is no tokens to keep, if it is none.
+pub fn tokens_check(t: &ChatgptTokens) -> Result<(), String> {
+    let token = |s: &str| (1..=TOKEN_MAX_BYTES).contains(&s.len()) && s.bytes().all(|b| (0x21..=0x7e).contains(&b));
+    if !valid_client_id(&t.client_id) {
+        return Err("client_id is the issued client's id (not dynamic_agent_client)".into());
+    }
+    if !token(&t.access_token) || !token(&t.refresh_token) {
+        return Err(format!("the tokens are 1 to {TOKEN_MAX_BYTES} printable characters"));
+    }
+    if !(1..=86_400 * 30).contains(&t.expires_in) {
+        return Err("expires_in is the access token's lifetime in seconds".into());
+    }
+    if !t.scope.split_whitespace().any(|s| s == PLAN_SCOPE) {
+        return Err(format!("ChatGPT did not grant plan usage ({PLAN_SCOPE}): connect again and allow it"));
+    }
+    if t.email.as_ref().is_some_and(|e| e.len() > 320 || e.chars().any(char::is_control)) {
+        return Err("email is an address".into());
+    }
+    Ok(())
+}
+
+/// A refresh's answer, read (`grant_type=refresh_token`): the new access
+/// token, its replacement refresh token, its lifetime, and the scopes (the
+/// grant's own when the answer names none).
+pub fn refreshed(v: &Value, client_id: &str, scope: &str, email: Option<String>) -> Result<ChatgptTokens, String> {
+    let t = ChatgptTokens {
+        client_id: client_id.to_string(),
+        access_token: v["access_token"].as_str().unwrap_or_default().to_string(),
+        refresh_token: v["refresh_token"].as_str().unwrap_or_default().to_string(),
+        expires_in: v["expires_in"].as_i64().unwrap_or(0),
+        scope: v["scope"].as_str().unwrap_or(scope).to_string(),
+        email,
+    };
+    if !v["token_type"].as_str().is_none_or(|t| t.eq_ignore_ascii_case("bearer")) {
+        return Err("the refresh answered no bearer token".into());
+    }
+    tokens_check(&t).map(|()| t)
+}
+
+/// Whether a refresh's refusal means the tokens are spent for good (sign in
+/// again), not a failure that may pass
+/// (developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+pub fn refresh_spent(status: u16, v: &Value) -> bool {
+    let code = v["error"].as_str().or(v["error"]["code"].as_str()).unwrap_or("");
+    matches!(code, "invalid_grant" | "invalid_refresh_token" | "token_expired" | "refresh_token_expired" | "refresh_token_invalidated" | "refresh_token_reused" | "invalid_client")
+        || matches!(status, 400 | 401)
+}
+
+/// A host's id for Sign in with ChatGPT (`ext_agent_host_id`): a UUIDv4's
+/// URN, from 16 random bytes.
+pub fn host_id(random: [u8; 16]) -> String {
+    let mut b = random;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    format!("urn:uuid:{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 /// A model a provider lists, for the picker.
@@ -575,6 +741,43 @@ mod tests {
         let v = c.openai();
         assert_eq!((v["prompt_tokens"].clone(), v["prompt_tokens_details"]["cached_tokens"].clone()), (json!(1000), json!(900)));
         assert_eq!(crate::models::usage_of("claude-x", &v), Some(c.usage("claude-x")));
+    }
+
+    fn tokens() -> ChatgptTokens {
+        ChatgptTokens {
+            client_id: "oaiapp_abc".into(),
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            expires_in: 3600,
+            scope: CHATGPT_SCOPES.into(),
+            email: Some("p@example.com".into()),
+        }
+    }
+
+    /// Goal: only tokens that grant plan usage, from an issued client, are
+    /// kept; a refresh's answer reads into the next tokens (its scope kept
+    /// when it names none), and its refusal says whether to sign in again.
+    /// Method: good tokens, each way out of shape, and refreshes.
+    #[test]
+    fn chatgpt_tokens_are_checked() {
+        assert!(tokens_check(&tokens()).is_ok());
+        assert!(tokens_check(&ChatgptTokens { client_id: DYNAMIC_CLIENT.into(), ..tokens() }).is_err());
+        assert!(tokens_check(&ChatgptTokens { client_id: "a b".into(), ..tokens() }).is_err());
+        assert!(tokens_check(&ChatgptTokens { scope: "openid offline_access".into(), ..tokens() }).unwrap_err().contains(PLAN_SCOPE));
+        assert!(tokens_check(&ChatgptTokens { access_token: String::new(), ..tokens() }).is_err());
+        assert!(tokens_check(&ChatgptTokens { refresh_token: "has space".into(), ..tokens() }).is_err());
+        assert!(tokens_check(&ChatgptTokens { expires_in: 0, ..tokens() }).is_err());
+        let r = refreshed(&json!({ "access_token": "at2", "refresh_token": "rt2", "expires_in": 3600, "token_type": "Bearer" }), "oaiapp_abc", CHATGPT_SCOPES, None).unwrap();
+        assert_eq!((r.access_token.as_str(), r.refresh_token.as_str(), r.scope.as_str()), ("at2", "rt2", CHATGPT_SCOPES));
+        assert!(refreshed(&json!({ "access_token": "at2", "expires_in": 3600 }), "oaiapp_abc", CHATGPT_SCOPES, None).is_err(), "no replacement refresh token");
+        assert!(refresh_spent(400, &json!({ "error": "invalid_grant" })));
+        assert!(refresh_spent(401, &json!({})));
+        assert!(!refresh_spent(503, &json!({ "detail": "later" })));
+        let named = serde_json::from_value::<RoleChoices>(json!({ "chat": null, "hands": { "provider": "anthropic", "model": "m" } })).unwrap().named();
+        assert_eq!(named, vec![(Role::Chat, None), (Role::Hands, Some(Choice { provider: Vendor::Anthropic, model: "m".into() }))], "null is the default; one not named is left");
+        assert!(serde_json::from_value::<RoleChoices>(json!({ "talk": null })).is_err());
+        let id = host_id([0xff; 16]);
+        assert_eq!(id, "urn:uuid:ffffffff-ffff-4fff-bfff-ffffffffffff");
     }
 
     /// Goal: the picker lists chat models and suggests the gist's. Method:

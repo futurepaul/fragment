@@ -176,12 +176,22 @@ async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
 
 /// One model call, metered (the module's doc): its answer as the client
 /// reads it, OpenAI's shape. A streamed answer is settled after it ends,
-/// by `after`, whether or not the client read it to its end.
-pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
+/// by `after`, whether or not the client read it to its end. A tier's call
+/// runs on the payer's choice for their agents (`hands`): another tier, or
+/// their own provider (providers/mod.rs), unless its spender is someone
+/// else in the payer's fragment.
+pub async fn complete(env: &Env, mut call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let body_bytes = serde_json::to_vec(&call.body).expect("a JSON value serializes").len();
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
+    }
+    if let Named::Tier(named) = call.named {
+        let own_spend = call.fragment.as_ref().is_none_or(|f| f.owner != call.payer || f.by_owner);
+        match crate::providers::chosen(env, call.payer, fragment_core::providers::Role::Hands, named, own_spend).await? {
+            crate::providers::Chosen::Fragment(tier) => call.named = Named::Tier(tier),
+            crate::providers::Chosen::Own(own) => return crate::providers::complete(env, call, own, after).await,
+        }
     }
     let model = bounds::capped(call.named, cfg.vision_model.as_str()).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;

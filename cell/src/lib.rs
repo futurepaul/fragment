@@ -61,6 +61,7 @@ mod ops;
 mod owner;
 mod plane;
 mod principal;
+mod providers;
 mod publish;
 mod push;
 mod registry;
@@ -1158,6 +1159,13 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         }
         (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
         (Method::Post, ["api", "models", "v1", "decide"]) => models::decide_route(req, env, &url).await,
+        // a person's own models: the picker (providers/mod.rs)
+        (method @ (Method::Get | Method::Put), ["api", "models", rest @ ..]) => {
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
+            let rest = rest.to_vec();
+            providers::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+        }
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await

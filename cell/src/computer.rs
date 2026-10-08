@@ -61,6 +61,8 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
 use crate::js;
 
+mod own_models;
+
 /// The marker an internal route's caller carries (routed.rs `marker`): the
 /// router never passes it.
 pub const INTERNAL_HEADER: &str = "x-fragment-computer-internal";
@@ -85,7 +87,9 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 /// it is made (`computer/assign`), so the column's default is never read.
 /// `uses` counts each agent's calls to each provider a month (`Month`'s
 /// index) and what they were charged; `own_keys` holds the owner's own
-/// keys, sealed for this object.
+/// keys, sealed for this object. `model_choices`, `chatgpt` (one row: the
+/// owner's Sign in with ChatGPT, its tokens sealed) and `model_uses` are
+/// their own models' (own_models.rs).
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
@@ -94,6 +98,9 @@ CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
 CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS model_choices (role TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS chatgpt (one INTEGER PRIMARY KEY CHECK (one = 1), client_id TEXT NOT NULL, sealed TEXT, expires_at INTEGER NOT NULL, scopes TEXT NOT NULL, email TEXT, state TEXT NOT NULL, refreshing_until INTEGER NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS model_uses (month INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, role TEXT NOT NULL, calls INTEGER NOT NULL, input INTEGER NOT NULL, cached INTEGER NOT NULL, cache_write INTEGER NOT NULL, output INTEGER NOT NULL, PRIMARY KEY (month, provider, model, role));
 ";
 /// The one row a wiped computer keeps: when it was wiped. Apart from
 /// `SCHEMA`, whose tables the wipe drops.
@@ -205,6 +212,9 @@ enum MetaKey {
     /// The owner's WorkOS user, once the registry named it
     /// (`workos_user`): `{owner, issuer, subject}`.
     WorkosUser,
+    /// This host's id for Sign in with ChatGPT (`ext_agent_host_id`):
+    /// made once, kept through sign-outs (own_models.rs).
+    ChatgptHost,
 }
 
 impl MetaKey {
@@ -220,6 +230,7 @@ impl MetaKey {
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
             MetaKey::WorkosUser => "workos_user",
+            MetaKey::ChatgptHost => "chatgpt_host",
         }
     }
 }
@@ -1258,7 +1269,7 @@ impl ComputerCell {
                 micros: r["micros"].as_i64().unwrap_or(0),
             })
             .collect();
-        Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses })
+        Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses, models: self.model_uses(month)? })
     }
 
     /// Counts an agent's calls a provider answered, in `at`'s month, and
@@ -1574,6 +1585,10 @@ impl ComputerCell {
                     None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
+            }
+            p @ ("computer/models" | "computer/model-choice" | "computer/model-call" | "computer/model-credential" | "computer/model-used" | "computer/chatgpt") => {
+                let p = p.to_string();
+                self.own_models(&p, &mut req).await
             }
             "computer/own-keys" => {
                 let b: OwnKeysAsk = body_json(&mut req).await?;

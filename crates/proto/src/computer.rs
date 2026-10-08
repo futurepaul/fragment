@@ -167,6 +167,28 @@ pub struct ComputerUses {
     /// `YYYY-MM`, UTC.
     pub month: String,
     pub uses: Vec<ProviderUse>,
+    /// The month's calls on the owner's own models (docs/optchat.md, "Your
+    /// own models"): counted, never charged.
+    #[serde(default)]
+    pub models: Vec<ModelUse>,
+}
+
+/// A month's calls of one model of an own provider, for one role, and the
+/// tokens they used as the provider counted them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUse {
+    /// `anthropic`, `openai` or `chatgpt`.
+    pub provider: String,
+    pub model: String,
+    /// `chat`, `memory` or `hands`.
+    pub role: String,
+    pub calls: u64,
+    /// Input neither read from nor written to the cache.
+    pub input: u64,
+    pub cached: u64,
+    pub cache_write: u64,
+    pub output: u64,
 }
 
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
