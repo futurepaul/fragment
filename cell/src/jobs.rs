@@ -855,7 +855,19 @@ impl FragmentCell {
             }
             // what the fragment's own page reads, read for its code: who is
             // in it, their names, and who is here
-            Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),
+            // each with `here`: a live socket of theirs is open now (an
+            // agent's: its bridge follows here, its computer awake)
+            Step::Members {} => self
+                .member_list()
+                .map(|l| {
+                    let mut v = json!(l);
+                    for m in v["members"].as_array_mut().into_iter().flatten() {
+                        let here = m["principal"].as_str().is_some_and(|p| self.here(p));
+                        m["here"] = json!(here);
+                    }
+                    v
+                })
+                .map_err(|e| StepFail::Retry(e.message)),
             Step::People { ids } => {
                 if ids.len() > fragment_core::steps::PEOPLE_MAX {
                     return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));

@@ -573,6 +573,12 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
+            Some("abort-app") => {
+                // its app's instance ends, as an eviction ends it: the next
+                // call starts a fresh one on the same database
+                js::abort_app_facet(&self.raw, &self.app_facet()?, "a test hook")?;
+                json!({ "ok": true })
+            }
             Some("meter-now") => {
                 // every counted minute closed, a storage sample taken, and
                 // the batch sent now (a waiting one again: the ledger
@@ -614,7 +620,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, expire-draft, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, abort-app, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, expire-draft, or ended")),
         })
     }
 }

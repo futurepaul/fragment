@@ -159,6 +159,14 @@ impl FragmentCell {
         present_on(&self.state.get_websockets_with_tag(LIVE_TAG))
     }
 
+    /// Whether `principal` (an identity, or a key) has a live socket open
+    /// here now, presence shared or not: a page of theirs, or an agent's
+    /// bridge following a channel while its computer is awake (a job's
+    /// `members` step, each member's `here`).
+    pub(crate) fn here(&self, principal: &str) -> bool {
+        !self.state.get_websockets_with_tag(&format!("who:{}", npub::display(principal))).is_empty()
+    }
+
     /// Opens a live socket for a caller who can see the fragment, resolved
     /// from `credential` (kept to ask the registry again later).
     pub(crate) fn live(&self, req: &Request, caller: &Caller, credential: Option<Credential>, principal: &str, link: bool) -> CellResult<Response> {
