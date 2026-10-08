@@ -1192,7 +1192,9 @@ function mirror() {
 }
 addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
-  if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
+  // a mind's screen typed or linked into the address (a hash's change pops too)
+  if (shown && location.pathname !== SETTINGS && location.hash.startsWith("#/") && mindOf() && location.hash !== mind.said?.route) toMind({ go: location.hash });
+  else if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname !== SETTINGS && byName(state.current)) openChat(state.current, false);
   else start().catch((e) => notice("This page did not load", e.message));
 });
