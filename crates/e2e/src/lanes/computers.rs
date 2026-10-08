@@ -377,6 +377,46 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(added)
 }
 
+/// The intercept's one rule for whose a model call is (decision 9's
+/// transcriptions; docs/computers.md, Models): an OpenAI SDK, which sends
+/// no header of its own, names its agent by its key, `agent:<name>`, for a
+/// voice memo's transcription and a chat call alike. The key goes no
+/// further than the computer: Workers AI (the fake) never sees it. A key
+/// naming a fragment that does not run on this computer is refused (403),
+/// a malformed one and one that disagrees with `x-fragment-agent` too
+/// (401), each before anything is reserved or sent. The replies it adds.
+fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str, chat: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    use fragment_fakes::workers_ai::TRANSCRIBE_MODEL;
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let said = fetched(s, 70, "transcribe hello from a voice memo")?;
+    let sent = s.ai.calls().get(calls).cloned();
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and metered to the agent's owner",
+        said == "heard: hello from a voice memo" && aig.len() == before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig.len(),
+        json!({ "said": said, "aig": aig }),
+    );
+    s.ok(
+        "the guest's key goes no further than the computer: the vendor sees no authorization and no agent: in its input",
+        sent.as_ref().is_some_and(|c| c.model == TRANSCRIBE_MODEL && c.authorization.is_none() && !c.body.to_string().contains("agent:") && !c.metadata.to_string().contains(agent)),
+        json!(sent.map(|c| json!({ "model": c.model, "authorization": c.authorization, "metadata": c.metadata }))),
+    );
+    let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
+    s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let elsewhere = fetched(s, 72, &format!("transcribe hi as agent:{chat}"))?;
+    let malformed = fetched(s, 73, "transcribe hi as agent:not-a-name")?;
+    let disagree = fetched(s, 74, &format!("transcribe hi as agent:{chat} header {agent}"))?;
+    let missing = fetched(s, 75, "transcribe hi as fragment-model")?;
+    s.ok(
+        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing reserved or sent",
+        elsewhere.starts_with("transcribe refused: 403") && malformed.starts_with("transcribe refused: 401") && disagree.starts_with("transcribe refused: 401") && missing.starts_with("transcribe refused: 401")
+            && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
+        json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
+    );
+    Ok(6)
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
@@ -635,6 +675,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
             json!(aig),
         );
+        if fakes {
+            replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
+        }
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, reserved and settled on its owner's ledger.
@@ -777,11 +820,29 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
-    // a socket on its port, bridged through the Computer DO both ways: the
-    // screen's control socket speaks first (who holds control), as an RFB
-    // server does, and that first word reaches the page
-    let control = || Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
-    let heard = control().and_then(|mut c| {
+    // a ticket lands where its page asks, on its port: an agent's screen
+    // is the screen page at `?agent=<agent>`, the image's to read
+    let landing = format!("/?agent={agent_name}");
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": landing })))?;
+    let landed = match r.body["url"].as_str() {
+        Some(url) => Some(api.call(Call { method: "GET", url: url.to_string(), ..Call::default() })?),
+        None => None,
+    };
+    s.ok(
+        "a ticket that names a path lands there on its port (an agent's screen: the page at ?agent=)",
+        r.status == 200 && landed.as_ref().is_some_and(|l| l.status == 303 && l.header("location") == format!("/p/6080{landing}")),
+        format!("{r} / {}", landed.map(|l| l.to_string()).unwrap_or_default()),
+    );
+    let refused: Vec<u16> = ["//elsewhere.example/", "/../6081/", "no-slash", "/a#b"]
+        .iter()
+        .map(|path| api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": path }))).map(|r| r.status).unwrap_or(0))
+        .collect();
+    s.ok("a ticket's path is a path on its port, or refused (400)", refused.iter().all(|st| *st == 400), format!("{refused:?}"));
+    // a socket on its port, bridged through the Computer DO both ways: an
+    // agent's screen's control socket speaks first (whose screen, who holds
+    // control), as an RFB server does, and that first word reaches the page
+    let control = |agent: &str| Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let heard = control(&agent_name).and_then(|mut c| {
         let first = c.next()?;
         c.send(&json!({ "type": "take" }))?;
         let taken = c.next()?;
@@ -789,9 +850,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((first, taken))
     });
     s.ok(
-        "a socket on its port opens from its own page, and carries the container's first word and the page's answer",
-        heard.as_ref().is_ok_and(|(first, taken)| *first == json!({ "type": "control", "holder": null }) && taken["holder"] == "e2e"),
+        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, held by no one) and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first["name"].as_str().is_some_and(|n| !n.is_empty()) && first["holder"].is_null() && taken["holder"] == "e2e"),
         format!("{heard:?}"),
+    );
+    // an agent this computer does not run, or no agent's name, is refused
+    // by the image: the platform carries the query and reads nothing in it
+    let (absent, malformed) = (control(&format!("nobody.{}", api.username(&owner)?)).map(|_| ()), control("Not%20A%20Name").map(|_| ()));
+    s.ok(
+        "an agent's screen the computer does not run is refused (404), and a query that names no agent (400): the image's answers, through its port",
+        absent.as_ref().is_err_and(|e| format!("{e:#}").contains("404")) && malformed.as_ref().is_err_and(|e| format!("{e:#}").contains("400")),
+        format!("{absent:?} / {malformed:?}"),
     );
     // and in a frame of the platform's page (the shell's tab onto its screen),
     // where the platform is cross-site from the computer's origin

@@ -24,6 +24,12 @@
 //! - No branch move is announced: the platform takes no push webhooks
 //!   (cell/src/plane.rs), so a writer refreshes the fragment, as the CLI
 //!   does.
+//! - A repo is deleted (`DELETE /api/repos/{repo}`, `repo:write` on it) as
+//!   the service deletes one: its calls answer 404 from then, a delete
+//!   again is 409 `repository_deleted`, and it leaves the org's list. Its
+//!   name is never made again (409 `repository_deleted`): the service's
+//!   docs do not say a deleted name is free, so the fake holds the
+//!   platform to never reusing one (`fragment_core::codestorage::repo_name`).
 //! - A call can be a round trip away (`set_latency`): the real service
 //!   answers a preview in about 100 ms, long enough for a fragment's alarm
 //!   to run beside the request that armed it.
@@ -123,6 +129,9 @@ struct Write<'a> {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     repos: BTreeMap<String, Repo>,
+    /// The repos deleted, by url, with their names: gone from `repos`.
+    #[serde(default)]
+    deleted: BTreeMap<String, String>,
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
@@ -136,6 +145,12 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
+    /// Repo deletes still to answer 503 (`fail_repo_deletes`).
+    #[serde(skip)]
+    deletes_failing: u32,
+    /// Repo deletes answer 403 while set (`refuse_repo_deletes`).
+    #[serde(skip)]
+    deletes_refused: bool,
     /// Requests answered, by (the bearer token's subject, the repo url a
     /// repo route names or "", route): what a test counts, by repo
     /// (`requests`) or by caller (`take_requests`). Bounded by subjects
@@ -207,6 +222,15 @@ fn problem(status: u16, detail: &str) -> Response {
 }
 
 /// A commit pack code.storage refuses as malformed, in its shape.
+/// The service's answer about a repo deleted before (a delete again, or
+/// its name made again).
+fn deleted_repo() -> Response {
+    Response::json(
+        409,
+        &json!({ "code": "repository_deleted", "detail": "repository already deleted", "error": "repository already deleted", "status": 409, "title": "Conflict", "type": "about:blank" }),
+    )
+}
+
 fn invalid(message: &str) -> Response {
     Response::json(400, &json!({ "commit": null, "result": { "success": false, "status": "invalid", "message": message } }))
 }
@@ -490,6 +514,9 @@ impl Inner {
             if st.repo_by(name).is_some() {
                 return problem(409, "repository already exists");
             }
+            if st.deleted.values().any(|n| n == name) {
+                return deleted_repo();
+            }
             let repo_id = format!("repo_{}", &fresh_sha(&mut st.counter, name)[..20]);
             let url = uuid_like(&fresh_sha(&mut st.counter, &repo_id));
             st.repos.insert(url.clone(), Repo::new(name, &url, &repo_id));
@@ -526,6 +553,26 @@ impl Inner {
                 body["next_cursor"] = json!(format!("page-{}", start + limit));
             }
             return Response::json(200, &body);
+        }
+        // a repo's delete: `/api/repos/{repo}`, nothing after it
+        if let Some(url) = path.strip_prefix("/api/repos/").filter(|u| !u.contains('/') && m == "DELETE") {
+            if let Err(r) = self.authorize(req, "repo:write", Some(url)) {
+                return r;
+            }
+            if st.deleted.contains_key(url) {
+                return deleted_repo();
+            }
+            if st.deletes_refused {
+                return problem(403, "repo deletes are refused (the fake's lever: a key without the right)");
+            }
+            if st.deletes_failing > 0 {
+                st.deletes_failing -= 1;
+                return problem(503, "repo deletes are unavailable (the fake's outage lever)");
+            }
+            let Some(repo) = st.repos.remove(url) else { return problem(404, "repository not found") };
+            st.deleted.insert(url.to_string(), repo.name.clone());
+            let message = format!("Repository {} deletion initiated. Physical storage cleanup will complete asynchronously.", repo.name);
+            return Response::json(200, &json!({ "message": message, "repo_name": repo.name, "repo_id": repo.repo_id }));
         }
         if let Some(id) = path.strip_prefix("/api/repo-urls/") {
             if let Err(r) = self.authorize(req, "org:read", None) {
@@ -997,6 +1044,28 @@ impl CodeStorage {
         self.with(|st| st.url_of(name))
     }
 
+    /// The name of the repo whose url-form identity is `url` (one deleted
+    /// too).
+    pub fn repo_name(&self, url: &str) -> Option<String> {
+        self.with(|st| st.repos.get(url).map(|r| r.name.clone()).or_else(|| st.deleted.get(url).cloned()))
+    }
+
+    /// The next `n` repo deletes answer 503 (an outage the platform retries).
+    pub fn fail_repo_deletes(&self, n: u32) {
+        self.with(|st| st.deletes_failing = n);
+    }
+
+    /// While `on`, every repo delete answers 403: a refusal no retry passes
+    /// until something changes (a key given the right).
+    pub fn refuse_repo_deletes(&self, on: bool) {
+        self.with(|st| st.deletes_refused = on);
+    }
+
+    /// Whether the repo `url` was deleted (`DELETE /api/repos/{repo}`).
+    pub fn repo_deleted(&self, url: &str) -> bool {
+        self.with(|st| st.deleted.contains_key(url))
+    }
+
     pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
         self.with(|st| st.repo_by(repo)?.branches.get(branch).cloned())
     }
@@ -1220,6 +1289,52 @@ mod tests {
         let new = cs.token("r", &["git:read"]);
         assert_ne!(new, old);
         assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &new).0, 200);
+    }
+
+    fn send(method: &str, url: &str, token: &str, body: Option<&str>) -> (u16, Value) {
+        let mut args = vec!["-s", "-w", "\n%{http_code}", "-X", method, "-H"];
+        let auth = format!("authorization: Bearer {token}");
+        args.push(&auth);
+        if let Some(b) = body {
+            args.extend(["-H", "content-type: application/json", "--data", b]);
+        }
+        args.push(url);
+        let out = std::process::Command::new("curl").args(&args).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let (body, code) = text.rsplit_once('\n').unwrap();
+        (code.parse().unwrap(), serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+
+    /// Goal: a repo is deleted as the service deletes one: its calls are
+    /// 404 from then, a delete again is 409 `repository_deleted` (a wipe run
+    /// again reads it as done), it leaves the org's list, its name is never
+    /// made again, and only `repo:write` on it deletes it. Method: a repo
+    /// made through the API, deleted with the wrong token, then the right
+    /// one, twice, then made again.
+    #[test]
+    fn a_deleted_repo_is_gone_and_its_name_never_made_again() {
+        let key = SigningKey::from_slice(&[5u8; 32]).unwrap();
+        let pem = key.to_pkcs8_pem(Default::default()).unwrap().to_string();
+        let cs = CodeStorage::start(Options { org_key_pem: Some(pem), ..Options::default() }).unwrap();
+        let made = send("POST", &format!("{}/api/repos", cs.url), &cs.token("todo--paul--abc", &["repo:write"]), Some(r#"{"repo_name":"todo--paul--abc"}"#));
+        assert_eq!(made.0, 201, "{}", made.1);
+        let url = cs.repo_url("todo--paul--abc").expect("its url");
+        cs.seed_filler(1);
+        let delete = |token: &str| send("DELETE", &format!("{}/api/repos/{url}", cs.url), token, None);
+        assert_eq!(delete(&cs.token(&url, &["git:write"])).0, 403, "git:write deletes no repo");
+        assert!(!cs.repo_deleted(&url));
+        let gone = delete(&cs.token(&url, &["repo:write"]));
+        assert_eq!(gone.0, 200, "{}", gone.1);
+        assert_eq!(gone.1["repo_name"], "todo--paul--abc");
+        assert!(cs.repo_deleted(&url));
+        assert_eq!(cs.repo_name(&url).as_deref(), Some("todo--paul--abc"), "a deleted repo's name is known");
+        let again = delete(&cs.token(&url, &["repo:write"]));
+        assert_eq!((again.0, again.1["code"].as_str()), (409, Some("repository_deleted")), "a delete again");
+        assert_eq!(get(&format!("{}/api/repos/{url}/branch?name=main", cs.url), &cs.token(&url, &["git:read"])).0, 404, "its calls are 404");
+        let listed = get(&format!("{}/api/repos?limit=100", cs.url), &cs.token("fragment-dev", &["org:read"])).1;
+        assert!(listed["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "todo--paul--abc"), "{listed}");
+        let remade = send("POST", &format!("{}/api/repos", cs.url), &cs.token("todo--paul--abc", &["repo:write"]), Some(r#"{"repo_name":"todo--paul--abc"}"#));
+        assert_eq!((remade.0, remade.1["code"].as_str()), (409, Some("repository_deleted")), "its name is never made again");
     }
 
     /// Goal: a commit pack that changes nothing is refused as the real

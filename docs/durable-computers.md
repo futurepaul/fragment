@@ -64,8 +64,9 @@ file is the newer word, and decision 18 points here.
   (its terminal's `HOME`, its file tools' `~`) joined it on 2026-10-07
   (Paul: the whole `~`, not only the browser), a hard cut: what agents
   had written under `~` stayed where it was.
-- **An agent's temp files joined its work (2026-10-07).** Hermes v0.21.5
-  points `TMPDIR`, `TMP` and `TEMP` at `<home>/cache/scratch` for itself
+- **An agent's temp files joined its work (2026-10-07).** Hermes (v0.21.5,
+  and v0.21.6 alike) points `TMPDIR`, `TMP` and `TEMP` at
+  `<home>/cache/scratch` for itself
   and for each process it runs, derived again from the home it runs that
   process under (`hermes_constants.apply_scratch_tmp_env`, which leaves
   alone a value it did not set, knowing its own by its
@@ -95,8 +96,11 @@ file is the newer word, and decision 18 points here.
   sockets, execute_code's staging) are Hermes'. And execute_code's
   scripts' are there too, because Hermes' sandbox drops the marker from
   their environment: a debt-ledger entry, until our terminal backend
-  (step 3) runs them or Hermes keeps its marker. docs/computers.md, "Our
-  images"; the Docker lane's `a_tools_temp_files_are_its_work`.
+  (step 3) runs them or Hermes keeps its marker. And the image's Chromium
+  opts out of both on purpose: it sets its own `TMPDIR`, the container's
+  `/tmp` (#231), so a browser's throwaway profile and shared memory are in
+  no save at all. docs/computers.md, "Our images"; the Docker lane's
+  `a_tools_temp_files_are_its_work`.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The S3 endpoint it wrote through
   (`storage.fragment.internal`) went after it (#156): no image used it.
@@ -132,6 +136,85 @@ file is the newer word, and decision 18 points here.
   session code, so the next message is a turn of its own. Hermes' own
   recovery notes stay off. docs/bridge.md, "The turn after a cut one is
   told"; docs/chat-records.md; docs/computers.md.
+- **What Hermes writes under the hold is chosen (2026-10-07).** Its
+  model-catalog refresh is off and Node's compile cache is out of
+  `/data`; the rest of what its gateway writes on its own timers is kept
+  hot, each named, with why a save cannot tear it (below).
+
+## What changes under the hold (2026-10-07)
+
+The hold promises that no file the save keeps tears. Held, our image
+claims no turn, starts no round of its own (repo sync, skills, the
+agents' reads), and copies every database as of one moment. Hermes'
+gateway is not paused: it cannot be asked, and freezing it is option B.
+So its own timers run on through a hold. `held_nothing_under_data_changes`
+(images/bridge/tests/docker.rs) failed once on 2026-10-07, in a run with
+9 containers starting, when one of those timers landed in its 5 s
+window: four caches under `/data/hermes/cache` and Node's compile cache
+under `cache/scratch` changed while held. Read from Hermes v0.21.5 (tag
+v2026.9.24) and measured idle in Docker, these are the gateway's writers
+and what each now does.
+
+| What | Its writer and when | Choice |
+|---|---|---|
+| `cache/model_catalog.json`, `openrouter_curated_catalog.json`, `nous_recommended_cache.json`, `reasoning_caps.json` | the gateway's `_model_catalog_refresh_watcher` (`gateway/run_watchers.py`): `refresh_catalogs()` 30 s after it starts (written about 47 s in the failing run, the fetch slow), then every 20 minutes | **off**: `model_catalog.enabled: false` in the managed overlay (`hermes.rs`, `managed_config`) |
+| `cache/scratch/node-compile-cache/…` | npm turns on Node's compile cache at every start (`enableCompileCache()`), under `TMPDIR`, which Hermes points at its home's `cache/scratch`; its `npx --version` probes run it | **out of `/data`**: `NODE_COMPILE_CACHE=/tmp/node-compile-cache` (Dockerfile); a cache every start rebuilds |
+| `state/gateway.heartbeat` | its loop heartbeat, every 30 s | kept hot: replaced whole; no switch |
+| `gateway_state.json`, `channel_directory.json` | its housekeeping thread, every 60 s and every 5 minutes | kept hot: replaced whole; no switch |
+| `cron/ticker_heartbeat`, `ticker_last_success` (`ticker_last_error`), `cron/.tick.lock`, in its home and each profile's | its cron ticker, every 60 s, though its cron tool is off (decision 38) | kept hot: the stamps replaced whole, the lock empty; no switch (with more than one profile the built-in ticker always runs) |
+| `logs/*.log` | appended | kept hot: a save may end mid-line |
+| `backups/config/config.yaml.good.<time>`, in its home and each profile's | `load_config()`, the first time a process reads a `config.yaml` whose bytes its newest copy lacks: on a first start, the catalog watcher's tick 30 s in (it reads the config with the catalog off) | kept hot: made once, in place, and read only when that `config.yaml` will not parse, which ours never fail to (the boot writes each whole at every start) |
+
+**Kept hot** means the save keeps whichever version it reads. Hermes
+writes each stamp and state as its `atomic_json_write` does: a temp file
+beside it, fsynced, then renamed over it. So any reader, a save included,
+has the old file or the new one, never a mix. The temp file
+(`.<name>_*.tmp`, `.hb_*.tmp`) may be caught mid-write, but nothing
+reads one. Each is a stamp of the life that wrote it (a heartbeat, a
+status, the ticker's last run), so a wake's copy is stale either way.
+None is a fact with an authority of its own (the rule, above). So the
+test now holds for at least 65 s, until Hermes' heartbeat and its cron
+ticker have both run inside the hold: longer than each of these timers
+but the 5-minute one, so every run sees them inside it. It fails on any
+other file that changes (our own sync, every 60 s, among them) and
+checks that each stamp it saw rewritten parses whole.
+
+**Why the catalogs are off rather than kept hot, left out, or paused:**
+
+- Nothing of ours reads them. Every profile's model is the platform's
+  route (`custom`, or `anthropic` for the high tier, each with a
+  `base_url`). The catalogs feed Hermes' `/model` picker and reasoning
+  hints for OpenRouter's and Nous' routes, nothing else. No person
+  reaches the picker: the bridge keeps a leading `/` from reading as a
+  command. In v0.21.5 no turn of such a profile reads them: their
+  readers (`agent/reasoning_params.py`, `agent/auxiliary_reasoning_floor.py`,
+  `agent/turn_recovery.py`) are for those routes, and `gateway/run_turn.py`
+  reads one only for a profile that names no model. Ours always name one.
+- The refresh was the gateway's only idle egress: four third-party hosts
+  (hermes-agent.nousresearch.com, raw.githubusercontent.com, openrouter.ai,
+  portal.nousresearch.com), from every computer, every 20 minutes.
+- A torn `model_catalog.json` would stop the refresh for good. Hermes'
+  read (`_read_disk_cache`) lets the decode error of a file that is not
+  UTF-8 out. Its watcher logs that at debug and never rewrites the file.
+  Turned off, `get_catalog` returns nothing before it reads the file. The
+  one reader on a turn's path that ignores the switch
+  (`get_default_model_for_provider`, for a profile that names no model)
+  catches the error. Kept hot, the file could
+  never tear in a save (it is renamed into place). But keeping it would
+  keep the egress and that failure for nothing we use.
+- Pausing the refresh while held needs a hook in Hermes' gateway (a
+  patch). Leaving the caches out of the save would make every wake start
+  them cold, and fetch them again at once.
+
+Turned off, the refresh writes nothing even when forced inside a hold,
+and a wake from a save whose four caches are torn answers like any
+other: `a_catalog_refresh_forced_under_the_hold_writes_nothing` (the
+Docker lane). That test also runs the same refresh with the catalog on,
+as a counterfactual: it rewrites `model_catalog.json` under the hold, as
+the failing run saw. Two cautions. Hermes reads a managed overlay that
+will not parse as empty, which would turn the catalog back on. Ours is
+the boot's (unit-tested), and the lane checks that Hermes reads it off.
+Also, a save from before this change keeps its stale caches, unread.
 
 ## The open problem
 

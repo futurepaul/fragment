@@ -20,9 +20,11 @@
 //!                    cache saves between them: --build-only (builds, runs
 //!                    nothing), then --no-build (runs what the build left)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
-//!       [--dry-run | --sweep] [--max-paid-calls <n>]
+//!       [--dry-run | --sweep] [--max-paid-calls <n>] [--operator-key-file <file>]
 //!                    the suite against that branch deployment on its real vendors
-//!                    (crates/e2e/src/hosted.rs); --dry-run prints its plan
+//!                    (crates/e2e/src/hosted.rs); --dry-run prints its plan;
+//!                    --operator-key-file names an operator key the config's
+//!                    operators list (its `wipe` section's)
 //!   check            every first-party JavaScript file parses (node --check;
 //!                    xtask/src/js_syntax.rs), then host tests and clippy,
 //!                    warnings denied

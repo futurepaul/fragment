@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use fragment_core::body::LimitedBody;
 use fragment_core::codestorage::{self as core_cs, Promotion, TokenCache, TreeEntry};
+use fragment_core::ended::{kept_error, Failure};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
@@ -267,6 +268,28 @@ impl<'a> Cs<'a> {
             return Err(upstream("repo url", status, v.to_string().as_bytes()));
         }
         core_cs::repo_url(&v).ok_or_else(|| upstream("repo url", status, b"no url in the answer"))
+    }
+
+    /// Deletes the repo (a wiped person's fragment's, ended: cell
+    /// ended.rs): done once code.storage says it is gone, deleted by this
+    /// call or before it, never there included (`core_cs::repo_deleted`),
+    /// so asking again after a lost answer is no error. Otherwise why not,
+    /// told apart (`fragment_core::ended::Failure`): a refusal the same
+    /// call cannot pass, or a failure a later try may. The service deletes
+    /// softly, then cleans up its storage on its own.
+    pub async fn delete_repo(&self, repo: &str) -> Result<core_cs::RepoDeleted, Failure> {
+        let path = format!("/api/repos/{}", seg(repo));
+        let (status, body) = match self.call(Method::Delete, &path, repo, &["repo:write"], None).await {
+            Ok(answer) => answer,
+            // no answer (a timeout, the network), or no token to ask with
+            Err(e) => return Err(Failure::Transient(kept_error(&format!("code.storage delete repo {repo}: {:?}: {}", e.code, e.message)))),
+        };
+        let why = || kept_error(&upstream(&format!("delete repo {repo}"), status, &body).message);
+        match core_cs::repo_deleted(status, &body) {
+            gone @ (core_cs::RepoDeleted::Now | core_cs::RepoDeleted::Already) => Ok(gone),
+            core_cs::RepoDeleted::Transient => Err(Failure::Transient(why())),
+            core_cs::RepoDeleted::Refused => Err(Failure::Refused(why())),
+        }
     }
 
     /// A branch's head, or `None` when the branch does not exist.

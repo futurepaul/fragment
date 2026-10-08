@@ -157,6 +157,35 @@ pub fn tree_page(v: &Value) -> Result<(Vec<TreeEntry>, Option<String>), String> 
     Ok((out, next))
 }
 
+/// Hex digits of the owner's digest a repo's name carries: 48 bits, so two
+/// identities that ever hold one username share a repo name once in 2^48.
+pub const REPO_OWNER_HEX: usize = 12;
+
+/// A new fragment's code.storage repo name: the one place it is derived.
+/// The cell's create names the repo with it once and keeps the repo it
+/// made (`Created.repo`, the url-form id every later call uses); nothing
+/// rebuilds the name.
+///
+/// `<prefix><label>--<username>--<owner>`: the deployment's prefix (a
+/// branch's `<branch>--`), the fragment's flat name, and the first 12 hex
+/// digits of a digest of its owner's identity. The owner is in it so a
+/// username another identity holds later (a wiped person's, or one an
+/// operator released) never finds the repo its earlier holder made under
+/// the same label: a repo a wipe deleted is never made again, nor another
+/// person's files read. The same owner making a deleted name again finds
+/// its repo, as before. `None`: not a fragment's name, or not an identity.
+pub fn repo_name(prefix: &str, fragment: &str, owner: &str) -> Option<String> {
+    assert!(prefix.is_empty() || prefix.ends_with("--"), "a deployment's repo prefix is empty or ends in --: {prefix:?}");
+    let flat = fragment_proto::flat_name(fragment)?;
+    if !crate::npub::is_identity(owner) {
+        return None;
+    }
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment repo owner\0{owner}").as_bytes());
+    let name = format!("{prefix}{flat}--{}", &hex::encode(digest)[..REPO_OWNER_HEX]);
+    assert!(name.starts_with(prefix) && name.ends_with(&hex::encode(digest)[..REPO_OWNER_HEX]), "the name is the prefix, the flat name, and the owner's digits");
+    Some(name)
+}
+
 /// `POST /api/repos` → the new repo's id.
 pub fn created_repo_id(v: &Value) -> Option<String> {
     v["repo_id"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
@@ -303,6 +332,34 @@ pub fn merge_conflicted(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|v| v["conflict_type"] == "merge_conflict" || v["code"] == "merge_conflict")
 }
 
+/// What `DELETE /api/repos/{repo}` answered (the service deletes softly,
+/// then cleans up its storage after).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoDeleted {
+    /// Deleted by this call.
+    Now,
+    /// Gone before it: deleted already (409 `repository_deleted`), or
+    /// never there (404, 410). A replay of a delete lands here.
+    Already,
+    /// The repo may still be there, and a retry may pass: a timeout, a
+    /// rate limit, a 5xx, or a 409 that is not a delete's (one thawing).
+    Transient,
+    /// The service refused the call (another 4xx): the same call cannot
+    /// pass until something else changes (its key, its scopes).
+    Refused,
+}
+
+pub fn repo_deleted(status: u16, body: &[u8]) -> RepoDeleted {
+    match status {
+        200..=299 => RepoDeleted::Now,
+        404 | 410 => RepoDeleted::Already,
+        409 if serde_json::from_slice::<Value>(body).is_ok_and(|v| v["code"] == "repository_deleted") => RepoDeleted::Already,
+        408 | 409 | 425 | 429 | 500..=599 => RepoDeleted::Transient,
+        400..=499 => RepoDeleted::Refused,
+        _ => RepoDeleted::Transient,
+    }
+}
+
 /// A commit pack's 412 that says it would change nothing: the branch's
 /// tip holds its files already (a retry of a pack that landed, or a
 /// write of what is there). The service makes no empty commit.
@@ -388,6 +445,52 @@ mod tests {
         assert_eq!(next_repos_cursor(&repos).as_deref(), Some("c2"));
         assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": false, "next_cursor": "c3" })), None);
         assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": true })), None);
+    }
+
+    /// Goal: a new fragment's repo name carries its owner, so another
+    /// identity under the same username and label never names the same
+    /// repo, while the same owner making the name again does (a delete
+    /// keeps the repo). Method: names derived for one owner, another, and
+    /// the inputs the derivation refuses.
+    #[test]
+    fn a_repo_name_is_its_owners() {
+        let (paul, fresh) = (format!("id:{}", "a".repeat(32)), format!("id:{}", "b".repeat(32)));
+        let first = repo_name("e2e--", "todo.paul", &paul).unwrap();
+        assert!(first.starts_with("e2e--todo--paul--"), "{first}");
+        assert_eq!(first.len(), "e2e--todo--paul--".len() + REPO_OWNER_HEX, "{first}");
+        assert!(first["e2e--todo--paul--".len()..].bytes().all(|b| b.is_ascii_hexdigit()), "{first}");
+        // the same owner, again (a delete, then a create): the same repo
+        assert_eq!(repo_name("e2e--", "todo.paul", &paul).as_deref(), Some(first.as_str()));
+        // another identity under the same username (a wipe freed it): another repo
+        let theirs = repo_name("e2e--", "todo.paul", &fresh).unwrap();
+        assert_ne!(theirs, first);
+        assert!(theirs.starts_with("e2e--todo--paul--"), "{theirs}");
+        // production's has no prefix; another label is another repo
+        assert!(repo_name("", "todo.paul", &paul).unwrap().starts_with("todo--paul--"));
+        assert_ne!(repo_name("", "notes.paul", &paul), repo_name("", "todo.paul", &paul));
+        // not a fragment's name, or not an identity: no name
+        for (fragment, owner) in [("todo", paul.as_str()), ("Todo.paul", &paul), ("todo.paul", "id:short"), ("todo.paul", "npub1x")] {
+            assert_eq!(repo_name("", fragment, owner), None, "{fragment} {owner}");
+        }
+    }
+
+    /// Goal: a repo's delete is done once the service says it is gone,
+    /// however often it is asked (a wipe run again asks again), and only
+    /// then. Method: the service's documented answers, and others.
+    #[test]
+    fn a_repo_delete_is_done_once_it_is_gone() {
+        assert_eq!(repo_deleted(200, br#"{"message":"deletion initiated","repo_name":"x"}"#), RepoDeleted::Now);
+        assert_eq!(repo_deleted(404, b""), RepoDeleted::Already, "never there");
+        assert_eq!(repo_deleted(410, b""), RepoDeleted::Already, "gone");
+        let deleted = br#"{"code":"repository_deleted","detail":"repository already deleted","status":409}"#;
+        assert_eq!(repo_deleted(409, deleted), RepoDeleted::Already, "a replay");
+        assert_eq!(repo_deleted(409, br#"{"code":"repository_thawing"}"#), RepoDeleted::Transient, "a 409 that is not a delete's");
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert_eq!(repo_deleted(status, b"{}"), RepoDeleted::Transient, "{status}: a retry may pass");
+        }
+        for status in [400, 401, 403, 405, 422] {
+            assert_eq!(repo_deleted(status, b"{}"), RepoDeleted::Refused, "{status}: the same call cannot pass");
+        }
     }
 
     /// Goal: a deploy's steps follow the preview, and an answer that names

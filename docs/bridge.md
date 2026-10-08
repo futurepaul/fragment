@@ -17,10 +17,20 @@ ended.
   (`BRIDGE_AGENTS_FILE`): a computer's agents may change while it runs.
 - `runtime/`: `relay` (Hermes' Relay connector) and `script` (a
   deterministic agent, the stub image's).
-- `screen.rs`: a screen page and an RFB proxy with Take over / Give back:
-  its input gate follows every message noVNC 1.7.0 sends (the extended
-  clipboard's negative length, the extended pointer event), and its
-  control socket answers on an image with no display (the stub's) too.
+- `screen.rs`: each agent's screen (`?agent=<agent fragment>` on its
+  sockets): a page, and an RFB proxy onto that agent's own display with
+  Take over / Give back. Its input gate follows every message noVNC 1.7.0
+  sends (the extended clipboard's negative length, the extended pointer
+  event), and its control socket answers on an image with no display (the
+  stub's) too. An agent the bridge does not run, or one the image names
+  no screen for, is 404; no agent's name, 400.
+- `screens.rs`: which display is each agent's, when the image says
+  (`BRIDGE_SCREENS_FILE`), with its runtime's lease and activity file.
+- `lease.rs`: who drives a screen, the agent or one person, as Hermes'
+  Bot Desktop lease file has it (`lease.json` under its `lease.lock`
+  flock, its epoch one on at every change): Take over is that lease, so
+  the agent's tools refuse while a person holds it (`human_has_control`).
+  A screen with no lease file keeps one of its own, by the same rules.
 
 ## A runtime
 
@@ -80,7 +90,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 ## Settings
 
-`fragment-bridge run` (and `screen`, the screen alone):
+`fragment-bridge run`:
 
 | Variable | Default | |
 |---|---|---|
@@ -100,18 +110,19 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
-| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
+| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screens. Their sockets wait (at most 30 s) for the agents, told past the restore gate, so no lease under `/data` is touched before the restore |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
-| `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
+| `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
 
 ## State, and what it never does twice
 
 `<state>/state.json`, written whole (a temporary file, synced, renamed)
 after every step that changed it and before that step's effects: the
-cursors (`agent|fragment|channel` → seq) and the turns not yet over
-(queued, running, waiting, or ended and owing their last records). It is
-a cache. The authority on which turns have started is the chat's `work`
+cursors (`agent|fragment|channel` → seq), the turns not yet over
+(queued, running, waiting, or ended and owing their last records), and
+each chat's budget of agent turns ("Agents asking each other", below). It
+is a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
 (docs/explorations/pi-durable.md, P1).
@@ -183,6 +194,50 @@ turns ran.
 
 Every bound is a const in `limits.rs`, with its reason. SIGTERM: gone
 within 3 s.
+
+## Agents asking each other
+
+A person's agents hand work to each other in a chat they share, by
+`@name` in a reply (the bridge stamps its `to`), or by a message one posts
+itself naming the other in `to` (`fragment ask`, cli/src/ask.rs). The
+bridge that answers decides whether it is a turn, and how deep
+(docs/chat-records.md, "An agent's reply"):
+
+- **The hop is counted here, not read.** A record by an agent of this
+  computer is one hop past the turn that agent is in: its turn running in
+  that chat, or the one there the record's `turn` names when that ended
+  within `ENDED_HOPS_MS` (remembered, never written: a reply read just
+  after its turn was let go); and its deepest turn running anywhere else,
+  the deeper of the two; in none at all, `HOPS_MAX` (answered, handing on
+  nothing). A CLI post names no turn, so a turn just ended does not count
+  for it (`an_ended_turn_counts_only_for_the_reply_that_names_it`). A record's `hop` only raises it. So a post made
+  around the bridge (the CLI, the API, a script the agent left running)
+  resets nothing: `a_hand_off_loop_stops_at_the_cap` runs the same
+  A, B, A, B loop with each hand-off posted by its turn as the CLI does (no
+  `hop`, no `turn`) and stops at the same place, and `a_scripted_hand_off_loop_stops_at_the_cap`
+  (tests/bridge.rs) runs it with the scripted runtime, then an agent's
+  CLI-shaped post, answered once. What is remembered of ended turns is
+  never written to `/data`: a reply the next life reads first is the last
+  hop (`a_reply_read_by_the_next_life_resets_nothing`). Another
+  computer's agent (another person's, in a shared chat) is held to the hop
+  it claims, at least 1, and by the budget.
+- **A chat's budget.** Turns its agents start of each other are kept per
+  chat in the state (`agent_turns`: the causing records' `at`s, the
+  platform's clock, so every life counts alike), at most
+  `AGENT_TURNS_PER_CHAT_MAX` in `AGENT_TURNS_WINDOW_MS`; past it a
+  hand-off's turn is refused with both its records, its end saying why
+  (`a_chats_agents_have_a_budget`: valid, past it, a person never
+  counted, replay, restart, another chat's own, the window sliding). A
+  state from before the budget loads with none.
+- **`tasks` is the agent's own.** A routine or `joined` starts anything
+  only from the agent fragment's own key (not an identity: its cron, the
+  platform) or its owner; another agent acting for the owner, who may post
+  there, is passed over (`tasks_hear_only_the_owner_and_the_fragment`).
+
+Why here: the platform holds no chat record (docs/cloudflare-v1.md, the
+rule), and the bridge is the one place that knows which turn an agent is
+in. A person's agents all run on one computer (decision 13), so every
+hand-off between them meets this count.
 
 ## A card keeps its computer awake
 
@@ -256,8 +311,8 @@ real model, so told, checks before it redoes is a hosted run's to see.
 
 ## Hermes' Relay, as the bridge speaks it
 
-Hermes v0.21.5 (tag `v2026.9.24`, the newest release on 2026-10-03;
-`gateway/relay/`), contract version 1. The bridge serves
+Hermes v0.21.6 (tag `v0.21.6`, 2026-10-08; read first from v0.21.5,
+whose wire it keeps; `gateway/relay/`), contract version 1. The bridge serves
 `ws://127.0.0.1:8650/relay` and `/relay/media` and checks Hermes'
 token; the descriptor names platform `relay` with draft streaming and
 the ops `send, edit, delete, typing, react, draft, prompt, send_media,

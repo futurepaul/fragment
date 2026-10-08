@@ -25,6 +25,14 @@
 //!
 //! It records each request's `model` and `x-fragment-agent` (a screenshot's
 //! description comes as the route's `vision`: Hermes' auxiliary vision).
+//!
+//! It answers transcriptions too, `POST /v1/audio/transcriptions` in
+//! OpenAI's multipart shape, as the route's `whisper` does (decision 9):
+//! the text is the words a memo (`memo`, a WAV) says in a chunk of its own,
+//! `{"text": …}`. As the intercept does, it refuses one that names no agent,
+//! by `x-fragment-agent` or by its key (`Authorization: Bearer
+//! agent:<name>`), and records the key, the form's fields and the audio's
+//! size.
 
 #![allow(dead_code)]
 
@@ -45,8 +53,76 @@ pub struct Call {
     pub model: String,
     pub agent: Option<String>,
     pub stream: bool,
-    /// The request as it came (a failure's detail: what the model was given).
+    /// The request as it came (a failure's detail: what the model was given);
+    /// a transcription's, its form's fields but the audio.
     pub body: Value,
+    /// Its `authorization`, as it came.
+    pub authorization: Option<String>,
+}
+
+/// A second of silence, as a WAV, that says `words` in a chunk of its own
+/// (`said`): a voice memo (the stub's scripted runtime and the Workers AI
+/// fake read it the same way).
+pub fn memo(words: &str) -> Vec<u8> {
+    fragment_bridge::runtime::script::memo(words)
+}
+
+/// What a memo says: its `said` chunk, or nothing.
+fn said_in(audio: &[u8]) -> Option<String> {
+    let at = audio.windows(4).position(|w| w == b"said")?;
+    let len = u32::from_le_bytes(audio.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+    Some(String::from_utf8_lossy(audio.get(at + 8..at + 8 + len)?).into_owned())
+}
+
+/// A multipart form's parts, `(name, bytes)`, read as OpenAI's SDKs write
+/// one (test support, not a parser of every form).
+fn form_parts(content_type: &str, body: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let Some(boundary) = content_type.split("boundary=").nth(1).map(|b| b.trim_matches('"')) else { return vec![] };
+    let delimiter = format!("--{boundary}");
+    let mut parts = vec![];
+    let text = body;
+    let mut starts = vec![];
+    let d = delimiter.as_bytes();
+    let mut i = 0;
+    while i + d.len() <= text.len() {
+        if &text[i..i + d.len()] == d {
+            starts.push(i);
+            i += d.len();
+        } else {
+            i += 1;
+        }
+    }
+    for w in starts.windows(2) {
+        let part = &text[w[0] + d.len()..w[1]];
+        let part = part.strip_prefix(b"\r\n").unwrap_or(part);
+        let part = part.strip_suffix(b"\r\n").unwrap_or(part);
+        let Some(split) = part.windows(4).position(|x| x == b"\r\n\r\n") else { continue };
+        let head = String::from_utf8_lossy(&part[..split]).into_owned();
+        let Some(name) = head.split("name=\"").nth(1).and_then(|n| n.split('"').next()) else { continue };
+        parts.push((name.to_string(), part[split + 4..].to_vec()));
+    }
+    parts
+}
+
+/// A transcription, answered as the route's `whisper` answers it.
+fn transcription(content_type: &str, body: &[u8], agent: &Option<String>, authorization: &Option<String>) -> (Value, Response<Body>) {
+    let parts = form_parts(content_type, body);
+    let field = |n: &str| parts.iter().find(|(k, _)| k == n).map(|(_, v)| String::from_utf8_lossy(v).into_owned());
+    let audio = parts.iter().find(|(k, _)| k == "file").map(|(_, v)| v.clone()).unwrap_or_default();
+    let fields = json!({ "model": field("model"), "language": field("language"), "prompt": field("prompt"), "response_format": field("response_format"), "audio_bytes": audio.len() });
+    let keyed = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer agent:"));
+    if agent.is_none() && keyed.is_none() {
+        return (fields, net::refusal(StatusCode::UNAUTHORIZED, "unauthenticated", "name the agent this call is for"));
+    }
+    if field("model").as_deref() != Some("whisper") {
+        return (fields, net::refusal(StatusCode::BAD_REQUEST, "invalid", "a transcription's model is \"whisper\""));
+    }
+    let text = said_in(&audio).unwrap_or_else(|| "(no words)".into());
+    let answer = match field("response_format").as_deref() {
+        Some("text") => Response::builder().status(StatusCode::OK).header("content-type", "text/plain").body(http_body_util::Full::new(bytes::Bytes::from(text))).unwrap(),
+        _ => net::json_answer(StatusCode::OK, &json!({ "text": text })),
+    };
+    (fields, answer)
 }
 
 pub struct Model {
@@ -203,13 +279,20 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
 async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if path.ends_with("/models") {
         return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+    if path.ends_with("/audio/transcriptions") {
+        let (fields, answer) = transcription(&content_type, &body, &agent, &authorization);
+        calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, stream: false, body: fields, authorization });
+        return answer;
+    }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
-    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone() });
+    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
@@ -242,6 +325,30 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     last["usage"] = usage;
     sse.push_str(&format!("data: {last}\n\ndata: [DONE]\n\n"));
     Response::builder().status(StatusCode::OK).header("content-type", "text/event-stream").header("cache-control", "no-cache").body(http_body_util::Full::new(bytes::Bytes::from(sse))).unwrap()
+}
+
+#[test]
+fn a_memo_is_transcribed_as_the_route_would() {
+    let memo = memo("hello from a voice memo");
+    let form = |fields: &[(&str, &str)]| {
+        let mut b = Vec::new();
+        for (k, v) in fields {
+            b.extend(format!("--xx\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+        }
+        b.extend(b"--xx\r\nContent-Disposition: form-data; name=\"file\"; filename=\"m.wav\"\r\nContent-Type: audio/wav\r\n\r\n");
+        b.extend(&memo);
+        b.extend(b"\r\n--xx--\r\n");
+        b
+    };
+    let key = Some("Bearer agent:juniper.paul".to_string());
+    let (fields, r) = transcription("multipart/form-data; boundary=xx", &form(&[("model", "whisper"), ("response_format", "json")]), &None, &key);
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!((fields["model"].clone(), fields["language"].clone(), fields["audio_bytes"].clone()), (json!("whisper"), Value::Null, json!(memo.len())));
+    let (_, r) = transcription("multipart/form-data; boundary=xx", &form(&[("model", "whisper")]), &None, &Some("Bearer fragment-model".into()));
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a placeholder names no agent");
+    let (_, r) = transcription("multipart/form-data; boundary=xx", &form(&[("model", "whisper-1")]), &None, &key);
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(said_in(&memo).as_deref(), Some("hello from a voice memo"));
 }
 
 #[test]

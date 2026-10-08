@@ -31,6 +31,14 @@
 //!   agent of its was added to): the agent's own fragment posts `joined`
 //!   on its `tasks`, and the fragment that added it then wakes the
 //!   computer (`Wake::Joined`; docs/computers.md).
+//! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
+//!   marks it wiped before anything else, destroys its container, deletes
+//!   every save from R2 (each record, then whatever else is under its saves'
+//!   prefix) and empties its record, the snapshot's id with it (Cloudflare
+//!   deletes no snapshot: forgotten, it is never restored, and expires in
+//!   30 days). From the mark on it starts, saves and writes nothing, and
+//!   answers as a computer never made: an event already under way (a save,
+//!   a start) fails at its next write.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -40,7 +48,7 @@ use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, 
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestoreSource, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -87,6 +95,12 @@ CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NU
 CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
 CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
+/// The one row a wiped computer keeps: when it was wiped. Apart from
+/// `SCHEMA`, whose tables the wipe drops.
+const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
+/// R2 pages (up to 1000 keys each) one `computer/wipe` deletes under its
+/// saves' prefix; the rest are the next call's.
+const WIPE_PAGES_PER_CALL: usize = 10;
 /// The Durable Object class a sealed own key names (`keys::scope`).
 const SEAL_CLASS: &str = "Computer";
 /// Months of uses kept (this one and the twelve before it).
@@ -247,15 +261,22 @@ pub struct ComputerCell {
     /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
     /// the guest's view lists: a token is asked of Pipes for each swap.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// Its owner was wiped (`wiped`'s row, read as it starts, or set by
+    /// the wipe): no write lands, and it answers as no computer.
+    wiped: std::cell::Cell<bool>,
 }
 
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
-        state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
+        let sql = state.storage().sql();
+        sql.exec(SCHEMA, None).expect("the Computer schema applies");
+        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
+        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
+        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default(), wiped: std::cell::Cell::new(wiped) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -266,7 +287,7 @@ impl DurableObject for ComputerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        if self.meta(MetaKey::Id).ok().flatten().is_some() {
+        if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
             if let Err(e) = self.drive(Event::Alarm).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
             }
@@ -295,6 +316,11 @@ impl DurableObject for ComputerCell {
         self.keepalive_closed(&ws).await;
         Ok(())
     }
+}
+
+/// A wiped computer's answer: as no computer.
+fn wiped_computer() -> CellError {
+    CellError::new(ErrorCode::NotFound, "no such computer (its owner was wiped)")
 }
 
 /// `computer/init`'s body.
@@ -448,7 +474,13 @@ impl ComputerCell {
         Ok(self.sql().exec(q, binds)?.to_array::<Value>()?)
     }
 
+    /// Every write the computer makes (its meta, saves, lifecycle, agents,
+    /// meters): none once it is wiped, so nothing under way when its wipe
+    /// began (a save, a start's report) writes it again.
     fn exec(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
+        if self.wiped.get() {
+            return Err(wiped_computer());
+        }
         self.sql().exec(q, binds)?;
         Ok(())
     }
@@ -781,6 +813,11 @@ impl ComputerCell {
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
+        // a wipe that began while this start awaited starts nothing: the
+        // check and the start are one turn (the host's start is synchronous)
+        if self.wiped.get() {
+            return Err(wiped_computer().into());
+        }
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
@@ -1288,6 +1325,67 @@ impl ComputerCell {
         })
     }
 
+    /// Where its saves are in R2: entry.mjs's `DirectoryBackup` prefix,
+    /// named by this object's id.
+    fn backups_prefix(&self) -> String {
+        format!("computers/{}/backups/", self.state.id())
+    }
+
+    /// Its owner's wipe (docs/api.md, Operators): marked wiped first (from
+    /// here no write lands and it answers as no computer), its alarm and
+    /// its container gone, each save's record deleted (the delete a save's
+    /// own `forget` makes), then whatever else is under its saves' prefix
+    /// (an upload its destroy cut short), at most `WIPE_PAGES_PER_CALL`
+    /// pages a call; once none is left, its tables dropped and made again
+    /// empty, the snapshot's id with them. Answers `{destroyed, records,
+    /// objects, more}`: `more`, its prefix holds more (call again). Each
+    /// part is idempotent: a wipe cut anywhere is done by the next call.
+    async fn wipe(&self) -> CellResult<Value> {
+        let id = self.meta(MetaKey::Id)?;
+        if !self.wiped.get() {
+            self.sql().exec("INSERT INTO wiped (at) VALUES (?)", vec![js::now_ms().into()])?;
+            self.wiped.set(true);
+            console_log!("{}", json!({ "computer": id, "wipe": "marked" }));
+        }
+        self.state.storage().delete_alarm().await?;
+        // whatever start runs it (`0`), and waited out
+        let destroyed = self.call("destroy", &[JsValue::from_f64(0.0), "its owner was wiped".into()]).await?.as_bool() == Some(true);
+        if !destroyed {
+            return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
+        }
+        let records = self.saves()?.every_record();
+        // bounded: a computer's records are (Saves::every_record)
+        for record in &records {
+            self.call("forget", &[js::to_js(record)]).await?;
+        }
+        let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        if !more {
+            // one step, no await: its record emptied, the mark kept
+            let sql = self.sql();
+            for table in fragment_core::ddl::tables(SCHEMA) {
+                sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
+            }
+            sql.exec(SCHEMA, None)?;
+            assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
+        }
+        console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
+        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more }))
+    }
+
+    /// What a wipe finds of it (docs/api.md, Operators): whether it is
+    /// wiped, made, its phase, its saves, how many objects its saves' prefix
+    /// holds (one page: `more` past it), and whether it keeps a snapshot.
+    async fn wipe_view(&self) -> CellResult<Value> {
+        let made = self.meta(MetaKey::Id)?.is_some();
+        let phase = match made {
+            true => Some(self.view()?.phase),
+            false => None,
+        };
+        let saves = self.saves()?;
+        let (keys, more) = js::blob_list(&self.env, &self.backups_prefix()).await?;
+        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
+    }
+
     /// A test fleet's lever on this computer (`POST /api/test/computer`,
     /// docs/api.md): `kill` sends SIGKILL to the guest's PID 1, so its
     /// container exits as a crash does and its real exit is reported;
@@ -1342,6 +1440,10 @@ impl ComputerCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
+        // a wiped computer answers as none, its wipe's own calls aside
+        if self.wiped.get() && !matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view") {
+            return Err(wiped_computer());
+        }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("port") => return self.port(req).await,
@@ -1370,6 +1472,8 @@ impl ComputerCell {
                 json_response(&self.view()?)
             }
             "computer/view" => json_response(&self.view()?),
+            "computer/wipe" => json_response(&self.wipe().await?),
+            "computer/wipe-view" => json_response(&self.wipe_view().await?),
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
@@ -1813,9 +1917,17 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Post, [id, "ports", port, "ticket"]) => {
             let v = owned(env, who, id).await?;
             let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
+            // where on the port it lands: a path and query the image reads
+            // (an agent's screen: `/?agent=<agent>`), carried, never read
+            let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+            let path = asked.path.unwrap_or_else(|| "/".into());
+            if !valid_port_path(&path) {
+                return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
+            }
             let t = ask(env, id, "computer/ticket", &json!({ "port": port, "identity": who })).await?;
             let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
-            let url = format!("{}/__ticket?t={ticket}&next=/p/{port}/", v.origin);
+            let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
+            let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
             json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
@@ -1877,7 +1989,9 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
     if path == "/__ticket" {
         let q = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
         let ticket = q("t").ok_or_else(|| CellError::invalid("this link names no ticket"))?;
-        let next = q("next").filter(|n| n.starts_with("/p/") && !n.contains("//")).unwrap_or_else(|| "/p/6080/".into());
+        // `/p/<port>` and a path on it, as the ticket's minting checked it
+        let landing = |n: &str| n.strip_prefix("/p/").and_then(|r| r.split_once('/')).is_some_and(|(port, rest)| port.parse::<u16>().is_ok() && valid_port_path(&format!("/{rest}")));
+        let next = q("next").filter(|n| landing(n)).unwrap_or_else(|| "/p/6080/".into());
         let s = ask(env, id, "computer/redeem", &json!({ "ticket": ticket })).await?;
         let session = s["session"].as_str().ok_or_else(|| CellError::host("the computer made no session"))?;
         let max_age_s = s["maxAgeS"].as_i64().unwrap_or(0);
@@ -2065,28 +2179,36 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
-/// /v1/chat/completions`, OpenAI's shape, with `model` a tier and
-/// `x-fragment-agent`. It is the platform's model route as that agent
-/// (`models::route`, signed as egress_api signs), which bounds it, meters
-/// it to the agent's owner, and refuses at zero credit. Its auth headers
-/// are the guest's and go nowhere; any other path is 404, unmetered.
+/// /v1/chat/completions`, OpenAI's shape, with `model` a tier, or `POST
+/// /v1/audio/transcriptions`, OpenAI's multipart shape, with `model`
+/// `whisper`; each names its agent (`models::agent_named`: the
+/// `x-fragment-agent` header, or the key `agent:<name>` from a client that
+/// sends no header of its own). It is the platform's model route as that
+/// agent (`models::route`, `models::transcription_route`, signed as
+/// egress_api signs, only for an agent that runs on this computer), which
+/// bounds it, meters it to the agent's owner, and refuses at zero credit.
+/// The guest's auth headers, its key among them, go nowhere: only the
+/// agent's name, the content type and `accept` are sent on. Any other path
+/// is 404, unmetered.
 async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
-    if req.method() != Method::Post || req.path() != "/v1/chat/completions" {
-        return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions"));
-    }
-    if req.headers().get(AGENT_HEADER)?.is_none() {
-        return Err(CellError::new(ErrorCode::Unauthenticated, "name the agent this call is for (x-fragment-agent): its owner pays for it"));
-    }
+    let (route, max) = match (req.method(), req.path().as_str()) {
+        (Method::Post, "/v1/chat/completions") => ("/api/models/v1/chat/completions", crate::models::MODEL_BODY_MAX_BYTES),
+        (Method::Post, "/v1/audio/transcriptions") => ("/api/models/v1/audio/transcriptions", fragment_core::transcribe::BODY_MAX_BYTES),
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions and /v1/audio/transcriptions")),
+    };
+    let named = fragment_core::models::agent_named(req.headers().get(AGENT_HEADER)?.as_deref(), req.headers().get("authorization")?.as_deref());
+    let agent = named.map_err(|why| CellError::new(ErrorCode::Unauthenticated, why.message()))?;
     let headers = Headers::new();
-    for k in [AGENT_HEADER, "content-type", "accept"] {
+    headers.set(AGENT_HEADER, &agent)?;
+    for k in ["content-type", "accept"] {
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
         }
     }
-    let body = crate::read_body(&mut req, crate::models::MODEL_BODY_MAX_BYTES).await?;
+    let body = crate::read_body(&mut req, max).await?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
-    let api = Request::new_with_init("http://api.fragment.internal/api/models/v1/chat/completions", &init)?;
+    let api = Request::new_with_init(&format!("http://api.fragment.internal{route}"), &init)?;
     egress_api(api, env, ctx, computer).await
 }
 

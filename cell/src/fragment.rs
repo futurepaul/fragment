@@ -899,6 +899,15 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
+        if let Some(route) = path.strip_prefix("/wipe/") {
+            // Only a wipe's orchestrator sets the header; the router never passes it.
+            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let route = route.to_string();
+            let bytes = req.bytes().await?;
+            return json_response(&self.wipe_route(&route, &bytes).await?);
+        }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
         let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
@@ -1054,8 +1063,10 @@ impl FragmentCell {
     async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
-            return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
+            return Err(CellError::invalid("a fragment's name is <label>.<username> (docs/api.md, Names)"));
         }
+        // the create door checked it (lib.rs); a fragment no host reaches is never made
+        fragment_core::names::host_fits(&body.name, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
         if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
             let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
@@ -1081,8 +1092,10 @@ impl FragmentCell {
         self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
-            let flat = fragment_proto::flat_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
-            let repo_name = format!("{}{flat}", cs_cfg.repo_prefix);
+            // the one place a repo's name is derived: its owner's, so a
+            // username held later by another identity never finds it
+            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
+                .ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>, and its owner an identity"))?;
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))

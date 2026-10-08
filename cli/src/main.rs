@@ -1,7 +1,9 @@
 mod api;
+mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod operator;
 mod sync;
 mod watch;
 
@@ -188,6 +190,11 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
+    /// The deployment's operators: an operator key, and wiping a person
+    Operator {
+        #[command(subcommand)]
+        sub: OperatorCmd,
+    },
     /// Your usage ledger: your credit, your plan, what you may still
     /// spend, and this month's spend by fragment (your fragments' hosting
     /// and AI, and your agents' models, bill you)
@@ -265,6 +272,28 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// Ask another of your agents (an agent: of its owner's) something, in
+    /// a chat of the two of you and your owner, made the first time (a
+    /// person: their direct chat with it), or in --chat; prints the chat
+    /// and the question's record. Its answer comes in that chat; --wait
+    /// prints it
+    Ask {
+        /// The agent: its label or fragment (`fred`, `fred.paul`), or its identity
+        agent: String,
+        /// What to ask it
+        text: String,
+        /// Ask in this chat instead (each of you two not in it is added, as its
+        /// owner's agent may)
+        #[arg(long)]
+        chat: Option<String>,
+        /// Wait for its answer and print it: at most SECS seconds (default
+        /// 150, under an agent's terminal's own 180 s; at most 1800)
+        #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "150")]
+        wait: Option<u64>,
+        /// The question's post id (a retry with the same --id posts nothing again)
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// List a fragment's channels, or read one (--follow keeps streaming)
     Channel {
         name: String,
@@ -320,6 +349,31 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OperatorCmd {
+    /// Make an operator key: a new key's secret in a file of its own (0600,
+    /// never overwritten, never printed); prints its npub, to list in the
+    /// deployment's `operators`. It is held by no person, so a wipe never
+    /// removes it
+    Key { path: PathBuf },
+    /// Wipe a person (a username, or id:…): everything theirs and their
+    /// agents' is deleted, and their username and sign-in freed, so their
+    /// next sign-in is a new person. --dry-run says what it deletes and
+    /// changes nothing; --yes deletes it (again: it goes on where it
+    /// stopped)
+    Wipe {
+        person: String,
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        /// The operator key's file (else FRAGMENT_OPERATOR_KEY_FILE, else
+        /// this machine's own key)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -798,6 +852,44 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Skill => {
             print!("{SKILL}");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Key { path } } => {
+            let npub = operator::make_key(&path, write_secret_file)?;
+            json_exit(j, &json!({ "npub": npub, "path": path.display().to_string() }));
+            println!("{npub}");
+            println!("its secret is in {} (0600): list the npub in the deployment's `operators`, and wipe with --key-file {}", path.display(), path.display());
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Wipe { person, dry_run, yes, key_file } } => {
+            let c = match operator::key_file(key_file.as_deref(), std::env::var(operator::KEY_FILE_ENV).ok()) {
+                Some(file) => {
+                    let mut c = api::Client::new(&resolve_host(&cli.host, &load_config()), operator::read_key(&file)?);
+                    c.verbose = cli.verbose;
+                    c
+                }
+                None => require_client(&cli.host, cli.verbose)?,
+            };
+            if dry_run || !yes {
+                let r = operator::dry_run(&c, &person)?;
+                json_exit(j, &r);
+                operator::print(&r);
+                if !dry_run {
+                    println!("a wipe deletes all of it: say --dry-run to only see it, --yes to delete it");
+                }
+                return Ok(());
+            }
+            let (r, calls) = operator::wipe(&c, &person, |n, r| {
+                if !j {
+                    for ran in &r.ran {
+                        let note = ran.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default();
+                        println!("  call {n}: {} {} ({} deleted){note}", ran.step, if ran.done { "done" } else { "not done" }, ran.deleted);
+                    }
+                }
+            })?;
+            json_exit(j, &json!({ "report": r, "calls": calls }));
+            operator::print(&r);
+            println!("wiped in {calls} call(s): nothing of theirs is left; their next sign-in is a new person");
             return Ok(());
         }
         Cmd::New { dir, template, list } => {
@@ -1442,6 +1534,35 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: post {id} had already appended this record)");
             }
         }
+        Cmd::Ask { agent, text, chat, wait, id } => {
+            let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
+            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
+            json_exit(j, &v);
+            println!("asked {} in {} (record {})", v.asked.name, v.chat, v.record["seq"]);
+            for who in &v.added {
+                println!("  added {who} to {} as an editor", v.chat);
+            }
+            if v.replayed {
+                eprintln!("(replayed: this question was posted before)");
+            }
+            match (&v.answer, v.waited_s) {
+                (Some(a), _) => {
+                    match (a.outcome.as_str(), &a.error) {
+                        ("idle", _) => println!("{} answered:", v.asked.name),
+                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.name),
+                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.name),
+                    }
+                    for r in &a.replies {
+                        println!("{}", r.text);
+                        if r.attachments > 0 {
+                            println!("  ({} file{} in the chat)", r.attachments, if r.attachments == 1 { "" } else { "s" });
+                        }
+                    }
+                }
+                (None, Some(s)) => println!("no answer in {s} s: it comes in {} (`fragment channel {} chat --after {}`)", v.chat, v.chat, v.record["seq"]),
+                (None, None) => println!("its answer comes in {} (`--wait` waits for it)", v.chat),
+            }
+        }
         Cmd::Channel { name, channel: None, .. } => {
             let v = c.call(c.get(&format!("/api/f/{name}/channels"))?)?;
             json_exit(j, &v);
@@ -1480,7 +1601,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }
