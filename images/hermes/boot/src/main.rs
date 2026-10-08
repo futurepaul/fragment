@@ -608,12 +608,12 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 }
 
 /// An agent's work directory (`/data/work/<profile>`, the hermes user's:
-/// its terminal's cwd), and its home and its desktop browser's profile in
-/// it, each linked from where Hermes keeps one in the profile, so what its
-/// tools write is the work the computer saves on its own (step 2 of
-/// docs/durable-computers.md). A `home` that had something in it is set
-/// aside, unmoved (`hermes::link_home`); a browser profile that is a
-/// directory already stays where it is.
+/// its terminal's cwd), and its home, its temp files and its desktop
+/// browser's profile in it, each linked from where Hermes keeps one in the
+/// profile, so what its tools write is the work the computer saves on its
+/// own (step 2 of docs/durable-computers.md). A `home` or scratch that had
+/// something in it is set aside, unmoved (`hermes::link_into_work`); a
+/// browser profile that is a directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
     let browser = work.join("browser-profile");
@@ -623,16 +623,19 @@ fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     }
     chown(&work, ids);
     chown(&browser, ids);
-    let home = hermes::home_dir(&a.fragment);
-    match hermes::link_home(profile, &home) {
-        Ok(found) => {
-            chown(&home, ids);
-            chown(&profile.join(hermes::PROFILE_HOME), ids);
-            if let hermes::HomeLink::SetAside(aside) = found {
-                ev!("profile.home_set_aside", { "agent": a.fragment, "to": aside.display().to_string() });
+    for (at, to) in [(hermes::PROFILE_HOME, hermes::home_dir(&a.fragment)), (hermes::PROFILE_SCRATCH, hermes::tmp_dir(&a.fragment))] {
+        match hermes::link_into_work(profile, at, &to) {
+            Ok(found) => {
+                let link = profile.join(at);
+                for p in [Some(to.as_path()), link.parent(), Some(link.as_path())].into_iter().flatten() {
+                    chown(p, ids);
+                }
+                if let hermes::WorkLink::SetAside(aside) = found {
+                    ev!("profile.set_aside", { "agent": a.fragment, "what": at, "to": aside.display().to_string() });
+                }
             }
+            Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": format!("its {at}: {e}") }),
         }
-        Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": format!("its home: {e}") }),
     }
     let link = profile.join(hermes::BROWSER_PROFILE);
     if let Some(parent) = link.parent() {

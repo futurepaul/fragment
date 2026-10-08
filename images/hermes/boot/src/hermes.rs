@@ -266,12 +266,15 @@ pub fn chromium_script(full: &Path) -> String {
 }
 
 /// Chromium's scratch: the container's own `/tmp`, which no save keeps.
-/// Hermes points `TMPDIR` into its home (`<profile>/cache/scratch`, under
-/// `/data`), and Chromium keeps there a headless browser's profile when its
-/// caller names none (Chrome 145, which Hermes v0.21.6 pins; 153, in its
-/// v0.21.5 image, kept it under `~`), and the shared memory
-/// `--disable-dev-shm-usage` moves out of `/dev/shm`: a hold while one runs
-/// would find its databases under Hermes' home, locked.
+/// Hermes points `TMPDIR` under `/data`: an agent's terminal at its
+/// profile's scratch (its work's `tmp_dir`, through a link), Hermes' browser
+/// tool at the gateway's own (`/data/hermes/cache/scratch`).
+/// Chromium keeps there a headless browser's profile when its caller names
+/// none (Chrome 145, which Hermes v0.21.6 pins; 153, in its v0.21.5 image,
+/// kept it under `~`), and the shared memory `--disable-dev-shm-usage` moves
+/// out of `/dev/shm`: throwaway state any save would carry, and under the
+/// gateway's scratch a hold while one runs would find its databases under
+/// Hermes' home, locked.
 pub const CHROMIUM_TMP: &str = "/tmp";
 
 /// What Hermes would otherwise decide by guessing whether it runs in a
@@ -306,7 +309,7 @@ pub const RUNTIME_ENV: [(&str, &str); 2] = [("TERMINAL_HOME_MODE", "profile"), (
 pub const WORK: &str = "/data/work";
 
 /// An agent's work directory: its terminal's cwd, its home (`home_dir`),
-/// and its browser's profile (`BROWSER_PROFILE`).
+/// its temp files (`tmp_dir`) and its browser's profile (`BROWSER_PROFILE`).
 pub fn work_dir(agent_fragment: &str) -> PathBuf {
     Path::new(WORK).join(wire::profile(agent_fragment))
 }
@@ -320,56 +323,89 @@ pub fn home_dir(agent_fragment: &str) -> PathBuf {
     work_dir(agent_fragment).join("home")
 }
 
+/// An agent's temp files: what Hermes points `TMPDIR`, `TMP` and
+/// `TEMP` at for each process it runs with the profile's home (its
+/// terminal's commands, foreground or background), its profile's
+/// `PROFILE_SCRATCH`, there a link to this. So a tool's temp file is its
+/// work, saved with it, never Hermes' home.
+///
+/// Why a link, and not a `TMPDIR` of the image's: Hermes derives each
+/// child's temp directory from the home it runs it under
+/// (`hermes_constants.apply_subprocess_home_env`, then
+/// `apply_scratch_tmp_env`, re-pointing a value it set itself, known by its
+/// `HERMES_SCRATCH_DIR` marker), so its own path is the one place every one
+/// of its ways of starting a command reads. A profile cannot name one:
+/// `terminal.env_passthrough` reads no `TMPDIR` from a profile's `.env`
+/// (Hermes keeps it process-wide: `agent/secret_scope.py`,
+/// `_GLOBAL_ENV_EXACT`), and an export in `shell_init_files` reaches only
+/// the terminal's snapshot, never a background process (a `bash -lic` of
+/// the gateway's environment). And the gateway's own `TMPDIR` stays
+/// Hermes': one Hermes did not set is passed to every child as it is, so
+/// all agents would share it. One way misses: execute_code's scripts get
+/// the gateway's own (docs/technical-debt-ledger.md, "An agent's
+/// execute_code makes its temp files in Hermes' home").
+pub fn tmp_dir(agent_fragment: &str) -> PathBuf {
+    work_dir(agent_fragment).join("tmp")
+}
+
 /// A profile's `home`, as Hermes names it (one of `PROFILE_DIRS`).
 pub const PROFILE_HOME: &str = "home";
 
-/// What a profile's `home` is set aside as when it has something in it from
-/// before an agent's home was its work: a hard cut, so nothing of it is
-/// carried over, and nothing deleted.
-pub const HOME_SET_ASIDE: &str = "home.before-work";
+/// A profile's scratch directory, relative to it, as Hermes names it
+/// (`hermes_constants.get_scratch_dir`: `<home>/cache/scratch`).
+pub const PROFILE_SCRATCH: &str = "cache/scratch";
 
-/// What `link_home` found and did.
+/// What a profile's `home` or scratch is set aside as (after its own name)
+/// when it has something in it from before it was the agent's work: a hard
+/// cut, so nothing of it is carried over, and nothing deleted.
+pub const SET_ASIDE: &str = ".before-work";
+
+/// What `link_into_work` found and did.
 #[derive(Debug, PartialEq, Eq)]
-pub enum HomeLink {
+pub enum WorkLink {
     /// Already the link.
     Kept,
-    /// Linked now: a fresh profile, an empty `home`, or a link elsewhere.
+    /// Linked now: a fresh profile, an empty directory, or a link elsewhere.
     Linked,
-    /// A `home` with something in it, set aside unmoved (`HOME_SET_ASIDE`,
-    /// numbered when that is taken), then linked.
+    /// A directory with something in it, set aside unmoved (`SET_ASIDE`
+    /// after its name, numbered when that is taken), then linked.
     SetAside(PathBuf),
 }
 
-/// Makes `profile`'s `home` a link to `home` (made if missing), whatever it
-/// was. The caller gives both to the agent's user.
-pub fn link_home(profile: &Path, home: &Path) -> std::io::Result<HomeLink> {
-    std::fs::create_dir_all(home)?;
-    let link = profile.join(PROFILE_HOME);
+/// Makes `profile`'s `at` (`PROFILE_HOME`, `PROFILE_SCRATCH`) a link to
+/// `to` (made if missing, as is the link's parent), whatever it was. The
+/// caller gives them to the agent's user.
+pub fn link_into_work(profile: &Path, at: &str, to: &Path) -> std::io::Result<WorkLink> {
+    std::fs::create_dir_all(to)?;
+    let link = profile.join(at);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let found = match std::fs::symlink_metadata(&link) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HomeLink::Linked,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkLink::Linked,
         Err(e) => return Err(e),
         Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::read_link(&link)? == home {
-                return Ok(HomeLink::Kept);
+            if std::fs::read_link(&link)? == to {
+                return Ok(WorkLink::Kept);
             }
             std::fs::remove_file(&link)?;
-            HomeLink::Linked
+            WorkLink::Linked
         }
         Ok(m) if m.is_dir() && std::fs::read_dir(&link)?.next().is_none() => {
             std::fs::remove_dir(&link)?;
-            HomeLink::Linked
+            WorkLink::Linked
         }
         Ok(_) => {
             // bounded: 100 names
             let aside = (0..100)
-                .map(|n| profile.join(if n == 0 { HOME_SET_ASIDE.to_string() } else { format!("{HOME_SET_ASIDE}-{n}") }))
+                .map(|n| profile.join(if n == 0 { format!("{at}{SET_ASIDE}") } else { format!("{at}{SET_ASIDE}-{n}") }))
                 .find(|p| std::fs::symlink_metadata(p).is_err())
                 .ok_or_else(|| std::io::Error::other(format!("no name left to set {} aside as", link.display())))?;
             std::fs::rename(&link, &aside)?;
-            HomeLink::SetAside(aside)
+            WorkLink::SetAside(aside)
         }
     };
-    std::os::unix::fs::symlink(home, &link)?;
+    std::os::unix::fs::symlink(to, &link)?;
     Ok(found)
 }
 
@@ -771,48 +807,54 @@ mod tests {
         }
     }
 
-    /// An agent's home is in its work, and its profile's `home` the link
-    /// to it: made for a fresh profile; kept when it is the link (each
-    /// boot); an empty `home` or a link elsewhere replaced; a `home` with
+    /// An agent's home and its temp files are in its work, and its
+    /// profile's `home` and scratch the links to them: made for a fresh
+    /// profile (the scratch's `cache` with it); kept when each is the link
+    /// (each boot); an empty one or a link elsewhere replaced; one with
     /// something in it set aside whole, and nothing of it carried over.
     #[test]
-    fn a_profiles_home_is_a_link_into_its_work() {
+    fn a_profiles_home_and_scratch_are_links_into_its_work() {
         assert_eq!(home_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul/home"));
+        assert_eq!(tmp_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul/tmp"));
         assert!(PROFILE_DIRS.contains(&PROFILE_HOME), "Hermes' name for it: {PROFILE_DIRS:?}");
-        let root = std::env::temp_dir().join(format!("hermes-home-{}", std::process::id()));
+        assert_eq!(format!("{PROFILE_HOME}{SET_ASIDE}"), "home.before-work", "the name a home from before was set aside as since 2026-10-07");
+        let root = std::env::temp_dir().join(format!("hermes-work-links-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (profile, home) = (root.join("hermes/profiles/juniper-paul"), root.join("work/juniper-paul/home"));
+        let profile = root.join("hermes/profiles/juniper-paul");
         std::fs::create_dir_all(&profile).unwrap();
-        let link = profile.join(PROFILE_HOME);
         let linked = |l: &Path| std::fs::read_link(l).ok();
-        // valid: a fresh profile, its home made
-        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
-        assert_eq!(linked(&link), Some(home.clone()));
-        assert!(home.is_dir());
-        std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
-        // replay: the next boot keeps it, and what is in it
-        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Kept);
-        assert!(link.join(".gitconfig").is_file(), "written through the link, kept in the work");
-        // a link elsewhere is pointed home
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
-        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
-        assert_eq!(linked(&link), Some(home.clone()));
-        // an empty `home` (Hermes' own, made before the link) goes
-        std::fs::remove_file(&link).unwrap();
-        std::fs::create_dir(&link).unwrap();
-        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
-        assert!(!profile.join(HOME_SET_ASIDE).exists(), "nothing to set aside");
-        // a `home` from before, with files: set aside unmoved, twice numbered
-        for (n, aside) in [HOME_SET_ASIDE.to_string(), format!("{HOME_SET_ASIDE}-1")].iter().enumerate() {
+        for (at, to) in [(PROFILE_HOME, root.join("work/juniper-paul/home")), (PROFILE_SCRATCH, root.join("work/juniper-paul/tmp"))] {
+            let link = profile.join(at);
+            // valid: a fresh profile, its directory in the work made
+            assert_eq!(link_into_work(&profile, at, &to).unwrap(), WorkLink::Linked, "{at}");
+            assert_eq!(linked(&link), Some(to.clone()));
+            assert!(to.is_dir());
+            std::fs::write(to.join("kept"), "x").unwrap();
+            // replay: the next boot keeps it, and what is in it
+            assert_eq!(link_into_work(&profile, at, &to).unwrap(), WorkLink::Kept, "{at}");
+            assert!(link.join("kept").is_file(), "written through the link, kept in the work");
+            // a link elsewhere is pointed at the work
             std::fs::remove_file(&link).unwrap();
-            std::fs::create_dir_all(link.join(".config/chromium")).unwrap();
-            std::fs::write(link.join(".config/chromium/History"), format!("{n}")).unwrap();
-            assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::SetAside(profile.join(aside)));
-            assert_eq!(std::fs::read_to_string(profile.join(aside).join(".config/chromium/History")).unwrap(), format!("{n}"), "set aside whole");
-            assert_eq!(linked(&link), Some(home.clone()));
-            assert!(!home.join(".config").exists(), "nothing of it carried into the work");
+            std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
+            assert_eq!(link_into_work(&profile, at, &to).unwrap(), WorkLink::Linked, "{at}");
+            assert_eq!(linked(&link), Some(to.clone()));
+            // an empty one (Hermes' own, made before the link) goes
+            std::fs::remove_file(&link).unwrap();
+            std::fs::create_dir(&link).unwrap();
+            assert_eq!(link_into_work(&profile, at, &to).unwrap(), WorkLink::Linked, "{at}");
+            assert!(!profile.join(format!("{at}{SET_ASIDE}")).exists(), "nothing to set aside");
+            // one from before, with files: set aside unmoved, twice numbered
+            for (n, aside) in [format!("{at}{SET_ASIDE}"), format!("{at}{SET_ASIDE}-1")].iter().enumerate() {
+                std::fs::remove_file(&link).unwrap();
+                std::fs::create_dir_all(link.join("from-before")).unwrap();
+                std::fs::write(link.join("from-before/file"), format!("{n}")).unwrap();
+                assert_eq!(link_into_work(&profile, at, &to).unwrap(), WorkLink::SetAside(profile.join(aside)), "{at}");
+                assert_eq!(std::fs::read_to_string(profile.join(aside).join("from-before/file")).unwrap(), format!("{n}"), "set aside whole");
+                assert_eq!(linked(&link), Some(to.clone()));
+                assert!(!to.join("from-before").exists(), "nothing of it carried into the work");
+            }
         }
+        assert!(profile.join("cache").is_dir() && !profile.join("cache").is_symlink(), "the scratch's parent is Hermes' own");
         let _ = std::fs::remove_dir_all(&root);
     }
 

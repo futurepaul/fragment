@@ -1386,7 +1386,7 @@ async fn homes(runtime: Runtime) -> Homes {
     if !written.is_empty() {
         assert_eq!(c.exec_out(&["cat", &written]), support::model::WRITTEN, "write_file wrote where it said");
     }
-    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/hermes/profiles/juniper-paul/cache/scratch", "/data/work/juniper-paul/home"];
+    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/work/juniper-paul/tmp", "/data/work/juniper-paul/home"];
     let modes = c.exec_out(&["sh", "-c", &format!("stat -c '%a %n' {} 2>/dev/null", dirs.join(" "))]);
     let real = |p: &str| if p.is_empty() { String::new() } else { c.exec_out(&["realpath", p]).trim().to_string() };
     let terminal = said(&terminal, "home");
@@ -1431,8 +1431,9 @@ fn held_event(c: &Container) -> Option<serde_json::Value> {
 /// `declarative_performance_observer.db` was held locked. Chrome 153 (Hermes
 /// v0.21.5's image) kept that temporary profile under `~`, in its work;
 /// Chrome 145 (Hermes v0.21.6) keeps it in `TMPDIR`, which Hermes points at
-/// its home's scratch, so the image's Chromium gives it the container's
-/// `/tmp` (hermes.rs, `CHROMIUM_TMP`).
+/// its profile's scratch (a link into its work, saved with it), so the
+/// image's Chromium gives it the container's `/tmp` (hermes.rs,
+/// `CHROMIUM_TMP`).
 /// The agent starts it as Hermes' background process (`start:`).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
@@ -1461,6 +1462,102 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
     assert_eq!(dbs("/data/hermes/").trim(), "", "none of its databases is under Hermes' home");
     assert!(!dbs("/tmp/").trim().is_empty() || !dbs("/data/work/juniper-paul/home/").trim().is_empty(), "its temporary profile is the container's, or in its home, in its work");
     unhold(&c);
+}
+
+/// Says `text` and waits until `done` holds of its turn, any card the turn
+/// asks allowed for the session: the turn.
+async fn asked(fake: &Fake, chat: &str, c: &Container, text: &str, done: impl Fn(&support::fake::World, &str) -> bool) -> String {
+    let said = fake.say(chat, &person("paul"), json!({ "text": text }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", chat, "chat", said["seq"].as_u64().unwrap());
+    let (t, mut allowed) = (Instant::now(), false);
+    // bounded: four minutes
+    loop {
+        if fake.with(|w| done(w, &turn)) {
+            return turn;
+        }
+        if !allowed {
+            if let Some(card) = fake.with(|w| w.bodies(chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == turn)) {
+                fake.say(chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
+                allowed = true;
+            }
+        }
+        assert!(t.elapsed() < Duration::from_secs(240), "{text:?} not done in 240 s; {}", told(fake, chat, c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// What the tool of `text`'s turn said, as the scripted model quotes it
+/// (`scripted: the tool said: …`).
+async fn tool_said(fake: &Fake, chat: &str, c: &Container, text: &str) -> String {
+    let reply = |w: &support::fake::World, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn);
+    let turn = asked(fake, chat, c, text, |w, turn| reply(w, turn).is_some()).await;
+    fake.with(|w| reply(w, &turn)).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
+}
+
+/// Goal (the seam, step 2 of docs/durable-computers.md): a temp file an
+/// agent's tools make is its work (`/data/work/<profile>/tmp`), saved with
+/// it, never Hermes' home. Hermes points every child's `TMPDIR` at its
+/// home's `cache/scratch` (`hermes_constants.apply_scratch_tmp_env`), for an
+/// agent's the profile's, which until 2026-10-07 was a directory under
+/// Hermes' home (`/data/hermes/profiles/juniper-paul/cache/scratch`); the
+/// image makes it a link into the work (`hermes::tmp_dir`). Each way a tool
+/// runs is given its environment its own way, so each is asked: its
+/// terminal (`mktemp`), a background process it starts (`mktemp`, its path
+/// written to a file), and execute_code (Python's `tempfile`), whose
+/// scripts Hermes gives the gateway's own temp directory instead
+/// (docs/technical-debt-ledger.md, "An agent's execute_code makes its temp
+/// files in Hermes' home"): pinned here, so the day Hermes fixes it this
+/// fails and the entry goes. Then Hermes' own use of the scratch: a file
+/// made there and named in the reply's `MEDIA:` tag, as Hermes' prompts
+/// suggest, is still sent, read through the link.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_tools_temp_files_are_its_work() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("temp", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let (work, real) = ("/data/work/juniper-paul/tmp", |p: &str| c.exec_out(&["realpath", "-e", p]).trim().to_string());
+    let terminal = tool_said(&fake, &chat, &c, "run: echo tmpdir=$TMPDIR made=$(mktemp)").await;
+    let started = "/data/work/juniper-paul/started-temp.txt";
+    let background = tool_said(&fake, &chat, &c, &format!("start: echo made=$(mktemp) > {started}")).await;
+    let t = Instant::now();
+    // bounded: a minute
+    while !c.exec(&["test", "-s", started]) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the background process wrote nothing; the terminal said {background:?}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let background = c.exec_out(&["cat", started]);
+    let code = tool_said(&fake, &chat, &c, "code: import tempfile; print('made=' + tempfile.mkstemp()[1])").await;
+    let made: Vec<(&str, String, String)> = [("its terminal", &terminal), ("a background process", &background), ("execute_code", &code)].into_iter().map(|(tool, text)| (tool, said(text, "made"), text.clone())).collect();
+    for (tool, path, _) in &made {
+        eprintln!("temp: {tool} made {path:?}, in {:?}", real(path));
+    }
+    eprintln!("temp: the gateway's own scratch holds {:?}", c.exec_out(&["ls", "-A", "/data/hermes/cache/scratch"]));
+    let tmpdir = said(&terminal, "tmpdir");
+    assert_eq!(real(&tmpdir), work, "its terminal's TMPDIR ({tmpdir:?}) is its work's: {terminal}");
+    for (tool, path, text) in &made {
+        assert!(path.starts_with('/'), "{tool} said where it made its temp file: {text:?}");
+        let in_fact = real(path);
+        if *tool == "execute_code" {
+            assert!(
+                in_fact.starts_with("/data/hermes/cache/scratch/"),
+                "execute_code's temp file is no longer the gateway's own but {in_fact:?}: Hermes now keeps its scratch marker for execute_code's scripts, so drop the ledger's entry (\"An agent's execute_code makes its temp files in Hermes' home\") and hold it to its work with the rest"
+            );
+        } else {
+            assert!(in_fact.starts_with(&format!("{work}/")), "{tool}'s temp file {path:?} is in its work, not {in_fact:?}");
+        }
+    }
+    let attached = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_some());
+    let turn = asked(&fake, &chat, &c, "send: f=$(mktemp --suffix=.txt) && echo temp-sent > $f && echo made=$f", |w, turn| attached(w, turn).is_some()).await;
+    fake.with(|w| {
+        let reply = attached(w, &turn).unwrap();
+        let sha = reply["attachments"][0]["sha256"].as_str().unwrap_or("");
+        let sent = w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.clone());
+        assert_eq!(sent.as_deref(), Some(&b"temp-sent\n"[..]), "the temp file Hermes sent is the one in its work: {reply}");
+    });
 }
 
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
