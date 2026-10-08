@@ -102,6 +102,18 @@ export function settingsScreen({ framed = false } = {}) {
     null,
     h("section", null, h("h3", { text: "About you" }), h("p.quiet", { text: "Every persona reads this, in every chat." }), about, h("div.row", null, save, saved)),
     h("section", null, h("h3", { text: "Memory" }), memory, h("div.row", null, exportBtn, exportNote)),
+    // the models are the person's, set on the platform with their keys (a
+    // page of a fragment never holds them); framed by the shell's Settings,
+    // its Models section is beside this one
+    framed
+      ? null
+      : h(
+          "section",
+          null,
+          h("h3", { text: "Models" }),
+          h("p.quiet", { text: "Which model runs your chats, your memory and your agents' work: Fragment's own, or Claude or ChatGPT on your own account." }),
+          h("a.pill", { href: `${platformOrigin()}/settings#models`, target: "_top", "data-models": "settings" }, "Choose in Settings"),
+        ),
     h("section", null, h("h3", { text: "Import chats" }), importing),
     h(
       "section",

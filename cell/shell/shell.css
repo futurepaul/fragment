@@ -358,6 +358,12 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
+/* settings' models: a picker a role (shell.js modelsSection) */
+.model-role .settings-value { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.model-picker { height: 30px; max-width: 100%; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-window); color: var(--text-primary); font: inherit; font-size: 13px; }
+.model-saved:empty { display: none; }
+.model-role small { font-size: 12px; }
+.provider p.muted { font-size: 13px; }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
 .chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
 .chip:disabled { opacity: .6; }

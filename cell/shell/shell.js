@@ -1251,6 +1251,8 @@ function say(text) {
   return p;
 }
 async function openSettings(push = true) {
+  // the mind's settings link to the models (`/settings#models`): read before the address changes
+  const toModels = location.hash === "#models";
   if (push) at(SETTINGS);
   state.page = "Settings";
   $("frames").hidden = true;
@@ -1261,11 +1263,12 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked, uses, clients] = await Promise.all([
+  const [ledger, linked, uses, clients, models] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/oauth/connections").catch(() => null),
+    api("GET", "/api/models").catch(() => null),
   ]);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
@@ -1353,7 +1356,9 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  place(page, [account, mindSection(), credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER)].filter(Boolean));
+  place(page, [account, mindSection(), modelsSection(models), credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER)].filter(Boolean));
+  // and scrolled there when it came for them
+  if (toModels) $("settings-models")?.scrollIntoView({ block: "start" });
 }
 
 // ---- the mind's settings (docs/optchat.md, "The page"): about you, its
@@ -1568,6 +1573,184 @@ function connectionsSection(linked, uses) {
     }
     row.append(used);
     s.append(row);
+  }
+  return s;
+}
+
+// ---- models (docs/optchat.md, "Your own models"): which model runs each of
+// the person's roles (their chats' turns, their memory's summaries, their
+// agents' work), Fragment's own (billed to their credit) or one of a
+// provider they connect (their own account: counted here, never charged).
+// Their keys and sign-in are kept by their computer, sealed, and given to
+// no page: this one sends a key once and reads back only its state.
+const ROLES = [
+  { role: "chat", name: "Chat", about: "Your mind's turns, and its research." },
+  { role: "memory", name: "Memory", about: "The summaries your memory is made of." },
+  { role: "hands", name: "Hands", about: "Your agents' work on your computer (goose)." },
+];
+const MODEL_PROVIDERS = {
+  anthropic: { name: "Claude", kind: "Your Anthropic API key" },
+  chatgpt: { name: "ChatGPT", kind: "Sign in with ChatGPT" },
+  openai: { name: "OpenAI", kind: "Your OpenAI API key" },
+};
+const MODEL_STATE = { set: "Key set", not_set: "No key yet", connected: "Connected", not_connected: "Not connected", needs_reauthorization: "Sign in again" };
+// Anthropic's article: Max and Team plans include monthly API credits (2026-10-07)
+const CLAUDE_CREDITS = "https://support.claude.com/en/articles/15036540";
+// OpenAI's terms for ChatGPT plan usage (developers.openai.com/cookbook/articles/sign-in-with-chatgpt, 2026-10-08)
+const CHATGPT_TERMS =
+  "OpenAI offers ChatGPT plan usage to open-source projects, personal projects that run locally, and selected private apps; a paid or remotely hosted app joins its waitlist before offering it. Until fragment is approved, this is for your own testing.";
+const count = (n) => Number(n ?? 0).toLocaleString();
+function modelProvider(p) {
+  const meta = MODEL_PROVIDERS[p.provider] ?? { name: providerName(p.provider), kind: "" };
+  const row = el("div", "provider");
+  row.dataset.modelProvider = p.provider;
+  row.dataset.state = p.state;
+  const head = el("div", "provider-head");
+  const state = p.provider === "chatgpt" && p.state === "connected" && p.account ? `Connected as ${p.account}` : MODEL_STATE[p.state] ?? p.state;
+  head.append(el("span", "provider-name", meta.name), el("span", "provider-kind", meta.kind), el("span", `provider-state ${p.state}`, state));
+  row.append(head);
+  if (p.provider === "anthropic" || p.provider === "openai") {
+    const form = el("form", "provider-key");
+    const input = el("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.placeholder = p.state === "set" ? "Replace your key" : `Your ${meta.name} API key`;
+    const save = el("button", "quiet", "Save");
+    save.type = "submit";
+    form.append(input, save);
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      save.disabled = true;
+      try {
+        await api("PUT", `/api/connections/${p.provider}/key`, { key: input.value });
+        await openSettings(false);
+      } catch (err) {
+        save.textContent = err.message;
+        save.disabled = false;
+      }
+    };
+    const actions = el("div", "settings-actions");
+    actions.append(form);
+    if (p.state === "set") {
+      const remove = el("button", "quiet", "Remove");
+      remove.type = "button";
+      remove.onclick = async () => {
+        remove.disabled = true;
+        await api("DELETE", `/api/connections/${p.provider}/key`).catch(() => {});
+        await openSettings(false);
+      };
+      actions.append(remove);
+    }
+    row.append(actions);
+    if (p.provider === "anthropic") {
+      const note = say("Claude Max and Team plans include monthly API credits for the Claude API: make a key in the Claude Console and paste it here. ");
+      const more = el("a", null, "Anthropic's article");
+      more.href = CLAUDE_CREDITS;
+      more.target = "_blank";
+      more.rel = "noopener";
+      note.append(more, ".");
+      note.classList.add("muted");
+      row.append(note);
+    }
+  }
+  if (p.provider === "chatgpt") {
+    row.append(
+      say("ChatGPT's sign-in comes back to the machine that asked for it, so your terminal does it: with `fragment` signed in to this platform, run"),
+      el("pre", "command", "fragment connect chatgpt"),
+      say("It opens ChatGPT in your browser, then hands this platform your tokens, which your computer keeps sealed and refreshes. `fragment connect chatgpt --forget` signs out."),
+    );
+    const terms = el("p", "muted", CHATGPT_TERMS);
+    terms.dataset.terms = "chatgpt";
+    row.append(terms);
+  }
+  if (p.error) row.append(el("p", "settings-warning", p.error));
+  return row;
+}
+// one role's picker: Fragment's models, then each connected provider's (its
+// suggestion for the role first); the default, Fragment's Flash, is kept as no choice
+function rolePicker(r, models) {
+  const line = el("div", "settings-line model-role");
+  line.dataset.role = r.role;
+  const select = el("select", "model-picker");
+  select.dataset.role = r.role;
+  select.setAttribute("aria-label", `${r.name}'s model`);
+  const fragment = el("optgroup");
+  fragment.label = "Fragment, billed to your credit";
+  for (const m of models.fragment ?? []) {
+    const o = el("option", null, m.default ? `${m.name} (default)` : m.name);
+    o.value = `fragment:${m.id}`;
+    fragment.append(o);
+  }
+  select.append(fragment);
+  for (const p of models.providers ?? []) {
+    if (!p.models?.length) continue;
+    const group = el("optgroup");
+    group.label = `${MODEL_PROVIDERS[p.provider]?.name ?? p.provider}, your account`;
+    const suggested = p.suggested?.[r.role];
+    const first = p.models.find((m) => m.id === suggested);
+    for (const m of first ? [first, ...p.models.filter((x) => x !== first)] : p.models) {
+      const o = el("option", null, m === first ? `${m.name} (suggested)` : m.name);
+      o.value = `${p.provider}:${m.id}`;
+      group.append(o);
+    }
+    select.append(group);
+  }
+  const chosen = models.roles?.[r.role];
+  const value = chosen ? `${chosen.provider}:${chosen.model}` : "fragment:cheap";
+  // a choice whose provider lists nothing now (signed out, a key removed) shows as it is
+  if (![...select.options].some((o) => o.value === value)) {
+    const o = el("option", null, `${chosen.model} (${MODEL_PROVIDERS[chosen.provider]?.name ?? chosen.provider}: not connected)`);
+    o.value = value;
+    select.append(o);
+  }
+  select.value = value;
+  select.dataset.saved = value;
+  const saved = el("span", "muted model-saved");
+  select.onchange = async () => {
+    select.disabled = true;
+    const at = select.value.indexOf(":");
+    const [provider, model] = [select.value.slice(0, at), select.value.slice(at + 1)];
+    const choice = provider === "fragment" && model === "cheap" ? null : { provider, model };
+    try {
+      await api("PUT", "/api/models/choices", { [r.role]: choice });
+      select.dataset.saved = select.value;
+      saved.textContent = "Saved";
+    } catch (e) {
+      saved.textContent = e.message;
+      select.value = select.dataset.saved;
+    }
+    select.disabled = false;
+  };
+  const value_ = el("div", "settings-value");
+  value_.append(select, saved, el("small", "muted", r.about));
+  line.append(el("span", "settings-key", r.name), value_);
+  return line;
+}
+function modelsSection(models) {
+  const s = section("Models");
+  s.id = "settings-models";
+  if (!models) {
+    s.append(el("p", "muted", "Your models could not be read."));
+    return s;
+  }
+  s.append(el("p", "muted", "Which model runs your chats, your memory and your agents' work. Fragment's own is billed to your credit; a provider you connect runs on your own account, its use counted here and never charged."));
+  for (const r of ROLES) s.append(rolePicker(r, models));
+  if (!models.computer) s.append(el("p", "muted", "Your keys and choices are kept by your computer: connect a provider once it is made."));
+  for (const p of models.providers ?? []) s.append(modelProvider(p));
+  // this month's calls on the person's own models, by provider, model and role
+  const uses = models.uses ?? [];
+  if (uses.length) {
+    const block = el("div", "provider model-uses");
+    const used = el("div", "provider-uses");
+    used.append(el("span", "settings-key", "This month"));
+    for (const u of uses) {
+      const tokens = u.input + u.cached + u.cacheWrite;
+      const item = el("span", "use", `${MODEL_PROVIDERS[u.provider]?.name ?? u.provider} ${u.model} for ${u.role}: ${count(u.calls)} ${u.calls === 1 ? "call" : "calls"}, ${count(tokens)} tokens in (${count(u.cached)} from the cache), ${count(u.output)} out`);
+      Object.assign(item.dataset, { provider: u.provider, model: u.model, role: u.role, calls: String(u.calls), cached: String(u.cached), output: String(u.output) });
+      used.append(item);
+    }
+    block.append(used);
+    s.append(block);
   }
   return s;
 }
