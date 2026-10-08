@@ -31,7 +31,15 @@
 //!   save kept, and left out);
 //! - `think <text>`: one model call through the computer's model intercept
 //!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
-//!   model's answer;
+//!   model's answer; `think as <key> <text>` names its agent by its key
+//!   alone, `Authorization: Bearer <key>`, as an OpenAI SDK does;
+//! - `transcribe <words> [as <key>] [header <agent>]`: a voice memo that
+//!   says `<words>` (a WAV the Workers AI fake reads them from) sent through
+//!   the intercept as an OpenAI SDK sends one, `POST
+//!   /v1/audio/transcriptions` with `model` `whisper`, its agent named by
+//!   its key (`agent:<itself>` unless `as` names another) and, with
+//!   `header`, by `x-fragment-agent` too: the reply is `heard: <the text>`,
+//!   or the refusal's status and its first 300 characters;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -229,9 +237,10 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| format!("{url}: no answer"))?
 }
 
-/// One model call, `said` as the user's message, as `agent`: the answer's
-/// text.
-async fn think(agent: &str, said: &str) -> Result<String, String> {
+/// One model call, `said` as the user's message, as `agent`, named by its
+/// `x-fragment-agent`, or by `key` alone (`Authorization: Bearer <key>`):
+/// the answer's text.
+async fn think(agent: &str, key: Option<&str>, said: &str) -> Result<String, String> {
     use http_body_util::{BodyExt, Full, Limited};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
@@ -239,9 +248,13 @@ async fn think(agent: &str, said: &str) -> Result<String, String> {
     let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
     let base = crate::net::Base::parse(&model)?;
     let body = serde_json::json!({ "model": "cheap", "messages": [{ "role": "user", "content": said }] }).to_string();
+    let named = match key {
+        Some(k) => ("authorization", format!("Bearer {k}")),
+        None => ("x-fragment-agent", agent.to_string()),
+    };
     let req = hyper::Request::post(base.url("/v1/chat/completions"))
         .header("host", base.authority())
-        .header("x-fragment-agent", agent)
+        .header(named.0, named.1)
         .header("content-type", "application/json")
         .header("content-length", body.len())
         .body(Full::new(bytes::Bytes::from(body)))
@@ -254,6 +267,87 @@ async fn think(agent: &str, said: &str) -> Result<String, String> {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
         match v["choices"][0]["message"]["content"].as_str() {
             Some(answer) if status == 200 => Ok(answer.to_string()),
+            _ => Err(format!("{status} {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>())),
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
+}
+
+/// A second of silence, as a WAV, that says `words` in a chunk of its own
+/// (`said`), which the Workers AI fake reads as what was spoken
+/// (fragment_fakes::workers_ai::spoken_wav makes the same).
+pub fn memo(words: &str) -> Vec<u8> {
+    const RATE: u32 = 32_000;
+    let mut said = words.as_bytes().to_vec();
+    if said.len() % 2 == 1 {
+        said.push(0);
+    }
+    let mut w = Vec::new();
+    w.extend(b"RIFF");
+    w.extend(((4 + 24 + 8 + said.len() + 8) as u32 + RATE).to_le_bytes());
+    w.extend(b"WAVEfmt ");
+    w.extend(16u32.to_le_bytes());
+    w.extend([1, 0, 1, 0]);
+    w.extend(16_000u32.to_le_bytes());
+    w.extend(RATE.to_le_bytes());
+    w.extend([2, 0, 16, 0]);
+    w.extend(b"said");
+    w.extend((words.len() as u32).to_le_bytes());
+    w.extend(&said);
+    w.extend(b"data");
+    w.extend(RATE.to_le_bytes());
+    w.resize(w.len() + RATE as usize, 0);
+    w
+}
+
+/// `transcribe <words> [as <key>] [header <agent>]`: the words, the key
+/// (`agent:<agent>` unless named) and the header's agent, if any.
+fn transcribe_words<'a>(rest: &'a str, agent: &str) -> (&'a str, String, Option<&'a str>) {
+    let (rest, header) = match rest.split_once(" header ") {
+        Some((r, h)) => (r, Some(h.trim())),
+        None => (rest, None),
+    };
+    match rest.split_once(" as ") {
+        Some((words, key)) => (words.trim(), key.trim().to_string(), header),
+        None => (rest.trim(), format!("agent:{agent}"), header),
+    }
+}
+
+/// A voice memo transcribed through the intercept (`transcribe`): the
+/// text heard, or the refusal.
+async fn transcribe(agent: &str, rest: &str) -> Result<String, String> {
+    use http_body_util::{BodyExt, Full, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let (words, key, header) = transcribe_words(rest, agent);
+    let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
+    let base = crate::net::Base::parse(&model)?;
+    let boundary = "fragment-memo-0f3a9c";
+    let mut body = Vec::new();
+    for (name, value) in [("model", "whisper"), ("response_format", "json")] {
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes());
+    }
+    body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"memo.wav\"\r\nContent-Type: audio/wav\r\n\r\n").as_bytes());
+    body.extend(memo(words));
+    body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut req = hyper::Request::post(base.url("/v1/audio/transcriptions"))
+        .header("host", base.authority())
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .header("content-length", body.len());
+    if let Some(h) = header {
+        req = req.header("x-fragment-agent", h);
+    }
+    let req = req.body(Full::new(bytes::Bytes::from(body))).map_err(|e| e.to_string())?;
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let call = async {
+        let res = client.request(req).await.map_err(|e| e.to_string())?;
+        let status = res.status().as_u16();
+        let bytes = Limited::new(res.into_body(), 64 * 1024).collect().await.map_err(|e| e.to_string())?.to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        match v["text"].as_str() {
+            Some(text) if status == 200 => Ok(text.to_string()),
             _ => Err(format!("{status} {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>())),
         }
     };
@@ -287,7 +381,11 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     let mut reply = format!("echo: [{}] {}", ts.asker_name, ts.text);
     if let Some(said) = ts.text.strip_prefix("think ") {
-        reply = match think(&ts.agent.fragment, said).await {
+        let (key, said) = match said.strip_prefix("as ").and_then(|r| r.split_once(' ')) {
+            Some((key, said)) => (Some(key), said),
+            None => (None, said),
+        };
+        reply = match think(&ts.agent.fragment, key, said).await {
             Ok(answer) => format!("thought: {answer}"),
             Err(e) => format!("think failed: {e}"),
         };
@@ -304,6 +402,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("read ") {
         reply = read_data(&cfg.data, rest.trim()).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("transcribe ") {
+        reply = match transcribe(&ts.agent.fragment, rest).await {
+            Ok(text) => format!("heard: {text}"),
+            Err(e) => format!("transcribe refused: {e}"),
+        };
     }
     if text.starts_with("fetch ") {
         reply = match fetch(&ts.agent.fragment, &ts.text).await {
@@ -395,6 +499,20 @@ mod tests {
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
         }
+    }
+
+    /// `transcribe`'s grammar: its words, its key (`agent:<itself>` unless
+    /// named) and a header's agent; and its memo, a WAV that says them.
+    #[test]
+    fn transcribe_reads_its_key_and_header() {
+        assert_eq!(transcribe_words("hello from a memo", "juniper.paul"), ("hello from a memo", "agent:juniper.paul".to_string(), None));
+        assert_eq!(transcribe_words("hi as agent:willow.paul", "juniper.paul"), ("hi", "agent:willow.paul".to_string(), None));
+        assert_eq!(transcribe_words("hi as agent:willow.paul header juniper.paul", "juniper.paul"), ("hi", "agent:willow.paul".to_string(), Some("juniper.paul")));
+        let m = memo("hi!");
+        assert_eq!((&m[..4], &m[8..16]), (&b"RIFF"[..], &b"WAVEfmt "[..]));
+        assert_eq!(u32::from_le_bytes(m[4..8].try_into().unwrap()) as usize, m.len() - 8, "its RIFF size is its bytes after the size");
+        let at = m.windows(4).position(|w| w == b"said").unwrap();
+        assert_eq!(&m[at + 8..at + 11], b"hi!");
     }
 
     /// `write` and `read` stay under the data root: a relative path of

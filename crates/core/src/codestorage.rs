@@ -339,18 +339,24 @@ pub enum RepoDeleted {
     /// Deleted by this call.
     Now,
     /// Gone before it: deleted already (409 `repository_deleted`), or
-    /// never there (404). A replay of a delete lands here.
+    /// never there (404, 410). A replay of a delete lands here.
     Already,
-    /// Anything else: the repo may still be there; a retry may pass.
-    Failed,
+    /// The repo may still be there, and a retry may pass: a timeout, a
+    /// rate limit, a 5xx, or a 409 that is not a delete's (one thawing).
+    Transient,
+    /// The service refused the call (another 4xx): the same call cannot
+    /// pass until something else changes (its key, its scopes).
+    Refused,
 }
 
 pub fn repo_deleted(status: u16, body: &[u8]) -> RepoDeleted {
     match status {
         200..=299 => RepoDeleted::Now,
-        404 => RepoDeleted::Already,
+        404 | 410 => RepoDeleted::Already,
         409 if serde_json::from_slice::<Value>(body).is_ok_and(|v| v["code"] == "repository_deleted") => RepoDeleted::Already,
-        _ => RepoDeleted::Failed,
+        408 | 409 | 425 | 429 | 500..=599 => RepoDeleted::Transient,
+        400..=499 => RepoDeleted::Refused,
+        _ => RepoDeleted::Transient,
     }
 }
 
@@ -475,11 +481,15 @@ mod tests {
     fn a_repo_delete_is_done_once_it_is_gone() {
         assert_eq!(repo_deleted(200, br#"{"message":"deletion initiated","repo_name":"x"}"#), RepoDeleted::Now);
         assert_eq!(repo_deleted(404, b""), RepoDeleted::Already, "never there");
+        assert_eq!(repo_deleted(410, b""), RepoDeleted::Already, "gone");
         let deleted = br#"{"code":"repository_deleted","detail":"repository already deleted","status":409}"#;
         assert_eq!(repo_deleted(409, deleted), RepoDeleted::Already, "a replay");
-        assert_eq!(repo_deleted(409, br#"{"code":"repository_thawing"}"#), RepoDeleted::Failed, "a 409 that is not a delete's");
-        for status in [401, 403, 429, 500, 503] {
-            assert_eq!(repo_deleted(status, b"{}"), RepoDeleted::Failed, "{status}");
+        assert_eq!(repo_deleted(409, br#"{"code":"repository_thawing"}"#), RepoDeleted::Transient, "a 409 that is not a delete's");
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert_eq!(repo_deleted(status, b"{}"), RepoDeleted::Transient, "{status}: a retry may pass");
+        }
+        for status in [400, 401, 403, 405, 422] {
+            assert_eq!(repo_deleted(status, b"{}"), RepoDeleted::Refused, "{status}: the same call cannot pass");
         }
     }
 

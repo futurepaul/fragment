@@ -16,7 +16,9 @@
 //!    fragment's) are installed;
 //! 3. asked for a todo app, the app is theirs and live, and an open shell
 //!    shows it with no reload (the live sidebar, #158);
-//! 4. asked to open a browser, its screen (a ticket, in Chrome) connects,
+//! 4. its chat's agent's screen is the one served (the RFB stream's desktop
+//!    is that agent's, the page names it, another agent's is refused);
+//!    asked to open a browser, its screen (a ticket, in Chrome) connects,
 //!    draws a frame that is not blank, follows the desktop while open,
 //!    takes Take over, and shows the browser opened again;
 //! 5. a command Hermes' smart approvals asks about is a card its owner
@@ -250,7 +252,7 @@ fn paid(api: &Api, identity: &str) -> usize {
 /// The screen's page's status line, as the person reads it.
 const STATUS: &str = "document.getElementById('status')?.textContent ?? ''";
 /// The page is connected (its RFB stream open), whoever holds control.
-const CONNECTED: &str = "[\"Watching the agent's screen\", \"You have the screen\", \"Someone else has the screen\"].includes(document.getElementById('status')?.textContent ?? '')";
+const CONNECTED: &str = "['watching', 'mine', 'theirs'].includes(document.body.dataset.state ?? '')";
 /// A grid of the noVNC canvas's pixels (its framebuffer's), or null before
 /// it has one.
 const FRAME_JS: &str = "(() => { const c = document.querySelector('#screen canvas'); if (!c || !c.width || !c.height) return null; \
@@ -345,18 +347,26 @@ fn describe(frame: &Option<Frame>) -> String {
     frame.as_ref().map(Frame::describe).unwrap_or_else(|| "no frame".into())
 }
 
-/// A one-time ticket to its screen (port 6080), as the shell's `openScreen` mints it.
-fn ticket(api: &Api, owner: &Keys, id: &str) -> Result<String> {
-    let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
+/// A one-time ticket to `agent`'s screen (port 6080, at `?agent=`), as
+/// the shell's `openScreen` mints it.
+fn ticket(api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<String> {
+    let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": format!("/?agent={agent}") })))?;
     anyhow::ensure!(r.status == 200, "a ticket to its screen: {r}");
     Ok(r.body["url"].as_str().unwrap_or("").to_string())
 }
 
-/// The screen's page through a new ticket, connected or not by `PAGE`.
-fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str) -> Result<(Page, bool)> {
-    let page = chrome.open(&ticket(api, owner, id)?)?;
+/// `agent`'s screen's page through a new ticket, connected or not by `PAGE`.
+fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool)> {
+    let page = chrome.open(&ticket(api, owner, id, agent)?)?;
     let connected = chrome.until(&page, CONNECTED, PAGE);
     Ok((page, connected))
+}
+
+/// Hermes' profile for an agent fragment (the bridge's `wire::profile`, for
+/// a name of lowercase letters, digits, `-` and one `.`, as an e2e agent's
+/// is): its desktop's name is `hermes:<profile>`.
+fn hermes_profile(agent: &str) -> String {
+    agent.replace('.', "-")
 }
 
 fn status(chrome: &mut Browser, page: &Page) -> String {
@@ -522,23 +532,40 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = c.finish(&making, WORK);
     count(api, "app", &making, &mut spent);
 
-    // ---- 4. its desktop and its screen
-    let first = ticket(api, &keys, &id)?;
+    // ---- 4. its desktop and its screen: the chat's agent's own
+    let first = ticket(api, &keys, &id, &agent_name)?;
     let origin = first.split("/__ticket").next().unwrap_or("").to_string();
     let redeemed = api.call(Call { method: "GET", url: first, ..Call::default() })?;
     let cookie = redeemed.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string());
+    s.ok(
+        "a ticket to its chat's agent's screen lands on the computer's screen port at ?agent=<that agent>",
+        redeemed.status == 303 && redeemed.header("location") == format!("/p/6080/?agent={agent_name}"),
+        format!("{redeemed}"),
+    );
     let t4 = Instant::now();
-    let greeting = Socket::connect(api, &format!("{origin}/p/6080/websockify?viewer=e2e-smoke"), None, cookie.as_deref(), Some(&origin)).and_then(|(mut rfb, _)| {
+    let desktop = Socket::connect(api, &format!("{origin}/p/6080/websockify?viewer=e2e-smoke&agent={agent_name}"), None, cookie.as_deref(), Some(&origin)).and_then(|(mut rfb, _)| {
         rfb.patience(PAGE)?;
-        let version = rfb.bytes(12)?;
+        let name = rfb.rfb_desktop()?;
         rfb.close();
-        Ok(String::from_utf8_lossy(&version).into_owned())
+        Ok(name)
     });
     println!("      (its screen's socket to the RFB greeting: {:.1?})", t4.elapsed());
     s.ok(
-        "its screen's websockify socket connects through its port (a ticket's session): the desktop's RFB greeting",
-        greeting.as_deref().is_ok_and(|g| g.starts_with("RFB 003.")),
-        format!("{greeting:?}"),
+        "its agent's screen's websockify socket connects through its port (a ticket's session), and the desktop served is that agent's own (Hermes names each profile's)",
+        desktop.as_deref().is_ok_and(|d| d == format!("hermes:{}", hermes_profile(&agent_name))),
+        format!("{desktop:?}"),
+    );
+    let control = |agent: &str| Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e-smoke&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let named = control(&agent_name).and_then(|mut c| {
+        let first = c.next()?;
+        c.close();
+        Ok(first)
+    });
+    let other = control(&format!("nobody.{username}")).map(|_| ());
+    s.ok(
+        "its control socket names the chat's agent, and another agent's screen, not on this computer, is refused (404)",
+        named.as_ref().is_ok_and(|w| w["agent"] == agent_name.as_str() && w["holder"].is_null()) && other.as_ref().is_err_and(|e| format!("{e:#}").contains("404")),
+        format!("{named:?} / {other:?}"),
     );
     let browsing = "Open a browser on your desktop and go to example.com.";
     let browsed = match chrome.as_mut() {
@@ -546,7 +573,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
             let browsed = c.say("smoke-4", browsing)?;
             let _ = c.finish(&browsed, WORK);
             for label in [
-                "the screen's page connects to the agent's desktop and draws a frame",
+                "the screen's page names its chat's agent, connects to that agent's desktop and draws a frame",
                 "the screen left open follows the agent's desktop: with no reload it shows the browser",
                 "opened now, the screen's page connects and draws a frame that is not blank",
                 "Take over gives the person the screen",
@@ -709,12 +736,13 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
 /// opened again after it closed shows it.
 #[allow(clippy::too_many_arguments)]
 fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys: &Keys, id: &str, browsing: &str, shots: &Path) -> Result<String> {
-    let (open, connected) = open_screen(chrome, api, keys, id)?;
+    let (open, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
     let before = connected.then(|| within(FOLLOW, || Frame::read(chrome, &open))).flatten();
+    let shows = chrome.eval(&open, "[document.getElementById('screen')?.dataset.agent, document.title]").unwrap_or_default();
     s.ok(
-        "the screen's page (a ticket, in Chrome) connects to the agent's desktop and draws a frame",
-        connected && before.is_some(),
-        json!({ "status": status(chrome, &open), "frame": describe(&before) }),
+        "the screen's page (a ticket, in Chrome) names its chat's agent, connects to that agent's desktop and draws a frame",
+        connected && before.is_some() && shows[0] == c.agent.as_str() && shows[1].as_str().is_some_and(|t| t.ends_with("'s screen")),
+        json!({ "status": status(chrome, &open), "shows": shows, "frame": describe(&before) }),
     );
     let _ = chrome.screenshot(&open, &shots.join("1-desktop-before.png"));
     let browsed = c.say("smoke-4", browsing)?;
@@ -748,7 +776,7 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
         json!({ "status": status(chrome, &open), "before": describe(&before), "now": describe(&Frame::read(chrome, &open)) }),
     );
     // a page opened now: connected, drawn, not blank; and Take over
-    let (now, connected) = open_screen(chrome, api, keys, id)?;
+    let (now, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
     let drawn = connected.then(|| within(FOLLOW, || Frame::read(chrome, &now).filter(|f| !f.blank()))).flatten();
     let _ = chrome.screenshot(&now, &shots.join("3-opened-now.png"));
     s.ok(
@@ -756,12 +784,12 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
         drawn.is_some(),
         json!({ "status": status(chrome, &now), "frame": describe(&Frame::read(chrome, &now)) }),
     );
-    let taken = connected && chrome.eval(&now, "(document.getElementById('control').click(), true)").is_ok() && chrome.until(&now, "document.getElementById('status')?.textContent === 'You have the screen'", Duration::from_secs(20));
-    s.ok("Take over gives the person the screen (its control socket grants control)", taken, status(chrome, &now));
+    let taken = connected && chrome.eval(&now, "(document.getElementById('control').click(), true)").is_ok() && chrome.until(&now, "document.body.dataset.state === 'mine'", Duration::from_secs(20));
+    s.ok("Take over gives the person the screen (its control socket grants control: the agent's lease)", taken, status(chrome, &now));
     // every page closed, then the screen opened again
     chrome.close(open)?;
     chrome.close(now)?;
-    let (again, connected) = open_screen(chrome, api, keys, id)?;
+    let (again, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
     let same = |f: &Frame| new_frame(f) && drawn.as_ref().is_none_or(|d| f.unlike(d) <= SAME);
     let shown = connected.then(|| within(FOLLOW, || Frame::read(chrome, &again).filter(same))).flatten();
     let _ = chrome.screenshot(&again, &shots.join("4-opened-again.png"));

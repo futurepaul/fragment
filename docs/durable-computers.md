@@ -49,7 +49,7 @@ file is the newer word, and decision 18 points here.
   the hold is a handshake (`held`, within 20 s); three saves are kept and
   a wake falls back to the save before one that will not restore; a sleep
   whose save fails keeps its container for at most
-  `computers.unsaved_max_ms` (30 minutes by default, Paul's to confirm).
+  `computers.unsaved_max_ms` (30 minutes; Paul confirmed it on 2026-10-08).
   Our Hermes image copies every database with SQLite's online backup
   (from Rust: Hermes' own covers a fixed list, and restarts a busy copy)
   and its answer names exactly what it copied, so the save leaves out the
@@ -64,6 +64,43 @@ file is the newer word, and decision 18 points here.
   (its terminal's `HOME`, its file tools' `~`) joined it on 2026-10-07
   (Paul: the whole `~`, not only the browser), a hard cut: what agents
   had written under `~` stayed where it was.
+- **An agent's temp files joined its work (2026-10-07).** Hermes (v0.21.5,
+  and v0.21.6 alike) points `TMPDIR`, `TMP` and `TEMP` at
+  `<home>/cache/scratch` for itself
+  and for each process it runs, derived again from the home it runs that
+  process under (`hermes_constants.apply_scratch_tmp_env`, which leaves
+  alone a value it did not set, knowing its own by its
+  `HERMES_SCRATCH_DIR` marker). An
+  agent's commands run under its profile's home, so a tool's temp file (a
+  `mktemp`, a build's, an install's) was in Hermes' home,
+  `/data/hermes/profiles/<profile>/cache/scratch` (seen in the Docker lane
+  while working on #225). That directory is now a link to
+  `/data/work/<profile>/tmp`, made as the link to its home is (a hard cut:
+  one with something in it is set aside, unmoved, as
+  `cache/scratch.before-work`). A link, not a `TMPDIR` of ours, because
+  nothing short of patching Hermes can give each agent one:
+  - a profile's `.env` cannot (`terminal.env_passthrough` reads `TMPDIR`
+    from the process, never from a profile's scope: Hermes keeps that name
+    process-wide);
+  - an export in the terminal's `shell_init_files` reaches its foreground
+    commands only, never a background process, which starts from the
+    gateway's environment;
+  - and one set for the gateway is passed to every child as it is (Hermes
+    re-points only its own), so every agent would share it.
+
+  Hermes' own path is what each way it starts a command reads, so the
+  link catches them all, and Hermes' own uses of it work through it (its
+  prune of entries idle 24 hours; a file it sends from a reply's `MEDIA:`
+  tag). Two kinds of temp files stay in Hermes' home. The gateway's own
+  (`/data/hermes/cache/scratch`: its terminal's snapshots, its browser's
+  sockets, execute_code's staging) are Hermes'. And execute_code's
+  scripts' are there too, because Hermes' sandbox drops the marker from
+  their environment: a debt-ledger entry, until our terminal backend
+  (step 3) runs them or Hermes keeps its marker. And the image's Chromium
+  opts out of both on purpose: it sets its own `TMPDIR`, the container's
+  `/tmp` (#231), so a browser's throwaway profile and shared memory are in
+  no save at all. docs/computers.md, "Our images"; the Docker lane's
+  `a_tools_temp_files_are_its_work`.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The S3 endpoint it wrote through
   (`storage.fragment.internal`) went after it (#156): no image used it.
@@ -103,6 +140,26 @@ file is the newer word, and decision 18 points here.
   model-catalog refresh is off and Node's compile cache is out of
   `/data`; the rest of what its gateway writes on its own timers is kept
   hot, each named, with why a save cannot tear it (below).
+- **Its owner is told, and can get back to working (2026-10-08).** Paul
+  confirmed the unsaved bound (30 minutes) and asked that no one's
+  computer die unexplained while they use it. It never did while in use:
+  the bound stops a computer only at a sleep, which waits while anything
+  holds it; the bound caps the idle time a failing computer is kept. What
+  was missing was telling them. The owner's view now carries `notices`
+  (its saves failing, since when, and when the bound stops it, its last
+  try now at the bound itself; a start that went back to an older save,
+  why and to which, told once until seen; won't wake), pushed to their
+  open pages, and the shell shows them over every chat with the way back:
+  Restart, a sleep that saves if it can and a fresh start from the newest
+  good save (never the snapshot), asked twice made once. The shell no
+  longer wakes a computer that won't on the person's presence. The time a
+  computer is kept for its failed saves, up to the bound, is not metered
+  (Paul, 2026-10-08). The agent
+  is told too: after a rollback, its next turn in a chat says what turns
+  another life ran there since the save (their claims answer 409), from
+  the journal (docs/bridge.md, "What a rollback forgot").
+  docs/computers.md, "What its owner is told", has every way a computer
+  stops and what its person sees.
 
 ## What changes under the hold (2026-10-07)
 
@@ -257,7 +314,8 @@ tests, each leaving master whole:
 3. **Our terminal backend.** Hermes runs its tools' commands through a
    terminal-backend plugin of ours, at first locally in the work
    directory of the same container. We then know when tools are busy,
-   which the save schedule can use instead of the keepalive.
+   which the save schedule can use instead of the keepalive. execute_code's
+   scripts then run through it too, so their temp files join the work.
 4. **E.** That backend runs commands in a separate Cloudflare Sandbox
    per computer, whose Durable Object starts every command and saves
    its disk when idle. The gateway's container keeps only Hermes' home.

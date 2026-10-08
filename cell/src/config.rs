@@ -52,9 +52,14 @@ pub struct Config {
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
     /// keeps failing stays awake before it sleeps unsaved (I5 of
-    /// docs/explorations/pi-durable.md). Thirty minutes by default, a
-    /// default for Paul to confirm (`fragment_core::computer`).
+    /// docs/explorations/pi-durable.md). Thirty minutes by default, Paul's
+    /// (2026-10-08; `fragment_core::computer`).
     pub computer_unsaved_max_ms: i64,
+    /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
+    /// person whose computer will not start gets help, an `https:` page or
+    /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
+    /// Unset, the shell shows them what to tell whoever runs it.
+    pub support_url: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -201,7 +206,8 @@ impl Config {
         let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
         assert!(
             host_label_suffix.as_deref().is_none_or(valid_label_suffix),
-            "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (^--[a-z0-9][a-z0-9-]{{0,30}}$)"
+            "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (1-{} of a-z, 0-9 and single dashes inside)",
+            fragment_proto::limits::BRANCH_MAX_BYTES
         );
         // the platform's origin is named in frames' `frame-ancestors` and
         // messages' targets (fragment_core::frames), so it is one exactly
@@ -230,6 +236,10 @@ impl Config {
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))
                 .unwrap_or(fragment_core::computer::UNSAVED_MAX_MS_DEFAULT),
+            support_url: var(env, "FRAGMENT_SUPPORT_URL").map(|u| {
+                assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
+                u
+            }),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
@@ -383,16 +393,13 @@ fn default_plan(env: &Env) -> Plan {
     }
 }
 
-/// A branch's mark on its fragments' labels: `--` and its name, so
-/// `<label>--<username>--<branch>.<suffix>` stays one DNS label under the
-/// zone's one wildcard certificate (docs/cloudflare-v1.md, decision 20).
+/// A branch's mark on its fragments' labels: `--` and its name (a branch
+/// `xtask deploy` makes), so `<label>--<username>--<branch>.<suffix>`
+/// stays one DNS label under the zone's one wildcard certificate
+/// (docs/cloudflare-v1.md, decision 20), and a computer's
+/// `<24 hex>--computer--<branch>` fits in one.
 fn valid_label_suffix(s: &str) -> bool {
-    s.strip_prefix("--").is_some_and(|b| {
-        (1..=31).contains(&b.len())
-            && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-            && b.as_bytes()[0] != b'-'
-            && !b.contains("--")
-    })
+    s.strip_prefix("--").is_some_and(fragment_proto::valid_branch)
 }
 
 /// The label `host` has under `suffix` (`x` of `x.<suffix>`), if it is one.

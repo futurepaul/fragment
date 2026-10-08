@@ -21,10 +21,29 @@
 //! is the same end with its repo recorded beside it (`ended_repos`), which
 //! the alarm deletes with the rest, retried as the rest are: the life is
 //! cleaned up only once its repo is gone too.
+//!
+//! **A try that fails** is told apart (`fragment_core::ended`): a part
+//! already gone is done (a repo code.storage says is gone, or was never
+//! there); a refusal the same call cannot pass is held at once; anything
+//! else is tried again, backing off, until `TRIES_MAX` failed tries hold
+//! it. A held part is tried daily, and by each wipe call. Each part's last
+//! error is kept (`ended_errors`) and named: the `ended` lever and a
+//! wipe's report say what is left of each life and why, so a cleanup that
+//! cannot finish says so instead of "still cleaning" (p5, 2026-10-08: a
+//! wipe waited on its person's own lists, which refused every change, and
+//! nothing said so).
+//!
+//! **A wipe never waits on the lists it empties.** A wipe's `wipe/end`
+//! names the wiped person and their agents; their lists are emptied by the
+//! wipe's `lists` step, after this one, and take nothing after (principal.rs,
+//! wiped). Their rows here are dropped once tried: a list of theirs that
+//! refuses every change (one from before its table had a column master
+//! writes) holds no wipe.
 
-use fragment_core::backoff::outbox_retry_ms;
+use fragment_core::ended::{self as rules, Failure};
 use fragment_core::npub;
-use fragment_proto::{ErrorCode, Identity, IdentityKind};
+use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind};
 use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -48,7 +67,31 @@ CREATE TABLE IF NOT EXISTS ended_index (
 CREATE INDEX IF NOT EXISTS ended_index_due ON ended_index (next_at);
 CREATE TABLE IF NOT EXISTS ended_repos (
   incarnation INTEGER PRIMARY KEY, repo TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ended_errors (
+  incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part));
 ";
+
+/// The parts of an ended life whose last error `ended_errors` keeps.
+const PART_LISTS: &str = "lists";
+const PART_STORED: &str = "stored";
+const PART_REPO: &str = "repo";
+
+/// Each ended life, oldest first, and what it has left: its lists still to
+/// tell, its app's database or blobs (`stored`), its repo (`repos`), the
+/// most failed tries of a part left (`tries`), and the last error of a part
+/// left (`part: error`). `attempts` is the stored part's own count.
+const LIVES_LEFT: &str = "SELECT e.incarnation, e.name, e.stored, e.attempts,
+  (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists,
+  (SELECT COUNT(*) FROM ended_repos r WHERE r.incarnation = e.incarnation) AS repos,
+  MAX(CASE WHEN e.stored = 1 THEN e.attempts ELSE 0 END,
+      (SELECT COALESCE(MAX(i.attempts), 0) FROM ended_index i WHERE i.incarnation = e.incarnation),
+      (SELECT COALESCE(MAX(r.attempts), 0) FROM ended_repos r WHERE r.incarnation = e.incarnation)) AS tries,
+  (SELECT x.part || ': ' || x.error FROM ended_errors x WHERE x.incarnation = e.incarnation AND (
+      (x.part = 'stored' AND e.stored = 1)
+      OR (x.part = 'lists' AND EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = e.incarnation))
+      OR (x.part = 'repo' AND EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = e.incarnation)))
+    ORDER BY x.at DESC LIMIT 1) AS error
+FROM ended e ORDER BY e.incarnation";
 
 /// Ended lives one pass clears the storage of.
 const CLEARED_PER_PASS: i64 = 4;
@@ -57,11 +100,14 @@ const BLOB_PAGES_PER_PASS: usize = 10;
 /// Ended lives' repos one pass deletes (one code.storage call each).
 const REPOS_PER_PASS: i64 = 4;
 
-/// `wipe/end`'s body: the person a wipe ends this fragment for.
+/// `wipe/end`'s body: the person a wipe ends this fragment for, and their
+/// agents (whose lists the wipe empties, as it empties theirs).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WipeEnd {
     owner: String,
+    #[serde(default)]
+    agents: Vec<String>,
 }
 
 /// `wipe/leave`'s body: a wiped person, or an agent of theirs, who leaves.
@@ -191,12 +237,28 @@ impl FragmentCell {
 
     /// The alarm's part: tells a batch of lists, clears what storage is
     /// due, and forgets each life with nothing left. Nothing here fails
-    /// the alarm: what fails waits, doubling, and is tried again.
+    /// the alarm: what fails waits, doubling, and is tried again, until it
+    /// is held (`fragment_core::ended`).
     pub(crate) async fn drain_ended(&self) {
         self.tell_ended(None).await;
         self.clear_ended().await;
         self.clear_repos().await;
         self.forget_ended().await;
+    }
+
+    /// A part's try failed: it waits (or is held) as `fragment_core::ended`
+    /// says, by `update` (its `attempts = ?, next_at = ?` first, then
+    /// `key`), and its error is kept as the life's last for `part`.
+    fn failed_part(&self, incarnation: i64, part: &str, attempts: i64, failure: &Failure, update: &str, key: Vec<SqlStorageValue>) -> CellResult<rules::Retry> {
+        let now = js::now_ms();
+        let r = rules::after_failure(attempts, failure, now);
+        self.exec(update, [vec![SqlStorageValue::Integer(r.attempts), SqlStorageValue::Integer(r.next_at)], key].concat())?;
+        self.exec(
+            "INSERT INTO ended_errors (incarnation, part, error, at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (incarnation, part) DO UPDATE SET error = excluded.error, at = excluded.at",
+            vec![SqlStorageValue::Integer(incarnation), part.into(), rules::kept_error(failure.message()).into(), SqlStorageValue::Integer(now)],
+        )?;
+        Ok(r)
     }
 
     /// Tells due lists their ended life is gone, at most `INDEX_FLUSH_MAX`,
@@ -214,24 +276,34 @@ impl FragmentCell {
         assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush tells a bounded batch");
         let told = join_all(due.iter().map(|u| {
             let body = json!({ "fragment": u.name, "role": null, "incarnation": u.incarnation, "version": u.version });
-            async move { self.send_index(&u.principal, &body).await }
+            async move { self.tell_index(&u.principal, &body).await }
         }))
         .await;
+        let (mut failed, mut first_error) = (0usize, None::<String>);
         for (u, told) in due.iter().zip(told) {
             let key = vec![SqlStorageValue::Integer(u.incarnation), u.principal.as_str().into()];
-            let done = if told {
-                self.exec("DELETE FROM ended_index WHERE incarnation = ? AND principal = ?", key)
-            } else {
-                let attempts = u.attempts + 1;
-                let at = SqlStorageValue::Integer(js::now_ms() + outbox_retry_ms(attempts));
-                self.exec(
-                    "UPDATE ended_index SET attempts = ?, next_at = ? WHERE incarnation = ? AND principal = ?",
-                    [vec![SqlStorageValue::Integer(attempts), at], key].concat(),
-                )
+            let done = match told {
+                Ok(()) => self.exec("DELETE FROM ended_index WHERE incarnation = ? AND principal = ?", key),
+                Err(failure) => {
+                    // the error names whose list it was
+                    let failure = match failure {
+                        Failure::Transient(m) => Failure::Transient(format!("{}: {m}", u.principal)),
+                        Failure::Refused(m) => Failure::Refused(format!("{}: {m}", u.principal)),
+                    };
+                    failed += 1;
+                    first_error.get_or_insert_with(|| failure.message().to_string());
+                    let update = "UPDATE ended_index SET attempts = ?, next_at = ? WHERE incarnation = ? AND principal = ?";
+                    self.failed_part(u.incarnation, PART_LISTS, u.attempts, &failure, update, key).map(|_| ())
+                }
             };
             if let Err(e) = done {
                 console_error!("{}: the ended life's row for {} did not write ({:?}): {}", u.name, u.principal, e.code, e.message);
             }
+        }
+        if let Some(first) = first_error {
+            // one line a pass, however many failed: the first says why
+            let fragment = due.first().map(|u| u.name.as_str());
+            console_error!("{}", json!({ "event": "ended.lists-untold", "fragment": fragment, "asked": due.len(), "failed": failed, "first": first }));
         }
     }
 
@@ -257,10 +329,12 @@ impl FragmentCell {
                 Ok(true) => self.exec("UPDATE ended SET stored = 0 WHERE incarnation = ?", vec![inc]),
                 Ok(false) => Ok(()),
                 Err(e) => {
-                    console_error!("{}: the ended life's facet or blobs did not go ({:?}): {}", s.name, e.code, e.message);
-                    let attempts = s.attempts + 1;
-                    let at = SqlStorageValue::Integer(js::now_ms() + outbox_retry_ms(attempts));
-                    self.exec("UPDATE ended SET attempts = ?, next_at = ? WHERE incarnation = ?", vec![SqlStorageValue::Integer(attempts), at, inc])
+                    // the runtime's or R2's: a later try may pass
+                    let failure = Failure::Transient(format!("its app's database or blobs ({:?}): {}", e.code, e.message));
+                    let update = "UPDATE ended SET attempts = ?, next_at = ? WHERE incarnation = ?";
+                    self.failed_part(s.incarnation, PART_STORED, s.attempts, &failure, update, vec![inc]).map(|r| {
+                        console_error!("{}: the ended life's facet or blobs did not go (try {}): {}", s.name, r.attempts, failure.message());
+                    })
                 }
             };
             if let Err(e) = wrote {
@@ -270,7 +344,8 @@ impl FragmentCell {
     }
 
     /// Deletes the repos of the ended lives due (a wipe's), at most
-    /// `REPOS_PER_PASS`, and forgets each one code.storage says is gone.
+    /// `REPOS_PER_PASS`, and forgets each one code.storage says is gone
+    /// (deleted now, before, or never there).
     async fn clear_repos(&self) {
         let due: Vec<EndedRepo> = match self.typed(
             "SELECT incarnation, repo, attempts FROM ended_repos WHERE next_at <= ? ORDER BY next_at LIMIT ?",
@@ -291,11 +366,11 @@ impl FragmentCell {
                     console_log!("{}", json!({ "event": "ended.repo-deleted", "repo": r.repo, "incarnation": r.incarnation, "gone": format!("{gone:?}") }));
                     self.exec("DELETE FROM ended_repos WHERE incarnation = ?", vec![inc])
                 }
-                Err(e) => {
-                    console_error!("the ended life {}'s repo {} did not go ({:?}): {}", r.incarnation, r.repo, e.code, e.message);
-                    let attempts = r.attempts + 1;
-                    let at = SqlStorageValue::Integer(js::now_ms() + outbox_retry_ms(attempts));
-                    self.exec("UPDATE ended_repos SET attempts = ?, next_at = ? WHERE incarnation = ?", vec![SqlStorageValue::Integer(attempts), at, inc])
+                Err(failure) => {
+                    let update = "UPDATE ended_repos SET attempts = ?, next_at = ? WHERE incarnation = ?";
+                    self.failed_part(r.incarnation, PART_REPO, r.attempts, &failure, update, vec![inc]).map(|after| {
+                        console_error!("the ended life {}'s repo {} did not go (try {}, held: {}): {}", r.incarnation, r.repo, after.attempts, rules::held(after.attempts), failure.message());
+                    })
                 }
             };
             if let Err(e) = wrote {
@@ -327,6 +402,10 @@ impl FragmentCell {
         if forgot.is_empty() {
             return;
         }
+        // their errors with them
+        if let Err(e) = self.exec("DELETE FROM ended_errors WHERE incarnation NOT IN (SELECT incarnation FROM ended)", vec![]) {
+            console_error!("the ended lives' errors were not forgotten ({:?}): {}", e.code, e.message);
+        }
         let released = async {
             let [created_at, claimed_at] = self.metas([MetaKey::CreatedAt, MetaKey::ClaimedAt])?;
             let claimed = claimed_at.and_then(|c| c.parse::<i64>().ok()).is_some_and(|at| now - at < CLAIM_TTL_MS);
@@ -345,27 +424,81 @@ impl FragmentCell {
     }
 
     /// The test lever `ended` (ops.rs): each ended life, and what is left
-    /// of its cleanup. It answers on an object with no life.
+    /// of its cleanup (`lists`, `stored`, `repos`, the most failed `tries`
+    /// of a part left, whether one is `held`, and its last `error`). It
+    /// answers on an object with no life.
     pub(crate) fn ended_view(&self) -> CellResult<Value> {
-        let lives = self.rows(
-            "SELECT e.incarnation, e.name, e.stored, e.attempts,
-               (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists,
-               (SELECT COUNT(*) FROM ended_repos r WHERE r.incarnation = e.incarnation) AS repos
-             FROM ended e ORDER BY e.incarnation",
-            vec![],
-        )?;
+        let lives = self.rows(&format!("{LIVES_LEFT} LIMIT ?"), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
+        let lives: Vec<Value> = lives
+            .into_iter()
+            .map(|mut l| {
+                let tries = l["tries"].as_i64().unwrap_or(0);
+                l["held"] = json!(rules::held(tries));
+                l
+            })
+            .collect();
         Ok(json!({ "ended": lives, "dueAt": self.ended_due_at()? }))
+    }
+
+    /// What each ended life has left (at most `LIVES_SHOWN_MAX`), as a
+    /// wipe's report says it.
+    fn ended_lives(&self) -> CellResult<Vec<LifeLeft>> {
+        #[derive(Deserialize)]
+        struct Row {
+            incarnation: i64,
+            stored: i64,
+            lists: i64,
+            repos: i64,
+            tries: i64,
+            error: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(&format!("{LIVES_LEFT} LIMIT ?"), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
+        assert!(rows.len() <= LIVES_SHOWN_MAX, "a bounded few lives");
+        Ok(rows
+            .into_iter()
+            .map(|r| LifeLeft {
+                incarnation: r.incarnation,
+                lists: u64::try_from(r.lists).unwrap_or(0),
+                stored: r.stored == 1,
+                repo: r.repos > 0,
+                tries: u64::try_from(r.tries).unwrap_or(0),
+                error: r.error,
+            })
+            .collect())
+    }
+
+    /// A wipe empties the lists of the person it wipes and of their agents
+    /// (its `lists` step, after its cleanup): this object's ended lives do
+    /// not wait to tell them, once tried. Answers how many rows went.
+    fn forget_wiped_lists(&self, owner: &str, agents: &[String]) -> CellResult<usize> {
+        let whom: Vec<&str> = std::iter::once(owner).chain(agents.iter().map(String::as_str)).collect();
+        let whom = serde_json::to_string(&whom).map_err(|e| CellError::host(format!("the wiped principals: {e}")))?;
+        let gone = self.rows("DELETE FROM ended_index WHERE principal IN (SELECT value FROM json_each(?)) RETURNING incarnation", vec![whom.into()])?;
+        Ok(gone.len())
+    }
+
+    /// A wipe's call is the retry: every part of every ended life here is
+    /// due now, held ones too (`fragment_core::ended`), one try a call.
+    fn ended_due_now(&self) -> CellResult<()> {
+        let now = SqlStorageValue::Integer(js::now_ms());
+        self.exec("UPDATE ended_index SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
+        self.exec("UPDATE ended SET next_at = ?1 WHERE stored = 1 AND next_at > ?1", vec![now.clone()])?;
+        self.exec("UPDATE ended_repos SET next_at = ?1 WHERE next_at > ?1", vec![now])
     }
 
     /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs),
     /// only from inside the platform (`wipe::WIPE_HEADER`):
     ///
-    /// - `end {owner}`: ends this fragment's life for the wiped person who
-    ///   owns it, its repo with it (`end_life_wiped`), and cleans up what
-    ///   one pass of its alarm would; answers `{ended, left}`, `left` the
-    ///   ended lives still to clean (0: done). Again, with no life, it only
-    ///   cleans: a wipe asks until nothing is left. A fragment someone else
-    ///   owns is refused (403), and nothing of it changes.
+    /// - `end {owner, agents?}`: ends this fragment's life for the wiped
+    ///   person who owns it, its repo with it (`end_life_wiped`), and cleans
+    ///   up what one pass of its alarm would, every part due at once (a
+    ///   wipe's call is the retry); answers `{ended, left, lives}`, `left`
+    ///   the ended lives still to clean (0: done), `lives` what each has
+    ///   left (`fragment_core::wipe::LifeLeft`). The lists of `owner` and
+    ///   `agents` are not waited on: the wipe empties them. Again, with no
+    ///   life, it only cleans: a wipe asks until nothing is left. A
+    ///   fragment someone else owns is refused (403), and nothing of it
+    ///   changes.
     /// - `leave {principal, kind}`: the wiped person, or an agent of theirs,
     ///   leaves this fragment of someone else's, as a member leaves (their
     ///   membership, subscriptions and the browsers' pushes they asked for
@@ -374,8 +507,11 @@ impl FragmentCell {
         match route {
             "end" => {
                 let b: WipeEnd = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/end: {e}")))?;
-                if !npub::is_identity(&b.owner) {
-                    return Err(CellError::invalid("wipe/end names the owner by identity"));
+                if !npub::is_identity(&b.owner) || !b.agents.iter().all(|a| npub::is_identity(a)) {
+                    return Err(CellError::invalid("wipe/end names the owner and their agents by identity"));
+                }
+                if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
+                    return Err(CellError::invalid(format!("wipe/end names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
                 }
                 let [created_at, owner, name] = self.metas([MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Name])?;
                 let ended = match (created_at, owner) {
@@ -389,12 +525,21 @@ impl FragmentCell {
                     (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
                     (Some(_), None) => return Err(missing(MetaKey::Owner)),
                 };
+                // the lists the wipe empties itself: tried once (just now, or
+                // by an earlier call or pass), never waited on
+                let forgot = self.forget_wiped_lists(&b.owner, &b.agents)?;
+                if !ended {
+                    // a wipe's call is the retry: every part due now
+                    self.ended_due_now()?;
+                }
                 // what one pass of the alarm cleans, now; the rest is its
                 self.drain_ended().await;
                 self.schedule().await?;
                 let left = self.ended_left()?;
+                let lives = if left > 0 { self.ended_lives()? } else { vec![] };
                 assert!(!ended || self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
-                Ok(json!({ "ended": ended, "left": left }))
+                assert!(lives.len() as u64 <= left, "each life named is one left");
+                Ok(json!({ "ended": ended, "left": left, "lives": lives, "forgot": forgot }))
             }
             "leave" => {
                 let b: WipeLeave = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/leave: {e}")))?;

@@ -105,6 +105,20 @@ speaking Cloudflare's APIs) returns once this product works.
    added) answers and may hand off with `@`. The chat template and each
    agent's bridge implement this through ordinary channels. Other
    people collaborate with you in other fragments, not in chats.
+
+   Status, 2026-10-07 (branch `claude/agents-ask-each-other`): a chat's
+   `@` lists all of its owner's agents, the chat's first; one not in the
+   chat is added (an editor, by the shell once its person confirms it in
+   the shell's own dialog; the shell hands a person's agents only to their
+   own fragments' pages: docs/api.md, The shell) before the message names
+   it. Agents ask each other by `@` in a shared chat, or
+   with `fragment ask <agent> "…" [--wait]`, in a chat of the two and
+   their owner. The answering bridge counts the hops (never fewer than a
+   record claims; for its own computer's agents, from the turn the poster
+   is in), so a CLI or API post resets nothing; a chat's agents start at
+   most 20 turns of each other in 5 minutes, past it refused and said so;
+   only an agent's own fragment and its owner start its routines
+   (docs/chat-records.md; docs/bridge.md, "Agents asking each other").
 9. **Chat in v1** comes from the chat template: streaming replies
    (drafts), tool steps as cards, approvals as buttons, Stop,
    attachments both ways (blobs), voice input (a voice memo, an audio
@@ -112,6 +126,23 @@ speaking Cloudflare's APIs) returns once this product works.
    to text; Paul, 2026-10-03), push notifications (fragment push), and
    rename and archive. Search across chats, apps and messages is the
    shell's, over your fragments' channels and files.
+   *Status (Paul, 2026-10-07).* The agent still transcribes a memo
+   itself, but through the platform's model route, so voice memos never
+   depend on a run-time install:
+   - **The route.** `POST /api/models/v1/audio/transcriptions` runs
+     Workers AI's Whisper (`@cf/openai/whisper-large-v3-turbo`) in
+     OpenAI's multipart shape, with `model` `whisper`.
+   - **Metering.** It is metered to the agent's owner at 46.63 neurons
+     per audio minute, and takes at most 10 MiB of audio.
+   - **Naming the agent.** It is generic: a guest may name its agent by
+     its key (`agent:<name>`), the one rule for every model call
+     (docs/computers.md, Models).
+   - **Our Hermes image.** It points Hermes' speech-to-text at the route,
+     with no language forced and no transcript echoed as a message of
+     its own.
+   - **Before.** Hermes would have installed faster-whisper into `/data`
+     at a person's first voice note.
+   docs/api.md; docs/ledger.md.
 10. **First run:** choose a username, then "What should your first
     agent do?". Through public APIs the shell makes your computer (the
     operator's default image), an agent fragment, and a chat fragment
@@ -257,10 +288,25 @@ speaking Cloudflare's APIs) returns once this product works.
     answers `held`), three saves are kept, a wake falls back to the save
     before one that will not restore, and a sleep whose save fails keeps
     its container for at most `computers.unsaved_max_ms` (30 minutes by
-    default, Paul's to confirm). Litestream is cut from the image (P4).
+    default). Litestream is cut from the image (P4).
     Step 2, the seam:
     `/data/work` (the tools') is saved as a record of its own beside the
     rest of `/data` (the guest's own state), restored together.
+
+    *Status (2026-10-08).* Paul confirmed `computers.unsaved_max_ms` at 30
+    minutes (2026-10-08), with: "a user will be still using it and then it
+    will die and they won't know why. need user-facing recovery so they
+    can get back to working." The bound is unchanged: it stops a computer
+    only at a sleep, which waits while anything holds it (a screen, a
+    turn, a recent message), so it caps the idle time a failing computer
+    is kept, and its last try is now at the bound itself. Its owner is
+    told while there is still time (its saves failing, since when, and
+    when it stops), told afterwards what a start went back to (once), and
+    has one way back, Restart (a sleep that saves if it can, then a fresh
+    start from the newest good save; asked twice, made once): docs/computers.md,
+    "What its owner is told". The time a computer is kept for its failed
+    saves, up to the bound, is free to its owner (Paul, 2026-10-08): not
+    metered.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

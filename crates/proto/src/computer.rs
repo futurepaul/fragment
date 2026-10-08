@@ -189,9 +189,19 @@ pub struct ComputerView {
     /// The pinned image's name (the deployment's `containers` config).
     pub image: String,
     pub phase: ComputerPhase,
+    /// Its newest start (the Computer DO's generation, 0 before its first):
+    /// what a restart names, so the same restart asked twice is made once.
+    #[serde(default)]
+    pub generation: u64,
     /// Why it won't wake, or why a wake was refused (the owner's credit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// What its owner is told of it now (docs/computers.md, "What its
+    /// owner is told"), the most pressing first: it won't start, its saves
+    /// are failing, or a start went back to an older save. Its owner's view
+    /// only (the guest's is empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<ComputerNotice>,
     pub agents: Vec<ComputerAgent>,
     /// Its own origin, where its ports are served.
     pub origin: String,
@@ -285,6 +295,96 @@ pub struct ComputerRestore {
     pub at: i64,
 }
 
+/// Why a start went back to an older save: how the life whose work is lost
+/// ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LossCause {
+    /// It stopped on its own (a crash, a host restart, the runtime's idle
+    /// stop), or died while its sleep was saving it.
+    Crash,
+    /// Its saves kept failing for the deployment's bound
+    /// (`computers.unsaved_max_ms`), and it was put to sleep unsaved.
+    Unsaved,
+    /// Its owner restarted it, and the restart's save failed.
+    Restart,
+    /// Its sleep saved it, but that save would not restore (its archive
+    /// gone or altered, or the image's check of it failed): the start fell
+    /// back to the save before it.
+    Unusable,
+}
+
+/// One thing a computer's owner is told of it (`ComputerView::notices`;
+/// docs/computers.md, "What its owner is told"). Times are ms; the page
+/// says them in its person's own clock. Each is derived from the Computer
+/// DO's own state, so it is the same whoever reads it, and goes when what
+/// it says is no longer so (or, for `went_back`, once its owner says they
+/// saw it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerNotice {
+    /// Its starts kept failing: it starts again only when its owner asks
+    /// (a restart). `why` is the last failure, as the platform said it.
+    WontWake { why: String },
+    /// Its saves are failing: what it did since `since` is in no save yet,
+    /// and a stop now would go back to save `save` (none: an empty `/data`).
+    /// `stops_at`, when a sleep's save has failed and nothing keeps it in
+    /// use: when it will be put to sleep unsaved if no save works first
+    /// (none: not while something uses it, or never, for an always-on
+    /// computer). It keeps trying until then.
+    #[serde(rename_all = "camelCase")]
+    Unsaved {
+        since: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save: Option<u64>,
+        /// The first failure of this run of them, how many, and the last's why.
+        failing_since: i64,
+        failures: u32,
+        why: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stops_at: Option<i64>,
+    },
+    /// A start went back to an older save (a rollback), or will as it next
+    /// starts (`pending`: it is asleep after the loss). `life` is the start
+    /// whose work since `saved_at` is in no save: what its owner says they
+    /// saw (`POST …/notices/seen {life}`), after which it is told no more.
+    #[serde(rename_all = "camelCase")]
+    WentBack {
+        life: u64,
+        cause: LossCause,
+        /// When that life ended, when the platform knows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended_at: Option<i64>,
+        pending: bool,
+        /// The save it went back to (none: nothing, an empty `/data`), and
+        /// when that save was taken.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved_at: Option<i64>,
+        /// When the start that went back came up (none while `pending`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<i64>,
+    },
+}
+
+/// `POST /api/computers/{id}/restart`: the start its owner restarts, as
+/// their view named it (`generation`); none, or 0, restarts whatever runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartAsk {
+    #[serde(default)]
+    pub generation: Option<u64>,
+}
+
+/// `POST /api/computers/{id}/notices/seen`: its owner saw the notice of
+/// the lost life `life` (a `went_back` notice's).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeSeen {
+    pub life: u64,
+}
+
 /// `POST /api/computers/{id}/ports/{port}/ticket` → a one-time link that
 /// signs a browser in to the computer's origin for that port.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,9 +394,50 @@ pub struct PortTicket {
     pub expires_at: i64,
 }
 
+/// What a port ticket asks for: where on the port its browser lands, the
+/// port's root by default. A path and a query an image reads, such as an
+/// agent's screen's `/?agent=<agent fragment>` (docs/computers.md, Ports):
+/// the platform carries it and reads nothing in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortTicketAsk {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// A ticket's landing path is at most this many bytes.
+pub const PORT_PATH_MAX_BYTES: usize = 512;
+
+/// Whether `path` may be where a ticket lands on its port: `/`, then
+/// visible ASCII (no fragment `#`, no `\`), no `//` (which a redirect
+/// could read as another host), and no `.` or `..` segment in its path
+/// (which would leave the port).
+pub fn valid_port_path(path: &str) -> bool {
+    let visible = path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'#' && b != b'\\');
+    let segments = path.split('?').next().unwrap_or("").split('/').all(|s| s != "." && s != "..");
+    path.starts_with('/') && path.len() <= PORT_PATH_MAX_BYTES && visible && !path.contains("//") && segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Valid: the port's root, or a path and query an image reads. Invalid:
+    /// anything that is not a path on the port.
+    #[test]
+    fn a_tickets_landing_is_a_path_on_its_port() {
+        for ok in ["/", "/?agent=juniper.paul", "/novnc/core/rfb.js", "/a/b?c=d&e=f%20g", "/?q=a/../b"] {
+            assert!(valid_port_path(ok), "{ok}");
+        }
+        for bad in ["", "?agent=juniper.paul", "agent", "//evil.example/", "/a//b", "/../6081/", "/a/./b", "/a/..", "/a b", "/a#b", "/a\\b", "/\u{e9}", "/\n"] {
+            assert!(!valid_port_path(bad), "{bad:?}");
+        }
+        assert!(valid_port_path(&format!("/{}", "a".repeat(PORT_PATH_MAX_BYTES - 1))));
+        assert!(!valid_port_path(&format!("/{}", "a".repeat(PORT_PATH_MAX_BYTES))));
+        let ask: PortTicketAsk = serde_json::from_str("{}").unwrap();
+        assert_eq!(ask.path, None, "no path: the port's root");
+        assert!(serde_json::from_str::<PortTicketAsk>(r#"{"next":"/"}"#).is_err(), "a field it does not know is refused");
+    }
 
     #[test]
     fn computer_ids_and_their_labels() {
@@ -327,6 +468,26 @@ mod tests {
         let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
         assert_eq!(older.connections, None);
         assert!(older.credentials.is_empty());
+    }
+
+    /// What its owner is told, on the wire as the shell reads it: a kind,
+    /// camelCase fields, what is unknown left out.
+    #[test]
+    fn a_computers_notices_on_the_wire() {
+        let unsaved = ComputerNotice::Unsaved { since: 10, save: Some(3), failing_since: 20, failures: 2, why: "R2".into(), stops_at: None };
+        assert_eq!(serde_json::to_value(&unsaved).unwrap(), serde_json::json!({ "kind": "unsaved", "since": 10, "save": 3, "failingSince": 20, "failures": 2, "why": "R2" }));
+        let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None };
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::json!({ "kind": "went_back", "life": 4, "cause": "unsaved", "endedAt": 30, "pending": true }));
+        assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
+        for n in [unsaved, back] {
+            assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
+        }
+        // a view from before notices reads as none, at no start
+        let v: ComputerView = serde_json::from_str(r#"{"computer":"computer:0123456789abcdef01234567","owner":"id:p","image":"stub","phase":"asleep","agents":[],"origin":"https://x"}"#).unwrap();
+        assert!(v.notices.is_empty() && v.generation == 0);
+        let ask: RestartAsk = serde_json::from_str("{}").unwrap();
+        assert_eq!(ask.generation, None);
+        assert!(serde_json::from_str::<RestartAsk>(r#"{"gen":1}"#).is_err() && serde_json::from_str::<NoticeSeen>(r#"{"life":1,"x":2}"#).is_err(), "a field it does not know is refused");
     }
 
     /// The guest's credentials on the wire, as an image reads them.
