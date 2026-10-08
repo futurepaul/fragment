@@ -86,29 +86,55 @@ async fn a_mind_hands_goose_its_view_and_a_chat_its_text() {
     fake.until(WAIT, "the chat's reply", |w| !replies(w, &chat).is_empty() && !ends(w, &chat).is_empty()).await;
     fake.with(|w| assert_eq!(replies(w, &chat), vec!["scripted: hello goose"]));
     assert!(said["seq"].as_u64().is_some());
-    support::until(WAIT, "both sessions closed", || goose.log.lock().unwrap().closed.len() == 2).await;
+    // each turn's session closed; after each, one made ahead for the next
+    // turn there (s2, the mind's, closed unused at the chat's turn; s4, the
+    // chat's), its MCP servers started and its system prompt set
+    support::until(WAIT, "the sessions closed, and one made ahead", || {
+        let log = goose.log.lock().unwrap();
+        log.closed.len() == 3 && log.sessions.len() == 4 && log.system.len() == 4
+    })
+    .await;
 
     {
         let log = goose.log.lock().unwrap();
         assert_eq!(log.spawned, vec!["hands.paul"], "one goose for the agent");
         assert_eq!(log.prompts, vec![vec![VIEW.to_string(), "Find my notes\n\n(task k1, thread t_0123456789abcdef)".to_string()], vec!["hello goose".to_string()]], "a mind's view, then the task; a chat's text alone");
+        let (framed, hands) = (format!("{HANDS}\n\n{FRAMING}\n\n{VIEW_DOC}"), HANDS.to_string());
+        let system = |s: &str, text: &str| json!({ "sessionId": s, "mode": "append", "key": "fragment", "text": text });
         assert_eq!(
             log.system,
-            vec![json!({ "sessionId": "s1", "mode": "append", "key": "fragment", "text": format!("{HANDS}\n\n{FRAMING}\n\n{VIEW_DOC}") }), json!({ "sessionId": "s2", "mode": "append", "key": "fragment", "text": HANDS })],
+            vec![system("s1", &framed), system("s2", &framed), system("s3", &hands), system("s4", &hands)],
             "every session is told of its computer and fragments; the mind's alone is framed as its subagent"
         );
-        assert_eq!(log.closed, vec!["s1", "s2"]);
+        assert_eq!(log.prompted, vec!["s1", "s3"]);
+        assert_eq!(log.closed, vec!["s1", "s2", "s3"]);
         let work = dir.join("work").display().to_string();
         assert_eq!(log.sessions[0]["cwd"], work.as_str());
-        assert_eq!(log.sessions[0]["mcpServers"], json!([{ "name": "mind", "command": "/usr/local/bin/fragment", "args": ["mcp", mind], "env": [{ "name": "FRAGMENT_AS_AGENT", "value": "hands.paul" }, { "name": "FRAGMENT_FOR", "value": "id:paul" }, { "name": "FRAGMENT_API", "value": fake.url() }] }]));
-        assert_eq!(log.sessions[1]["mcpServers"], json!([]), "a chat gets no mind");
-        assert_ne!(log.sessions[0]["_meta"]["sessionTitle"], log.sessions[1]["_meta"]["sessionTitle"]);
+        let minds = json!([{ "name": "mind", "command": "/usr/local/bin/fragment", "args": ["mcp", mind], "env": [{ "name": "FRAGMENT_AS_AGENT", "value": "hands.paul" }, { "name": "FRAGMENT_FOR", "value": "id:paul" }, { "name": "FRAGMENT_API", "value": fake.url() }] }]);
+        assert_eq!(log.sessions[0]["mcpServers"], minds);
+        assert_eq!(log.sessions[1]["mcpServers"], minds, "the mind's next session, made ahead, is the same");
+        assert_eq!(log.sessions[2]["mcpServers"], json!([]), "a chat gets no mind");
+        assert_ne!(log.sessions[0]["_meta"]["sessionTitle"], log.sessions[2]["_meta"]["sessionTitle"]);
         // the view was asked as the agent, once
         fake.with(|w| {
             let views: Vec<_> = w.requests.iter().filter(|r| r.0 == format!("POST /api/f/{mind}/ops/view")).collect();
             assert_eq!(views.len(), 1);
             assert_eq!(views[0].2.as_deref(), Some("hands.paul"));
         });
+    }
+    // the chat's next turn takes the session made ahead for it: none made
+    // at its turn, and the next one made ahead once it ends
+    fake.say(&chat, &person("paul"), json!({ "text": "again" }));
+    fake.until(WAIT, "the chat's second reply", |w| replies(w, &chat).len() == 2).await;
+    support::until(WAIT, "its session closed, and the next made ahead", || {
+        let log = goose.log.lock().unwrap();
+        log.closed.len() == 4 && log.sessions.len() == 5
+    })
+    .await;
+    {
+        let log = goose.log.lock().unwrap();
+        assert_eq!(log.prompted, vec!["s1", "s3", "s4"], "the session made ahead answered it");
+        assert_eq!(log.closed, vec!["s1", "s2", "s3", "s4"]);
     }
     bridge.stop().await;
 }

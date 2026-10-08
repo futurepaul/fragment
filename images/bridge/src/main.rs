@@ -51,7 +51,7 @@ fn runtime() -> Box<dyn Runtime> {
             root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
             api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
             model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
-            tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
+            tier: env_or("BRIDGE_GOOSE_TIER", "cheap"),
             cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
             ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
             desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),

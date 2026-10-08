@@ -142,7 +142,7 @@ pub struct GooseConfig {
     pub api: String,
     /// `FRAGMENT_MODEL`: goose's OpenAI provider's host.
     pub model: String,
-    /// The model tier its calls name (`medium`).
+    /// The model tier its calls name (`cheap`: GLM-5.3 Flash, Paul, 2026-10-08).
     pub tier: String,
     /// The fragment CLI, for a mind's `fragment mcp <mind>`; none, no such
     /// extension.
@@ -598,6 +598,9 @@ struct Ctx {
     api: Api,
     spawn: Arc<dyn Spawn>,
     gooses: tokio::sync::Mutex<HashMap<String, Arc<Conn>>>,
+    /// Each agent's session made ahead for its next turn (`Spare`), by its
+    /// fragment's name.
+    spares: tokio::sync::Mutex<HashMap<String, Spare>>,
     /// The platform skill, made once from the CLI's (`fragment skill`).
     platform: tokio::sync::OnceCell<Option<String>>,
 }
@@ -633,7 +636,7 @@ async fn run(config: GooseConfig, spawn: Arc<dyn Spawn>, mut io: RuntimeIo) -> R
     if let Some((ca, bundle)) = config.ca.clone() {
         tokio::spawn(trust_ca(ca, bundle));
     }
-    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()), platform: tokio::sync::OnceCell::new() });
+    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()), spares: tokio::sync::Mutex::new(HashMap::new()), platform: tokio::sync::OnceCell::new() });
     let mut turns: HashMap<String, mpsc::Sender<Heard>> = HashMap::new();
     let mut shutdown = io.shutdown.clone();
     // Each agent's goose starts at its first turn, so turns can be taken now.
@@ -723,24 +726,72 @@ pub fn prompt(view: Option<&str>, ts: &TurnStart) -> Vec<String> {
 /// The session a turn runs in: the agent's browser, computer and web tools
 /// when the image has its desktop; `fragment mcp <mind>` among them for a
 /// mind, when the image has the CLI.
-fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
+/// It is `agent`'s in `fragment`, titled `title`: a turn's, or one made
+/// ahead for the next (`Spare`).
+fn session_of(cfg: &GooseConfig, agent: &Agent, fragment: &str, title: &str, mind: bool) -> Value {
     let mut servers = Vec::new();
     if let Some(desktop) = &cfg.desktop {
-        for (name, args) in [("browser", vec!["mcp", "browser", ts.agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", ts.agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
+        for (name, args) in [("browser", vec!["mcp", "browser", agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
             servers.push(json!({ "name": name, "command": desktop, "args": args, "env": [] }));
         }
     }
     if let (true, Some(cli)) = (mind, &cfg.cli) {
-        let env = [("FRAGMENT_AS_AGENT", ts.agent.fragment.as_str()), ("FRAGMENT_FOR", ts.agent.owner.as_str()), ("FRAGMENT_API", cfg.api.as_str())];
+        let env = [("FRAGMENT_AS_AGENT", agent.fragment.as_str()), ("FRAGMENT_FOR", agent.owner.as_str()), ("FRAGMENT_API", cfg.api.as_str())];
         servers.push(json!({
             "name": "mind",
             "command": cli,
-            "args": ["mcp", ts.fragment],
+            "args": ["mcp", fragment],
             "env": env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
         }));
     }
     // a title of ours: goose names no session itself (no model call for it)
-    json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": format!("turn {}", ts.turn) } })
+    json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": title } })
+}
+
+/// A session made ahead for an agent's next turn in a fragment, once a
+/// turn there ends: its MCP servers started (Playwright's Node, cua-driver,
+/// `fragment mcp`: over a second at each `session/new`) and its system
+/// prompt set. Nothing was said in it, so it is as fresh as one made at the
+/// turn; the next turn there with the same goose takes it.
+struct Spare {
+    fragment: String,
+    mind: bool,
+    conn: Arc<Conn>,
+    session: String,
+}
+
+/// Makes a session on `conn` (`session_of`) and sets its system prompt:
+/// its id, or why not (a half-made one is closed).
+async fn make_session(cfg: &GooseConfig, conn: &Arc<Conn>, agent: &Agent, fragment: &str, title: &str, mind: bool) -> Result<String, String> {
+    let made = conn.call("session/new", session_of(cfg, agent, fragment, title, mind), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
+    let made = made.map_err(|e| format!("goose made no session: {e}"))?;
+    let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
+    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(mind) });
+    if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
+        close(conn, &session);
+        return Err(format!("goose took no system prompt: {e}"));
+    }
+    Ok(session)
+}
+
+/// A session made ahead for `agent`'s next turn in `fragment` (`Spare`),
+/// unless it has one; one it had elsewhere is closed.
+async fn ready_next(ctx: Arc<Ctx>, agent: Agent, fragment: String, mind: bool) {
+    if ctx.spares.lock().await.get(&agent.fragment).is_some_and(|s| s.fragment == fragment && s.mind == mind && s.conn.alive()) {
+        return;
+    }
+    let Ok(conn) = ctx.goose_for(&agent).await else { return };
+    let t = Instant::now();
+    match make_session(&ctx.config, &conn, &agent, &fragment, "ready", mind).await {
+        Ok(session) => {
+            crate::ev!("goose.spare", { "agent": agent.fragment, "fragment": fragment, "ms": ms(t) });
+            let old = ctx.spares.lock().await.insert(agent.fragment.clone(), Spare { fragment, mind, conn, session });
+            if let Some(old) = old {
+                close(&old.conn, &old.session);
+            }
+        }
+        Err(e) => crate::ev!("goose.spare_failed", { "agent": agent.fragment, "error": e }),
+    }
 }
 
 /// The platform skill: the computer's page and the CLI's own skill, made
@@ -779,8 +830,10 @@ fn ms(t: Instant) -> u64 {
 }
 
 /// The turn's session, made: its goose, its id, its updates, its prompt,
-/// and what each phase took (`turn.timing`'s first fields).
-async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>, Map<String, Value>), String> {
+/// what each phase took (`turn.timing`'s first fields), and whether the
+/// fragment is a mind (it answered a view).
+#[allow(clippy::type_complexity)]
+async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>, Map<String, Value>, bool), String> {
     let mut timing = Map::new();
     let ((view, view_ms), skills_ms) = tokio::join!(
         async {
@@ -801,22 +854,27 @@ async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::
     let t = Instant::now();
     let conn = ctx.goose_for(&ts.agent).await.map_err(|e| format!("goose: {e}"))?;
     timing.insert("goose_ms".into(), json!(ms(t)));
+    let mind = view.is_some();
+    // the session made ahead for this turn (`Spare`), when it is this goose's
+    // for this fragment; else one made now, its MCP servers started
+    let spare = ctx.spares.lock().await.remove(&ts.agent.fragment);
     let t = Instant::now();
-    let made = conn.call("session/new", new_session(&ctx.config, ts, view.is_some()), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
-    let made = made.map_err(|e| format!("goose made no session: {e}"))?;
-    // its MCP servers started (goose starts a session's own as it makes it)
+    let session = match spare {
+        Some(s) if s.fragment == ts.fragment && s.mind == mind && Arc::ptr_eq(&s.conn, &conn) && conn.alive() => {
+            timing.insert("spare".into(), json!(true));
+            s.session
+        }
+        other => {
+            if let Some(s) = other {
+                close(&s.conn, &s.session);
+            }
+            make_session(&ctx.config, &conn, &ts.agent, &ts.fragment, &format!("turn {}", ts.turn), mind).await?
+        }
+    };
     timing.insert("session_ms".into(), json!(ms(t)));
-    let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
-    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(view.is_some()) });
-    let t = Instant::now();
-    if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
-        close(&conn, &session);
-        return Err(format!("goose took no system prompt: {e}"));
-    }
-    timing.insert("system_ms".into(), json!(ms(t)));
     let updates = conn.follow(&session);
     crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len), "timing": timing });
-    Ok((conn, session, updates, prompt(view.as_deref(), ts), timing))
+    Ok((conn, session, updates, prompt(view.as_deref(), ts), timing, mind))
 }
 
 /// Steps a turn's timing lists, at most (the rest are counted).
@@ -905,7 +963,7 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             return;
         }
     };
-    let (conn, session, mut updates, blocks, mut timing) = match prepared {
+    let (conn, session, mut updates, blocks, mut timing, mind) = match prepared {
         Ok(p) => p,
         Err(e) => {
             crate::ev!("goose.turn_failed", { "turn": id, "error": e });
@@ -955,6 +1013,8 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
         emit(map.update(&u)).await;
     }
     close(&conn, &session);
+    // the next turn here finds its session made (`Spare`)
+    tokio::spawn(ready_next(ctx.clone(), ts.agent.clone(), ts.fragment.clone(), mind));
     clock.fields(answered, &mut timing);
     timing.insert("total_ms".into(), json!(ms(t0)));
     crate::ev!("goose.timing", { "turn": id, "timing": timing });
@@ -1260,6 +1320,10 @@ mod tests {
         cut.note = Some("Your turn before this one was cut short.".into());
         cut.files = vec![crate::runtime::LocalFile { path: "/tmp/bridge-media/x/cat.png".into(), media_type: "image/png".into(), name: "cat.png".into(), size: 3 }];
         assert_eq!(prompt(None, &cut), vec!["Your turn before this one was cut short.\n\nhello\n\nIts files, on this computer:\n- /tmp/bridge-media/x/cat.png (image/png, 3 bytes)"]);
+    }
+
+    fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
+        session_of(cfg, &ts.agent, &ts.fragment, &format!("turn {}", ts.turn), mind)
     }
 
     fn config() -> GooseConfig {
