@@ -41,20 +41,21 @@ const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
 const CURRENT = "shell.chat.v1";
-// the templates an app starts from (the platform's catalog: publish.rs)
+// the templates an app starts from (the platform's catalog: publish.rs),
+// each made with a title: the name its maker gives it, or the template's
 const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
   { template: "blank", name: "Blank", about: "One page to start from." },
-  // blessed (decision 40): named, not copied, and made with a title, as a chat is
-  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
+  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search." },
 ];
 
-// me: the signed-in person; fragments: their list (name, role, kind,
+// me: the signed-in person; guest: whether their plan is a guest's, who
+// makes nothing (decision 49); fragments: their list (name, role, kind,
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity
-const state = { me: null, fragments: [], computer: null, defaultImage: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+const state = { me: null, guest: false, fragments: [], computer: null, defaultImage: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -145,10 +146,15 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
-function notice(title, text) {
+function notice(title, text, action = null) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
   if (text) n.append(el("span", null, text));
+  if (action) {
+    const row = el("div");
+    row.append(action);
+    n.append(row);
+  }
   n.hidden = false;
 }
 
@@ -465,7 +471,7 @@ function renderChats() {
     row.append(mark(f.name), text, ...badges(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : "Your first agent starts here")]);
+  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your first agent starts here")]);
 }
 $("agent-heading").onclick = () => {
   const name = state.current;
@@ -601,7 +607,7 @@ function renderApps() {
     row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
     row.onpointerleave = hidePeek;
     return row;
-  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]);
+  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : state.guest ? "Apps shared with you show here" : "No apps yet")]);
 }
 function openApp(name) {
   const f = byName(name);
@@ -851,7 +857,7 @@ function showCatalog() {
       error.textContent = "";
       try {
         const label = input.value.trim();
-        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
+        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, title: label || t.name });
         await load();
         viewer.close("catalog");
         openApp(made.name);
@@ -1160,7 +1166,6 @@ const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fr
 // a computer's phase, as a person reads it (proto's `ComputerPhase`)
 const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 const WHY = {
-  guest: "a guest has no agents",
   seat_canceled: "the seat was canceled",
   no_credit: "the credit is used up; adding credit starts them again",
   overdrawn: "the balance reached the overdraft; credit that brings it above zero ends it",
@@ -1197,15 +1202,16 @@ async function openSettings(push = true) {
   renderChats();
   leaveSidebar();
   // Checkout's return, or a trial mailed, before the ledger is read
-  // with no chats yet, a seat's Billing offers the first run (home makes
-  // the first agent: `start`)
-  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false), firstAgent: chats().length ? null : firstAgentOnceSeated };
+  // with no chat of their own yet (one shared with them is not theirs), a
+  // seat's Billing offers the first run (home makes the first agent: `start`)
+  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false), firstAgent: chats().some(own) ? null : firstAgentOnceSeated };
   const back = await returning(billingHelpers);
   const [ledger, linked, uses] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
   ]);
+  if (ledger) setGuest(ledger.plan === "guest");
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
@@ -1247,9 +1253,12 @@ async function openSettings(push = true) {
   signout.append(out);
   actions.append(link, signout);
   account.append(actions);
-  const standing = ledger?.standing?.standing;
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, back);
+  // a guest has no agents to stop, nor a computer, skills or connections
+  // for them, nor apps to publish: a seat to get comes first, then who they are
+  if (state.guest) return page.replaceChildren(...billing, account, ...credited(WALLPAPER));
+  const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
   }
@@ -1548,7 +1557,7 @@ $("settings").onclick = () => openSettings().catch((e) => notice("Settings did n
 function firstRun(...children) {
   $("layout").hidden = true;
   $("first-run").hidden = false;
-  $("first-run-card").replaceChildren(el("div", "brand", "Finite.Computer"), ...children);
+  $("first-run-card").replaceChildren(el("div", "brand", $("brand").textContent), ...children);
 }
 function signIn() {
   const go = el("a", "primary", "Sign in");
@@ -1749,21 +1758,44 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  await load();
+  const [, ledger] = await Promise.all([load(), api("GET", "/api/ledger").catch(() => null)]);
+  setGuest(ledger?.plan === "guest");
   watchList();
-  // the first agent is asked for at home; settings open as asked, chats or
-  // not; a guest's first run is a seat, since creating needs one (decision 49)
+  // the first agent is made at home; settings open as asked, chats or not;
+  // a guest makes nothing (decision 49), so their home is what is shared
+  // with them, and a seat offered
   const settings = !open && location.pathname === SETTINGS;
-  const first = !chats().length && !open && !settings;
-  const guest = first && (await api("GET", "/api/ledger").catch(() => null))?.plan === "guest";
-  if (first && !guest) return creatingAgent();
+  if (!chats().length && !open && !settings && !state.guest) return creatingAgent();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
-  if (settings || guest) await openSettings(guest);
+  if (settings) await openSettings(false);
   else if (pick) openChat(pick);
+  else if (state.guest) guestHome();
   else notice("No chats yet", "Make an agent to start.");
   prewake();
+}
+
+// ---- a guest: they see and edit what is shared with them, and make
+// nothing (decision 49), so no button offers to make something ----
+function setGuest(guest) {
+  state.guest = guest;
+  for (const id of ["new-agent", "new-agent-top", "new-group", "add-app"]) $(id).hidden = guest;
+  renderChats();
+  renderApps();
+}
+// With no chat to show: the first app shared with them in its window, and
+// beside it what a guest may do, and what a seat gives.
+function guestHome() {
+  const app = shown(apps())[0];
+  if (app) openApp(app.name);
+  const seat = el("a", "allow", "Get a seat");
+  seat.href = SETTINGS;
+  seat.onclick = (e) => {
+    e.preventDefault();
+    openSettings().catch((err) => notice("Settings did not open", err.message));
+  };
+  notice("You're a guest", "You see and edit what people share with you: it shows in the sidebar as they share it. A seat, from $100 a month, gives you agents of your own, the computer they run on, and apps of your own.", seat);
 }
 
 start().catch((e) => {

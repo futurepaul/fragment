@@ -418,12 +418,20 @@ Settings gains **Billing**, which replaces the read-only Credit section:
   - remove a seat;
   - add an admin;
   - open "Payment and invoices" (Stripe's portal).
+
+  The table shows once someone besides its admin is in the org (a seat,
+  held or invited, or another admin). An admin alone in it, who pays for
+  themselves, sees "Payment and invoices" and "Add seats for others",
+  which shows the table.
 - **A lapsed person** sees why, and how to pay again.
 
 The first run starts once a seat is held, so a guest's first run is
-"get a seat". A seat holder with no chats yet sees "Make your first
-agent" in Billing: once the seat's plan has reached their ledger, it
-goes home, where the first run makes their default agent.
+home: what is shared with them, and a note of what a guest may do and
+what a seat gives, whose "Get a seat" opens Billing. The shell offers a
+guest nothing to make. A seat holder with no chat of their own yet sees
+"Make your first agent" in Billing: once the seat's plan has reached
+their ledger, it goes home, where the first run makes their default
+agent.
 
 ## The API, in sketch
 

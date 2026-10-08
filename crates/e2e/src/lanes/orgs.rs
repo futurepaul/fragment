@@ -67,7 +67,7 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         let sent = s.mail.sent_to(&alice_email);
         s.ok(
             "the platform mails them their seat, once (the replay mails nothing)",
-            r.body["mailed"] == true && again.body["mailed"] == false && sent.len() == 1 && sent[0].subject == "You have a seat on fragment" && sent[0].text.contains("always-on computer") && sent[0].text.contains("It is yours now"),
+            r.body["mailed"] == true && again.body["mailed"] == false && sent.len() == 1 && sent[0].subject == format!("You have a seat on {}", fragment_core::mail::PRODUCT) && sent[0].text.contains("always-on computer") && sent[0].text.contains("It is yours now"),
             format!("{sent:?}"),
         );
     }

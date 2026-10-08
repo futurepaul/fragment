@@ -363,7 +363,7 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The title a blessed template's fragment starts with (`TemplatePending`'s).
+    /// The title a template's fragment starts with (`TemplatePending`'s).
     TemplateTitle,
     /// The commits the cell pins (plane.rs).
     PinMain,
@@ -1069,8 +1069,8 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
         if let Some(title) = &body.title {
-            if body.template.as_deref().and_then(blessed::template).is_none() {
-                return Err(CellError::invalid("a title is a blessed template's fragment's (template chat or agent); others say theirs in fragment.json"));
+            if body.template.is_none() {
+                return Err(CellError::invalid("a title is a template's fragment's, its first fragment.json's; others say theirs in fragment.json"));
             }
             if title.trim().is_empty() || title.chars().count() > 120 {
                 return Err(CellError::invalid("a title is 1 to 120 characters"));

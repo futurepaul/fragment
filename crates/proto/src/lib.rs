@@ -559,8 +559,8 @@ pub struct CreateFragment {
     /// first commit is a `fragment.json` that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// A blessed template's fragment's title (its `meta.title`; at most
-    /// 120 characters).
+    /// With `template`, the fragment's title: its first `fragment.json`'s
+    /// `meta.title`, over the template's (at most 120 characters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }

@@ -3,16 +3,20 @@
 // A guest buys a seat, or starts a trial with a code; a seat's holder sees
 // it, lets a $200 seat's computer sleep, and buys credit; an org's admin
 // adds, changes and removes seats and admins, and opens Stripe's portal for
-// card and invoices. Stripe's Checkout and portal are Stripe's pages: the
-// shell goes there, and Checkout's return (`/settings?checkout=…`) comes
-// back here (`returning`). Every value is text, never markup.
+// card and invoices. An org is shown once someone besides its admin is in
+// it (a seat, held or invited, or another admin): its admin alone, who pays
+// for themselves, sees only Payment and invoices, and asks for the org's
+// seats to add one for someone else. Stripe's Checkout and portal are
+// Stripe's pages: the shell goes there, and Checkout's return
+// (`/settings?checkout=…`) comes back here (`returning`). Every value is
+// text, never markup.
 
 const KIND = { seat: "$100 seat", seat_always_on: "$200 always-on seat" };
 
 /**
  * The shell's helpers this module uses: `{api, el, section, line, usd,
  * reopen, firstAgent}` (`firstAgent`: home's first run, for a person with
- * no chats yet; otherwise null).
+ * no chat of their own yet; otherwise null).
  */
 let h = null;
 
@@ -85,10 +89,14 @@ export async function billingSections(helpers, ledger, back) {
   if (!mine) return [section("Billing", el("p", "muted", "Your seat could not be read."))];
   const billing = section("Billing");
   if (back?.said) billing.append(el("p", "settings-line", back.said));
+  // an admin's org, and whether they are alone in it
+  const org = mine.admin ? await h.api("GET", "/api/org").catch((e) => ({ error: e.message })) : null;
+  const alone = org?.members?.length === 1;
   const seat = mine.seat;
   if (seat) {
     const kind = KIND[seat.kind] + (seat.comped ? " (given)" : "");
-    billing.append(line("Seat", kind), line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
+    billing.append(line("Seat", kind));
+    if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     if (seat.good && h.firstAgent) {
       const first = el("button", "primary", "Make your first agent");
@@ -123,7 +131,7 @@ export async function billingSections(helpers, ledger, back) {
       billing.append(label);
     }
   } else if (!mine.org || mine.admin) {
-    billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat lets you make agents and apps."));
+    billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat gives you agents of your own, the computer they run on, and apps of your own."));
     const buy = el("div", "settings-actions");
     buy.append(button("Get a $100 seat", () => goCheckout({ kind: "seat" })), button("Get a $200 always-on seat", () => goCheckout({ kind: "seat_always_on" })));
     billing.append(buy);
@@ -148,19 +156,33 @@ export async function billingSections(helpers, ledger, back) {
     billing.append(el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`));
   }
   for (const o of mine.offered) billing.append(el("p", "muted", `${o.org.name} offered you a ${KIND[o.kind]}; you are in another org.`));
-  if (ledger) {
+  // credit is a seat's (or a plan the deployment gives): a guest pays for
+  // nothing, so has none to show
+  if (ledger && (seat || ledger.plan !== "guest")) {
     billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`));
     if (seat?.good) billing.append(button("Buy $25 of credit", async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)));
   }
-  const out = [billing];
-  if (mine.admin) out.push(await orgSection());
-  return out;
+  if (!alone) return org ? [billing, orgSection(org)] : [billing];
+  const more = el("div", "settings-actions");
+  const others = el("button", "quiet", "Add seats for others");
+  others.type = "button";
+  others.onclick = () => {
+    more.remove();
+    billing.after(orgSection(org));
+  };
+  more.append(...(seat?.comped ? [] : [portal()]), others);
+  billing.append(more);
+  return [billing];
 }
 
-/** An admin's org: its seats and admins, and Stripe's portal. */
-async function orgSection() {
+/** Stripe's portal: the org's card, invoices, and cancelling. */
+function portal() {
+  return button("Payment and invoices", async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url));
+}
+
+/** An admin's org (`GET /api/org`'s): its seats and admins, and Stripe's portal. */
+function orgSection(org) {
   const { el, section } = h;
-  const org = await h.api("GET", "/api/org").catch((e) => ({ error: e.message }));
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
     box.append(el("p", "muted", org.error));
@@ -234,8 +256,8 @@ async function orgSection() {
       note(box, err.message);
     }
   };
-  const portal = el("div", "settings-actions");
-  portal.append(button("Payment and invoices", async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url)));
-  box.append(add, admin, el("p", "muted", "A seat added bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices."), portal);
+  const pay = el("div", "settings-actions");
+  pay.append(portal());
+  box.append(add, admin, el("p", "muted", "A seat added bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices."), pay);
   return box;
 }
