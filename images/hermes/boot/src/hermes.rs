@@ -1,4 +1,4 @@
-//! What the Hermes image writes for Hermes v0.21.5 at each boot (and for an
+//! What the Hermes image writes for its Hermes at each boot (and for an
 //! agent assigned while it runs), as pure functions of the computer's
 //! agents: the managed overlay (`/etc/hermes/config.yaml`, merged over every
 //! profile's config), each agent's profile config, the gateway's Relay
@@ -131,6 +131,13 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     // Hermes' own watcher, were it to run, would agree.
     let minutes = screen_idle_ms as f64 / 60_000.0;
     y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
+    // Lazy installs are off (upstream's image turns them on): they fetch
+    // Hermes' own optional backends (providers, platforms, speech) into its
+    // home, which a computer configures none of (its model is the platform's
+    // route, its chat the relay). What our agents use is in the image (Edge's
+    // speech for text_to_speech: images/hermes/Dockerfile). Software the
+    // agent wants is its terminal's to install.
+    y.push_str("security:\n  allow_lazy_installs: false\n");
     if !disabled_plugins.is_empty() {
         // Messaging platforms this computer never serves (it is reached through its
         // bridge) and the dashboard's auth providers: the gateway imports every one
@@ -168,17 +175,20 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // The guest holds no credential: the intercept strips auth and adds its own.
     y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
     y.push_str(&format!("  default_headers:\n    x-fragment-agent: {}\n", q(&agent.fragment)));
-    // The managed skills, then the platform skill (skills.rs), after the
-    // profile's own `skills/`: Hermes takes the first skill of a name, so an
-    // agent's own wins, and a managed one over the platform's.
+    // The managed skills and the platform skill's view (skills.rs), below
+    // the profile's own `skills/`: an agent's own wins, and a managed one
+    // over the platform's, which leaves the view for it.
     let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
     // Its eyes: Hermes' auxiliary vision (each computer_use screenshot, and
     // an image a person attaches, described in words for the main model) on
     // the route's `vision`, the deployment's vision model, whatever the
     // agent's tier (the medium tier's GLM-5.3 reads no images). Named
-    // outright, Hermes routes every capture through it (its
-    // `tools/computer_use/vision_routing.py`, step 1) and sends it, as every
+    // outright, Hermes routes every capture and attachment through it (its
+    // image routing, `agent/image_routing.py`: in `auto`, an explicit
+    // `auxiliary.vision` makes it text, which each capture asks through
+    // `tools/vision_tools.py`'s `_native_tool_result_images`) and
+    // sends it, as every
     // call to a custom endpoint, with `model.default_headers`: the agent's
     // `x-fragment-agent`, so the intercept meters it to the agent's owner.
     // Always OpenAI's shape, the high tier's agents' too.
@@ -203,11 +213,11 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     ));
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
-    // the screen shows it. Left unset, Hermes picks Browser Use mode (one
-    // browser_exec tool) whenever uvx is on PATH, which fetches its CLI,
-    // unpinned, into /data (about 490 MB) at the first call. Hermes reads
-    // `browser` from the profile's own config file alone, never from the
-    // managed overlay.
+    // the screen shows it, through agent-browser (in the image: its
+    // Dockerfile). Left unset, Hermes picks Browser Use mode (one
+    // browser_exec tool, its harness a core dependency of Hermes). Hermes
+    // reads `browser` from the profile's own config file alone, never from
+    // the managed overlay.
     y.push_str("browser:\n  headed: true\n  backend: \"off\"\n");
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
@@ -238,29 +248,31 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
 /// memory (p5, 2026-10-05).
 pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
 
-/// The image's Chromium: a script that starts Playwright's with
-/// `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
+/// The image's Chromium: a script that starts the one Hermes' image pins
+/// with `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
 /// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
 /// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
 pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
 
-/// The script at `CHROMIUM`, written at image build: on a desktop
-/// (`DISPLAY` set) the full Chromium, `full`; with none the headless
-/// shell, `shell`, as Hermes picks between them itself (its boot pins the
-/// shell, and a running desktop swaps in the full one).
-pub fn chromium_script(full: &Path, shell: &Path) -> String {
-    let quoted = |p: &Path| {
-        let s = p.display().to_string();
-        assert!(p.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
-        format!("'{s}'")
-    };
+/// The script at `CHROMIUM`, written at image build: Hermes' pinned full
+/// Chromium, `full`, its only browser (no headless shell: the full one runs
+/// headed on a desktop and headless with none, as its caller asks), its
+/// scratch the container's `/tmp` (`CHROMIUM_TMP`).
+pub fn chromium_script(full: &Path) -> String {
+    let s = full.display().to_string();
+    assert!(full.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
     let flags = CHROMIUM_FLAGS.join(" ");
-    format!(
-        "#!/bin/sh\n# The image's Chromium (hermes-boot build-info: images/hermes/boot/src/hermes.rs):\n# Playwright's, always with the flags a container needs.\n[ -n \"$DISPLAY\" ] && exec {} {flags} \"$@\"\nexec {} {flags} \"$@\"\n",
-        quoted(full),
-        quoted(shell)
-    )
+    format!("#!/bin/sh\n# The image's Chromium (hermes-boot build-info: images/hermes/boot/src/hermes.rs):\n# Hermes' pinned Chromium, always with the flags a container needs,\n# its scratch out of /data.\nexport TMPDIR={CHROMIUM_TMP}\nexec '{s}' {flags} \"$@\"\n")
 }
+
+/// Chromium's scratch: the container's own `/tmp`, which no save keeps.
+/// Hermes points `TMPDIR` into its home (`<profile>/cache/scratch`, under
+/// `/data`), and Chromium keeps there a headless browser's profile when its
+/// caller names none (Chrome 145, which Hermes v0.21.6 pins; 153, in its
+/// v0.21.5 image, kept it under `~`), and the shared memory
+/// `--disable-dev-shm-usage` moves out of `/dev/shm`: a hold while one runs
+/// would find its databases under Hermes' home, locked.
+pub const CHROMIUM_TMP: &str = "/tmp";
 
 /// What Hermes would otherwise decide by guessing whether it runs in a
 /// container, pinned in the boot's environment (and so the gateway's, its
@@ -653,6 +665,7 @@ mod tests {
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
             "\nmodel_catalog:\n  enabled: false\n",
+            "\nsecurity:\n  allow_lazy_installs: false\n",
             "\nstt:\n  echo_transcripts: false\n",
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
@@ -688,7 +701,7 @@ mod tests {
             assert!(config.contains(ears), "the {tier} tier's voice memos go to the route's whisper, its key naming the agent, no language forced: {config}");
         }
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
-        assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
+        assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
@@ -709,36 +722,33 @@ mod tests {
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
     }
 
-    /// The image's Chromium starts Playwright's with the container's flags,
-    /// headed on a desktop and the headless shell with none: run here by
-    /// `sh`, as Hermes runs it.
+    /// The image's Chromium starts Hermes' pinned one with the container's
+    /// flags, on a desktop or with none: run here by `sh`, as Hermes runs it.
     #[test]
     fn the_images_chromium_carries_the_containers_flags() {
-        let s = chromium_script(Path::new("/opt/p/chrome-linux64/chrome"), Path::new("/opt/p/shell/chrome-headless-shell"));
+        let s = chromium_script(Path::new("/opt/hermes/tools/chromium-1208/chrome-linux64/chrome"));
         assert!(s.starts_with("#!/bin/sh\n"), "{s}");
         assert_eq!(CHROMIUM_FLAGS, ["--no-sandbox", "--disable-dev-shm-usage"], "Hermes' CHROMIUM_SANDBOX_BYPASS_ARGS");
         let dir = std::env::temp_dir().join(format!("hermes-chromium-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // the two browsers, each saying what it was started with
-        let echo = |name: &str| {
-            let p = dir.join(name);
-            std::fs::write(&p, format!("#!/bin/sh\necho {name} \"$@\"\n")).unwrap();
-            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-            p
-        };
+        // the browser, saying what it was started with, and its scratch
+        let full = dir.join("full");
+        std::fs::write(&full, "#!/bin/sh\necho full \"$@\" \"tmp=$TMPDIR\"\n").unwrap();
+        std::fs::set_permissions(&full, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let script = dir.join("chromium");
-        std::fs::write(&script, chromium_script(&echo("full"), &echo("shell"))).unwrap();
+        std::fs::write(&script, chromium_script(&full)).unwrap();
         let run = |display: Option<&str>| {
             let mut c = std::process::Command::new("sh");
-            c.arg(&script).args(["--user-data-dir=/p", "https://example.com"]).env_remove("DISPLAY");
+            // Hermes' scratch, under its home, as its terminal has it
+            c.arg(&script).args(["--user-data-dir=/p", "https://example.com"]).env_remove("DISPLAY").env("TMPDIR", "/data/hermes/profiles/p/cache/scratch");
             if let Some(d) = display {
                 c.env("DISPLAY", d);
             }
             String::from_utf8(c.output().unwrap().stdout).unwrap()
         };
-        assert_eq!(run(Some(":20")), "full --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "on a desktop, the full Chromium");
-        assert_eq!(run(None), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "with none, the headless shell");
-        assert_eq!(run(Some("")), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "an empty DISPLAY is none");
+        let started = "full --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com tmp=/tmp\n";
+        assert_eq!(run(Some(":20")), started, "on a desktop");
+        assert_eq!(run(None), started, "with none: its caller asks for headless");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -809,7 +819,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a browser's path, absolute, quotable")]
     fn a_browser_path_a_shell_would_misread_is_a_bug() {
-        chromium_script(Path::new("/opt/it's/chrome"), Path::new("/opt/shell"));
+        chromium_script(Path::new("/opt/it's/chrome"));
     }
 
     fn credential(provider: &str, env: &[&str], placeholder: &str) -> fragment_bridge::runtime::Credential {

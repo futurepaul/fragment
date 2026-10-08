@@ -504,12 +504,16 @@ fn screen_start(agent: Option<&str>) -> ! {
 fn build_info() -> ! {
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
-    // the image's Chromium (hermes::CHROMIUM): Playwright's two browsers,
-    // with the flags a container needs, whatever the runtime
-    let playwright = Path::new("/opt/hermes/.playwright");
-    let full = find_browser(playwright, |name, dir| name == "chrome" && dir.starts_with("chrome-linux")).unwrap_or_else(|| fail("no Chromium under /opt/hermes/.playwright"));
-    let shell = find_browser(playwright, |name, _| matches!(name, "chrome-headless-shell" | "headless_shell")).unwrap_or_else(|| fail("no headless shell under /opt/hermes/.playwright"));
-    std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full, &shell)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
+    // the image's Chromium (hermes::CHROMIUM): the full Chromium Hermes'
+    // build pins and names (its one browser, headed or headless), with the
+    // flags a container needs, whatever the runtime
+    let named = std::fs::read_to_string(PINNED_CHROMIUM).unwrap_or_else(|e| fail(&format!("{PINNED_CHROMIUM}: {e}")));
+    let full = PathBuf::from(named.trim());
+    let runs = std::fs::metadata(&full).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    if !full.is_absolute() || !runs {
+        fail(&format!("{PINNED_CHROMIUM} names no Chromium that runs: {full:?}"));
+    }
+    std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
     std::fs::set_permissions(hermes::CHROMIUM, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
     std::fs::write(format!("{OPT}/browser-path"), hermes::CHROMIUM).unwrap_or_else(|e| fail(&e.to_string()));
     let cli = Command::new(FRAGMENT_CLI).arg("skill").output().unwrap_or_else(|e| fail(&format!("{FRAGMENT_CLI} skill: {e}")));
@@ -518,37 +522,14 @@ fn build_info() -> ! {
     }
     let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
     skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
-    println!("{} plugins disabled; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
+    println!("{} plugins disabled; Chromium {full:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
 
-/// The first executable under `root` whose name and directory's name `is`.
-fn find_browser(root: &Path, is: impl Fn(&str, &str) -> bool) -> Option<PathBuf> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0;
-    // bounded: 100 000 entries of Playwright's tree
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for e in entries.filter_map(Result::ok) {
-            seen += 1;
-            if seen > 100_000 {
-                return None;
-            }
-            let p = e.path();
-            let Ok(meta) = e.metadata() else { continue };
-            if meta.is_dir() {
-                stack.push(p);
-            } else if meta.permissions().mode() & 0o111 != 0 {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let dir = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if is(name, dir) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
+/// Where Hermes' image build names the Chromium it pinned (its PM's full
+/// Chromium, whose directory differs by architecture), so nothing hunts for
+/// it.
+const PINNED_CHROMIUM: &str = "/etc/hermes/agent-browser-executable-path";
 
 // ---- main: under s6, after its setup ----
 
@@ -884,13 +865,25 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
 }
 
 /// The managed skills' directory (skills.rs), made if it is missing: the
-/// boot's, readable by all, writable by none of the agents.
+/// boot's, readable by all, writable by none of the agents. And the
+/// platform skill's view, as the last install left the managed set.
 fn managed_dir() {
     use std::os::unix::fs::PermissionsExt;
     let dir = skills::managed_dir();
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))) {
         ev!("skills.dir_failed", { "dir": dir.display().to_string(), "error": e.to_string() });
     }
+    settle_platform();
+}
+
+/// The platform skill shown to the profiles unless a managed skill takes
+/// its name (skills.rs, `settle_platform`).
+fn settle_platform() -> Option<bool> {
+    let shown = skills::settle_platform(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::PLATFORM_DIR), Path::new(skills::PLATFORM_VIEW));
+    if let Err(e) = &shown {
+        ev!("skills.platform_failed", { "view": skills::PLATFORM_VIEW, "error": e.to_string() });
+    }
+    shown.ok()
 }
 
 /// What the last install of the managed skills found: the owner's skills
@@ -913,7 +906,10 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
         let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
         match done {
-            Ok(d) => ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "ms": t.elapsed().as_millis() as u64 }),
+            Ok(d) => {
+                let platform = settle_platform();
+                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 })
+            }
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
     }))
