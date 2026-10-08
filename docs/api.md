@@ -1283,7 +1283,8 @@ The steps:
   - Every call streams from the model, and is hedged
     (fragment_core::hedge): one whose first data line has not come 3.5 s
     after it was made, or that fails for now (a 429, a 5xx, no answer)
-    before it, gets one second, identical call, under a reservation of its
+    before it, gets one second call, the same request on its tier's next
+    model (fragment_core::models::plan), under a reservation of its
     own (`<step's reference>/hedge/<hex>`). The first to stream is the
     answer, and the other is aborted: the second's reservation is charged
     the answer's prompt, split as the answer's was between cached and not,
@@ -1354,11 +1355,12 @@ fragment_core::hedge; docs/optchat.md, "Latency"):
   model that answered is the step's `model` (its usage row names it), at
   that model's prices: each is in the default price book.
 - **A slow one is hedged.** One whose first data line has not come 3.5 s
-  after it was made, or that fails for now before it, gets one second,
-  identical call under a reservation of its own; the first to stream
-  answers, and the other is aborted and charged the answer's prompt, split
-  as the answer's was, with no output (or released, when it failed before
-  it began).
+  after it was made, or that fails for now before it, gets one second
+  call, the same request down its ladder from the next model (an agent's
+  on a prefix-cache session of its own), under a reservation of its own;
+  the first to stream answers, and the other is aborted and charged, at
+  its own model's prices, the answer's prompt, split as the answer's was,
+  with no output (or released, when it failed before it began).
 
 | method & path | who | body → answer |
 | --- | --- | --- |

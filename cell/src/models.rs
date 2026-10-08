@@ -25,7 +25,8 @@
 //!
 //! A streamed call is hedged (fragment_core::hedge): its first data line
 //! is waited for `hedge::AFTER_MS`, and past it, or at a failure for now
-//! before it, one second, identical call is made under a reservation of its
+//! before it, one second call (the same request on the tier's next model,
+//! `bounds::plan`) is made under a reservation of its
 //! own (`aig:<hex>:hedge` here, `…/hedge/<hex>` for a job's step).
 //! Whichever streams first is the answer, and the other is aborted. The
 //! answer's reservation settles from its usage; the second's from what the
@@ -316,7 +317,7 @@ fn answer_hedged(held: Held, h: Hedged<Held>, body_bytes: usize, after: &dyn Bac
         stream.finish(None);
         let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
         if let Some(s) = second {
-            s.end(model, usage.as_ref(), body_bytes).await;
+            s.end(usage.as_ref(), body_bytes).await;
         }
         held.settle_timed(usage, log_id, Some(first_ms), hedge).await;
     }));
@@ -330,9 +331,9 @@ fn answer_hedged(held: Held, h: Hedged<Held>, body_bytes: usize, after: &dyn Bac
 impl SecondCall<Held> {
     /// The route's second call's hold, ended: charged what the cancelled
     /// call is (`hedge::cancelled_usage`), or released.
-    async fn end(self, model: &'static str, answer: Option<&Usage>, body_bytes: usize) {
+    async fn end(self, answer: Option<&Usage>, body_bytes: usize) {
         match self.cancelled {
-            true => self.hold.settle_timed(Some(hedge::cancelled_usage(model, answer, body_bytes)), None, None, Some("cancelled")).await,
+            true => self.hold.settle_timed(Some(hedge::cancelled_usage(self.cancelled_model, answer, body_bytes)), None, None, Some("cancelled")).await,
             false => self.hold.release("the other call of its hedge failed before it began").await,
         }
     }
@@ -379,6 +380,9 @@ pub(crate) struct SecondCall<H> {
     /// failed before it used anything (or the whole call failed), and the
     /// second's hold is released.
     pub cancelled: bool,
+    /// The model the cancelled call asked first (its plan's), whose prices
+    /// it is charged at.
+    pub cancelled_model: &'static str,
 }
 
 /// A hedged call (fragment_core::hedge): the answer that began, or why it
@@ -407,17 +411,11 @@ impl Arrived {
     }
 }
 
-/// One call of a hedged pair: made, and read until its first data line.
-async fn arm(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata, signal: AbortSignal) -> Arrived {
-    // its ladder (bounds::ladder): each rung asked not to queue, then its
-    // own model's queue; a model with none waits in its queue at once
-    let rungs = bounds::ladder(bounded.model);
-    let mut plan: Vec<(&'static str, bool)> = Vec::with_capacity(rungs.len() + 2);
-    if !rungs.is_empty() {
-        plan.push((bounded.model, true));
-        plan.extend(rungs.iter().map(|m| (*m, true)));
-    }
-    plan.push((bounded.model, false));
+/// One call of a hedged pair (`which`): made down its plan
+/// (bounds::plan: each rung asked not to queue, then its own model's
+/// queue), and read until its first data line.
+async fn arm(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata, signal: AbortSignal, which: Arm) -> Arrived {
+    let plan = bounds::plan(bounded.model, which);
     let mut passed: Vec<&'static str> = Vec::new();
     let last = plan.len() - 1;
     // bounded by the plan: a rung each pass
@@ -494,16 +492,16 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
     let cfg = Config::from_env(env);
     let t0 = js::now_ms();
     let mut race = Race::new();
-    // the second call on a prefix-cache session of its own (`Metadata::hedge`):
-    // an agent's first and second calls on one session were slow together
-    // (2026-10-08: both past 25 s), the mind's (on none) seldom
+    // the second call on a model of its own (bounds::plan) and a prefix-cache
+    // session of its own (`Metadata::hedge`): the slowest calls were slow on
+    // both calls of one model at once (2026-10-08: 15 and 30 s)
     let mut hedge_meta = Some(meta.hedge());
-    let open = |meta: Metadata, c: &AbortController| -> LocalBoxFuture<'a, Arrived> {
+    let open = |meta: Metadata, c: &AbortController, which: Arm| -> LocalBoxFuture<'a, Arrived> {
         let signal = c.signal();
-        Box::pin(async move { arm(env, cfg, bounded, &meta, signal).await })
+        Box::pin(async move { arm(env, cfg, bounded, &meta, signal, which).await })
     };
     let first = AbortController::default();
-    let mut arms: [Option<LocalBoxFuture<'a, Arrived>>; 2] = [Some(open(meta.clone(), &first)), None];
+    let mut arms: [Option<LocalBoxFuture<'a, Arrived>>; 2] = [Some(open(meta.clone(), &first, Arm::First)), None];
     let mut controllers: [Option<AbortController>; 2] = [Some(first), None];
     let mut arrived: [Option<Arrived>; 2] = [None, None];
     let mut timer = Some(Delay::from(std::time::Duration::from_millis(hedge::AFTER_MS)));
@@ -548,7 +546,7 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
                     hold = Some(h);
                     race.made();
                     let c = AbortController::default();
-                    arms[1] = Some(open(hedge_meta.take().expect("the second call is made once"), &c));
+                    arms[1] = Some(open(hedge_meta.take().expect("the second call is made once"), &c, Arm::Second));
                     controllers[1] = Some(c);
                     Next::Wait
                 }
@@ -568,7 +566,9 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
             }
         }
         let first_ms = js::now_ms() - t0;
-        let second = hold.map(|hold| SecondCall { hold, won: outcome == Ok(Arm::Second), cancelled: outcome.is_ok() && cancel.is_some() });
+        // the cancelled call: the one that did not answer, priced as its plan's first model
+        let cancelled_model = bounds::plan(bounded.model, if outcome == Ok(Arm::Second) { Arm::First } else { Arm::Second })[0].0;
+        let second = hold.map(|hold| SecondCall { hold, won: outcome == Ok(Arm::Second), cancelled: outcome.is_ok() && cancel.is_some(), cancelled_model });
         let opened = match outcome {
             Ok(winner) => match arrived[slot(winner)].take() {
                 Some(Arrived::Begun { log_id, head, rest, model, passed }) => Ok(Begun { log_id, head, rest, model, passed, abort: controllers[slot(winner)].take().expect("a call made has its controller") }),

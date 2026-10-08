@@ -60,6 +60,25 @@ pub fn ladder(model: &str) -> &'static [&'static str] {
     }
 }
 
+/// The models one call of a hedged pair asks, in order, each with whether
+/// it asks `rejectIfBusy`: the first call its own model and then its
+/// ladder, each not to queue, then its own model's queue; the second (the
+/// hedge, crate::hedge) starts at its ladder's next model, a model of its
+/// own: the preview's slowest calls were slow on both calls of one model
+/// at once (2026-10-08: 15 and 30 s, neither busy). A model with no
+/// ladder waits in its queue, in both.
+pub fn plan(model: &'static str, arm: crate::hedge::Arm) -> Vec<(&'static str, bool)> {
+    let rungs = ladder(model);
+    if rungs.is_empty() {
+        return vec![(model, false)];
+    }
+    let own = match arm {
+        crate::hedge::Arm::First => Some((model, true)),
+        crate::hedge::Arm::Second => None,
+    };
+    own.into_iter().chain(rungs.iter().map(|m| (*m, true))).chain(std::iter::once((model, false))).collect()
+}
+
 /// Whether a model's refusal says it is busy: `rejectIfBusy`'s 429 with
 /// Workers AI's error 3040 ("Capacity temporarily exceeded").
 pub fn busy(status: u16, body: &[u8]) -> bool {
@@ -623,6 +642,10 @@ mod tests {
             }
         }
         assert!(ladder(crate::decide::CLEF_MODEL).is_empty());
+        use crate::hedge::Arm;
+        assert_eq!(plan(CHEAP_MODEL, Arm::First), vec![(CHEAP_MODEL, true), (DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)]);
+        assert_eq!(plan(CHEAP_MODEL, Arm::Second), vec![(DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)], "a hedge starts on another model");
+        assert_eq!(plan("@cf/example/seeing", Arm::Second), vec![("@cf/example/seeing", false)]);
         assert!(busy(429, br#"{"errors":[{"message":"Capacity temporarily exceeded, please try again.","code":3040}],"success":false}"#));
         assert!(!busy(429, br#"{"errors":[{"message":"rate limited","code":3036}]}"#));
         assert!(!busy(503, b"3040"));

@@ -406,24 +406,28 @@ fn hedges(s: &mut Suite, api: &Api, owner: &Keys, run: &dyn Fn(&str, &str, Value
     let took = t0.elapsed();
     let timing = &r["output"]["timing"];
     let holds = hedge_holds(&r);
+    let models: Vec<String> = s.ai.calls().into_iter().skip(calls).map(|c| c.model).collect();
     let sent: Vec<Value> = s.ai.chats().into_iter().skip(calls).collect();
+    let (own, next) = (fragment_core::models::CHEAP_MODEL, fragment_core::models::ladder(fragment_core::models::CHEAP_MODEL)[0]);
     s.ok(
-        "a text step whose first call has not begun to stream after the hedge's wait makes one second, identical call, which answers first: the step is answered well before the first would have",
+        "a text step whose first call has not begun to stream after the hedge's wait makes one second call, the same request on its tier's next model, which answers first: the step is answered well before the first would have",
         r["status"] == "succeeded"
             && r["output"]["text"] == "echo: a slow start"
             && sent.len() == 2
             && sent[0] == sent[1]
+            && models == [own, next]
+            && r["output"]["model"] == next
             && timing["hedged"] == true
             && timing["won"] == "second"
             && timing["first_ms"].as_u64().is_some_and(|ms| ms >= fragment_core::hedge::AFTER_MS && ms < slow.as_millis() as u64)
             && took < slow,
-        json!({ "run": r, "took_ms": took.as_millis() as u64, "calls": sent.len() }),
+        json!({ "run": r, "took_ms": took.as_millis() as u64, "models": models }),
     );
     let charged = holds.first().map(|e| &e["entry"]["end"]);
     s.ok(
-        "the cancelled call is charged on a hold of its own: its prompt as the answer reported it, and no output",
+        "the cancelled call is charged on a hold of its own: its prompt as the answer reported it, at its own model's prices, and no output",
         holds.len() == 1
-            && charged.is_some_and(|end| end["end"] == "settled" && end["usage"]["output"] == 0 && end["usage"]["input"].as_u64().is_some_and(|n| n > 0) && end["charge"].as_i64().is_some_and(|c| c > 0)),
+            && charged.is_some_and(|end| end["end"] == "settled" && end["usage"]["model"] == own && end["usage"]["output"] == 0 && end["usage"]["input"].as_u64().is_some_and(|n| n > 0) && end["charge"].as_i64().is_some_and(|c| c > 0)),
         json!(holds),
     );
     let calls = s.ai.calls().len();

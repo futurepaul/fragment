@@ -1,6 +1,7 @@
 //! Hedged model calls (docs/optchat.md, "Latency"). A streamed call whose
 //! first data line has not come `AFTER_MS` after it was made gets one
-//! second, identical call; whichever streams first is the answer, and the
+//! second call, the same request on its tier's next model (models::plan);
+//! whichever streams first is the answer, and the
 //! other is cancelled. A call that fails for now (a 429, a 5xx, a broken
 //! connection) before its first data line gets the second call at once,
 //! as a retry within its step. Never more than two calls.

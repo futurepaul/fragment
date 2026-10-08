@@ -1221,11 +1221,12 @@ hand-off spend, measured on the preview with real models by the hosted
   ladder at once (GLM-5.3 Flash, DeepSeek V4 Flash, Gemma 4 26B A4B), and
   with every rung busy it waits in its own model's queue.
 - **Slow calls are hedged** (fragment_core::hedge): no first data line in
-  3.5 s, or a failure for now before it, makes one second, identical call
-  (an agent's on a prefix-cache session of its own: a slow first was its
-  replica's as often as its prompt's);
-  the first to stream answers, the other is aborted, and charged the
-  answer's prompt split as the answer's was and no output (it reports
+  3.5 s, or a failure for now before it, makes one second call: the same
+  request on its tier's next model, an agent's on a prefix-cache session
+  of its own (the slowest calls were slow on both calls of one model at
+  once: 15 and 30 s); the first to stream answers, the other is aborted,
+  and charged at its own model's prices the answer's prompt split as the
+  answer's was and no output (it reports
   nothing; every token uncached would be its dearest reading, up to five
   times the price for a cached prefix: decision for Paul). A failure
   before the first line is so retried within its step, not after the

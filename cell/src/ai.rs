@@ -16,8 +16,8 @@
 //! agent asked for, so an agent of the owner's counts as the owner).
 //!
 //! A text step always streams, and its call is hedged (models.rs,
-//! fragment_core::hedge): past its first data line's wait, a second,
-//! identical call is made under a reservation of its own
+//! fragment_core::hedge): past its first data line's wait, a second call
+//! (the same request on its tier's next model) is made under a reservation of its own
 //! (`<reference>/hedge/<hex>`), the first to stream is the answer and the
 //! other is aborted. The answer is kept and settled as any call's; the
 //! second's hold is then charged what the cancelled call is (the answer's
@@ -409,7 +409,7 @@ impl FragmentCell {
         tries_end(&p.key);
         self.keep(&p, &result, usage.as_ref())?;
         self.settle_kept(&p, &Kept { result: result.clone(), usage: usage.clone(), settled: false }).await?;
-        self.end_hedge(&p, read.second, read.model, usage.as_ref(), body_bytes).await;
+        self.end_hedge(&p, read.second, usage.as_ref(), body_bytes).await;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
     }
@@ -442,13 +442,13 @@ impl FragmentCell {
     /// (fragment_core::hedge::cancelled_usage), or released when the call
     /// that was not the answer failed before it began. A settle the ledger
     /// does not answer leaves it held, for `release_ended_holds`.
-    async fn end_hedge(&self, p: &Paying, second: Option<SecondCall<String>>, model: &str, answer: Option<&Usage>, body_bytes: usize) {
+    async fn end_hedge(&self, p: &Paying, second: Option<SecondCall<String>>, answer: Option<&Usage>, body_bytes: usize) {
         let Some(s) = second else { return };
         if !s.cancelled {
             self.release(&p.owner, &s.hold).await;
             return;
         }
-        let charged = self.settle(&p.owner, &s.hold, Some(fragment_core::hedge::cancelled_usage(model, answer, body_bytes))).await;
+        let charged = self.settle(&p.owner, &s.hold, Some(fragment_core::hedge::cancelled_usage(s.cancelled_model, answer, body_bytes))).await;
         let summary = match &charged {
             Ok(micros) => format!("{}: the other call of its hedge was cancelled before it began, charged its prompt ({micros} micros)", s.hold),
             Err(_) => format!("{}: the other call of its hedge was cancelled; its charge did not land, and its hold goes back when the run ends", s.hold),
@@ -486,7 +486,7 @@ impl FragmentCell {
         let begun = match h.opened {
             Ok(b) => b,
             Err(failed) => {
-                self.end_hedge(p, second, bounded.model, None, body_bytes).await;
+                self.end_hedge(p, second, None, body_bytes).await;
                 return Err(match failed {
                     Failed::Unanswered(e) => retry(e),
                     Failed::Refused { status, body, .. } => self.unpaid(p, model_failure(status, &body)).await,
@@ -511,7 +511,7 @@ impl FragmentCell {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    self.end_hedge(p, second, bounded.model, None, body_bytes).await;
+                    self.end_hedge(p, second, None, body_bytes).await;
                     return Err(StepFail::Retry(format!("the model's stream broke: {e}")));
                 }
             };
@@ -538,7 +538,7 @@ impl FragmentCell {
         stream.finish(None);
         let answer = stream.answer().cloned().expect("an answering stream keeps its answer");
         if answer.finish_reason.is_none() {
-            self.end_hedge(p, second, bounded.model, None, body_bytes).await;
+            self.end_hedge(p, second, None, body_bytes).await;
             return Err(StepFail::Retry("the model's stream ended before its answer did".into()));
         }
         if let Some(d) = d.filter(|_| answer.content.len() > sent) {
