@@ -1063,16 +1063,37 @@ actually makes a chat a Bot Chat"), so the image does both
   to give it up (its history kept). So the agent's first turn there has
   the roster. The title follows a compression to the new session (Hermes'
   own). Event: `botmode.titled` (the gateway's output).
-- A message one agent sends another reaches the other's Bot Chat through
-  Hermes' own path: a background process runs one turn there (`hermes -p
-  <agent> chat -c "Bot Chat" -Q`), as that agent (its model calls name it,
-  so they are metered to it); its answer, that process's output, wakes the
-  sender, whose turn then says it in the sender's own chat (a message of
-  its runtime's own: docs/chat-records.md).
+- A message one agent sends another is a hand-off in the other's own
+  chat, which its owner sees, and the other's answer a turn of the
+  bridge's there (drafts, steps, cards, Stop, its screen; the hop count
+  and the chat's budget, docs/bridge.md). Hermes would run that answer as
+  a turn of its own, outside the gateway (`hermes -p <agent> chat -c "Bot
+  Chat" -Q`), unless the Bot Chat has a live owner, as Hermes Desktop is
+  (`tools/bot_live_delivery.py`): then the message waits in the agent's
+  mailbox for its owner. The image's Bot Mode keeper
+  (`images/hermes/botmode.py`, in Hermes' own Python as the hermes user,
+  started and restarted by the boot) is that owner. About once a second,
+  for each agent in the bots file, it holds the agent's Bot Chat session
+  (the compression tip of the session titled `Bot Chat`, when that is its
+  own chat's) with an active-session lease marked as a live-delivery
+  consumer, and takes each message waiting in its mailbox: it posts it
+  into the agent's own chat as the agent that sent it, naming the agent
+  in `to` (`fragment ask <agent> --chat <its chat> --id dm-<delivery>
+  --wait 1800`, acting as the sender, which adds the sender to the chat),
+  and once the agent's turn of it ends, settles the delivery with its
+  replies (up to 16,000 characters; a failure with why). That wakes the
+  sender, whose turn says the answer in the sender's own chat (a message
+  of its runtime's own: docs/chat-records.md). The message's text is
+  Hermes' own, its attribution first (`Message from 🤖 Juniper
+  (@juniper-paul): …`). At most four messages per agent are delivered at
+  once; the rest wait in its mailbox. While the platform holds the
+  computer the keeper writes nothing. Events: `botmode.owned`,
+  `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).
 - An agent with no such chat (made by other means than the shell) has no
-  Bot Chat of ours: Hermes makes one of its own for a teammate's message,
-  which the person sees nowhere until the agent has its own chat, whose
-  session then takes the title.
+  Bot Chat of ours, and no owner: Hermes runs a teammate's message in a
+  Bot Chat of its own, outside the bridge, which the person sees nowhere
+  until the agent has its own chat, whose session then takes the title.
+  So does every agent while the keeper is down.
 
 ### Skills and the CLI in our Hermes image
 

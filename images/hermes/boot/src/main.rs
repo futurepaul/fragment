@@ -71,6 +71,10 @@ const STOP_MS_MAX: u64 = 2_500;
 const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
 /// The bridge is restarted at most this many times before the boot fails.
 const BRIDGE_RESTARTS_MAX: u32 = 10;
+/// The Bot Mode keeper (bots.rs) is restarted at most this many times; past
+/// it a bot's teammates reach it by Hermes' own path alone, and the computer
+/// runs on.
+const KEEPER_RESTARTS_MAX: u32 = 10;
 /// Readahead reads at most this many files.
 const READAHEAD_FILES_MAX: usize = 5_000;
 /// The computer's agents are read again this often while awake: one
@@ -763,6 +767,28 @@ fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
     }
 }
 
+/// The Bot Mode keeper (`images/hermes/botmode.py`, bots.rs), in Hermes'
+/// own Python as the hermes user: it reads the bots file, and writes
+/// nothing while the platform holds the computer.
+fn spawn_keeper(home: &Path) -> Option<Child> {
+    let keeper = Command::new("/command/s6-setuidgid")
+        .args(["hermes", "/opt/hermes/.venv/bin/python", &format!("{OPT}/botmode.py")])
+        .env("HOME", home)
+        .env("HERMES_HOME", home)
+        .env("FRAGMENT_RUN", RUN)
+        .env("FRAGMENT_HOLD", held::HOLD)
+        .env("FRAGMENT_CLI", FRAGMENT_CLI)
+        .current_dir("/")
+        .spawn();
+    match keeper {
+        Ok(child) => Some(child),
+        Err(e) => {
+            ev!("boot.keeper_failed", { "error": e.to_string() });
+            None
+        }
+    }
+}
+
 /// The bridge's screens file (each agent's own desktop), then its ready
 /// file (every agent whose profile is written): a screen is named before
 /// its agent runs, and goes with it.
@@ -1097,6 +1123,8 @@ async fn boot_main() {
     write_ready(&agents, &home);
     let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
+    let mut keeper = spawn_keeper(&home);
+    let mut keeper_restarts = 0u32;
     // its answer to the platform's holds, for its whole life
     let quiet = std::sync::Arc::new(Quiet::default());
     tokio::spawn(answer_holds(quiet.clone(), ids));
@@ -1134,15 +1162,22 @@ async fn boot_main() {
         }
         if !alive(gateway) {
             ev!("boot.gateway_exited");
-            stop(gateway, bridge.as_mut()).await;
+            stop(gateway, bridge.as_mut(), keeper.as_mut()).await;
             std::process::exit(1);
+        }
+        if let Some(k) = keeper.as_mut() {
+            if let Ok(Some(status)) = k.try_wait() {
+                keeper_restarts += 1;
+                ev!("boot.keeper_exited", { "status": status.code(), "restarts": keeper_restarts });
+                keeper = (keeper_restarts <= KEEPER_RESTARTS_MAX).then(|| spawn_keeper(&home)).flatten();
+            }
         }
         if let Some(b) = bridge.as_mut() {
             if let Ok(Some(status)) = b.try_wait() {
                 restarts += 1;
                 ev!("boot.bridge_exited", { "status": status.code(), "restarts": restarts });
                 if restarts > BRIDGE_RESTARTS_MAX {
-                    stop(gateway, None).await;
+                    stop(gateway, None, keeper.as_mut()).await;
                     fail("the bridge keeps exiting");
                 }
                 bridge = spawn_bridge(approval_timeout_s);
@@ -1236,21 +1271,21 @@ async fn boot_main() {
         }
     }
     ev!("boot.signal");
-    stop(gateway, bridge.as_mut()).await;
+    stop(gateway, bridge.as_mut(), keeper.as_mut()).await;
     std::process::exit(0);
 }
 
-/// SIGTERM to the gateway and the bridge, then wait for them, at most
-/// `STOP_MS_MAX`.
-async fn stop(gateway: u32, mut bridge: Option<&mut Child>) {
+/// SIGTERM to the gateway, the bridge and the Bot Mode keeper, then wait
+/// for them, at most `STOP_MS_MAX`.
+async fn stop(gateway: u32, mut bridge: Option<&mut Child>, mut keeper: Option<&mut Child>) {
     let t = Instant::now();
     signal(gateway, libc::SIGTERM);
-    if let Some(b) = bridge.as_deref_mut() {
-        signal(b.id(), libc::SIGTERM);
+    for c in [bridge.as_deref_mut(), keeper.as_deref_mut()].into_iter().flatten() {
+        signal(c.id(), libc::SIGTERM);
     }
     // bounded by STOP_MS_MAX
     while t.elapsed() < Duration::from_millis(STOP_MS_MAX) {
-        let waiting = alive(gateway) || bridge.as_deref_mut().is_some_and(|b| matches!(b.try_wait(), Ok(None)));
+        let waiting = alive(gateway) || [bridge.as_deref_mut(), keeper.as_deref_mut()].into_iter().flatten().any(|c| matches!(c.try_wait(), Ok(None)));
         if !waiting {
             break;
         }

@@ -9,7 +9,10 @@
 //! each of the agent's turns starts, before its prompt is built, the hook
 //! (`images/hermes/hooks/fragment-bot-chat`) titles its own chat's session
 //! `Bot Chat`, reading which chat that is from the bots file
-//! (`bots_file`).
+//! (`bots_file`). The image's Bot Mode keeper (`images/hermes/botmode.py`,
+//! started by the boot) reads the same file: it holds each Bot Chat as
+//! Hermes' live owner, and posts each teammate's message into the bot's own
+//! chat as a hand-off, so its answer is a turn of the bridge's.
 
 use std::path::Path;
 
@@ -17,7 +20,8 @@ use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
 use serde_json::json;
 
-/// Under the boot's run directory: what the Bot Chat hook reads.
+/// Under the boot's run directory: what the Bot Chat hook and the keeper
+/// read.
 pub const BOTS_FILE: &str = "bots.json";
 
 /// The image's gateway hook that titles an agent's own chat's session, under

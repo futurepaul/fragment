@@ -801,25 +801,24 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Hermes lets an install leave its default profile out
   of the roster, or our gateway's own profile is an agent's.
 
-## A message between bots runs outside the bridge
+## A bot's answer to a teammate outlives the teammate's wait only while awake
 
-- **Observed:** 2026-10-08, Bot Mode in our Hermes image. A bot's
-  `message_agent` reaches its teammate through Hermes' own path: a
-  background process runs one turn in the teammate's Bot Chat
-  (`hermes -p <agent> chat -c "Bot Chat" -Q`), not the gateway, so not
-  the bridge.
-- **Risk:** the person sees the teammate's turn nowhere until the sender
-  says its answer; it has no cards (an approval it needs fails), no Stop,
-  and no hop count or chat budget (Hermes' roster tells a bot not to
-  ping-pong, and nothing else bounds two bots messaging each other); it
-  writes the teammate's Bot Chat session beside a turn the gateway may be
-  running there at once; a sleep cuts it with no record of it.
-- **First proof:** two bots' messages to each other outrunning a chat's
-  budget, or a teammate's session holding two turns' rows interleaved.
-- **Delete when:** each Bot Chat's turns are the bridge's: the image owns
-  each agent's Bot Chat as Hermes' live owner and posts a teammate's
-  message into the agent's own chat as a hand-off (Hermes'
-  `tools/bot_live_delivery.py`).
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`). A bot's `message_agent` waits for its
+  teammate's answer in a background process of Hermes' (up to 30
+  minutes), and the keeper delivers the message by a `fragment ask --wait`
+  of its own. Neither is saved: a sleep, a crash or a restart while the
+  teammate's turn runs ends both. Hermes keeps the delivery's claim for
+  good (its receipts never expire), and nothing settles it.
+- **Risk:** the sender never hears the answer, and never tells its owner;
+  the answer is in the teammate's chat, and the sender's owner sees it
+  there only if they look.
+- **First proof:** a hosted run where a computer sleeps while one bot's
+  teammate is still answering it, and the sender's chat says nothing more.
+- **Delete when:** a delivery's wait is the journal's: the keeper, at its
+  start, finds each claim of its own left unsettled and settles it from
+  the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
+  sender's wake comes from that receipt rather than from a process.
 
 ## Own keys are kept by the person's computer
 

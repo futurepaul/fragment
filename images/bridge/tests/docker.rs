@@ -2060,13 +2060,14 @@ fn bot_chat_of(c: &Container, profile: &str) -> serde_json::Value {
 /// own chat is its Bot Chat, so there its model has Hermes' teammate roster
 /// (each teammate's name and role, and the gateway's own `@hermes`, said to
 /// be no agent) and the `message_agent` tool; a message one bot sends
-/// another reaches the other's Bot Chat, is answered there, as that bot
-/// (metered to it), and the answer comes back to the first bot, which says
-/// it in its own chat.
+/// another is a hand-off in the other's own chat, posted as the sender, so
+/// the person sees it and the other's answer is a turn of the bridge's
+/// there (its Bot Chat, as that bot, metered to it); that answer comes back
+/// to the first bot, which says it in its own chat.
 /// Method: two agents, each with its own chat (`<label>-chat`); a first
 /// message in each makes its session, which the image's hook titles as the
-/// turn starts; then juniper is asked to message maple (the scripted
-/// model's `dm:`).
+/// turn starts, and the image's keeper then holds as Hermes' live owner;
+/// then juniper is asked to message maple (the scripted model's `dm:`).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn bots_message_each_other() {
@@ -2109,17 +2110,31 @@ async fn bots_message_each_other() {
     assert!(system.contains("`@hermes` — this computer's gateway, not an agent"), "the gateway's own profile, said to be no agent: {system}");
     assert!(!system.contains("`@juniper-paul` —"), "juniper is not her own teammate: {system}");
 
-    // maple answers in her Bot Chat, as maple
+    assert!(ack.contains("live Bot Chat owner"), "queued for maple's live owner, the keeper: {ack}");
+    // the message is juniper's, in maple's own chat, for maple: a hand-off
     let t = Instant::now();
-    // bounded: three minutes
-    while calls_of(&model, "maple.paul", "Message from").is_empty() {
-        assert!(t.elapsed() < Duration::from_secs(180), "maple was messaged: {}", told(&fake, &mchat, &c));
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!("bots: maple's model asked {} ms after juniper's turn", t.elapsed().as_millis());
+    let asked_maple = |w: &support::fake::World| w.records(&mchat, "chat").into_iter().find(|r| r["principal"] == "id:juniper" && r["body"]["to"] == json!(["id:maple"]));
+    within(&fake, &mchat, &c, 120_000, "juniper's message in maple's chat", |w| asked_maple(w).is_some()).await;
+    let record = fake.with(|w| asked_maple(w)).unwrap();
+    eprintln!("bots: juniper's message in maple's chat {} ms after her turn: {}", t.elapsed().as_millis(), record["body"]);
+    let text = record["body"]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("Message from 🤖 juniper (@juniper-paul): ") && text.ends_with("ping from juniper"), "as Hermes attributes it: {text}");
+    // maple's answer is a turn of the bridge's there, as maple
+    let mturn = fragment_bridge::records::turn_id("maple.paul", &mchat, "chat", record["seq"].as_u64().unwrap());
+    within(&fake, &mchat, &c, 180_000, "maple's turn", |w| w.bodies(&mchat, "work", "turn.end").iter().any(|e| e["turn"] == mturn)).await;
+    let manswer = fake.with(|w| reply(w, &mchat, &mturn)).unwrap_or_default();
+    eprintln!("bots: maple answered in her chat: {manswer}");
+    assert!(manswer.contains("ping from juniper"), "maple answered juniper's message: {manswer}");
     // and juniper says it in her own chat
     within(&fake, &jchat, &c, 180_000, "juniper to say maple's answer", |w| w.bodies(&jchat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("relayed:") && t.contains("ping from juniper")))).await;
+    eprintln!("bots: juniper said maple's answer {} ms after her turn", t.elapsed().as_millis());
     let kept = bot_chat_of(&c, "maple-paul");
     let texts = kept["texts"].to_string();
     assert!(texts.contains("Message from") && texts.contains("ping from juniper"), "the message is in maple's Bot Chat: {kept}");
+    let logs = c.logs();
+    let delivered: Vec<&str> = logs.lines().filter(|l| l.contains("\"botmode.delivered\"")).collect();
+    assert!(delivered.len() == 1 && delivered[0].contains("\"status\": \"settled\"") && delivered[0].contains("\"sender\": \"juniper.paul\""), "one delivery, settled: {delivered:?}");
+    // no turn of Hermes' own answered it: maple's every model call that was handed it is the bridge's turn's
+    let handed: Vec<_> = calls_of(&model, "maple.paul", "ping from juniper").into_iter().filter(|m| m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).is_some_and(|u| u.to_string().contains("ping from juniper"))).collect();
+    assert_eq!(handed.len(), 1, "one turn of maple's answered it");
 }

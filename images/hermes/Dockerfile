@@ -124,6 +124,7 @@ RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/hooks /opt/fragment/hooks
+COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
