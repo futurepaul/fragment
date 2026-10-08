@@ -1,5 +1,6 @@
-//! A tenant's reach: an app's database stops at 16 MiB and the rest of the
-//! fragment keeps working, and an app cannot run code from strings, block
+//! A tenant's reach: an app's database stops at 16 MiB, or at the cap its
+//! fragment.json declares (at most 1 GiB), and the rest of the fragment
+//! keeps working, and an app cannot run code from strings, block
 //! its thread, or use the parts of its Durable Object the platform takes
 //! away. Its CPU and memory limits are the runtime's, which local workerd
 //! does not enforce (spike S1): the hosted lane checks those.
@@ -55,6 +56,32 @@ pub fn facet_cap(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("then it takes writes again", r.status == 200 && r.body["result"]["rows"] == 4, &r);
     let r = api.op(&owner, &neighbor, "sign", "n1", json!({ "text": "next door" }))?;
     s.ok("the other apps carry on", r.status == 200, &r);
+
+    // a cap the app declares (fragment.json's storage.maxBytes): past 16 MiB, to its own
+    let mut declared: Value = serde_json::from_slice(HOARD_JSON)?;
+    declared["storage"] = json!({ "maxBytes": 32 * MIB });
+    ship(s, &c, HOARD_APP, declared.to_string().as_bytes());
+    let mut stored = 4;
+    let mut refusal = None;
+    for i in 0..10 {
+        let r = api.op(&owner, &name, "add", &format!("d{i}"), json!({ "mib": 4 }))?;
+        if r.status == 200 {
+            stored = r.body["result"]["rows"].as_i64().unwrap_or(0);
+        } else {
+            refusal = Some(r);
+            break;
+        }
+    }
+    let refused = refusal.as_ref().is_some_and(|r| r.status == 507 && r.error() == "storage_full");
+    s.ok(
+        "an app that declares 32 MiB holds past 16 MiB, and stops at its own cap",
+        refused && (28..32).contains(&stored),
+        format!("{stored} MiB stored; {}", refusal.as_ref().map_or("never refused".into(), |r| r.to_string())),
+    );
+    declared["storage"] = json!({ "maxBytes": 2048 * MIB });
+    ship(s, &c, HOARD_APP, declared.to_string().as_bytes());
+    let code = api.status(&owner, &name).map(|r| r.body["code"].clone()).unwrap_or_default();
+    s.ok("one past the most an app may declare (1 GiB) is refused at deploy", code["error"].as_str().is_some_and(|e| e.contains("storage.maxBytes")), &code);
     Ok(())
 }
 
