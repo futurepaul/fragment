@@ -212,6 +212,8 @@ impl Stripe {
                 let id = s.next("price");
                 s.prices.insert(key.to_string(), (id, amount));
             }
+            let id = s.next("price");
+            s.prices.insert(stripe::PACK_LOOKUP_KEY.into(), (id, stripe::PACK_CENTS));
             // finite-mono's, on the same account
             let id = s.next("price");
             s.prices.insert("finite_standard".into(), (id, 20_000));
