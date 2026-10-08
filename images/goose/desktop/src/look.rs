@@ -385,6 +385,10 @@ impl Screen {
         let Some(q) = args["question"].as_str().map(str::trim).filter(|q| !q.is_empty() && q.len() <= ASK_MAX_BYTES) else {
             return mcp::text_result(&format!("screen_look needs `question`, at most {ASK_MAX_BYTES} bytes"), true);
         };
+        // no look while a person holds the screen: they may be typing a password
+        if self.desk.held() {
+            return mcp::text_result(crate::proxy::HELD, true);
+        }
         let t = std::time::Instant::now();
         let img = match self.shot().await {
             Ok(i) => i,

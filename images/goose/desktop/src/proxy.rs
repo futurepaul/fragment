@@ -228,11 +228,11 @@ impl Proxy {
                             mcp::write(&out, &mcp::answer(id, mcp::text_result(HELD, true))).await?;
                             continue;
                         }
-                        desk.touch();
                         if let Err(e) = ensure_up(desk).await {
                             mcp::write(&out, &mcp::answer(id, mcp::text_result(&format!("your desktop did not start: {e}"), true))).await?;
                             continue;
                         }
+                        desk.touch();
                     }
                     if self.defaults.iter().any(|(t, _, _)| *t == name) {
                         with_defaults(&name, &mut m["params"]["arguments"], self.defaults);

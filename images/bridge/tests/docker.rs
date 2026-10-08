@@ -479,6 +479,15 @@ async fn the_goose_desktop_and_its_tools() {
     let (clicked, err, took) = computer.tool("screen_click", json!({ "target": "the thing in cell 50" }), Duration::from_secs(60));
     eprintln!("bench: screen_click (scripted Clef) {} ms: {clicked}", took.as_millis());
     assert!(!err && clicked.contains("x=66, y=366"), "{clicked}");
+    // held, the screen tools refuse too: no look at a screen a person types on
+    driving.say("take").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], "driver");
+    for (tool, args) in [("screen_look", json!({ "question": "what?" })), ("screen_click", json!({ "target": "cell 1" })), ("list_windows", json!({}))] {
+        let (held, err, _) = computer.tool(tool, args, Duration::from_secs(30));
+        assert!(err && held.contains("human_has_control"), "{tool}: {held}");
+    }
+    driving.say("give").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
     let display = c.exec_out(&["fragment-desktop", "display", "hands.paul"]);
     let at = c.exec_out(&["env", &format!("DISPLAY=:{}", display.trim()), "xdotool", "getmouselocation"]);
     assert!(at.starts_with("x:66 y:366"), "the pointer is where Clef found it: {at}");

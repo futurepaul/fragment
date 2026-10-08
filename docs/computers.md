@@ -753,7 +753,8 @@ settings and state):
   listing (Hacker News, page mode, its links) 0.18 s; the first
   `browser_navigate` 0.55 s, the desktop started; a listing's snapshot
   0.03 s (40k characters, its 30 stories); a form filled and submitted
-  (type, click, snapshot, click) 1.2 s; the screen's first frame 0.07 s,
+  (type, click, snapshot, click) 1.2 s, and nothing of the desktop or
+  its browser under `/data` after; the screen's first frame 0.07 s,
   the agent's own desktop with the browser drawn on it, another agent's
   refused; Take over making the browser answer `human_has_control`, Give
   back letting it act; cua-driver typing an address into the browser
