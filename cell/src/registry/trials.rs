@@ -68,6 +68,7 @@ impl Call for TrialGet {
 /// `POST /trials/change`: a code changed, compare-and-set on its revision.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TrialChange {
+    pub by: String,
     pub id: String,
     pub change: TrialCodeChange,
 }
@@ -233,6 +234,7 @@ impl RegistryCell {
                 b.by.as_str().into(),
             ],
         )?;
+        self.log_admin(&b.by, "trial-new", &id, &format!("{name}: {} days of a {} seat, {} places", n.days, n.kind.as_str(), n.capacity))?;
         self.trial_view(&self.code_row(&id)?, true)
     }
 
@@ -269,6 +271,7 @@ impl RegistryCell {
                 r.id.as_str().into(),
             ],
         )?;
+        self.log_admin(&b.by, "trial-change", &r.id, &serde_json::to_string(&c).unwrap_or_default())?;
         self.trial_view(&self.code_row(&r.id)?, true)
     }
 

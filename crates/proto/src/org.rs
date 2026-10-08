@@ -222,6 +222,112 @@ pub struct TrialCodeChange {
     pub expires_at: Option<i64>,
 }
 
+/// A person as the operators' list shows them (`GET /api/admin/people`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPerson {
+    pub npub: String,
+    pub email: Option<String>,
+    pub joined_at: i64,
+    pub last_sign_in_at: Option<i64>,
+    pub org: Option<OrgRef>,
+    pub admin: bool,
+    pub seat: Option<AdminSeat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSeat {
+    pub id: String,
+    pub kind: SeatKind,
+    pub comped: bool,
+    pub good: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPeople {
+    pub people: Vec<AdminPerson>,
+    /// Ask after this for the next page (`None`: the last).
+    pub next: Option<String>,
+}
+
+/// An org as the operators' list shows it (`GET /api/admin/orgs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminOrg {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    /// Its subscription's status (`None`: it never paid).
+    pub status: Option<String>,
+    pub customer: Option<String>,
+    pub subscription: Option<String>,
+    pub period_end: Option<i64>,
+    pub cancel_at_end: bool,
+    pub admins: u64,
+    pub paid_seats: u64,
+    pub comped_seats: u64,
+    pub pending: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminOrgs {
+    pub orgs: Vec<AdminOrg>,
+    pub next: Option<String>,
+}
+
+/// One push waiting in a queue, tried and failed at least once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Failing {
+    /// `plan` (a person's ledger and computer) or `quantity` (an org's
+    /// subscription in Stripe).
+    pub queue: String,
+    pub target: String,
+    pub tries: u64,
+    pub due: i64,
+}
+
+/// Billing's health (`GET /api/admin/health`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminHealth {
+    pub orgs_paying: u64,
+    pub orgs_lapsed: u64,
+    pub seats_paid: u64,
+    pub seats_comped: u64,
+    pub plan_pushes_queued: u64,
+    pub quantity_pushes_queued: u64,
+    pub failing: Vec<Failing>,
+    /// The newest subscription event applied (Stripe's seconds).
+    pub last_event_at: Option<i64>,
+    /// The oldest copy of a subscription (ms): the reconcile keeps it
+    /// within a day.
+    pub oldest_copy_at: Option<i64>,
+}
+
+/// What an operator did (`GET /api/admin/log`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminLogEntry {
+    pub n: u64,
+    pub at: i64,
+    pub operator: String,
+    pub action: String,
+    pub target: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminLog {
+    pub entries: Vec<AdminLogEntry>,
+    /// Ask before this for the next page (`None`: the last).
+    pub next: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
