@@ -16,7 +16,7 @@ use crate::http::{Handler, Request, Response, Server};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sent {
     pub to: String,
-    pub from: String,
+    pub from: Value,
     pub subject: String,
     pub text: String,
 }
@@ -54,9 +54,10 @@ impl Mailer {
             }
             let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
             let field = |k: &str| body[k].as_str().unwrap_or("").to_string();
-            let sent = Sent { to: field("to"), from: field("from"), subject: field("subject"), text: field("text") };
+            let sent = Sent { to: field("to"), from: body["from"].clone(), subject: field("subject"), text: field("text") };
             // the binding's own checks, as far as the platform's mail reaches them
-            if sent.to.is_empty() || sent.from.is_empty() || sent.subject.is_empty() || sent.text.is_empty() {
+            let from_email = sent.from.as_str().or_else(|| sent.from["email"].as_str()).unwrap_or("");
+            if sent.to.is_empty() || from_email.is_empty() || sent.subject.is_empty() || sent.text.is_empty() {
                 return refused(400, "E_FIELD_MISSING", "to, from, subject and text are required");
             }
             if print {
@@ -96,13 +97,18 @@ mod tests {
     fn it_keeps_what_it_is_sent() {
         let mailer = Mailer::start(0, false).unwrap();
         let send = |body: Value| crate::http::post(&format!("{}/send", mailer.url), &[("content-type", "application/json")], body.to_string().as_bytes()).unwrap();
-        let whole = json!({ "to": "bob@example.com", "from": "fragment <mail@fragment.localhost>", "subject": "s", "text": "t" });
+        let from = json!({ "email": "mail@fragment.localhost", "name": "Fragment" });
+        let whole = json!({ "to": "bob@example.com", "from": from, "subject": "s", "text": "t" });
         assert_eq!(send(whole.clone()), 200);
-        assert_eq!(mailer.sent_to("bob@example.com"), vec![Sent { to: "bob@example.com".into(), from: "fragment <mail@fragment.localhost>".into(), subject: "s".into(), text: "t".into() }]);
+        assert_eq!(mailer.sent_to("bob@example.com"), vec![Sent { to: "bob@example.com".into(), from, subject: "s".into(), text: "t".into() }]);
+        let bare = json!({ "to": "bob@example.com", "from": "mail@fragment.localhost", "subject": "s", "text": "t" });
+        assert_eq!(send(bare.clone()), 200);
+        assert_eq!(mailer.sent()[1].from, bare["from"]);
+        assert_eq!(send(json!({ "to": "bob@example.com", "from": { "name": "Fragment" }, "subject": "s", "text": "t" })), 400);
         assert_eq!(send(json!({ "to": "bob@example.com", "from": "f", "subject": "s" })), 400);
         mailer.fail_next("E_RATE_LIMIT_EXCEEDED");
         assert_eq!(send(whole.clone()), 500);
         assert_eq!(send(whole), 200);
-        assert_eq!(mailer.sent().len(), 2, "a refused message is not kept");
+        assert_eq!(mailer.sent().len(), 3, "a refused message is not kept");
     }
 }

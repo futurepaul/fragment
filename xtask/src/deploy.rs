@@ -460,6 +460,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
         bail!("support_url: {u:?} is no https: page or mailto: address of at most {} visible characters", fragment_core::computer::SUPPORT_URL_MAX_BYTES);
     }
+    if let Some(f) = &d.mail_from {
+        fragment_core::mail::Sender::parse(f).map_err(|e| anyhow::anyhow!("mail_from: {e}"))?;
+    }
     Ok(d)
 }
 
@@ -1205,6 +1208,13 @@ mod tests {
         let cell = rendered(&v, "mail-from");
         assert_eq!(cell["vars"]["FRAGMENT_MAIL_FROM"], "fragment <mail@finite.place>");
         assert_eq!(cell["send_email"], json!([{ "name": "EMAIL" }]));
+        v["mail_from"] = json!("mail@finite.place");
+        assert_eq!(rendered(&v, "mail-bare")["vars"]["FRAGMENT_MAIL_FROM"], "mail@finite.place");
+        for from in ["", "not an address", "Fragment <mail@finite.place", "mail@finite.place\n", "\"Fragment\" <mail@finite.place>"] {
+            v["mail_from"] = json!(from);
+            let why = format!("{:#}", load(&config_file("mail-invalid", &v)).err().unwrap());
+            assert!(why.contains("mail_from:"), "{why}");
+        }
     }
 
     /// The vision model is one the price book prices, refused before a
