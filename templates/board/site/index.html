@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Board</title>
+  <style>
+    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7c766a; --line: #e4dfd4; --soft: #eeeae1; --accent: #2f5d50; --on-accent: #fff; --tint: #dde9e3; --bad: #b3261e; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1e1d17; --fg: #eeeae0; --muted: #9a9384; --line: #2f2d26; --soft: #26241e; --accent: #7fb5a3; --on-accent: #16150f; --tint: #233630; --bad: #f2a49b; } }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 ui-sans-serif, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
+    main { max-width: 74rem; margin: 0 auto; padding: 1.8rem 1.1rem 4rem; }
+    header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.2rem; }
+    h1 { font: 600 clamp(1.7rem, 5vw, 2.3rem)/1.15 Georgia, serif; margin: 0; }
+    #status { margin: .35rem 0 0; color: var(--muted); font-size: .92rem; }
+    .right { display: flex; align-items: center; gap: .75rem; }
+    .faces { display: flex; }
+    .face { width: 2rem; height: 2rem; border-radius: 50%; border: 2px solid var(--bg); margin-left: -.45rem; display: grid; place-items: center; font-size: .75rem; font-weight: 600; background: var(--tint); color: var(--accent); object-fit: cover; flex: none; }
+    .faces .face:first-child { margin-left: 0; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .quiet { border: 1px solid var(--line); background: var(--card); border-radius: 2rem; padding: .4rem .9rem; font-size: .88rem; }
+    .quiet:disabled { color: var(--muted); cursor: default; }
+    .bar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1.2rem; }
+    .filter { display: flex; border: 1px solid var(--line); border-radius: 2rem; padding: .2rem; background: var(--card); }
+    .filter button { border: 0; background: none; border-radius: 2rem; padding: .3rem .85rem; font-size: .88rem; color: var(--muted); }
+    .filter button[aria-pressed=true] { background: var(--accent); color: var(--on-accent); }
+    #add { flex: 1 1 16rem; display: flex; gap: .5rem; }
+    #add input { flex: 1; min-width: 0; padding: .55rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--card); color: inherit; font: inherit; }
+    #add button { border: 0; border-radius: .5rem; padding: .55rem 1.1rem; background: var(--accent); color: var(--on-accent); font-weight: 600; }
+    #signin { margin: 0 0 1rem; color: var(--muted); }
+    a { color: var(--accent); }
+    #error { color: var(--bad); margin: 0 0 1rem; font-size: .9rem; }
+    #error:empty { display: none; }
+    .columns { display: grid; gap: 1.4rem; }
+    @media (min-width: 50rem) { .columns { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.1rem; } }
+    section { min-width: 0; }
+    h2 { display: flex; align-items: baseline; gap: .45rem; margin: 0 0 .6rem; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    h2 .n { font-variant-numeric: tabular-nums; letter-spacing: 0; }
+    ol { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: .7rem; padding: .75rem .8rem .65rem; }
+    .card.yours { border-color: var(--accent); }
+    .card p { margin: 0 0 .55rem; overflow-wrap: anywhere; }
+    [data-col=done] .card p { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+    .meta { display: flex; align-items: center; gap: .45rem; }
+    .meta .face { width: 1.6rem; height: 1.6rem; margin: 0; border: 0; font-size: .68rem; }
+    .meta .face.none { background: var(--soft); color: var(--muted); }
+    .meta select { min-width: 0; flex: 1; border: 0; background: none; color: var(--muted); font: inherit; font-size: .88rem; padding: .2rem 0; cursor: pointer; }
+    .meta select:disabled { cursor: default; opacity: 1; appearance: none; }
+    .next { border: 1px solid var(--line); background: none; border-radius: 2rem; padding: .25rem .75rem; font-size: .85rem; white-space: nowrap; }
+    .x { border: 0; background: none; color: var(--muted); padding: 0 .2rem; font-size: 1.1rem; line-height: 1; }
+    .empty { color: var(--muted); font-size: .9rem; padding: .4rem 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Board</h1><p id="status">connecting…</p></div>
+      <div class="right"><div class="faces" id="here"></div><button class="quiet" id="notify" hidden>Notify me</button></div>
+    </header>
+    <div class="bar">
+      <div class="filter"><button data-f="all" aria-pressed="true">Everyone</button><button data-f="mine" aria-pressed="false">Mine</button></div>
+      <form id="add" hidden><input id="title" maxlength="200" autocomplete="off" placeholder="Add a card, like “Water the plants”"><button>Add</button></form>
+    </div>
+    <p id="signin" hidden>You can look. <a href="./__signin?return=/">Sign in</a> to add, move and take cards.</p>
+    <p id="error" role="status"></p>
+    <div class="columns">
+      <section data-col="todo"><h2>To do <span class="n"></span></h2><ol></ol></section>
+      <section data-col="doing"><h2>Doing <span class="n"></span></h2><ol></ol></section>
+      <section data-col="done"><h2>Done <span class="n"></span></h2><ol></ol></section>
+    </div>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+    const NEXT = { todo: ["doing", "Start"], doing: ["done", "Done"], done: ["todo", "Again"] };
+    const PEOPLE_AT_ONCE = 64; // __people names at most this many at a time
+
+    let board = null;
+    let filter = "all";
+    const people = new Map();   // id:… -> {username, picture} (null: asked, unknown)
+    const members = [];         // the fragment's people, first added first
+
+    // who this page is first: a visitor with no cookie is given one by the
+    // socket, and a call sent beside it would be given another
+    const me = await fragment.me();
+    const signedIn = me.principal.startsWith("id:");
+    $("add").hidden = !signedIn;
+    $("signin").hidden = signedIn;
+    $("notify").hidden = !signedIn || !("serviceWorker" in navigator);
+
+    // names and pictures for identities, from the platform's registry
+    async function name(ids) {
+      const ask = [...new Set(ids)].filter((id) => id?.startsWith("id:") && !people.has(id));
+      for (let i = 0; i < ask.length; i += PEOPLE_AT_ONCE) {
+        const batch = ask.slice(i, i + PEOPLE_AT_ONCE);
+        batch.forEach((id) => people.set(id, null));
+        const got = await fetch(`./__people?${batch.map((id) => `id=${encodeURIComponent(id)}`).join("&")}`).then((r) => r.json()).catch(() => ({}));
+        for (const id of batch) people.set(id, got.profiles?.[id] ?? null);
+      }
+      if (ask.length) { render(); drawHere(); }
+    }
+    const label = (id) => (id === me.principal ? "You" : people.get(id)?.username ?? "Someone");
+    function face(id, title = label(id)) {
+      const p = people.get(id);
+      if (p?.picture) return el("img", { className: "face", src: p.picture, alt: "", title });
+      return el("span", { className: `face${id ? "" : " none"}`, title, textContent: id ? label(id).slice(0, 1).toUpperCase() : "–" });
+    }
+
+    function card(c) {
+      const who = el("select", { disabled: !signedIn, title: "Who it is for", onchange: () => fragment.call("assign", { id: c.id, to: who.value || null }).then(() => show(), (e) => { show(e); render(); }) });
+      const choices = [...new Set([...members, me.principal, c.assignee].filter((id) => id?.startsWith("id:")))];
+      who.append(el("option", { value: "", textContent: "No one yet" }), ...choices.map((id) => el("option", { value: id, textContent: label(id) })));
+      who.value = c.assignee ?? "";
+      const [to, verb] = NEXT[c.col];
+      const li = el("li", { className: `card${c.assignee === me.principal && c.col !== "done" ? " yours" : ""}` },
+        el("p", { textContent: c.title }),
+        el("div", { className: "meta" }, face(c.assignee), who,
+          signedIn ? el("button", { className: "next", textContent: verb, onclick: () => fragment.call("move", { id: c.id, column: to }).then(() => show(), show) }) : "",
+          signedIn ? el("button", { className: "x", title: "Remove", textContent: "×", onclick: () => fragment.call("remove", { id: c.id }).then(() => show(), show) }) : ""));
+      li.dataset.id = c.id;
+      return li;
+    }
+
+    // a change elsewhere redraws the board, but not under a menu someone has open
+    let held = false;
+    document.addEventListener("focusout", () => { if (held) { held = false; setTimeout(render); } });
+    function render() {
+      if (!board) return;
+      if (document.activeElement?.matches(".card select")) { held = true; return; }
+      const shown = board.cards.filter((c) => filter === "all" || c.assignee === me.principal);
+      const count = (col) => board.cards.filter((c) => c.col === col).length;
+      for (const section of document.querySelectorAll("section[data-col]")) {
+        const col = section.dataset.col;
+        const cards = shown.filter((c) => c.col === col);
+        section.querySelector(".n").textContent = col === "done" ? board.done : count(col);
+        section.querySelector("ol").replaceChildren(...(cards.length ? cards.map(card) : [el("li", { className: "empty", textContent: col === "todo" ? (filter === "mine" ? "Nothing of yours." : "Nothing to do.") : "Nothing yet." })]));
+      }
+      const mine = board.cards.filter((c) => c.assignee === me.principal && c.col !== "done").length;
+      $("status").textContent = signedIn ? (mine ? `${mine} card${mine === 1 ? " is" : "s are"} yours.` : "Nothing is yours right now.") : `${count("todo")} to do, ${count("doing")} doing.`;
+    }
+
+    fragment.live("board", {}, (b) => {
+      board = b;
+      render();
+      name(b.cards.flatMap((c) => [c.assignee, c.by]));
+    }, show);
+
+    // the fragment's people, whom a card can be given to
+    fetch("./__members").then((r) => r.json()).then(({ members: list }) => {
+      members.push(...(list ?? []).filter((m) => m.kind === "person").map((m) => m.principal));
+      name([...members, me.principal]);
+      render();
+    }).catch(() => {});
+
+    for (const b of document.querySelectorAll(".filter button")) {
+      b.onclick = () => {
+        filter = b.dataset.f;
+        document.querySelectorAll(".filter button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+        render();
+      };
+    }
+
+    $("add").onsubmit = async (e) => {
+      e.preventDefault();
+      const title = $("title").value.trim();
+      if (!title) return;
+      try { await fragment.call("add", { title }); $("title").value = ""; show(); } catch (err) { show(err); }
+    };
+
+    // a push to this person's browsers when a card is given to them
+    const notifyOn = () => Object.assign($("notify"), { textContent: "Notifications on", disabled: true });
+    navigator.serviceWorker?.getRegistration(new URL("./", location.href)).then((r) => r?.pushManager.getSubscription()).then((sub) => sub && notifyOn()).catch(() => {});
+    $("notify").onclick = async () => {
+      const r = await fragment.push.register(me.principal);
+      if (r.ok === false) show(new Error(r.reason === "denied" ? "Notifications are blocked for this page in your browser's settings." : `Notifications did not turn on (${r.error ?? r.reason}).`));
+      else notifyOn();
+    };
+
+    // who is here: a face each, a person's picture when they have one
+    let here = [];
+    function drawHere() {
+      $("here").replaceChildren(...here.slice(0, 6).map((id) => (id.startsWith("id:") ? face(id) : el("span", { className: "face", title: "A visitor", textContent: "?" }))));
+    }
+    fragment.presence.set({});
+    fragment.presence.on((list) => {
+      here = [...new Set(list.map((p) => p.principal))];
+      drawHere();
+      name(here);
+    });
+    fragment.closed(({ code }) => { $("status").textContent = code === 4004 ? "This board was deleted." : "This page's access changed: reload it."; });
+  </script>
+</body>
+</html>

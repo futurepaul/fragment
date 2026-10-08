@@ -398,6 +398,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "visibility"), ("visibility", "link")])?;
     anyhow::ensure!(r.status == 303, "visibility back to link: {r}");
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "contributor")])?;
+    let shown = with_session(api, "GET", &sheet, &owner_session)?;
+    s.ok(
+        "the sheet offers View, Use, and Edit: the owner lets the viewer use it (a contributor)",
+        shown.text.contains("<option value=\"viewer\">View</option><option value=\"contributor\">Use</option><option value=\"editor\">Edit</option>")
+            && r.status == 303
+            && role_of(&member_id)?.as_deref() == Some("contributor")
+            && shown.text.contains("<option value=\"contributor\" selected>Use</option>"),
+        &r,
+    );
 
     // ---- a fragment's page cannot share: its code (its author's, or an
     // agent's) runs in the owner's browser, with the platform's session

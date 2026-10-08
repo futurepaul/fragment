@@ -93,7 +93,13 @@ enum Cmd {
     },
     /// Create a fragment (empty, or from one of the platform's templates)
     Create {
-        name: String,
+        #[arg(required_unless_present = "draft")]
+        name: Option<String>,
+        /// A draft, with no login: the platform names it, it lives a day
+        /// with tight limits, and a person makes it theirs by signing in
+        /// at its claim link (this machine's key then acts as them)
+        #[arg(long, conflicts_with_all = ["name", "visibility", "title", "show_tokens"])]
+        draft: bool,
         /// public | link (default) | members
         #[arg(long)]
         visibility: Option<String>,
@@ -495,7 +501,7 @@ enum MembersCmd {
         name: String,
         /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
         who: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// Lend the member's agents nothing: only the person acts with it
@@ -513,7 +519,7 @@ enum InviteCmd {
     /// Make an invite (the owner, or their agent for them); prints the token once
     Create {
         name: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// how many people may join with it
@@ -904,6 +910,26 @@ fn run(cli: Cli) -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Create { draft: true, template, .. } => {
+            // an agent's fragments are its owner's: it makes them as itself
+            if let Some(mode) = agent_mode()? {
+                return Err(usage(format!("{} is an agent: what it makes is its owner's (`fragment create <label>`), never a draft", mode.agent)));
+            }
+            // a draft is signed by a key no one holds: this machine's, made now if it has none
+            if load_config().secret_key.is_none() {
+                save_config("secret_key", &auth::Identity::generate().secret_hex())?;
+            }
+            let c = require_client(&cli.host, cli.verbose)?;
+            let v: Created = c.call_as(c.post_json("/api/drafts", &fragment_proto::MakeDraft { template })?)?;
+            let draft = v.draft.as_ref().ok_or_else(|| anyhow!("the host answered no draft for {}", v.name))?;
+            // its page's share link and its claim link are what a draft is for: shown
+            json_exit(j, &v);
+            println!("made draft {} (no account: until it is claimed it holds no secrets, fetches nothing, and runs no AI step)", v.name);
+            println!("  page:   {}", share_link(&v.canonical, &v.view_token));
+            println!("  claim:  {}", draft.claim);
+            println!("it is deleted at {} unless someone signs in at the claim link: claiming makes it theirs, and this machine's key theirs too", chrono_like(draft.expires_at as u64 / 1000));
+            return Ok(());
+        }
         Cmd::Guide => {
             print!("{GUIDE}");
             return Ok(());
@@ -1065,12 +1091,13 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("revoked {npub}");
         }
-        Cmd::Create { name, visibility, show_tokens, template, title } => {
+        Cmd::Create { name, visibility, show_tokens, template, title, draft: _ } => {
             let visibility = match visibility.as_deref() {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template, title };
+            let name = name.ok_or_else(|| usage("name the fragment: fragment create <label>"))?;
+            let body = fragment_proto::CreateFragment { name, visibility, template, title };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
@@ -1508,7 +1535,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             MembersCmd::Add { name, who, role, people_only } => {
                 let who = member_named(who)?;
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
@@ -1530,7 +1557,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Invite { sub } => match sub {
             InviteCmd::Create { name, role, uses, ttl } => {
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
                 let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
                 // the create is the one answer that carries the token

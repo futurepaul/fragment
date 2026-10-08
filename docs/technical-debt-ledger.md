@@ -26,6 +26,42 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## A replayed refresh token does not end its connection
+
+- **Observed:** 2026-10-07, connected clients (docs/api.md, Connected
+  clients). A refresh token is replaced at each use, and the one it
+  replaced is refused (`invalid_grant`), but the connection stays: OAuth
+  2.1's reuse detection (a replaced refresh token presented again ends
+  the whole connection, since a thief or its client holds a copy) is not
+  done. The registry keeps only the current token's hash.
+- **Risk:** a refresh token stolen and used before its client next
+  refreshes keeps the thief connected (as the person, on its one
+  resource) until the person ends it in their settings; the client finds
+  itself refused and connects again, and the person sees two.
+- **First proof:** a person's list showing a connection of a client they
+  connected once, used after they reconnected it.
+- **Delete when:** each connection keeps the hash of the refresh token it
+  replaced last, and that token presented again ends the connection
+  (and a lost answer to a refresh, which looks the same, asks its person
+  to connect again).
+
+## A connected client's calls share `events` with the platform's own records
+
+- **Observed:** 2026-10-07, a fragment's MCP server (docs/api.md). Each
+  mutation or job a connected client runs appends `client.called` to
+  `events`, which keeps its newest 10 000 records (`limits::AUDIT_KEPT`)
+  for 90 days, beside the platform's own (deploys, refused code, runs
+  held, members changed).
+- **Risk:** a client calling a fragment's mutations thousands of times a
+  day pushes its deploys and refusals out of `events` within the day, so
+  `fragment events` and an agent reading it no longer see why its code
+  was refused.
+- **First proof:** a fragment whose `events` page holds only
+  `client.called` records, its last `code.installed` gone.
+- **Delete when:** a call's client is named where the call is already
+  recorded (its `ops` record and its run, beside their principal), and
+  `events` keeps only what no other record says.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
@@ -270,7 +306,8 @@ fragment.club until cutover (decisions 34–35).
   (cell/src/registry.rs, `NAME`): one round trip each, never more, and
   none for a page or file anyone who may see the fragment gets alike
   (the signin and identities lanes count them). A CLI or agent call, a
-  model call, an operation, an app route, a socket's connect: 1 each (a
+  model call, an operation, an app route, a socket's connect, a
+  connected client's MCP request (its access token): 1 each (a
   `__live` socket 1 more a minute while it sends frames); a members-only
   fragment's page: 1 a file; the shell's load (cell/shell/shell.js
   `start`, `load`): 4, then up to 3 a chat (its members, its channels,
@@ -290,7 +327,8 @@ fragment.club until cutover (decisions 34–35).
   answers every chat under one resolved identity), which takes the 3 a
   chat away; then, if still near the line, sessions and keys move to
   objects named by what they resolve (a session by its token's hash, a
-  key by itself), written by the registry as they change, which keeps
+  key by itself, a connection by its access token's), written by the
+  registry as they change, which keeps
   only what must be unique (usernames, sign-in subjects, identities).
   Each lookup stays one live round trip: no cache outlives a revocation
   (rule 7).

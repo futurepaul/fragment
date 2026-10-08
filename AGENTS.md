@@ -85,21 +85,22 @@ prebuilt bundle is in the debt ledger).
   builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
-  auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, isolation, frames, ops, public,
+  auth, create, lockdown, keys, members, identities, signin, drafts, levers, secrets,
+  delegation, files, deploy, templates, when, wall, board, split, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, watcher, brief, hook, wiki, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
   sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
   file `--operator-key-file <file>` names (its npub in the config's
-  `operators`; a skip without one).
+  `operators`; a skip without one). `drafts` sends its own client
+  addresses (`CF-Connecting-IP`), so it runs on a local node only.
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
-  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
-  notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
+  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, mcp (its settings check),
+  notes, when, wall, board and split sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section;
   frames, and computers' frame checks, start one of their own that
   blocks third-party cookies, as Safari does);
@@ -197,8 +198,18 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, and `calories`: a channel trigger and a text step); the
-  shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`, `calories`: a channel trigger and a text step, `when`: `public` operations,
+  live, presence, and `wall`: a channel people post to, live, anonymous
+  posters held to the public call budget, and `board`: live, presence, a push
+  to the person a card is given to, and `watch`: a cron job that fetches
+  pages and pushes their changes, and `brief`: a cron job that fetches
+  feeds and sums them up with a text step, and `hook`: the inbox's
+  trigger as a mutation, a live board, and push, and `wiki`: files as
+  the state, edited by a mutation or a synced folder, followed through a
+  file trigger, and `split`: per-person rows summed in SQL, a text step
+  that reads a receipt photo); the shell's catalog offers `todo`,
+  `inbox`, `when`, `wall`, `board`, `watch`, `brief`, `hook`, `wiki`,
+  `split` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store

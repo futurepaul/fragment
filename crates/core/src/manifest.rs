@@ -123,7 +123,7 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some(r) => r
             .as_str()
             .and_then(Role::parse)
-            .ok_or_else(|| format!("operations.{name}.role must be public, viewer, editor, or owner"))?,
+            .ok_or_else(|| format!("operations.{name}.role must be public, viewer, contributor, editor, or owner"))?,
     };
     let input = match obj.get("input") {
         None => None,
@@ -161,7 +161,7 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     }
     let role = |key: &str| -> Result<Option<Role>, String> {
         obj.get(key)
-            .map(|r| r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.{key} must be public, viewer, editor, or owner")))
+            .map(|r| r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.{key} must be public, viewer, contributor, editor, or owner")))
             .transpose()
     };
     let read = role("read")?.unwrap_or(Role::Viewer);
@@ -354,16 +354,25 @@ mod tests {
     fn operations_and_defaults() {
         let m = parse(br#"{"name":"t","visibility":"public","editors":[],"workflows":[],
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
-            "sign":{"kind":"mutation","role":"public"}},"meta":{"title":"T"}}"#)
+            "sign":{"kind":"mutation","role":"public"},"log":{"kind":"mutation","role":"contributor"}},"meta":{"title":"T"}}"#)
         .unwrap();
         assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false, description: None });
         assert_eq!(m.operations["add"].role, Role::Editor);
         assert_eq!(m.operations["add"].input, Some(serde_json::json!({"type":"object"})));
         assert_eq!(m.operations["sign"].role, Role::Public);
+        assert_eq!(m.operations["log"].role, Role::Contributor);
+        let e = parse(br#"{"operations":{"log":{"kind":"mutation","role":"user"}}}"#).unwrap_err();
+        assert_eq!(e, "operations.log.role must be public, viewer, contributor, editor, or owner");
         let ops = parse(br#"{"operations":{"frame":{"kind":"mutation","ephemeral":true},"add":{"kind":"mutation","ephemeral":false}}}"#).unwrap().operations;
         assert!(ops["frame"].ephemeral && !ops["add"].ephemeral, "a mutation may keep no ledger row");
         for bad in [&br#"{"operations":{"q":{"kind":"query","ephemeral":true}}}"#[..], br#"{"operations":{"j":{"kind":"job","ephemeral":true}}}"#, br#"{"operations":{"m":{"kind":"mutation","ephemeral":1}}}"#] {
             assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".ephemeral"), "only a mutation is ephemeral, with a boolean");
+        }
+        let said = parse(br#"{"operations":{"add":{"kind":"mutation","description":"Adds a todo."}}}"#).unwrap().operations;
+        assert_eq!(said["add"].description.as_deref(), Some("Adds a todo."));
+        let long = format!(r#"{{"operations":{{"add":{{"kind":"mutation","description":"{}"}}}}}}"#, "x".repeat(limits::OP_DESCRIPTION_MAX_CHARS + 1));
+        for bad in [&br#"{"operations":{"add":{"kind":"mutation","description":" "}}}"#[..], br#"{"operations":{"add":{"kind":"mutation","description":3}}}"#, long.as_bytes()] {
+            assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".description"), "a description is 1 to the limit's characters");
         }
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
@@ -464,11 +473,14 @@ mod tests {
         let control = parse(br#"{"channels":{"control":{"post":"viewer","signedIn":true}}}"#).unwrap().channels["control"].clone();
         assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true }, "a post role for signed-in posters only");
         assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
+        let log = parse(br#"{"channels":{"log":{"post":"contributor"}}}"#).unwrap().channels["log"].clone();
+        assert_eq!(log, ChannelDecl { read: Role::Viewer, post: Some(Role::Contributor), signed_in: false }, "viewers read what contributors post");
         for (bad, says) in [
+            (&br#"{"channels":{"chat":{"read":"contributor","post":"viewer"}}}"#[..], "channels.chat.post (viewer) is looser than its read (contributor)"),
             (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
             (br#"{"channels":{"chat":{"post":"public"}}}"#, "channels.chat.post (public) is looser than its read (viewer)"),
             (br#"{"channels":{"chat":{"read":"owner","post":"editor"}}}"#, "channels.chat.post (editor) is looser than its read (owner)"),
-            (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, editor, or owner"),
+            (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, contributor, editor, or owner"),
             (br#"{"channels":{"chat":{"post":true}}}"#, "channels.chat.post must be public"),
             (br#"{"channels":{"chat":{"signedIn":true}}}"#, "channels.chat.signedIn is about who may post: give it a post role"),
             (br#"{"channels":{"chat":{"post":"viewer","signedIn":"yes"}}}"#, "channels.chat.signedIn must be true or false"),

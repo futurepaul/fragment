@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch</title>
+  <style>
+    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7d776a; --line: #e4dfd3; --accent: #b4441c; --on-accent: #fff; --bad: #9b2c2c; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1e1c16; --fg: #eeeae0; --muted: #9a9384; --line: #2f2c24; --accent: #f08a5d; --on-accent: #16150f; --bad: #f19a8f; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
+    h1 { font: 600 2rem/1.1 Georgia, serif; margin: 0; }
+    h2 { font: 600 1.1rem/1.2 Georgia, serif; margin: 2.5rem 0 .75rem; }
+    .sub { color: var(--muted); margin: .35rem 0 0; font-size: .9rem; }
+    button { font: inherit; cursor: pointer; border-radius: .5rem; }
+    .primary { padding: .6rem 1rem; border: 0; background: var(--accent); color: var(--on-accent); }
+    .quiet { padding: .45rem .8rem; border: 1px solid var(--line); background: transparent; color: inherit; }
+    .link { padding: 0; border: 0; background: none; color: var(--muted); font-size: .85rem; text-decoration: underline; text-underline-offset: 2px; }
+    #notify-note { color: var(--muted); font-size: .85rem; margin-top: .35rem; max-width: 22rem; }
+    form { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--card); margin-bottom: .5rem; }
+    form[hidden] { display: none; }
+    input { width: 100%; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--bg); color: inherit; font: inherit; min-width: 0; }
+    details { grid-column: 1 / -1; color: var(--muted); font-size: .9rem; }
+    details > div { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-top: .5rem; }
+    details small { grid-column: 1 / -1; }
+    code { font: .85em ui-monospace, Menlo, monospace; background: var(--line); padding: .05rem .3rem; border-radius: .25rem; }
+    #error { color: var(--bad); min-height: 1.5rem; font-size: .9rem; }
+    #watches { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 1rem; }
+    .watch { display: flex; flex-direction: column; gap: .35rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--card); min-width: 0; }
+    .watch h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+    .where { color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; text-decoration: none; }
+    .value { font: 600 1.5rem/1.25 Georgia, serif; font-variant-numeric: tabular-nums; margin: .4rem 0 .1rem; overflow-wrap: anywhere; }
+    .value.long { font: 400 .95rem/1.45 ui-sans-serif, system-ui, sans-serif; max-height: 6.5em; overflow: hidden; }
+    .value.none { color: var(--muted); font: italic 400 1rem/1.4 Georgia, serif; }
+    .was { font-size: .85rem; color: var(--muted); }
+    .was.fresh { color: var(--accent); }
+    .status { font-size: .8rem; color: var(--muted); }
+    .problem { font-size: .85rem; color: var(--bad); }
+    .actions { display: flex; gap: 1rem; margin-top: auto; padding-top: .5rem; }
+    .empty { color: var(--muted); padding: 2rem 0; }
+    #history { list-style: none; padding: 0; margin: 0; }
+    #history li { display: grid; grid-template-columns: 6rem 1fr; gap: .75rem; padding: .55rem 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
+    #history time { color: var(--muted); font-size: .8rem; padding-top: .1rem; }
+    #history b { font-weight: 600; }
+    #history .arrow { color: var(--accent); }
+    .new { animation: flash 1.5s ease-out; }
+    @keyframes flash { from { background: color-mix(in srgb, var(--accent) 18%, var(--card)); } }
+    @media (max-width: 40rem) {
+      main { padding-top: 1.5rem; }
+      form { grid-template-columns: 1fr; }
+      details > div { grid-template-columns: 1fr; }
+      #history li { grid-template-columns: 1fr; gap: .1rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Watch</h1>
+        <p class="sub" id="summary">connecting…</p>
+      </div>
+      <div>
+        <button class="quiet" id="notify">Notify me of changes</button>
+        <div id="notify-note"></div>
+      </div>
+    </header>
+
+    <form id="add" hidden>
+      <input id="url" type="url" placeholder="https://shop.example/kettle" required autocomplete="off">
+      <input id="pick" placeholder="What on it, if a part: .price" autocomplete="off">
+      <button class="primary">Watch it</button>
+      <details>
+        <summary>Name it, pick in JSON, or send a secret</summary>
+        <div>
+          <input id="label" placeholder="Name (the site, if empty)" maxlength="100" autocomplete="off">
+          <input id="header" placeholder="Authorization: Bearer {{SHOP_KEY}}" autocomplete="off">
+          <small>The part is a CSS selector, or in a JSON answer a path: <code>data.price</code>.
+            A header naming a secret sends it with each check: set it first with
+            <code>fragment secret set &lt;name&gt; SHOP_KEY</code>. The page never sees it.</small>
+        </div>
+      </details>
+    </form>
+    <div id="error"></div>
+
+    <section id="watches"></section>
+
+    <h2>Changes</h2>
+    <ul id="history"></ul>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, cls, text) => Object.assign(document.createElement(tag), cls ? { className: cls } : {}, text === undefined ? {} : { textContent: text });
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+    const ago = (at) => {
+      const s = (Date.now() - at) / 1000;
+      if (s < 60) return "just now";
+      if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+      return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    };
+
+    let editor = false;
+    let watches = [];
+    // the newest change and problem of each watch, and every change (newest first)
+    const lastChange = new Map();
+    const lastProblem = new Map();
+    const changes = [];
+    const opened = Date.now();
+    const flashed = new Set();
+
+    function card(w) {
+      const a = el("article", "watch");
+      a.dataset.id = w.id;
+      const where = el("a", "where", new URL(w.url).host + (w.pick ? ` · ${w.pick}` : ""));
+      where.href = w.url;
+      where.rel = "noopener noreferrer";
+      a.append(el("h3", null, w.label), where);
+      // a problem newer than the last good check is the card's news
+      const problem = lastProblem.get(w.id);
+      const troubled = problem && problem.at > (w.checked_at ?? 0);
+      if (w.value !== null) a.append(el("div", w.value.length > 40 ? "value long" : "value", w.value));
+      else if (!troubled) a.append(el("div", "value none", "first check…"));
+      const change = lastChange.get(w.id);
+      if (change && w.changed_at) {
+        const before = change.before.length > 60 ? `${change.before.slice(0, 60)}…` : change.before;
+        a.append(el("div", Date.now() - w.changed_at < 86400000 ? "was fresh" : "was", `was ${before} · changed ${ago(w.changed_at)}`));
+      }
+      if (troubled) {
+        const why = `${problem.problem[0].toUpperCase()}${problem.problem.slice(1)}.`;
+        a.append(el("div", "problem", problem.held ? `Couldn't reach it ${ago(problem.at)} (run ${problem.run} held): ${problem.problem}.` : why));
+      } else if (w.checked_at) {
+        a.append(el("div", "status", `checked ${ago(w.checked_at)}${w.header ? " · with a secret" : ""}`));
+      }
+      if (editor) {
+        const actions = el("div", "actions");
+        const check = el("button", "link", "Check now");
+        check.onclick = () => fragment.call("check", { id: w.id }).then(() => { check.textContent = "Checking…"; show(); }, show);
+        // a second click removes it
+        const remove = el("button", "link", "Remove");
+        remove.onclick = () => {
+          if (remove.textContent === "Remove") remove.textContent = "Remove it?";
+          else fragment.call("remove", { id: w.id }).then(() => show(), show);
+        };
+        actions.append(check, remove);
+        a.append(actions);
+      }
+      return a;
+    }
+
+    function render() {
+      $("summary").textContent = watches.length
+        ? `${watches.length} ${watches.length === 1 ? "page" : "pages"} watched · checked every hour`
+        : "Nothing watched yet";
+      $("watches").replaceChildren(...(watches.length
+        ? watches.map(card)
+        : [el("p", "empty", editor ? "Add a page above: a product, a price feed, a changelog. When what you pick changes, everyone who asked gets a push." : "Nothing is watched here yet.")]));
+      $("history").replaceChildren(...changes.slice(0, 30).map((c) => {
+        // a change that came while the page was open flashes once
+        const li = el("li", c.at > opened && !flashed.has(c.seq) ? "new" : "");
+        flashed.add(c.seq);
+        const what = el("span");
+        what.append(el("b", null, c.body.label), " ", c.body.before, el("span", "arrow", " → "), c.body.after);
+        li.append(el("time", null, ago(c.at)), what);
+        return li;
+      }));
+      if (!changes.length) $("history").append(el("li", "empty", "No changes yet."));
+    }
+
+    fragment.live("list", {}, (r) => { watches = r.watches; render(); }, show);
+    fragment.subscribe("changes", (r) => {
+      lastChange.set(r.body.watch, r.body);
+      changes.unshift(r);
+      render();
+    }, { last: 200 });
+    fragment.subscribe("problems", (r) => { lastProblem.set(r.body.watch, { ...r.body, at: r.at }); render(); }, { last: 200 });
+    setInterval(render, 60000);
+
+    fragment.me().then((me) => {
+      editor = me.role === "editor" || me.role === "owner";
+      $("add").hidden = !editor;
+      render();
+    });
+
+    $("add").onsubmit = async (e) => {
+      e.preventDefault();
+      const input = { url: $("url").value.trim() };
+      for (const k of ["pick", "label", "header"]) if ($(k).value.trim()) input[k] = $(k).value.trim();
+      try {
+        const { id } = await fragment.call("add", input);
+        await fragment.call("check", { id });
+        for (const k of ["url", "pick", "label", "header"]) $(k).value = "";
+        show();
+      } catch (err) {
+        show(err);
+      }
+    };
+
+    $("notify").onclick = async () => {
+      $("notify-note").textContent = "Asking…";
+      const r = await fragment.push.register("changes");
+      $("notify-note").textContent = r.ok === false
+        ? { unsupported: "This browser can't get notifications here (on an iPhone, add this page to your Home Screen first).", denied: "Notifications are blocked for this site in your browser's settings." }[r.reason] ?? `That didn't work: ${r.error || r.reason}.`
+        : "You'll get a notification when a watched page changes.";
+    };
+  </script>
+</body>
+</html>

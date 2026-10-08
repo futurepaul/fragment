@@ -15,8 +15,9 @@ sudo (the same command updates it):
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 ```
 
-If `fragment` is then not found, put `~/.local/bin` on your PATH:
-`export PATH="$HOME/.local/bin:$PATH"`, in `~/.zshrc` or `~/.bashrc`.
+If `fragment` is then not found, run it as `~/.local/bin/fragment`, or
+put `~/.local/bin` on your PATH: `export PATH="$HOME/.local/bin:$PATH"`,
+in `~/.zshrc` or `~/.bashrc`.
 `fragment skill` prints a SKILL.md for a coding agent (Claude Code,
 Codex) that points it here.
 
@@ -35,6 +36,40 @@ host's page after the first sign-in) and can create nothing before. A
 fragment's name is `<label>.<username>`, served at
 `<label>--<username>.<suffix>`; in a command, a bare label names one of
 yours (`fragment status todo` is `todo.<your username>`).
+
+## Before an account: a draft
+
+Your person has no account yet, or is not at a browser to approve your
+key? Make a draft. It needs no login:
+
+```
+fragment create --draft --template todo   # or blank | inbox | calories, or none
+```
+
+This machine's key (made now if it has none) makes it. The platform
+names it from the key (`<12 characters>.draft`: one key, one draft; the
+same command again answers the same one) and prints two links: its page
+(with its share link) and its claim link. Give your person both. The
+claim link carries a code: whoever signs in there and claims it owns it,
+and this machine's key becomes theirs, so `fragment` here acts as them
+from then on, as after `fragment login`. Until it is claimed, a draft:
+
+- keeps to its own loop: `fragment write` and `fragment deploy` (no
+  `--dir`), `call`, `post`, `status`, `open`, `events`, `channel` (not
+  `--follow`), `runs`, `replay`, `rm`, always naming it in full;
+- spends nothing: no secrets, no `job.fetch` and no AI steps (a run that
+  takes one is held; replay it after the claim), no cron runs, no push,
+  no storage token (`sync`, `deploy --dir`), no sharing beyond its share
+  link;
+- takes 60 writes a minute, 2 MiB of files, and 16 MiB of records;
+- says on its page that it is a draft, with its claim link;
+- is deleted a day after it was made (`fragment status` says when).
+
+Claimed, every limit lifts, and it keeps its name and its links. A
+claim needs an account on the host, made as it allows (fragment.club is
+invite-only), and one that may make fragments: a guest's claim is
+refused, as a guest's create is. `fragment login` alone claims nothing:
+the draft is claimed at its link.
 
 ## As an agent, on a computer
 
@@ -125,8 +160,8 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
   are built in.
 - **Triggers.** A cron, a new record on a channel (the inbox is one),
   or a change to matching files starts a run of an operation.
-- **Members.** Owner, editor, viewer; visibility (`public`, `link`,
-  `members`) decides what everyone else gets.
+- **Members.** Owner, editor, contributor, viewer; visibility (`public`,
+  `link`, `members`) decides what everyone else gets.
 - **The event log is ground truth.** `fragment events <name>` says what
   happened; believe it over your memory.
 
@@ -136,7 +171,7 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
+fragment init my-inbox --template inbox   # or: todo | notes | wiki | calories | when | wall | board | watch | brief | hook | split | blank
 ```
 
 `fragment create <name> --template T` makes one on the platform with no
@@ -149,12 +184,42 @@ gives it its own title; any other is copied in as its first commit.
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
+- `wiki`: a team's wiki, its pages the files under `wiki/`: edited on
+  the page (a mutation's commit) or in a synced folder, followed live
+  through a file trigger.
 - `calories`: a food log you tell what you ate; a text step logs it.
+- `when`: find a time or run a poll; anyone with the link votes, with no
+  account (`public` operations), and the tally moves live.
+- `wall`: a page anyone with the link posts to (a channel people post
+  to, with no app code); new posts land live.
+- `split`: shared costs for a trip or a house; a text step reads a
+  receipt photo, and the balances move live.
+- `board`: chores or a small team's tasks in three columns, live; giving
+  someone a card pushes it to them (web push).
+- `watch`: pages and prices a cron job checks hourly; a push when one
+  changes, a held run when one does not answer.
+- `brief`: your feeds, fetched and summed up by a text step each
+  morning (an hourly cron), archived on a channel and pushed.
+- `hook`: a live board of your webhooks (CI runs, deploys, payments),
+  each delivery's trigger a mutation; a push when one starts failing.
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
 link's `?view=`), and the inbox token. `fragment open my-thing` prints
 the links again.
+
+Making one for someone, go in this order:
+
+1. State the app in one sentence: who it is for, and the job it does.
+2. Build the smallest version that does that job, and deploy it.
+3. Check its state lives in the app, not the page: reload, and it is all
+   still there. Then check a second person sees it: open it in two tabs
+   (or keep one open and change it with `fragment call`), and a change
+   in one shows in the other without a reload. Live multiplayer is what
+   a fragment has that a static page doesn't: use it (`fragment.live`,
+   Pages below).
+4. Hand back the link, with one suggested next step.
+5. Add nothing they didn't ask for.
 
 ## The folder
 
@@ -180,6 +245,18 @@ fragment rollback my-thing [--to <sha>]   # live back to an earlier deploy
 
 A deploy whose `fragment.json` does not check keeps the last good code:
 `fragment status` says why under `code.error`.
+
+Then check the page. Shortly after each deploy (not in its answer), the
+platform loads the page once in a browser for its preview card, as a
+visitor without an account sees it, and `fragment status` shows what
+the page reported under `page`: uncaught exceptions, console errors,
+failed loads, and Content Security Policy violations, each with its
+`kind`, `text`, and `source` (the script and line). Once `page.live` is
+the commit you deployed (`pins.live`), `page.errors` should be empty;
+`fragment events` says `page.errors` when it is not. It is one load with
+no clicks: it catches a syntax error, a missing import, a blocked
+script, not a bug behind a button. A members-only fragment's page is not
+loaded, so it gets no report.
 
 ## Sync in depth
 
@@ -254,13 +331,20 @@ fragment verify my-thing --dir .            # full-content audit
   refuses (a bad name, an unknown kind) keeps the last good code serving,
   and `fragment deploy` says why and exits 1.
 - `role` is who may call it: `public`, `viewer` (default for queries),
-  `editor` (default for mutations and jobs), `owner`.
+  `contributor`, `editor` (default for mutations and jobs), `owner`.
+  On an app its members write to (adding, checking off, voting), give
+  those operations `contributor`: someone it is shared with to Use
+  writes its data, and cannot change its files, deploy it, or read its
+  secrets, nor can an agent acting for them. Keep `editor` for what only
+  the app's makers do. A channel's `post` takes the same roles.
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
 - `description` (1 to 1024 characters) says what it does and answers,
-  for an agent: it makes the operation a tool of `fragment mcp` ("Use it
-  from another agent", below), and `fragment status` shows it.
+  for a model: it makes the operation a tool of the fragment's MCP
+  servers ("Use it from another agent", below), and `fragment status`
+  shows it. Describe each operation an agent should use; one without a
+  description is no tool.
 - `"ephemeral": true` on a mutation you call often with a "latest value":
   its calls keep no ledger row (a mutation's id is
   otherwise kept a week in your app's 16 MiB database), so the same id
@@ -356,6 +440,13 @@ A page imports the browser library from its own fragment:
 </script>
 ```
 
+`<link rel="stylesheet" href="./__fragment.css">` gives a page the
+platform's theme: warm neutrals and one accent, light and dark, as
+variables (`--bg`, `--fg`, `--muted`, `--line`, `--accent`, `--danger`,
+`--font`, `--radius`), and plain base styles for text, forms and
+buttons. Your rules after it override any of it; a page that doesn't
+link it gets none of it.
+
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
 `await fragment.push.register(who)` (from a click) subscribes the
@@ -364,6 +455,23 @@ every browser registered with that `who` (`*` for all).
 
 The share link's `?view=` token is a secret. If your app renders links
 into its own pages, don't leak it into places the page doesn't need.
+
+## Design
+
+A page should look made for its job, by someone who cared.
+
+- **Design for the job.** Put what the person came for first: who owes
+  whom, the vote so far, today's chores. A list with an add button is
+  rarely it.
+- **Mobile first.** Links get opened on phones: one column, thumb-sized
+  targets, nothing that needs a hover. Then widen.
+- **Warm neutrals** for the page (an off-white, warm greys, a warm
+  near-black in the dark), and **one accent color**, used sparingly: the
+  main action, the current state.
+- **A real type hierarchy:** a title clearly larger than the body, muted
+  small text for what matters less, sizes from a short scale. Spacing
+  from a scale too, with more space between groups than within them.
+- **None of:** gradients, glow, decorative emoji, heavy shadows.
 
 ## The inbox (webhooks in)
 
@@ -407,31 +515,47 @@ fragment channel my-thing activity --follow                     # the backlog a 
 
 ## Use it from another agent
 
-`fragment mcp <name>` serves a fragment's operations to any agent that
-speaks MCP (Claude Code, goose, …) as tools, over stdio: each operation
-whose `fragment.json` entry has a `description` and that your role may
-call, with its input schema. Its queries always; with `--write`, its
-mutations and jobs too.
+A fragment is an MCP server: any agent that speaks MCP uses its
+operations as tools. Its tools are the operations whose `fragment.json`
+entry has a `description` and that its person's role may call: its
+queries always, and its mutations and jobs only when the person lets
+the agent change things. A tool's arguments are the operation's input
+(its `input` schema); each call is one of its own (a fresh id). A
+result with a string `text` (a view the operation rendered) answers as
+that text, any other as JSON, and a refusal is the tool's error, with
+the platform's message. There are two ways in, with the same tools:
+
+- **From a chat client** (Claude, ChatGPT) or any client that connects
+  over HTTP: the fragment's own `https://<label>--<username>.<its
+  domain>/__mcp`, added as a custom connector (in Claude: Settings,
+  Connectors, Add custom connector, that URL). It asks its person to
+  sign in and allow it, reading only unless they tick "Also let it
+  change things". What it does names the client in `fragment events`;
+  its person ends it in their settings, under Connected clients.
+- **From a shell** (Claude Code, goose, …): `fragment mcp <name>`, over
+  stdio, signed with this machine's key as every command is (`fragment
+  login` first); `--write` is the box.
 
 ```
-claude mcp add my-thing -- fragment mcp my-thing            # read-only: its described queries
+claude mcp add --transport http my-thing https://my-thing--paul.fragment.boats/__mcp   # over HTTP, signing in once
+claude mcp add my-thing -- fragment mcp my-thing            # over stdio, read-only: its described queries
 claude mcp add my-thing -- fragment mcp my-thing --write    # and its described mutations and jobs
 ```
 
-A tool's call is a `fragment call` with a fresh id, signed with this
-machine's key as every command is (`fragment login` first). A result
-with a string `text` (a view the operation rendered) answers as that
-text, any other as JSON, and a refusal is the tool's error, with the
-platform's message. The tools are read when the client connects and
-each time it lists them. Stdout carries the protocol alone: a failure
-to start goes to stderr, and `-v` logs each request there.
-
-On a computer it runs in the agent mode ("As an agent, on a computer"),
-as the agent, with no key: name the fragment in full.
+`fragment mcp` reads the tools when the client connects and each time
+it lists them. Stdout carries the protocol alone: a failure to start
+goes to stderr, and `-v` logs each request there. On a computer it runs
+in the agent mode ("As an agent, on a computer"), as the agent, with no
+key: name the fragment in full.
 
 ```
 FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragment mcp mind.paul
 ```
+
+The platform itself is one too, at `https://<the platform>/mcp`: its
+tools are this loop (`list`, `create`, `status`, `files`, `read`,
+`write`, `deploy`, `members`, `share`, `visibility`, `call`, `events`;
+reading only, the six that read), for a person who has only a chat.
 
 ## People
 
@@ -439,6 +563,7 @@ FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragmen
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
 fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
+fragment members add my-thing <id:…> --role contributor   # uses it: its contributor operations, not its code
 fragment members rm my-thing <id:… | npub>
 fragment members leave my-thing
 fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)
@@ -464,8 +589,9 @@ after a top-up or next month.
   top-up brings you above zero: their cron and triggers start no runs
   meanwhile (each shows in `fragment runs` as `blocked`, saying why), and
   you make no new fragment.
-- A guest makes no fragments (`fragment create` is refused, 403): they
-  edit the fragments shared with them, whose owners pay.
+- A guest makes no fragments (`fragment create` is refused, 403), and
+  claims no draft: they edit the fragments shared with them, whose owners
+  pay. A draft no one claimed bills no one: it spends nothing.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
 
@@ -533,6 +659,7 @@ fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
+fragment create --draft [--template T]   (no login: Before an account, above)
 fragment inbox <name> --token T --payload JSON
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]

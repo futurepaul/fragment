@@ -71,7 +71,7 @@ Declared in `fragment.json`:
 {
   "operations": {
     "list":     { "kind": "query",    "role": "viewer", "input": { "type": "object", "properties": {} } },
-    "add_todo": { "kind": "mutation", "role": "editor", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 500 } } } },
+    "add_todo": { "kind": "mutation", "role": "contributor", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 500 } } } },
     "digest":   { "kind": "job",      "role": "editor", "input": { "type": "object" } }
   }
 }
@@ -143,7 +143,8 @@ leaves the run pending for a later try (docs/api.md, Apps).
 
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
-schema), a cron entry, an inbox webhook, a channel message, and a pin
+schema: an MCP client's `tools/call` at the fragment's own `__mcp`, as
+the person who connected it, docs/api.md), a cron entry, an inbox webhook, a channel message, and a pin
 move (file change). Cron entries, channel messages, and pin moves are
 declared in `fragment.json`'s `triggers` and start runs as the fragment's own key;
 a triggered mutation is a run of one step, so it retries and is held
@@ -183,11 +184,23 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   one or more public keys in the registry (finite.computer's BANKS
   model, docs/cloudflare-v1.md, R15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
-  maps to the person; an agent signs with its cell's key; a fragment
+  maps to the person; an MCP client (Claude, ChatGPT) has a connection
+  its person made, acting as them on one resource (docs/api.md,
+  Connected clients); an agent signs with its cell's key; a fragment
   with its own key (unregistered: it is the principal of its own
   triggered runs only). The platform holds no person's private
   key. An agent's designated owner reads what the agent can read, as a
   viewer, and never acts through it (docs/api.md, Principals and access).
+  A draft (docs/api.md, Drafts) is made by a key no one holds: its maker,
+  a principal derived from the key that the registry never holds, owns
+  it until a person claims it, signing in and approving that key, and
+  then it is theirs.
+- Roles, weakest first: `public`, `viewer`, `contributor`, `editor`,
+  `owner`; each holds what the weaker ones do. A `contributor` (the
+  share sheet's "Use") calls the operations and posts to the channels
+  its app declares for it, and holds nothing that needs `editor` (the
+  files, deploys, secrets, blobs, replay, pause): a member who writes an
+  app's data cannot change the app, nor can an agent acting for them.
 - Members and invites are supervisor tables. A grant or revoke is one
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
@@ -249,11 +262,15 @@ Every change is checked against this table.
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
-| Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Identities and their keys, agents' owners, sessions, connected clients' connections | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions, connections and caches name an identity and never outlive a revocation; cookies and clients hold only tokens, the registry their hashes; a connection grants nothing (the resource it reaches decides, as for any of its person's requests) |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
+| A draft: the key that made it, its end, its claim code, who claimed it | its supervisor's `meta` row `draft` (docs/api.md, Drafts) | its name and its maker are derived from the key, never stored apart; the claim link its maker gave carries the code; once claimed, its owner is the claimer's membership, as any fragment's |
+| Drafts started, by key and address, in the last day | the registry's `draft_starts` | none: kept a day, then swept |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |
+| The agent docs | `cli/SKILL.md` and `cli/GUIDE.md` | compiled in, never edited elsewhere: the CLI's `fragment skill` and `fragment guide`, the platform's `/llms.txt` and `/llms-full.txt` (docs/api.md, Agent docs) |
+| A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
 
 No file bytes persist in the cell's SQLite: a file lives in git or, at
 1 MiB and above, in R2 under its hash, named by a pointer in git.
@@ -273,6 +290,7 @@ No file bytes persist in the cell's SQLite: a file lives in git or, at
 | inbox pending | 1000 | overload is a 429, not memory pressure |
 | hop depth | 16 | carried from fragment's loop guard |
 | `public`-role calls | 60 per minute per anonymous principal, 600 per minute per fragment | public writes must not become an abuse amplifier; tunable per operation |
+| an unclaimed draft | a day to live; 60 writes a minute; 2 MiB of files; 16 MiB of records, runs and events; 10 a day per address, 10 000 a day per deployment | it bills no one, so it holds and spends as little as an app's first page needs (docs/api.md, Drafts) |
 
 ## Answered (2026-09-23)
 
