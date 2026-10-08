@@ -5,16 +5,23 @@
 //!
 //! A person makes their mind (members only) and says something on `say`:
 //! its trigger's turn logs the message and a reply as `msg` records on
-//! `log`, the reply streamed first as a draft. A message asking for a zoom
-//! makes the turn call the tool, logged as `tool` and `echo`. The
-//! compactor builds every message's node, so the memory's parts are all
-//! summaries and the view settles over the whole log; search finds a
-//! message; a topic added classifies the threads about it, and only them.
-//! With its agent (the stub) an editor of the mind, a turn of a persona
-//! with hands hands a task to it on `chat`, recorded under the turn the
-//! agent's bridge gives that record; the agent's one reply is the task's
-//! report, and comes back as a `[<task>] …` user message that runs a turn
-//! of its own. Its steps on `work` start nothing (a page follows them).
+//! `log`, the reply streamed first as a draft. Every call (UniiChat's
+//! design, docs/optchat.md) is the same tools and system prompt, then the
+//! view, then the turn's state (the time, the chat, the persona, the hands)
+//! and its messages. A message asking for a zoom makes the turn call the
+//! tool, logged as `tool` and `echo`. The compactor's pumps build every
+//! message's node with the turns' system prompt and tools (none to be
+//! called) and UniiChat's task, so the memory's parts are all summaries
+//! and the view settles over the whole log; the view is saved, and an app
+//! restarted loads it, not rebuilds it; a message past 30 000 characters is
+//! several in a row; search finds a message (the page's and MCP's, never a
+//! turn's tool); a topic added classifies the threads about it, and only
+//! them. With its agent (the stub) an editor of the mind, its computer
+//! awake, a turn of a persona with hands hands a task to it on `chat`,
+//! recorded under the turn the agent's bridge gives that record; the
+//! agent's one reply is the task's report, and comes back as a `work`
+//! message `[<task>] …` that runs a turn of its own, and that zoom("<task>")
+//! gives whole. Its steps on `work` start nothing (a page follows them).
 //!
 //! The web: web_fetch reads a page of a local upstream (a redirect
 //! followed) as text, its chrome and scripts left out. A search reaches the
@@ -24,7 +31,8 @@
 //! file comes back on the report and is read into the next turn. `export`
 //! pages the raw log. The person's apps (`apps`): their todo is listed and
 //! used as them, once though its step is tried twice; a shared mind lends
-//! none; a fork asking for the capability is refused at deploy.
+//! none; a fork asking for the capability is refused at deploy. An import
+//! is compacted by up to eight pumps at once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,17 +166,26 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "threads": threads, "turns": turns }),
     );
     let calls = s.ai.chats();
-    let first = calls.iter().find(|c| c["messages"][1]["content"][1]["text"] == "hello mind, the garden has tomatoes and basil");
+    let first = calls.iter().find(|c| c["messages"][1]["content"][2]["text"] == "hello mind, the garden has tomatoes and basil").cloned();
     s.ok(
-        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date, search, the web's tools and the apps'",
-        first.is_some_and(|c| {
-            c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You are Mind, an AI agent"))
+        "the turn's call is the system prompt, then the view before the message, the turn's state and the message whole, with zoom, date, the web's tools, the apps' and computer (no search)",
+        first.as_ref().is_some_and(|c| {
+            c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You are Mind, an AI agent that works for one user in a single chat that never\nends.") && !p.contains("Be plain, warm and brief"))
                 && c["messages"][1]["content"][0]["text"] == "<chat>\n</chat>"
                 && c["tools"].as_array().is_some_and(|t| {
-                    t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search", "web_search", "web_fetch", "research", "apps", "app_ops", "app_call"]
+                    t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "web_search", "web_fetch", "research", "apps", "app_ops", "app_call", "computer"]
                 })
         }),
         format!("{first:?}"),
+    );
+    let state = first.as_ref().and_then(|c| c["messages"][1]["content"][1]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    s.ok(
+        "its state, after the view: the time, the chat (its id, title, start, none before), the persona and its instructions, and no hands yet",
+        state.starts_with("Now: ")
+            && state.contains(&format!("\nChat: {garden} \"hello mind, the garden has tomatoes and basil\", begun "))
+            && state.contains("; it begins here.\nYou are Mind 🌿 in this chat. Be plain, warm and brief.")
+            && state.ends_with("\nYour hands: none."),
+        &state,
     );
 
     // ---- a tool: zoom, logged as tool and echo
@@ -199,12 +216,32 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         view["settled"] == true && view["T"] == 6 && view["text"].as_str().is_some_and(|t| t.starts_with("<chat>\n0+1|user: hello mind, the garden has tomatoes and basil\n") && t.ends_with("</chat>")),
         &view,
     );
-    let compacted = s.ai.chats().iter().any(|c| c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You write the memory of Mind")) && c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("Compress this message into one line, in at most 512 bytes:\nuser: please open the first message")));
-    s.ok("the long message's node is the compactor's, asked with its context and SCALE", compacted, "");
+    let task = format!("Compaction: compress message 2 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n{}\n<input>\nuser: please open the first message", "-".repeat(512));
+    let compaction = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with(&task)));
+    s.ok(
+        "the long message's node is a compaction: the turns' system prompt and tools, none to be called, the compaction view before it, then UniiChat's task",
+        compaction.as_ref().is_some_and(|c| {
+            first.as_ref().is_some_and(|f| c["messages"][0] == f["messages"][0] && c["tools"] == f["tools"])
+                && c["tool_choice"] == "none"
+                && c["messages"][1]["content"][0]["text"].as_str().is_some_and(|v| v.starts_with("<chat>\n0+1|user: hello mind, the garden has tomatoes and basil\n1+1|talk: ") && v.ends_with("</chat>"))
+                && c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.ends_with("\n</input>"))
+        }),
+        format!("{compaction:?}"),
+    );
+    // an app restarted (as an eviction ends it) loads the saved view
+    let before = op(api, &owner, &mind, "status", json!({}));
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": mind, "op": "abort-app" })))?;
+    let after = op(api, &owner, &mind, "status", json!({}));
+    let again = op(api, &owner, &mind, "view", json!({}));
+    s.ok(
+        "an app restarted loads its saved view, never rebuilt from the log: a new instance, no fold, the same view",
+        r.status == 200 && before["instance"].is_string() && after["instance"].is_string() && after["instance"] != before["instance"] && after["folds"] == 0 && again["text"] == view["text"] && after["view"] == before["view"],
+        json!({ "before": before, "after": after, "lever": r.body }),
+    );
     let z = op(api, &owner, &mind, "zoom", json!({ "id": 0, "n": 1 }));
     s.ok("zoom answers a message whole", z["text"] == "0+0|user: hello mind, the garden has tomatoes and basil", &z);
 
-    // ---- search
+    // ---- search (the page's and an MCP client's; a turn has none)
     let found = op(api, &owner, &mind, "search", json!({ "q": "tomatoes" }));
     s.ok(
         "search finds the message, newest first",
@@ -231,6 +268,53 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let topics = op(api, &owner, &mind, "topics", json!({}));
     s.ok("the topic counts its thread", topics["topics"][0]["name"] == "Garden" && topics["topics"][0]["count"] == 1, &topics);
     s.ok("its threads' topics are published on log", logged(api, &owner, &mind, "topics").iter().any(|t| t["body"]["thread"] == garden), "");
+
+    // ---- a long text: several messages in a row, never cut
+    let long_thread = "t_0d0d0d0d0d0d0d0d";
+    let long = format!("{}\n{}", "the long one ".repeat(2600), "and its tail ".repeat(1000));
+    let r = say("m8", json!({ "text": long, "thread": long_thread }))?;
+    anyhow::ensure!(r.status == 200, "saying m8: {r}");
+    let answered = s.eventually(TURN, || messages(api, &owner, &mind, long_thread).iter().any(|m| m["kind"] == "talk"));
+    let said = messages(api, &owner, &mind, long_thread);
+    let pieces: Vec<&Value> = said.iter().filter(|m| m["kind"] == "user").collect();
+    let read = op(api, &owner, &mind, "thread", json!({ "id": long_thread }));
+    let whole: String = read["messages"].as_array().into_iter().flatten().filter(|m| m["kind"] == "user").filter_map(|m| m["text"].as_str()).collect();
+    s.ok(
+        "a message past 30 000 characters is logged as two in a row, the second marked as going on from the first, and whole together",
+        answered
+            && pieces.len() == 2
+            && pieces[1]["i"].as_i64() == pieces[0]["i"].as_i64().map(|i| i + 1)
+            && pieces[0].get("cont").is_none()
+            && pieces[1]["cont"] == true
+            && read["messages"][1]["cont"] == true
+            && whole == long,
+        json!({ "records": said, "thread": read }),
+    );
+    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"] == long.as_str());
+    s.ok("and its turn reads it whole", call.is_some(), "");
+
+    // ---- a message said while a turn works reaches it between its tool calls
+    let busy = "t_0e0e0e0e0e0e0e0e";
+    let quiet = s.eventually(TURN, || op(api, &owner, &mind, "status", json!({}))["pumps"] == 0);
+    s.ai.delay_next(&[3000]);
+    let r = say("m9", json!({ "text": "what day was it [[call date {\"id\": 0}]]", "thread": busy }))?;
+    anyhow::ensure!(r.status == 200, "saying m9: {r}");
+    std::thread::sleep(Duration::from_millis(1000));
+    let r = say("m10", json!({ "text": "and also, the basil is flowering", "thread": busy }))?;
+    anyhow::ensure!(r.status == 200, "saying m10: {r}");
+    let heard = s.eventually(TURN, || {
+        s.ai.chats().iter().any(|c| {
+            let m = c["messages"].as_array().cloned().unwrap_or_default();
+            m.len() >= 4 && m[m.len() - 2]["role"] == "tool" && m[m.len() - 1]["role"] == "user" && m[m.len() - 1]["content"] == "and also, the basil is flowering"
+        })
+    });
+    let said = messages(api, &owner, &mind, busy);
+    let kinds: Vec<&str> = said.iter().filter_map(|m| m["kind"].as_str()).collect();
+    s.ok(
+        "a message said while a turn works reaches it between its tool calls, after the tool's result, and starts no turn of its own",
+        quiet && heard && kinds == ["user", "user", "tool", "echo", "talk"] && op(api, &owner, &mind, "status", json!({}))["queued"] == 0,
+        json!({ "messages": said }),
+    );
 
     // ---- the web: a page read as text, behind a redirect
     let web = page_upstream()?;
@@ -299,17 +383,26 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         opened && handed.is_some_and(|h| h["body"]["to"] == json!([identity]) && h["body"]["text"] == format!("tidy the shed\n\n(task {task}, thread {shed})").as_str()),
         json!({ "tasks": tasks, "chat": chat }),
     );
+    let builder = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with("please hand it over")));
+    s.ok(
+        "a turn of another persona keeps the cached prefix: the same system prompt and tools; its state names Builder and its hands, the computer awake",
+        builder.as_ref().is_some_and(|b| {
+            first.as_ref().is_some_and(|f| b["messages"][0] == f["messages"][0] && b["tools"] == f["tools"])
+                && b["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("\nYou are Builder 🛠️ in this chat. You get things done") && t.contains("\nYour hands: ") && t.ends_with(" (its computer awake)."))
+        }),
+        format!("{builder:?}"),
+    );
     let reported = s.eventually(WAKE, || {
-        messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "user" && m["task"] == task.as_str() && m["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] "))))
+        messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "work" && m["task"] == task.as_str() && m["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] "))))
     });
     let said = messages(api, &owner, &mind, shed);
-    let report = said.iter().find(|m| m["kind"] == "user" && m["task"] == task.as_str()).cloned().unwrap_or(Value::Null);
+    let report = said.iter().find(|m| m["kind"] == "work" && m["task"] == task.as_str()).cloned().unwrap_or(Value::Null);
     // the agent's one reply on chat, under the turn its bridge gave the task's record
     let seq = handed.and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
     let turn = turn_of(&agent_name, &mind, "chat", seq);
     let replies: Vec<Value> = agent_replies(&records(api, &owner, &mind, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect();
     s.ok(
-        "the agent replies once, and that reply comes back as the [task] user message in the thread",
+        "the agent replies once, and that reply comes back as the [task] work message in the thread",
         reported
             && replies.len() == 1
             && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("tidy the shed") && report["text"] == format!("[{task}] {t}").as_str()),
@@ -317,6 +410,12 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let answered = s.eventually(TURN, || messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "talk" && m["i"].as_i64() > report["i"].as_i64()));
     s.ok("which runs a turn of its own", answered, json!(messages(api, &owner, &mind, shed)));
+    let zoomed = op(api, &owner, &mind, "zoom", json!({ "id": task }));
+    s.ok(
+        "zoom(\"<task>\") gives the task whole: what it was given, and its report",
+        zoomed["text"].as_str().is_some_and(|t| t.starts_with(&format!("Task {task} (done) on the user's computer, from ")) && t.contains("\n\nGiven:\ntidy the shed\n\nIts report (message ") && replies.first().and_then(|r| r["body"]["text"].as_str()).is_some_and(|r| t.contains(r))),
+        &zoomed,
+    );
     let work = records(api, &owner, &mind, "work");
     let done = op(api, &owner, &mind, "tasks", json!({ "thread": shed }));
     s.ok(
@@ -357,10 +456,10 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let said = messages(api, &owner, &mind, hooks);
     s.ok("a message's file is named on its msg record, without its text", opened && said.first().is_some_and(|m| m["kind"] == "user" && m["attachments"] == json!([file])), json!(said));
     let shown = format!("[file: notes.txt (text/plain, {} B)]\n```\nthe spare key hangs on the third hook\n```", notes.len());
-    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with("draw the hooks")));
+    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with("draw the hooks")));
     s.ok(
         "its turn reads the text file whole, below its name (job.blob)",
-        call.as_ref().is_some_and(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.ends_with(&shown))),
+        call.as_ref().is_some_and(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.ends_with(&shown))),
         format!("{call:?}"),
     );
     let first = said.first().and_then(|m| m["i"].as_i64()).unwrap_or(-1);
@@ -373,8 +472,8 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let handed = records(api, &owner, &mind, "chat").into_iter().find(|r| r["principal"] == npub.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.ends_with(&format!("(task {task}, thread {hooks})"))));
     s.ok("the hand-off carries the turn's file on chat", handed.as_ref().is_some_and(|h| h["body"]["attachments"] == json!([file])), format!("{handed:?}"));
-    let reported = s.eventually(WAKE, || messages(api, &owner, &mind, hooks).iter().any(|m| m["kind"] == "user" && m["task"] == task.as_str()));
-    let report = messages(api, &owner, &mind, hooks).into_iter().find(|m| m["kind"] == "user" && m["task"] == task.as_str()).unwrap_or(Value::Null);
+    let reported = s.eventually(WAKE, || messages(api, &owner, &mind, hooks).iter().any(|m| m["kind"] == "work" && m["task"] == task.as_str()));
+    let report = messages(api, &owner, &mind, hooks).into_iter().find(|m| m["kind"] == "work" && m["task"] == task.as_str()).unwrap_or(Value::Null);
     let seq = handed.as_ref().and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
     let turn = turn_of(&agent_name, &mind, "chat", seq);
     let reply = agent_replies(&records(api, &owner, &mind, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).unwrap_or(Value::Null);
@@ -388,7 +487,7 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": reply, "report": report }),
     );
     let read_back = s.eventually(TURN, || {
-        s.ai.chats().iter().any(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] ")) && t.contains("[file: drawing.txt (text/plain, ") && t.contains("\na drawing for ")))
+        s.ai.chats().iter().any(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] ")) && t.contains("[file: drawing.txt (text/plain, ") && t.contains("\na drawing for ")))
     });
     s.ok("and the report's turn reads goose's text file whole", read_back, "");
     let bare = "t_00112233445566cc";
@@ -560,8 +659,7 @@ const IMPORTED_T0: i64 = 1_740_830_400_000;
 
 /// A Claude Code session as its file holds it (synthetic): a person's words,
 /// a reply, a long message of theirs, a turn with a tool call before its
-/// final reply, and a thanks. Three long messages in a row: one batched call
-/// summarizes them.
+/// final reply, and a thanks. Three long messages: a compaction each.
 fn claude_code_session() -> String {
     let s = "e2e-import-session";
     let at = |sec: i64| format!("2025-03-01T12:{:02}:{:02}.000Z", sec / 60, sec % 60);
@@ -583,9 +681,11 @@ fn claude_code_session() -> String {
 /// `fragment mind import` and the mind's `import`: a person signed in with
 /// the CLI plays a Claude Code session into their mind. A dry run counts
 /// it; the import lands its words and final replies with their own times
-/// in a thread of its own, and starts the compactor, which summarizes
-/// three long messages in one batched call; a rerun sends nothing; a part
+/// in a thread of its own, and starts the compactor, which summarizes each
+/// long message in a compaction of its own; a rerun sends nothing; a part
 /// ahead of what landed is refused, and one landed again changes nothing.
+/// Then a longer import, its model calls held a moment each: up to eight
+/// pumps compact it at once.
 fn imports(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("mind-import");
     s.login(api, &home);
@@ -607,7 +707,8 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
             && dry["sources"][0]["user"] == 3
             && dry["sources"][0]["assistant"] == 2
             && dry["estimate"]["level0_calls"] == 3
-            && dry["estimate"]["level0_batches"] == 1,
+            && dry["estimate"]["logged"] == 5
+            && dry["estimate"]["calls"].as_u64().is_some_and(|n| n >= 3),
         &dry,
     );
     let sent = s.cli_json(api, &home, &["mind", "import", &path, "--mind", &mind, "--no-wait", "--json"])?;
@@ -650,18 +751,19 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let status = op(api, &keys, &mind, "status", json!({}));
     s.ok("the import starts the compactor, which summarizes every message", done && status["import"]["conversations"] == 1 && status["import"]["messages"] == 5, &status);
-    let batched = s.ai.chats().into_iter().find(|c| {
-        c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You write the memory of Mind"))
-            && c["messages"][1]["content"][1]["text"]
-                .as_str()
-                .is_some_and(|t| t.contains("Compress each of these 3 messages") && t.contains("--- 1 ---\ntalk: Seed swap notes") && t.contains("--- 3 ---\ntalk: Saved the swap list"))
-    });
+    let compactions: Vec<String> = s
+        .ai
+        .chats()
+        .into_iter()
+        .filter(|c| c["tool_choice"] == "none")
+        .filter_map(|c| c["messages"][1]["content"][1]["text"].as_str().map(str::to_string))
+        .filter(|t| t.contains("\n<input>\ntalk: Seed swap notes") || t.contains("\n<input>\nuser: the list: tomatoes") || t.contains("\n<input>\ntalk: Saved the swap list"))
+        .collect();
     let memory = op(api, &keys, &mind, "memory", json!({}));
-    let lines: Vec<&str> = memory["parts"].as_array().into_iter().flatten().filter_map(|p| p["text"].as_str()).collect();
     s.ok(
-        "three long messages in a row are summarized in one call, a numbered line each",
-        batched.is_some() && memory["parts"].as_array().is_some_and(|p| p.iter().all(|x| x["built"] == true)) && lines.iter().any(|l| l.contains(fragment_fakes::workers_ai::BATCH_SAID)),
-        json!({ "memory": memory, "batched": batched.is_some() }),
+        "each long message is a compaction of its own, UniiChat's task, and every line is built",
+        compactions.len() == 3 && compactions.iter().all(|t| t.starts_with("Compaction: compress message ")) && memory["parts"].as_array().is_some_and(|p| p.iter().all(|x| x["built"] == true)),
+        json!({ "memory": memory, "compactions": compactions }),
     );
 
     let part = |from: i64| {
@@ -677,5 +779,49 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
         landed["appended"] == 0 && landed["landed"] == 5 && landed["thread"] == id.as_str() && asked["landed"] == json!([5, 0]),
         json!({ "landed": landed, "imported": asked }),
     );
+
+    // up to eight pumps at once: a longer import, each model call held a moment
+    let held = Duration::from_millis(PUMP_CALL_MS);
+    s.ai.reset_at_once();
+    s.ai.delay_next(&[PUMP_CALL_MS; 64]);
+    let began = std::time::Instant::now();
+    let messages: Vec<Value> = (0..PUMP_MESSAGES)
+        .map(|k| json!({ "role": if k % 2 == 0 { "user" } else { "assistant" }, "text": padded(&format!("pumped message {k}")), "at": IMPORTED_T0 + 600_000 + k * 1000 }))
+        .collect();
+    let r = api.op(&keys, &mind, "import", &format!("import-pumps-{}", crate::api::now_ms()), json!({ "source": "claude-code", "conversation": { "id": "e2e-pumps", "title": "Pumps" }, "from": 0, "messages": messages }))?;
+    anyhow::ensure!(r.status == 200, "importing the pumps' conversation: {r}");
+    let done = s.eventually(TURN, || {
+        let st = op(api, &keys, &mind, "status", json!({}));
+        st["T"] == 5 + PUMP_MESSAGES && st["unbuilt"] == 0 && st["ready"] == false
+    });
+    let took = began.elapsed();
+    let most = s.ai.most_at_once();
+    let calls = s.ai.chats().into_iter().filter(|c| c["tool_choice"] == "none" && c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("pumped message"))).count();
+    s.ok(
+        &format!("an import is compacted by pumps at once: {most} calls at most at once, {calls} level-0 calls of {} ms each in {:.1} s", held.as_millis(), took.as_secs_f64()),
+        done && (3..=8).contains(&most) && took < held * calls as u32,
+        json!({ "most": most, "calls": calls, "seconds": took.as_secs_f64(), "status": op(api, &keys, &mind, "status", json!({})) }),
+    );
+    s.ai.clear_script();
+    // measured, not checked: the same at the fake's own latency
+    let began = std::time::Instant::now();
+    let messages: Vec<Value> = (0..64)
+        .map(|k| json!({ "role": if k % 2 == 0 { "user" } else { "assistant" }, "text": padded(&format!("quick message {k}")), "at": IMPORTED_T0 + 900_000 + k * 1000 }))
+        .collect();
+    let r = api.op(&keys, &mind, "import", &format!("import-quick-{}", crate::api::now_ms()), json!({ "source": "claude-code", "conversation": { "id": "e2e-quick", "title": "Quick" }, "from": 0, "messages": messages }))?;
+    anyhow::ensure!(r.status == 200, "importing the quick conversation: {r}");
+    // an import starts the compactor at most once a minute: started as the CLI's follower starts it
+    let r = api.op(&keys, &mind, "pump", &format!("pump-quick-{}", crate::api::now_ms()), json!({}))?;
+    anyhow::ensure!(r.status == 200, "starting a pump: {r}");
+    let quick = s.eventually(TURN, || {
+        let st = op(api, &keys, &mind, "status", json!({}));
+        st["T"] == 5 + PUMP_MESSAGES + 64 && st["unbuilt"] == 0 && st["ready"] == false
+    });
+    let took = began.elapsed().as_secs_f64();
+    println!("      (64 imported messages compacted at the fake's latency in {took:.1} s, {:.1} calls a second{})", 64.0 / took, if quick { "" } else { ": not all" });
     Ok(())
 }
+
+/// The longer import: this many long messages, each call held this long.
+const PUMP_MESSAGES: i64 = 24;
+const PUMP_CALL_MS: u64 = 1500;

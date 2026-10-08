@@ -143,10 +143,11 @@ impl Mind<'_> {
     }
 
     /// The thread's messages once its turn is over: a `talk` after its last
-    /// `user` message, and no turn running or queued.
+    /// `user` (or `work`: a hand-off's report) message, and no turn running
+    /// or queued.
     fn answered(&self, thread: &str) -> Option<Vec<Value>> {
         let said = self.messages(thread);
-        let last = said.iter().rposition(|m| m["kind"] == "user")?;
+        let last = said.iter().rposition(|m| m["kind"] == "user" || m["kind"] == "work")?;
         said[last..].iter().any(|m| m["kind"] == "talk").then_some(())?;
         let status = self.op("status", json!({}));
         (status["turn"].is_null() && status["queued"] == 0).then_some(said)
@@ -331,7 +332,7 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
         ended["state"] == "done" && report.contains("Linux") && report.contains("42"),
         json!({ "task": ended, "computer": phase(api, &owner, &id) }),
     );
-    let said_c = within(REPLY, || m.answered(&c).filter(|said| said.iter().any(|x| x["kind"] == "user" && x["task"] == task.as_str())));
+    let said_c = within(REPLY, || m.answered(&c).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == task.as_str())));
     let follow = said_c.as_deref().map_or(0.0, turn_secs);
     s.ok("the report comes back to thread C, and the mind follows up there", said_c.is_some(), json!(m.messages(&c)));
 
@@ -364,7 +365,7 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "task": ended_d, "steps": steps_d, "front": front.iter().take(TOP).collect::<Vec<_>>() }),
     );
     // the report back in the thread, its follow-up over, before the next ask
-    let said_d = if ended_d.is_object() { within(REPLY, || m.answered(&d).filter(|said| said.iter().any(|x| x["kind"] == "user" && x["task"] == ended_d["id"]))) } else { None };
+    let said_d = if ended_d.is_object() { within(REPLY, || m.answered(&d).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == ended_d["id"]))) } else { None };
 
     // ---- thread D again: Clef clicks a link it is told of, measured
     let first = ended_d["id"].as_str().unwrap_or("").to_string();
