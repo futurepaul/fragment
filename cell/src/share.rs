@@ -1,46 +1,45 @@
-//! Sharing, on the platform's origin (docs/api.md, Sharing): the share sheet
-//! and accepting an invite. Both are the platform's pages, signed in by its
-//! session cookie, and each acts through the fragment's own handlers
-//! (members.rs) as the signed-in person: the fragment decides who may do
-//! what (only its owner changes anything; a member may see who is in;
-//! anyone else gets a 403 page).
+//! Sharing, on the platform's origin (docs/api.md, Sharing): the share
+//! sheet. It is the platform's page, signed in by its session cookie, and
+//! acts through the fragment's own handlers (members.rs) as the signed-in
+//! person: the fragment decides who may do what (only its owner changes
+//! anything; a member may see who is in; anyone else gets a 403 page).
 //!
 //!   GET  /share/<name>         the sheet: who is in (emails and pictures) and their roles;
-//!                              for the owner, inviting by email, pending invites, roles,
-//!                              removing, who may open it, and its share link (copy, a new one)
+//!                              for the owner, adding people by email, the invites waiting,
+//!                              roles, removing, who may open it, and its share link (copy, a new one)
 //!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet
-//!                              (a role of `remove` removes the member);
-//!                              an invite answers the sheet with the link to send
-//!   GET  /join/<name>?token=   what the invite grants, and a Join button
-//!   POST /join/<name>          joins, then → the fragment, signed in on its origin
+//!                              (a role of `remove` removes the member)
+//!
+//! An email no one signs in as yet is mailed a link to the fragment, and
+//! their first sign-in as it makes them a member (decision 48): there is no
+//! page to accept an invite on.
 //!
 //! A fragment's page (its author's code, or an agent's) is cross-site from
 //! the platform on fragment.club, but one site
 //! with it on a fleet whose platform shares the fragments' domain, where
 //! the platform's session rides along on its fetches, forms, and frames.
-//! Either way neither page can be driven by one:
+//! Either way the sheet cannot be driven by one:
 //!
-//! - it cannot read them: they send no CORS headers, and they refuse
-//!   every frame (`auth::unframed`) but the sheet's in the platform's own
-//!   page (`frame-ancestors 'self'`: no fragment is on its origin);
-//! - it cannot post to them: every POST's Origin must be the platform's
+//! - it cannot read it: it sends no CORS headers, and it refuses every
+//!   frame (`auth::unframed`) but the platform's own page's
+//!   (`frame-ancestors 'self'`: no fragment is on its origin);
+//! - it cannot post to it: every POST's Origin must be the platform's
 //!   (`auth::same_origin`) and carry a form token bound to the session
 //!   (`fragment_core::form`), which only the page itself holds;
-//! - it cannot script a window it opened on them: they answer
+//! - it cannot script a window it opened on it: it answers
 //!   `Cross-Origin-Opener-Policy: same-origin` (`auth::unopened`), so the
 //!   window is severed from its opener;
-//! - it cannot hand them a grant: the sheet reads nothing from its URL, so
-//!   no link prefills what a click would approve (the join page's token is
-//!   the invite itself, and an invite by email is its invitee's alone);
-//! - the click that opened one cannot confirm it: their buttons (and the
-//!   sheet's selects, each sent as it changes) arm `form::DELAY_MS` after
-//!   the page shows, and a form sent sooner is refused.
+//! - it cannot hand it a grant: the sheet reads nothing from its URL, so
+//!   no link prefills what a click would approve;
+//! - the click that opened it cannot confirm it: its buttons (and its
+//!   selects, each sent as it changes) arm `form::DELAY_MS` after the page
+//!   shows, and a form sent sooner is refused.
 
 
 use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
-use fragment_proto::{ErrorBody, ErrorCode, Invite, InviteList, Member, MemberList, Role, Visibility};
+use fragment_proto::{ErrorBody, ErrorCode, Invite, InviteList, Member, MemberList, Role, Shared, Visibility};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -52,12 +51,8 @@ use crate::js;
 use crate::registry::calls::{self, Profile};
 use crate::routed::{Routed, Signed};
 
-/// A form of a few short fields (the longest: an invite's token).
+/// A form of a few short fields (the longest: an email).
 const FORM_MAX_BYTES: usize = 4 * 1024;
-/// An invite's token: 24 random bytes, hex (members.rs).
-const INVITE_TOKEN_LEN: usize = 48;
-/// An invite's id: 8 random bytes, hex.
-const INVITE_ID_LEN: usize = 16;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A card, as a document's share dialog is: the page's, or, in the shell's
@@ -205,15 +200,13 @@ fn fragment_named(name: &str) -> Option<String> {
 pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
     let (what, name) = match segments {
-        [what @ ("share" | "join"), name] => (*what, *name),
+        [what @ "share", name] => (*what, *name),
         _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {}", url.path()))),
     };
     let Some(name) = fragment_named(name) else { return notice(404, "No such fragment", "This link names no fragment.") };
     match (method, what) {
         (Method::Get, "share") => sheet(&req, env, cfg, url, &name).await,
         (Method::Post, "share") => share_post(req, env, cfg, url, &name).await,
-        (Method::Get, "join") => join_page(&req, env, cfg, url, &name).await,
-        (Method::Post, "join") => join_post(req, env, cfg, url, &name).await,
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
 }
@@ -253,9 +246,8 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
 
 /// Emails and pictures for identities, asked of the registry
 /// `PROFILES_MAX` at a time. One it cannot answer shows as its id. Their
-/// emails are shown: the sheet is a member's, of the fragment's people and
-/// those its owner invited, and the join page names who invited its
-/// invitee (docs/cloudflare-v1.md, decision 48).
+/// emails are shown: the sheet is a member's, of the fragment's people
+/// (docs/cloudflare-v1.md, decision 48).
 async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
@@ -297,7 +289,7 @@ struct Sheet {
     /// The person's own role (`None`: they read through an agent of theirs).
     role: Option<Role>,
     members: Vec<Member>,
-    /// The owner's only.
+    /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
     /// The share link: the owner's only.
@@ -317,7 +309,10 @@ impl Sheet {
 
 /// What happened, shown above the sheet.
 enum Flash {
-    Invited { who: String, role: Role, link: String },
+    /// A person who signs in as the email: a member now.
+    Added { who: String, role: Role },
+    /// No one does yet: an invite waits on it, and they were mailed.
+    Invited { who: String, role: Role },
     Refused(String),
 }
 
@@ -338,7 +333,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
-    let ids = members.members.iter().map(|m| m.principal.clone()).chain(invites.iter().filter_map(|i| i.invitee.clone())).collect();
+    let ids = members.members.iter().map(|m| m.principal.clone()).collect();
     Ok(Sheet {
         me: who.id.clone(),
         role,
@@ -396,13 +391,12 @@ fn access(v: Visibility) -> (&'static str, &'static str, &'static str) {
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
     match flash {
-        Some(Flash::Invited { who, role, link }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}. Send them this link: it works for them alone, once, for {d} days.</p>\
-             <p class=\"row\"><input id=\"invite-link\" readonly value=\"{l}\"><button type=\"button\" class=\"quiet\" data-copy=\"{l}\">Copy</button></p></div>",
+        Some(Flash::Added { who, role }) => out += &format!("<div class=\"flash\"><p>Added <b>{}</b> as {}.</p></div>", esc(&who), role_phrase(role)),
+        Some(Flash::Invited { who, role }) => out += &format!(
+            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they sign in as {w} (within {d} days).</p></div>",
             w = esc(&who),
             r = role_phrase(role),
-            d = fragment_proto::limits::INVITE_TTL_DEFAULT_S / 86400,
-            l = esc(&link),
+            d = fragment_proto::limits::INVITE_TTL_S / 86400,
         ),
         Some(Flash::Refused(why)) => out += &format!("<div class=\"flash error\"><p>{}</p></div>", esc(&why)),
         None => {}
@@ -416,7 +410,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             "Invite",
             "add",
         );
-        out += "<p class=\"hint\">You get a link to send them; it works for them alone.</p>";
+        out += "<p class=\"hint\">Someone who has not signed in yet is mailed a link: they are in once they sign in as that email.</p>";
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {
@@ -440,14 +434,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let now = js::now_ms();
     for i in &sheet.invites {
         out += "<li>";
-        out += &match &i.invitee {
-            Some(id) => person(id, sheet.profiles.get(id), &sheet.me),
-            None => format!("<span class=\"av\" aria-hidden=\"true\">✉</span><span class=\"who\">anyone with its link <span class=\"role\">({} left)</span></span>", i.uses_left),
-        };
+        out += &format!("<span class=\"av\" aria-hidden=\"true\">✉</span><span class=\"who\">{}</span>", esc(&i.email));
         let days = (i.expires_at - now) / DAY_MS;
         let until = if days >= 1 { format!("{days} more day{}", if days == 1 { "" } else { "s" }) } else { "less than a day".into() };
         out += &format!("<span class=\"role\">invited as {}<br>for {until}</span>", i.role.as_str());
-        out += &action_form(sheet, "uninvite", &format!("<input type=\"hidden\" name=\"invite\" value=\"{}\">", esc(&i.id)), "Revoke", "text");
+        out += &action_form(sheet, "uninvite", &format!("<input type=\"hidden\" name=\"email\" value=\"{}\">", esc(&i.email)), "Revoke", "text");
         out += "</li>";
     }
     out += "</ul><h2>General access</h2>";
@@ -564,10 +555,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     };
     let done = match action {
         "invite" => match invite(env, url, name, &who, field("email"), role()).await {
-            Ok((email, role, token)) => {
-                let link = format!("{platform}/join/{name}?token={token}");
-                return shown(env, cfg, url, name, &who, &session, Some(Flash::Invited { who: email, role, link }), 200).await;
-            }
+            Ok(flash) => return shown(env, cfg, url, name, &who, &session, Some(flash), 200).await,
             Err(e) => Err(e),
         },
         "role" => match (member(), role()) {
@@ -578,11 +566,9 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Ok(m) => ask(env, url, name, &who, Method::Delete, &format!("/api/members/{m}"), None).await,
             Err(e) => Err(e),
         },
-        "uninvite" => match field("invite") {
-            id if id.len() == INVITE_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                ask(env, url, name, &who, Method::Delete, &format!("/api/invites/{id}"), None).await
-            }
-            _ => Err(CellError::invalid("name an invite")),
+        "uninvite" => match field("email") {
+            email if fragment_core::mail::valid_address(email) => ask(env, url, name, &who, Method::Delete, &format!("/api/invites/{}", enc(email)), None).await,
+            _ => Err(CellError::invalid("name an invite by its email")),
         },
         "visibility" => match Visibility::parse(field("visibility")) {
             Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", Some(json!({ "visibility": v }))).await,
@@ -595,7 +581,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     };
     match done {
         Ok(_) => Ok(auth::redirect(&format!("/share/{name}"), &[])?.with_status(303)),
-        Err(e) if matches!(e.code, ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::AlreadyExists | ErrorCode::Forbidden) => {
+        Err(e) if matches!(e.code, ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::AlreadyExists | ErrorCode::Forbidden | ErrorCode::RateLimited) => {
             let status = e.code.status();
             shown(env, cfg, url, name, &who, &session, Some(Flash::Refused(e.message)), status).await
         }
@@ -603,101 +589,18 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     }
 }
 
-/// Invites the person a verified email names, for them alone: the email,
-/// the role, and the invite's token.
-async fn invite(env: &Env, url: &Url, name: &str, who: &Signed, email: &str, role: CellResult<Role>) -> CellResult<(String, Role, String)> {
+/// Shares it with whoever signs in as `email` (decision 48): the person
+/// who does, a member now; or, when no one does yet, the invite waiting on
+/// it, mailed to them.
+async fn invite(env: &Env, url: &Url, name: &str, who: &Signed, email: &str, role: CellResult<Role>) -> CellResult<Flash> {
     let role = role?;
     let email = email.trim().to_ascii_lowercase();
     if !fragment_core::mail::valid_address(&email) {
         return Err(CellError::invalid(format!("{email:?} is not an email")));
     }
-    let invitee = match ask_registry(env, &calls::Lookup { who: email.clone() }).await {
-        Err(e) if e.code == ErrorCode::NotFound => return Err(CellError::new(ErrorCode::NotFound, format!("no one signs in as {email} yet"))),
-        found => found?,
-    };
-    if invitee.id == who.id {
-        return Err(CellError::invalid("that is you: you are in already"));
-    }
-    let made = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "role": role, "uses": 1, "invitee": invitee.id }))).await?;
-    let made: Invite = decoded(made, "the invite")?;
-    let token = made.token.ok_or_else(|| CellError::host("an invite made answered no token"))?;
-    Ok((email, role, token))
-}
-
-/// The invite a join page's URL names: its token, if it is one.
-fn invite_token(url: &Url) -> Option<String> {
-    auth::query(url, "token").filter(|t| t.len() == INVITE_TOKEN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform();
-    let Some(token) = invite_token(url) else { return notice(400, "Not an invite", "This link holds no invite. Ask for it again.") };
-    let Some((session, live)) = auth::platform_session(req, env, url).await? else {
-        return auth::to_login(&platform, &format!("/join/{name}?token={token}"));
-    };
-    let who = Signed::new(live.identity, None);
-    let preview = match ask(env, url, name, &who, Method::Post, "/api/join/preview", Some(json!({ "token": token }))).await {
-        Ok(p) => p,
-        Err(e) if e.code == ErrorCode::NotFound => {
-            return notice(404, "This invite is not good", "It was used, revoked, or it expired (or its fragment was deleted). Ask for a new one.")
-        }
-        Err(e) => return Err(e),
-    };
-    let role: Role = decoded(preview["role"].clone(), "the invite's role")?;
-    let current: Option<Role> = decoded(preview["current"].clone(), "the person's role")?;
-    let invited_by = preview["invitedBy"].as_str().unwrap_or_default().to_string();
-    let invitee = preview["invitee"].as_str().map(str::to_string);
-    let ids = [Some(invited_by.clone()), invitee.clone(), Some(who.id.clone())].into_iter().flatten().collect();
-    let names = profiles(env, ids).await;
-    let me = person(&who.id, names.get(&who.id), "");
-    let title = format!("Join {}", label(name));
-    if let Some(invitee) = invitee.filter(|i| *i != who.id) {
-        let them = person(&invitee, names.get(&invitee), "");
-        return sheet_page(
-            403,
-            &title,
-            &format!("<p>This invite is for someone else:</p><ul class=\"people\"><li>{them}</li></ul><p>You are signed in as:</p><ul class=\"people\"><li>{me}</li></ul><p><a href=\"/auth/logout\">Sign out</a></p>"),
-            true,
-        );
-    }
-    let open = format!("/auth/fragment?name={}&return=/", enc(name));
-    if current.is_some_and(|c| c >= role) {
-        let c = current.map_or("", Role::as_str);
-        return sheet_page(200, &title, &format!("<p>You are in {} already, as {c}.</p><p><a href=\"{}\">Open it</a></p>", esc(label(name)), esc(&open)), true);
-    }
-    let inviter = person(&invited_by, names.get(&invited_by), "");
-    let form = form::issue(&session, &purpose("join", name), js::now_ms());
-    let body = format!(
-        "<ul class=\"people\"><li>{inviter}</li></ul><p>invites you to <b>{l}</b> as {r}.</p>\
-         <form method=\"post\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"token\" value=\"{t}\"><button data-arm disabled>Join {l}</button></form>\
-         <p class=\"hint\">Signed in as {me_text}. Didn't expect this? Close this page.</p>",
-        l = esc(label(name)),
-        r = role_phrase(role),
-        f = esc(&form),
-        t = esc(&token),
-        me_text = match names.get(&who.id).and_then(|p| p.email.as_deref()) {
-            Some(e) => esc(e),
-            None => format!("<code>{}</code>", esc(&who.id)),
-        },
-    );
-    // no forms-here rule: joining redirects on to the fragment's origin
-    sheet_page(200, &title, &body, false)
-}
-
-async fn join_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform();
-    let (_, live, fields) = match poster(&mut req, env, url, &platform, &purpose("join", name)).await? {
-        Ok(posted) => posted,
-        Err(page) => return Ok(page),
-    };
-    let who = Signed::new(live.identity, None);
-    let token = fields.get("token").filter(|t| t.len() == INVITE_TOKEN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit()));
-    let Some(token) = token else { return notice(400, "Not an invite", "This form holds no invite.") };
-    match ask(env, url, name, &who, Method::Post, "/api/join", Some(json!({ "token": token }))).await {
-        // signed in on the fragment's own origin, and there
-        Ok(_) => Ok(auth::redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])?.with_status(303)),
-        Err(e) if e.code == ErrorCode::NotFound => notice(404, "This invite is not good", "It was used, revoked, or it expired. Ask for a new one."),
-        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::InvalidRequest) => notice(e.code.status(), "Not joined", &esc(&e.message)),
-        Err(e) => Err(e),
-    }
+    let shared = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await?;
+    Ok(match decoded::<Shared>(shared, "the invite")? {
+        Shared::Member(m) => Flash::Added { who: email, role: m.role },
+        Shared::Invited(i) => Flash::Invited { who: email, role: i.role },
+    })
 }

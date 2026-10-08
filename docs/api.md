@@ -125,7 +125,9 @@ nothing is sent. The service's refusals keep its code (`E_…`) in the
 message: too many sent is 429, a message it will not take (an address
 that bounced before, a field it refuses) 400, and the rest (an unverified
 sender, an outage) 502. Dev and the e2e send to the mail fake instead
-(`FRAGMENT_MAIL_URL`).
+(`FRAGMENT_MAIL_URL`). On a preview, whose mail is real, a message to an
+e2e person (`<name>@e2e.test`, an address with no mailbox) goes nowhere
+rather than bounce. What it sends: invites by email (Sharing).
 
 ## Principals and access
 
@@ -643,37 +645,70 @@ deleted in batches on the registry's alarm, never on a request.
 
 ## Sharing
 
-The share sheet and accepting invites are the platform's pages, never a
-fragment's: a fragment's page is its author's code (or an agent's), and
-sharing grants. Each acts through the fragment's own routes (members,
-invites, visibility, rotate, join; below) as the person signed in on the
-platform, so the fragment decides who may do what.
+The share sheet is the platform's page, never a fragment's: a
+fragment's page is its author's code (or an agent's), and sharing
+grants. It acts through the fragment's own routes (members, invites,
+visibility, rotate; below) as the person signed in on the platform, so
+the fragment decides who may do what. There is no page to accept an
+invite on: an invite waits on an email, and a sign-in that verifies the
+email meets it (Invites by email, below).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its name) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by email (an invite for the person a sign-in verified it for), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: an invite for its person alone, one use, seven days; no one signing in as it yet is 404; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
-| `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
-| `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its name) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by email (Invites by email, below), the invites waiting (each email, its role, how long it waits; revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says whether they are in now, or were mailed), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
 
-Neither page can be driven by a fragment's page. Every POST's `Origin`
+The sheet cannot be driven by a fragment's page. Every POST's `Origin`
 must be the platform's (403 otherwise), and every POST carries `form`,
 the token its page was made with: an HMAC, keyed by the session's own
 token (the HttpOnly cookie, which no page's script reads), of what the
-form does (`share:<name>`, `join:<name>`) and when its page was made
+form does (`share:<name>`) and when its page was made
 (`fragment_core::form`). A form without it, another session's, one for
 another fragment or page, one sent sooner than 800 ms after its page was
-made, or one older than 12 hours is 403. Their buttons come disabled and
-arm 800 ms after the page shows (again each time it is shown), so the
-click that opened a page (a double-click's second half) cannot confirm
-in it (the sheet's selects too). Both pages send no CORS headers (a
-fragment's page cannot read them, so it never holds a form's token),
-refuse every frame but the sheet's on the platform's own origin (the
-shell's dialog: `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`;
-every fragment is another origin), sever their opener, allow scripts
-and styles only inline and images only from the platform
-(`Content-Security-Policy`), and keep their URL to the platform
-(`Referrer-Policy: same-origin`: the join page's holds its invite).
+made, or one older than 12 hours is 403. Its buttons and selects come
+disabled and arm 800 ms after the page shows (again each time it is
+shown), so the click that opened it (a double-click's second half)
+cannot confirm in it. It sends no CORS headers (a fragment's page cannot
+read it, so it never holds a form's token), refuses every frame but its
+own on the platform's origin (the shell's dialog: `frame-ancestors
+'self'`, `X-Frame-Options: SAMEORIGIN`; every fragment is another
+origin), severs its opener, allows scripts and styles only inline and
+images only from the platform (`Content-Security-Policy`), and keeps its
+URL to the platform (`Referrer-Policy: same-origin`).
+
+### Invites by email
+
+Sharing is by email (docs/cloudflare-v1.md, decision 48). The owner (or
+their agent for them) names an email and a role, viewer or editor
+(`POST /api/f/<name>/invites`; the sheet's Add, `fragment members add
+<name> <email>`):
+
+- The person who signs in as that email (its verified holder) is a
+  member at once, as `PUT members` makes one: `{member}`.
+- When no one does yet, the invite waits on the email for 30 days
+  (`INVITE_TTL_S`) in the fragment, and the registry keeps it against the
+  email and mails it a link to the fragment's address: `{invited}`. Their
+  first sign-in that verifies the email (a WorkOS sign-in, an
+  `/auth/link` adding it, or an e2e person's) makes them a member at the
+  role it said, added by the invite's maker, and a stronger role they hold
+  is kept. The link signs them in and lands them there. A forwarded mail
+  admits no one else: only a sign-in as the email meets the invite.
+  Signing in never makes a share; it meets one addressed to its email.
+- Inviting the same email again renews the invite (its role, 30 days
+  more) and mails it again. Revoking it (`DELETE invites/<email>`) takes
+  it back; a mailed link then opens nothing for them.
+- A fragment holds at most `INVITES_MAX` (100) invites waiting, and an
+  email at most `INVITES_PER_EMAIL_MAX` (100) across the fleet (429 past
+  it). A person can have at most `INVITE_MAILS_DAILY_MAX` (50) mailed a
+  day, an agent's counted in its owner's day (429, saying so). A mail the
+  service does not send takes the invite back and says why.
+- No event names the email (a `link` fragment's viewers read its
+  events): `invite.created` and `invite.revoked` say a role and who made
+  them, and `member.joined` names the npub that met it.
+- An e2e person's address (`<name>@e2e.test`) on a preview is mailed
+  nowhere (Mail, below): its sign-in meets the invite as a person's would.
+
+Agents have no email: they are added by npub (`PUT members`).
 
 ## Control API
 
@@ -689,13 +724,11 @@ and styles only inline and images only from the platform
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
-| `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
-| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (an npub)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by email); without, whoever holds the token |
-| `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [...]}` without tokens |
-| `DELETE /api/f/{name}/invites/{id}` | owner, or their agent for them | → `{ok, revoked}` |
-| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
-| `POST /api/f/{name}/join/preview` | any signer | `{token}` → `{name, role, invitedBy, invitee, expiresAt, current}`: what joining would grant (`current`: the signer's role now), joining no one; 404 for a token that names no open invite (the platform's `/join` page shows it) |
+| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
+| `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{member: Member}` (someone signs in as it: a member now) or `{invited: {email, role, expiresAt, createdBy}}` (no one does yet: it waits on the email, mailed); Invites by email, above. An owner's own email, or a role they cannot grant, is refused as `PUT members` refuses it |
+| `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [{email, role, expiresAt, createdBy}]}`: the invites waiting, oldest first |
+| `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}` |
 | `POST /api/f/{name}/rotate` | owner, or their agent for them | `{scopes?: [inbox, view]}` → `{inboxToken, viewToken, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
@@ -1663,7 +1696,7 @@ ports, by one of its agents becoming a member of any fragment, and by
 its owner. Records its own agents post wake nothing, and neither do
 their own sockets: its guest following a fragment pre-wakes no
 computer its agents run on. An agent added to a
-fragment (a member's `PUT`, an invite it accepts, a fragment it makes
+fragment (a member's `PUT`, a fragment it makes
 for its owner) needs nothing more from whoever added it: the platform
 posts `{kind: "joined", fragment}` on the agent fragment's `tasks`, as
 that fragment, once for the membership, and wakes the computer (Paul,

@@ -213,7 +213,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   mutation by principal and id.
 - Origins: each fragment is served from
   `<name>.fragment.boats`; the platform (login, the share
-  sheet, invites) from `fragment.club`, another site
+  sheet) from `fragment.club`, another site
   (docs/cloudflare-v1.md, decision 5). The router checks the hostname against the configured
   suffix before it trusts it.
 
@@ -247,7 +247,7 @@ Every change is checked against this table.
 | File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
 | Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by the platform's own moves (its commits, a deploy), a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
-| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
+| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, to meet it at a sign-in: a pointer the fragment overrules (one with none waiting is forgotten) |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |

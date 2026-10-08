@@ -28,26 +28,28 @@
 //! leaving, sends every row again (`reindex`). A person's search cursor
 //! (search.rs) follows their row: made with a role, gone without one.
 //!
-//! An invite may be for one identity (`invitee`, the share sheet's invite by
-//! email): only they may accept it, so a forwarded link admits no one
-//! else. Without one, whoever holds its token may.
+//! An invite waits on an email no one signs in as yet (decision 48): the
+//! registry keeps it against the email and mails them, and their first
+//! sign-in as it makes them a member here (`claim_invite`). A forwarded
+//! mail admits no one else: only a sign-in that verified the email meets
+//! it. There are no bearer invites: an unguessable link is `link`
+//! visibility.
 
 use fragment_core::access;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
-    FragmentKind,
-    limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
-    Sharing, Visibility,
+    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
+    Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
+use crate::registry::calls::{ClaimInvite, InviteEmail, Invited};
 
 /// Index changes one flush sends at most, all at once (and a delete, of
 /// its ended life's: ended.rs). Sent one at a time, a fragment of
@@ -55,6 +57,10 @@ use crate::js;
 /// the e2e preview (2026-10-06): about 0.3 s a list, each a Principal made
 /// on the spot.
 pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
+
+/// Marks the registry's `invites/claim`, a sign-in meeting the invite
+/// waiting on its email; the router never sets it.
+pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 
 fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     if actor_is_owner {
@@ -119,13 +125,10 @@ impl Actor {
 
 fn invite_json(r: &Value) -> Invite {
     Invite {
-        id: r["id"].as_str().unwrap_or("").to_string(),
+        email: r["email"].as_str().unwrap_or("").to_string(),
         role: r["role"].as_str().and_then(Role::parse).unwrap_or(Role::Viewer),
-        uses_left: r["uses_left"].as_u64().unwrap_or(0) as u32,
         expires_at: r["expires_at"].as_i64().unwrap_or(0),
         created_by: npub::display(r["created_by"].as_str().unwrap_or("")),
-        invitee: r["invitee"].as_str().map(str::to_string),
-        token: None,
     }
 }
 
@@ -354,10 +357,10 @@ impl FragmentCell {
     }
 
     /// The identity `who` (an npub or 64 hex: an identity, or a key of
-    /// one) names.
+    /// one; or an email: the person who signs in as it) names.
     async fn named(&self, who: &str) -> CellResult<Identity> {
-        if npub::parse(who).is_none() {
-            return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")));
+        if npub::parse(who).is_none() && !fragment_core::mail::valid_address(who) {
+            return Err(CellError::invalid(format!("{who:?} is not an email, an npub, or a 64-hex key")));
         }
         crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: who.to_string() }).await
     }
@@ -433,6 +436,12 @@ impl FragmentCell {
             return Err(refusal(false, why));
         }
         let target = self.named(who).await?;
+        json_response(&self.put_member(&actor, &target, body).await?)
+    }
+
+    /// `target` made a member at `body`'s role, or their role changed, by
+    /// `actor`, the owner or their agent sharing for them.
+    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
@@ -481,7 +490,7 @@ impl FragmentCell {
         self.flush_index().await;
         self.flush_joined().await;
         let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
-        json_response(&member_json(&row[0])?)
+        member_json(&row[0])
     }
 
     pub(crate) async fn remove_member(&self, caller: &Caller, who: &str) -> CellResult<Response> {
@@ -493,7 +502,8 @@ impl FragmentCell {
             _ if who == "me" => me.clone(),
             Some(key) if self.member_role(&npub::identity_of(&key))?.is_some() => npub::identity_of(&key),
             Some(_) => self.named(who).await?.id,
-            None => return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key"))),
+            None if fragment_core::mail::valid_address(who) => self.named(&who.to_ascii_lowercase()).await?.id,
+            None => return Err(CellError::invalid(format!("{who:?} is not an email, an npub, or a 64-hex key"))),
         };
         let is_self = me == target;
         // leaving is any member's own; removing anyone else is sharing
@@ -535,151 +545,145 @@ impl FragmentCell {
     }
 
     fn drop_spent_invites(&self) -> CellResult<()> {
-        self.exec("DELETE FROM invites WHERE expires_at <= ? OR uses_left <= 0", vec![SqlStorageValue::Integer(js::now_ms())])
+        self.exec("DELETE FROM invites WHERE expires_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])
     }
 
-    pub(crate) fn create_invite(&self, caller: &Caller, body: CreateInvite) -> CellResult<Response> {
+    /// Its title as its members' lists show it, if it has one.
+    fn title(&self) -> CellResult<Option<String>> {
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
+    }
+
+    /// Shares it with whoever signs in as `body.email` (decision 48). The
+    /// person who holds that email is a member at once. When no one does
+    /// yet, the invite waits on the email here, and the registry keeps it
+    /// against the email, mails them, and makes them a member at their
+    /// first sign-in as it (`claim_invite`). It is written before the
+    /// registry is asked, so a sign-in meanwhile meets it, and taken back
+    /// when the registry refuses (a day's mails spent, a mail not sent).
+    /// No event names the email: a link's viewers read the events.
+    pub(crate) async fn create_invite(&self, caller: &Caller, body: CreateInvite) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         if !matches!(body.role, Role::Viewer | Role::Editor) {
             return Err(CellError::invalid("an invite grants viewer or editor"));
         }
-        if let Some(invitee) = &body.invitee {
-            if !npub::is_identity(invitee) {
-                return Err(CellError::invalid(format!("invitee {invitee:?} is not an identity (an npub)")));
-            }
-            // the fragment's owner, not who asks: their agent may ask for them
-            if self.must(MetaKey::Owner)? == *invitee {
-                return Err(CellError::invalid("the owner is in already"));
-            }
+        let email = body.email.trim().to_ascii_lowercase();
+        if !fragment_core::mail::valid_address(&email) {
+            return Err(CellError::invalid(format!("{email:?} is not an email")));
         }
-        let uses = body.uses.unwrap_or(1);
-        if uses == 0 || uses > limits::INVITE_USES_MAX {
-            return Err(CellError::invalid(format!("uses must be 1..={}", limits::INVITE_USES_MAX)));
-        }
-        let ttl_s = body.ttl_s.unwrap_or(limits::INVITE_TTL_DEFAULT_S);
-        if !(60..=limits::INVITE_TTL_MAX_S).contains(&ttl_s) {
-            return Err(CellError::invalid(format!("ttlS must be 60..={}", limits::INVITE_TTL_MAX_S)));
-        }
+        let name = self.name()?;
         self.drop_spent_invites()?;
-        if self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} open invites", limits::INVITES_MAX)));
+        let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
         }
-        let token = js::random_hex::<24>();
-        let id = js::random_hex::<8>();
         let now = js::now_ms();
-        let expires_at = now + ttl_s * 1000;
-        let by = actor.by.as_str();
-        self.exec(
-            "INSERT INTO invites (id, token_sha, role, uses_left, expires_at, created_by, created_at, invitee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            vec![
-                id.as_str().into(),
-                hex::encode(Sha256::digest(token.as_bytes())).into(),
-                body.role.as_str().into(),
-                SqlStorageValue::Integer(uses.into()),
-                SqlStorageValue::Integer(expires_at),
-                by.into(),
-                SqlStorageValue::Integer(now),
-                opt(body.invitee.as_deref()),
-            ],
-        )?;
-        let whom = body.invitee.as_deref().map(|i| format!(", for {i}")).unwrap_or_default();
-        self.event(
-            "invite.created",
-            &format!("invite {id} for {} ({uses} uses{whom}){}", body.role.as_str(), actor.said()),
-            actor.noted(json!({ "id": id, "role": body.role, "invitee": body.invitee })),
-        );
-        json_response(&Invite { id, role: body.role, uses_left: uses, expires_at, created_by: npub::display(by), invitee: body.invitee, token: Some(token) })
+        let expires_at = now + limits::INVITE_TTL_S * 1000;
+        let write = |role: &str, expires_at: i64, by: &str, at: i64| {
+            self.exec(
+                "INSERT INTO invites (email, role, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT (email) DO UPDATE SET role = excluded.role, expires_at = excluded.expires_at,
+                   created_by = excluded.created_by, created_at = excluded.created_at",
+                vec![email.as_str().into(), role.into(), SqlStorageValue::Integer(expires_at), by.into(), SqlStorageValue::Integer(at)],
+            )
+        };
+        write(body.role.as_str(), expires_at, &actor.by, now)?;
+        let asked = InviteEmail {
+            email: email.clone(),
+            fragment: name.clone(),
+            // an agent's mail counts in its owner's day
+            sharer: actor.for_owner.clone().unwrap_or_else(|| actor.by.clone()),
+            role: body.role,
+            title: self.title()?.unwrap_or_else(|| crate::share::label(&name).to_string()),
+            expires_at,
+        };
+        let answer = crate::ask_registry(&self.env, &asked).await;
+        // what this call wrote, unless a sign-in met it meanwhile
+        let mine = || self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)]);
+        match answer {
+            Ok(Invited::Mailed) => {
+                self.event(
+                    "invite.created",
+                    &format!("an invite waits on an email, as {}{}", body.role.as_str(), actor.said()),
+                    actor.noted(json!({ "role": body.role, "expiresAt": expires_at })),
+                );
+                let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone() };
+                json_response(&Shared::Invited(invite))
+            }
+            Ok(Invited::Holder(person)) => {
+                mine()?;
+                let member = self.put_member(&actor, &person, SetRole { role: body.role, people_only: false }).await?;
+                json_response(&Shared::Member(member))
+            }
+            Err(e) => {
+                mine()?;
+                if let Some(was) = before.first() {
+                    let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
+                    let int = |k: &str| was[k].as_i64().unwrap_or_default();
+                    write(&field("role"), int("expires_at"), &field("created_by"), int("created_at"))?;
+                }
+                Err(e)
+            }
+        }
     }
 
     pub(crate) fn invites(&self, caller: &Caller) -> CellResult<Response> {
         self.require_owner(caller)?;
         self.drop_spent_invites()?;
-        let rows = self.rows("SELECT id, role, uses_left, expires_at, created_by, invitee FROM invites ORDER BY created_at", vec![])?;
+        let rows = self.rows("SELECT email, role, expires_at, created_by FROM invites ORDER BY created_at, email", vec![])?;
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
-    pub(crate) fn revoke_invite(&self, caller: &Caller, id: &str) -> CellResult<Response> {
+    pub(crate) fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        if self.rows("SELECT id FROM invites WHERE id = ?", vec![id.into()])?.is_empty() {
-            return Err(CellError::new(ErrorCode::NotFound, "no such invite"));
+        let email = email.trim().to_ascii_lowercase();
+        self.drop_spent_invites()?;
+        if self.rows("SELECT email FROM invites WHERE email = ?", vec![email.as_str().into()])?.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no invite waits on {email}")));
         }
-        self.exec("DELETE FROM invites WHERE id = ?", vec![id.into()])?;
-        self.event("invite.revoked", &format!("invite {id} revoked{}", actor.said()), actor.noted(json!({ "id": id })));
-        json_response(&json!({ "ok": true, "revoked": id }))
+        self.exec("DELETE FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        self.event("invite.revoked", &format!("an invite was revoked{}", actor.said()), actor.noted(json!({})));
+        json_response(&json!({ "ok": true, "revoked": email }))
     }
 
-    /// The open invite a token names: its row (`id, role, expires_at,
-    /// created_by, invitee`), or 404.
-    fn open_invite(&self, token: &str) -> CellResult<Value> {
-        let rows = self.rows(
-            "SELECT id, role, expires_at, created_by, invitee FROM invites WHERE token_sha = ? AND expires_at > ? AND uses_left > 0",
-            vec![hex::encode(Sha256::digest(token.as_bytes())).into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        rows.into_iter().next().ok_or_else(|| CellError::new(ErrorCode::NotFound, "no such invite (it may have expired, been used, or been revoked)"))
-    }
-
-    /// What joining with a token would do, joining no one (the platform's
-    /// `/join` page shows it before its button): `{name, role, invitedBy,
-    /// invitee, expiresAt, current}`, `current` the caller's role now.
-    pub(crate) fn join_preview(&self, caller: &Caller, body: Join) -> CellResult<Response> {
-        let name = self.name()?;
-        let who = self.caller_id(caller)?;
-        let row = self.open_invite(&body.token)?;
+    /// The invite waiting on `email`, met by `identity`, a person who just
+    /// signed in as it (the registry's `ClaimInvite`): a member at the role
+    /// it said, added by its maker, and a stronger role they hold kept.
+    /// 404 when none waits (revoked, expired, or met already), and the
+    /// registry forgets it. A full fragment keeps it for their next sign-in.
+    pub(crate) async fn claim_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
+        self.name()?;
+        assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
+        self.drop_spent_invites()?;
+        let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        let Some(row) = rows.first() else {
+            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+        };
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
-        json_response(&json!({
-            "name": name,
-            "role": role,
-            "invitedBy": npub::display(row["created_by"].as_str().unwrap_or("")),
-            "invitee": row["invitee"],
-            "expiresAt": row["expires_at"],
-            "current": self.member_role(who)?,
-        }))
-    }
-
-    /// Redeems an invite. The token is the capability (no visibility
-    /// check); an invite for one identity is theirs alone.
-    pub(crate) async fn join(&self, caller: &Caller, body: Join) -> CellResult<Response> {
-        let name = self.name()?;
-        let who = self.caller_id(caller)?.to_string();
-        let row = self.open_invite(&body.token)?;
-        if row["invitee"].as_str().is_some_and(|invitee| invitee != who) {
-            return Err(CellError::new(ErrorCode::Forbidden, "this invite is for someone else"));
+        let by = row["created_by"].as_str().unwrap_or_default().to_string();
+        let who = claim.identity.as_str();
+        let current = self.member_role(who)?;
+        let kept = current.is_some_and(|c| c >= role);
+        if !kept {
+            self.check_room(current)?;
         }
-        let id = row["id"].as_str().unwrap_or("").to_string();
-        let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
-        let current = self.member_role(&who)?;
-        if let Some(current) = current {
-            if current >= role {
-                return json_response(&json!({ "name": name, "role": current, "joined": false }));
-            }
+        self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        if kept {
+            return Ok(json!({ "role": current }));
         }
-        // A full fragment refuses before the invite spends a use.
-        self.check_room(current)?;
-        let now = js::now_ms();
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, ?, ?, ?, 'person')
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-            vec![
-                who.as_str().into(),
-                role.as_str().into(),
-                format!("invite:{id}").into(),
-                SqlStorageValue::Integer(now),
-                opt(caller.kind().map(IdentityKind::as_str)),
-                opt(caller.owner()),
-            ],
+            vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;
-        self.index_change(&who, Some(role))?;
+        self.index_change(who, Some(role))?;
         self.sharing_changed()?;
-        // an agent that accepts an invite joins as one added does (runs_on.rs)
-        if current.is_none() && caller.kind() == Some(IdentityKind::Agent) {
-            self.agent_added(&who, caller.owner(), now)?;
-            self.reindex()?;
+        self.event("member.joined", &format!("{who} joined as {}, invited by email", role.as_str()), json!({ "principal": who, "role": role, "by": by }));
+        if current.is_some() {
+            self.reopen_sockets(&format!("p:{who}"), "your role changed");
         }
-        self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
-        self.flush_joined().await;
-        json_response(&json!({ "name": name, "role": role, "joined": true }))
+        Ok(json!({ "role": role }))
     }
 
     /// The fragment's sharing, as its owner's list carries it: `guests`

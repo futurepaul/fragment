@@ -19,9 +19,7 @@
 //!   GET    /api/members                   viewer
 //!   PUT    /api/members/<id|npub>         owner (a key names the identity holding it)
 //!   DELETE /api/members/<id|npub>         owner, or the member themselves
-//!   POST   /api/invites  GET /api/invites  DELETE /api/invites/<id>   owner
-//!   POST   /api/join                      any signed principal with a token (an invite for one identity: them)
-//!   POST   /api/join/preview              the same: what joining would do, joining no one
+//!   POST   /api/invites  GET /api/invites  DELETE /api/invites/<email>   owner (decision 48)
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
@@ -88,8 +86,7 @@ CREATE TABLE IF NOT EXISTS members (
   kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
-  id TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses_left INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, invitee TEXT);
+  email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS search_log (
@@ -899,6 +896,14 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
+        if path == "/invites/claim" {
+            // Only the registry's sign-in sets the header; the router never passes it.
+            if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let claim = body_json(&mut req).await?;
+            return json_response(&self.claim_invite(&claim).await?);
+        }
         if let Some(route) = path.strip_prefix("/wipe/") {
             // Only a wipe's orchestrator sets the header; the router never passes it.
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
@@ -950,18 +955,10 @@ impl FragmentCell {
             (Method::Delete, ["api", "members", who]) => self.remove_member(&caller, who).await,
             (Method::Post, ["api", "invites"]) => {
                 let body = body_json(&mut req).await?;
-                self.create_invite(&caller, body)
+                self.create_invite(&caller, body).await
             }
             (Method::Get, ["api", "invites"]) => self.invites(&caller),
-            (Method::Delete, ["api", "invites", id]) => self.revoke_invite(&caller, id),
-            (Method::Post, ["api", "join"]) => {
-                let body = body_json(&mut req).await?;
-                self.join(&caller, body).await
-            }
-            (Method::Post, ["api", "join", "preview"]) => {
-                let body = body_json(&mut req).await?;
-                self.join_preview(&caller, body)
-            }
+            (Method::Delete, ["api", "invites", email]) => self.revoke_invite(&caller, email),
             (Method::Put, ["api", "cap"]) => {
                 let body = body_json(&mut req).await?;
                 self.put_cap(&caller, body).await

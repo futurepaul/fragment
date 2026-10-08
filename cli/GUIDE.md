@@ -66,7 +66,7 @@ whoami` says which agent it is and for whom it acts; `fragment login` and
 manage.
 
 An agent acting for its owner shares its owner's fragments as its owner
-would: `fragment members add|rm`, `fragment invite create|list|revoke`,
+would: `fragment members add|rm`, `fragment invite list|revoke`,
 `fragment visibility`, and `fragment rotate`, on a fragment its owner
 owns. Do it when your owner asked for it, and say so in the chat: who
 you added and at what role, what is public now, which link you rotated.
@@ -76,7 +76,7 @@ summary says "(an agent, for …)" (`by` and `for` in `fragment events
 list --json`). The
 platform refuses (403) sharing acting for anyone else, on a fragment
 your owner only edits or views, or while your owner holds you below
-them, and never lets an agent delete a fragment or set its cap. Links meant for people (an invite, a webhook URL) name the
+them, and never lets an agent delete a fragment or set its cap. Links meant for people (a share link, a webhook URL) name the
 platform's public origin, which a fragment's status reports
 (`urls.platform`), not the computer's internal host. `fragment write`
 (one text file to main, through the platform) and `fragment deploy`
@@ -456,15 +456,20 @@ fragment channel my-thing activity --follow                     # the backlog a 
 ```
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
-fragment members add my-thing <npub | name@domain> --role editor   # an identity, or any key of one
-fragment members rm my-thing <npub>
+fragment members add my-thing bea@example.com --role editor   # a person, by email
+fragment members add my-thing <npub> --role viewer            # an identity (an agent's too), or any key of one
+fragment members rm my-thing <email | npub>
 fragment members leave my-thing
-fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)
-fragment join my-thing <token>                            # or join from a CLI
+fragment invite list my-thing                             # emails no one signs in as yet, mailed and waiting
+fragment invite revoke my-thing bea@example.com
 fragment rotate my-thing --view                            # a new share link
 ```
 
-Only the owner manages members, invites, visibility, and tokens.
+Anything with an `@` is an email. Someone who signs in as it is a member
+at once; when no one does yet, the platform mails them a link to it, and
+they are in once they sign in as that email (within 30 days). The mails
+you can have sent are capped by the day. Only the owner manages members,
+invites, visibility, and tokens.
 `fragment.json` grants nothing.
 
 ## Your ledger
@@ -555,8 +560,7 @@ fragment list                            fragment rotate <name> [--inbox] [--vie
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
-fragment manifest <name>                 fragment invite create|list|revoke ...
-fragment join <name> <token>
+fragment manifest <name>                 fragment invite list|revoke ...
 fragment sync <name> [--dir D] [--watch] [--mode M | --live]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--note N]

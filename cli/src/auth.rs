@@ -1,9 +1,8 @@
 // This machine's nostr key and its NIP-98 HTTP auth: crates/nip98 signs
 // (the same code the cell verifies with), crates/core names keys as npubs.
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use fragment_core::npub;
 use fragment_nip98::Keys;
-use serde_json::Value;
 
 #[derive(Clone)]
 pub struct Identity {
@@ -62,44 +61,38 @@ pub fn fixed(n: u8) -> Identity {
     Identity::from_secret_hex(&hex::encode([n; 32])).expect("a valid secret")
 }
 
-/// Resolve an identifier to its canonical npub form.
-///
-/// An npub or a 64-hex key is checked and canonicalised. NIP-05 names
-/// (`local@domain`) resolve via the standard well-known path
-/// `https://<domain>/.well-known/nostr.json?name=<local>` — the same lookup
-/// the other finite CLIs (fbrain, fsite) use — so finite identities like
-/// `paul@finite.vip` work anywhere an npub does.
-pub fn resolve_npub(input: &str) -> Result<String> {
-    let s = input.trim();
-    if let Some((local, domain)) = s.split_once('@') {
-        if local.is_empty() || domain.is_empty() || domain.contains('@') {
-            bail!("'{s}' is not a valid NIP-05 name");
+/// Whom a member command names (docs/cloudflare-v1.md, decision 48).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Member {
+    /// Anything shaped like an email, lower case: the person who signs in
+    /// as it (or, to `members add`, an invite waiting on it).
+    Email(String),
+    /// An npub or a 64-hex key, as its npub: the identity, or the one
+    /// holding the key.
+    Npub(String),
+}
+
+impl std::fmt::Display for Member {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Member::Email(e) => f.write_str(e),
+            Member::Npub(n) => f.write_str(n),
         }
-        let url = format!("https://{domain}/.well-known/nostr.json?name={local}");
-        let http = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none()) // NIP-05 forbids redirects
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-        let resp = http
-            .get(&url)
-            .send()
-            .with_context(|| format!("NIP-05 lookup failed for '{s}'"))?;
-        if !resp.status().is_success() {
-            bail!("NIP-05 lookup for '{s}' returned HTTP {}", resp.status());
-        }
-        let body = resp
-            .text()
-            .with_context(|| format!("NIP-05 lookup for '{s}' failed"))?;
-        let doc: Value = serde_json::from_str(&body)
-            .with_context(|| format!("NIP-05 document at {domain} is not valid JSON"))?;
-        let published = doc["names"][local]
-            .as_str()
-            .ok_or_else(|| anyhow!("no npub published for '{s}'"))?;
-        let hex = npub::parse(published).ok_or_else(|| anyhow!("'{s}' published an invalid pubkey"))?;
-        return Ok(npub::encode(&hex));
     }
-    let hex = npub::parse(s).ok_or_else(|| anyhow!("'{s}' is not an npub or a 64-hex key"))?;
-    Ok(npub::encode(&hex))
+}
+
+/// An email, or an npub or a 64-hex key, checked and made canonical.
+pub fn member_of(input: &str) -> Result<Member> {
+    let s = input.trim();
+    if s.contains('@') {
+        let email = s.to_ascii_lowercase();
+        if !fragment_core::mail::valid_address(&email) {
+            bail!("'{s}' is not an email");
+        }
+        return Ok(Member::Email(email));
+    }
+    let hex = npub::parse(s).ok_or_else(|| anyhow!("'{s}' is not an email, an npub, or a 64-hex key"))?;
+    Ok(Member::Npub(npub::encode(&hex)))
 }
 
 #[cfg(test)]
@@ -127,12 +120,17 @@ mod tests {
         }
     }
 
+    /// Goal: decision 48's "anything shaped like an email is an email",
+    /// and keys as their npubs. Method: each form, valid and not.
     #[test]
-    fn identifiers_resolve_to_npubs() {
+    fn a_member_is_an_email_or_an_npub() {
         let id = fixed(1);
-        assert_eq!(resolve_npub(&id.npub()).unwrap(), id.npub());
-        assert_eq!(resolve_npub(&format!(" {} ", id.pubkey_hex().to_uppercase())).unwrap(), id.npub());
-        assert!(resolve_npub("npub1xyz").is_err());
-        assert!(resolve_npub("@x").is_err());
+        assert_eq!(member_of(&id.npub()).unwrap(), Member::Npub(id.npub()));
+        assert_eq!(member_of(&format!(" {} ", id.pubkey_hex().to_uppercase())).unwrap(), Member::Npub(id.npub()));
+        assert_eq!(member_of(" Bea@Example.com ").unwrap(), Member::Email("bea@example.com".into()));
+        assert_eq!(member_of("paul@finite.vip").unwrap().to_string(), "paul@finite.vip", "an email, never a NIP-05 name");
+        for bad in ["npub1xyz", "@x", "bea@", "bea@example", "a b@example.com", ""] {
+            assert!(member_of(bad).is_err(), "{bad:?}");
+        }
     }
 }

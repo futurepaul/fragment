@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::{Identity, IdentityKind, IdentityView};
+use fragment_proto::{Identity, IdentityKind, IdentityView, Role};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +77,52 @@ impl Call for Lookup {
     fn checked(answer: Identity) -> CellResult<Identity> {
         identity_checked(answer)
     }
+}
+
+/// `POST /invite`: a fragment shared with whoever signs in as `email`
+/// (decision 48): the person who holds it, or, when no one does yet, the
+/// invite kept against the email and mailed to it, counted in the
+/// sharer's day (429 past `limits::INVITE_MAILS_DAILY_MAX`).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InviteEmail {
+    /// Lower case, one plain address (`fragment_core::mail::valid_address`).
+    pub email: String,
+    pub fragment: String,
+    /// The person whose day it counts in (an agent's owner).
+    pub sharer: String,
+    pub role: Role,
+    /// What the mail calls the fragment: its title, or its label.
+    pub title: String,
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Invited {
+    /// The person who holds the email: the fragment makes them a member.
+    Holder(Identity),
+    /// No one does: the invite waits on it, and the mail went.
+    Mailed,
+}
+
+impl Call for InviteEmail {
+    const PATH: &'static str = "/invite";
+    type Answer = Invited;
+    fn checked(answer: Invited) -> CellResult<Invited> {
+        match answer {
+            Invited::Holder(person) => Ok(Invited::Holder(identity_checked(person)?)),
+            Invited::Mailed => Ok(Invited::Mailed),
+        }
+    }
+}
+
+/// A fragment's `invites/claim`: the person `identity` signed in as
+/// `email`, verified, and meets the invite waiting on it there.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ClaimInvite {
+    pub email: String,
+    pub identity: String,
 }
 
 /// `POST /agents`: an agent its owner vouches for (the key's proof was

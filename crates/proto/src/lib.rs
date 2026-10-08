@@ -63,13 +63,14 @@ pub mod limits {
     pub const SECRETS_MAX: usize = 100;
     /// Members per fragment.
     pub const MEMBERS_MAX: usize = 1000;
-    /// Open invites per fragment.
+    /// Invites waiting per fragment.
     pub const INVITES_MAX: usize = 100;
-    /// People one invite may admit.
-    pub const INVITE_USES_MAX: u32 = 1000;
-    /// An invite's default and longest lifetime.
-    pub const INVITE_TTL_DEFAULT_S: i64 = 7 * 24 * 3600;
-    pub const INVITE_TTL_MAX_S: i64 = 30 * 24 * 3600;
+    /// How long an invite waits on its email (decision 48).
+    pub const INVITE_TTL_S: i64 = 30 * 24 * 3600;
+    /// Invites one person may have mailed in a day (decision 48).
+    pub const INVITE_MAILS_DAILY_MAX: u32 = 50;
+    /// Invites waiting on one email, across the fleet's fragments.
+    pub const INVITES_PER_EMAIL_MAX: usize = 100;
     /// A storage token's lifetime.
     pub const STORAGE_TOKEN_TTL_S: i64 = 900;
     /// A file path in the repo.
@@ -775,7 +776,7 @@ pub struct Member {
     /// The member's identity (an npub).
     pub principal: String,
     pub role: Role,
-    /// The identity that granted it (the owner), or `invite:<id>`.
+    /// Who granted it: the owner, or their agent for them (an invite's maker).
     pub added_by: String,
     pub added_at: i64,
     /// `person` or `agent`.
@@ -967,50 +968,39 @@ pub struct SetRole {
     pub people_only: bool,
 }
 
-/// `POST /api/f/<name>/invites` (owner)
+/// `POST /api/f/<name>/invites` (owner): share with whoever signs in as
+/// `email` (decision 48).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateInvite {
+    pub email: String,
     pub role: Role,
-    /// How many people may join with it (default 1).
-    #[serde(default)]
-    pub uses: Option<u32>,
-    /// Seconds until it expires (default 7 days).
-    #[serde(default)]
-    pub ttl_s: Option<i64>,
-    /// The identity (an npub) it is for: only they may accept it. `None`:
-    /// anyone who holds its token.
-    #[serde(default)]
-    pub invitee: Option<String>,
 }
 
+/// An invite waiting on an email: whoever signs in as it becomes a member,
+/// at its role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invite {
-    pub id: String,
+    pub email: String,
     pub role: Role,
-    pub uses_left: u32,
     pub expires_at: i64,
     pub created_by: String,
-    /// The identity it is for (`CreateInvite::invitee`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invitee: Option<String>,
-    /// Only in the answer to the create: the cell keeps its hash.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
 }
 
-/// `GET /api/f/<name>/invites` (owner): the open invites, without tokens.
+/// The answer to `POST /api/f/<name>/invites`: the person who holds the
+/// email, a member at once; or, when no one does yet, the invite, mailed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Shared {
+    Member(Member),
+    Invited(Invite),
+}
+
+/// `GET /api/f/<name>/invites` (owner): the invites waiting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InviteList {
     pub invites: Vec<Invite>,
-}
-
-/// `POST /api/f/<name>/join` (any signed principal)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Join {
-    pub token: String,
 }
 
 /// The answer to `POST /api/f/<name>/rotate` (owner): the tokens as they
