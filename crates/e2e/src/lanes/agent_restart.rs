@@ -109,7 +109,9 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         let follows = subs.body["subscriptions"].as_array()?.iter().any(|x| x["wake"] == true && x["principal"] == identity.as_str() && x["channel"] == "chat");
         (phase(api, &keys, &id) == "awake" && follows).then_some(())
     };
+    let woken = Instant::now();
     let ready = within(FIRST_START, following).is_some();
+    println!("      (first start: following its chat {:.1?} after the wake)", woken.elapsed());
     s.ok("its computer wakes, and the agent follows its chat", ready, view());
     if !ready {
         let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
@@ -122,7 +124,10 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     let reply_to = |turn: &str| agent_replies(&records(api, &keys, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
     let first = say(1, "Hello! What's one word for a calm morning?")?;
     let first_turn = turn_of(&agent_name, &chat_name, "chat", first.body["record"]["seq"].as_i64().unwrap_or(0));
-    let answered = within(REPLY, || (reply_to(&first_turn).is_some() && ended(&first_turn)).then_some(())).is_some();
+    let asked = Instant::now();
+    let replied = within(REPLY, || reply_to(&first_turn)).is_some();
+    println!("      (hello to its reply: {:.1?})", asked.elapsed());
+    let answered = replied && within(REPLY, || ended(&first_turn).then_some(())).is_some();
     let let_go = answered && within(LET_GO, || lever(api, &id, "saves").ok().filter(|r| r.body["keepalives"] == 0).map(|_| ())).is_some();
     s.ok("the agent answers, as itself, and its turn lets go of the computer", answered && let_go, json!({ "reply": reply_to(&first_turn), "work": work_of(&records(api, &keys, &chat_name, "work"), &first_turn) }));
     if !answered {
@@ -183,7 +188,9 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     // and the agent answers after it, with nothing left to tell its owner
     let second = say(2, "And one word for a quiet evening?")?;
     let second_turn = turn_of(&agent_name, &chat_name, "chat", second.body["record"]["seq"].as_i64().unwrap_or(0));
+    let asked = Instant::now();
     let answered = within(REPLY, || reply_to(&second_turn)).is_some();
+    println!("      (after the restart, a message to its reply: {:.1?})", asked.elapsed());
     let v = view();
     s.ok(
         "then the agent answers a message, and nothing is left to tell its owner",
