@@ -595,6 +595,30 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "bare": bare, "searched": searched, "builder": builder, "placeholder": asks, "at": b.eval(&page, "location.href")? }),
     );
     let _ = b.screenshot(&page, &shots.join("desktop-mind.png"));
+    // a file with a message: dropped on the mind's composer, uploaded as one
+    // of the mind's blobs, and named in the `say` record's attachments
+    b.click(&page, "#mind-links [data-key='mind:new']")?;
+    let fresh = s.eventually(wait, || b.eval_in_frame(&page, &mind_host, "document.querySelector('.composer textarea')?.placeholder ?? null").is_ok_and(|p| p == "Message Mind…"));
+    let drop = "(() => { const dt = new DataTransfer(); dt.items.add(new File(['hello mind'], 'notes.txt', { type: 'text/plain' })); \
+         document.querySelector('.screen.new').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); \
+         const t = document.querySelector('.composer textarea'); t.value = 'here are my notes'; t.dispatchEvent(new Event('input', { bubbles: true })); \
+         if (document.querySelectorAll('.composer .tray .file-chip').length !== 1) return false; document.querySelector('.composer').requestSubmit(); return true; })()";
+    let sent = fresh && b.eval_in_frame(&page, &mind_host, drop).ok() == Some(Value::Bool(true));
+    let said_file = || -> Value {
+        let r = shell(api, &session, "GET", &format!("/api/f/{mind}/channels/say?after=0&limit=100"), None, &[]).map(|r| r.body).unwrap_or_default();
+        r["records"].as_array().and_then(|l| l.iter().find(|x| x["body"]["text"] == "here are my notes").cloned()).unwrap_or(Value::Null)
+    };
+    let posted = sent && s.eventually(wait, || said_file()["body"]["attachments"][0]["name"] == "notes.txt");
+    let record = said_file();
+    let file = &record["body"]["attachments"][0];
+    let sha = file["sha256"].as_str().unwrap_or("");
+    let bytes = if sha.len() == 64 { shell_site(s, api, &session, &mind, &format!("__blob/{sha}")).ok() } else { None };
+    s.ok(
+        "a file dropped on the mind's composer goes with the message: uploaded as the mind's blob, named in say's attachments",
+        posted && file["type"] == "text/plain" && file["size"] == 10 && bytes.as_ref().is_some_and(|r| r.status == 200 && r.text == "hello mind"),
+        json!({ "fresh": fresh, "sent": sent, "record": record, "blob": bytes.map(|r| r.status) }),
+    );
+    let _ = b.screenshot(&page, &shots.join("desktop-mind-file.png"));
     // the first agent's direct chat, made as the shell's new agent makes
     // one: the shell's list shows it, live, and it opens in the middle
     // column in the mind's place
@@ -706,6 +730,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    // the mind takes the middle column again, the app's window still beside it
+    b.click(&page, "#mind-links [data-key='mind:memory']")?;
+    let beside = b.until(&page, "location.hash === '#/memory' && document.getElementById('chat-title').textContent === 'Memory' && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment.startsWith('mind.')) && document.querySelector('.viewer iframe')", wait);
+    s.ok("the mind's Memory opens in the middle column, the app's window still beside it", beside, b.eval(&page, "location.href")?);
+    let _ = b.screenshot(&page, &shots.join("desktop-mind-app.png"));
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
     // settings, at /settings: what a person needs of their account
@@ -776,6 +805,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
+    // the mind on a phone: the shell's sidebar over it opens its screens,
+    // and closes as it does
+    b.click(&page, "#toggle-left")?;
+    let drawer = b.until(&page, "document.getElementById('layout').classList.contains('left-open')", wait);
+    let _ = b.screenshot(&page, &shots.join("phone-sidebar.png"));
+    if drawer {
+        b.click(&page, "#mind-links [data-key='mind:topics']")?;
+    }
+    let topics = drawer && b.until(&page, "location.hash === '#/topics' && !document.getElementById('layout').classList.contains('left-open') && document.getElementById('chat-title').textContent === 'Topics'", wait);
+    s.ok("on a phone the sidebar opens over the mind, and its Topics opens the mind's, the sidebar closing", topics, b.eval(&page, "location.href")?);
+    let _ = b.screenshot(&page, &shots.join("phone-mind-topics.png"));
     println!("      (screenshots: {})", shots.display());
     Ok(())
 }
@@ -842,7 +882,8 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    let _ = b.screenshot(page, &s.dir("shell-ui").join("desktop-connections.png"));
+    // the lane's folder, made at its start (`dir` would empty it)
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui").join("desktop-connections.png"));
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
