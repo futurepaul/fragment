@@ -279,6 +279,30 @@ puts it under the creator's username; creating under someone else's is
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
 unsigned (an inbox, a site) names it in full.
 
+## Operators: the admin (docs/billing.md; decision 59)
+
+The deployment's operators run it from `/admin` (a platform page, plain
+like the shell: it holds nothing, and its API answers only operators),
+from `fragment operator people|person|orgs|comp|uncomp|trials|health|log`,
+or over `/api/admin/*`. An operator is: a key the deployment's
+`operators` lists, held by anyone or no one (no registry is asked of one
+no one holds, as a wipe's); an identity it lists, signed or through the
+shell's session; or a person who holds a key it lists, through their
+session too (it acts as that key may). The operators' ledger commands
+(Ledger) take the same. An operator is named by their identity, or a key
+no one holds by its npub: a grant's `by`, and the log's.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves) |
+| `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null}` |
+| `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
+| `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
+| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, and ledger command, written in its own turn; the newest 10,000 kept |
+| `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/settings?trial=<code>`; an ended code is 400 |
+
+Comps, orgs' views and trial codes are under Seats and orgs.
+
 ## Operators: wiping a person
 
 The deployment's operators (`FRAGMENT_OPERATORS`: identities, and keys)

@@ -14,8 +14,9 @@ use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, OrgOf, Sleeps, SyncSeat};
 use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat, SeatKindChange};
+use crate::registry::admin;
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
-use crate::{acting_for, ask_registry, caller, json_answer, read_body, signer, Caller};
+use crate::{acting_for, ask_registry, caller, json_answer, read_body, Caller};
 use fragment_nip98::Payload;
 
 fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
@@ -87,18 +88,62 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
     }
 }
 
-/// `/api/admin/…`: the deployment's operators' (docs/api.md, Operators),
-/// through a signed request or the shell's session (decision 59).
+/// Who an operator's request is from (the admin's routes, operators'
+/// ledger commands): a key the deployment lists, held by anyone or no one
+/// (no registry is asked, as a wipe's); a signed request or the shell's
+/// session (decision 59) of an identity it lists, or of a person who holds
+/// a key it lists (the session acts as that key may). Anyone else is 403.
+/// Answers the operator's name (their identity, or a key no one holds),
+/// for the log and a grant's `by`.
+pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<String> {
+    if acting_for(url)?.is_some() {
+        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+    }
+    let refused = || CellError::new(ErrorCode::Forbidden, "only the deployment's operators do this");
+    match caller(env, req, url, Payload::Read(bytes))? {
+        Caller::Key(key) => {
+            let listed = cfg.is_operator(Some(&key), "")?;
+            match ask_registry(env, &crate::registry::calls::Resolve { key: key.clone() }).await {
+                // a person's: named by their identity
+                Ok(who) => (listed || cfg.is_operator(Some(&key), &who.id)?).then_some(who.id).ok_or_else(refused),
+                // a listed key no one holds: named by itself
+                Err(e) if listed && e.code == ErrorCode::Unauthenticated => Ok(fragment_core::npub::encode(&key)),
+                Err(e) => Err(e),
+            }
+        }
+        Caller::Session(token) => {
+            let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: By::Session(token) }).await?;
+            if cfg.is_operator(None, &view.id)? {
+                return Ok(view.id);
+            }
+            // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
+            for k in view.keys.iter().filter(|k| k.revoked_at.is_none()) {
+                if let Some(hex) = fragment_core::npub::parse(&k.npub) {
+                    if cfg.is_operator(Some(&hex), "")? {
+                        return Ok(view.id);
+                    }
+                }
+            }
+            Err(refused())
+        }
+    }
+}
+
+/// A query parameter, once.
+fn param(url: &Url, k: &str) -> Option<String> {
+    url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned()).filter(|v| !v.is_empty())
+}
+
+/// `/api/admin/…`: the deployment's operators' (docs/api.md, Operators):
+/// comps, orgs, people, trial codes and their mail, billing's health, and
+/// the log of what operators did.
 pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-    let who = signer(env, &req, url, &bytes).await?;
-    if !cfg.is_operator(who.key.as_deref(), &who.id)? {
-        return Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators reach /api/admin"));
-    }
+    let by = operator(env, cfg, &req, url, &bytes).await?;
     match (req.method(), rest) {
         (Method::Post, ["seats"]) => {
             let comp: CompSeat = body(&bytes)?;
-            let mut comped = ask_registry(env, &CompSeatCall { by: who.id.clone(), comp }).await?;
+            let mut comped = ask_registry(env, &CompSeatCall { by, comp }).await?;
             if comped.created && cfg.mail_from.is_some() {
                 comped.mailed = mail_comp(env, cfg, &comped).await;
             }
@@ -106,16 +151,68 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         }
         (Method::Patch, ["seats", seat]) => {
             let set: SetSeatKind = body(&bytes)?;
-            json_answer(&ask_registry(env, &CompKind { seat: seat.to_string(), kind: set.kind }).await?)
+            json_answer(&ask_registry(env, &CompKind { by, seat: seat.to_string(), kind: set.kind }).await?)
         }
-        (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &EndComp { seat: seat.to_string() }).await?),
+        (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &EndComp { by, seat: seat.to_string() }).await?),
+        (Method::Get, ["orgs"]) => json_answer(&ask_registry(env, &admin::Orgs { after: param(url, "after") }).await?),
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
-        (Method::Post, ["trials"]) => json_answer(&ask_registry(env, &TrialNew { by: who.id.clone(), code: body(&bytes)? }).await?),
+        (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
+        (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
+        (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
+        (Method::Get, ["log"]) => {
+            let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
+            json_answer(&ask_registry(env, &admin::Log { before }).await?)
+        }
+        (Method::Post, ["trials"]) => json_answer(&ask_registry(env, &TrialNew { by, code: body(&bytes)? }).await?),
         (Method::Get, ["trials"]) => json_answer(&ask_registry(env, &TrialList {}).await?),
         (Method::Get, ["trials", id]) => json_answer(&ask_registry(env, &TrialGet { id: id.to_string() }).await?),
-        (Method::Patch, ["trials", id]) => json_answer(&ask_registry(env, &TrialChange { id: id.to_string(), change: body(&bytes)? }).await?),
+        (Method::Patch, ["trials", id]) => json_answer(&ask_registry(env, &TrialChange { by, id: id.to_string(), change: body(&bytes)? }).await?),
+        (Method::Post, ["trials", id, "send"]) => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Send {
+                email: String,
+            }
+            let send: Send = body(&bytes)?;
+            let code = ask_registry(env, &TrialGet { id: id.to_string() }).await?;
+            if !code.active || code.expires_at.is_some_and(|at| at <= crate::js::now_ms()) {
+                return Err(CellError::invalid("this trial code has ended: turn it on, or make another"));
+            }
+            let kind = match code.kind {
+                SeatKind::SeatAlwaysOn => "a seat with an always-on computer",
+                SeatKind::Seat => "a seat",
+            };
+            let text = format!(
+                "You are invited to try fragment: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/settings?trial={}\n\nYour code: {}\n",
+                code.days,
+                cfg.platform(),
+                code.code,
+                code.code
+            );
+            let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: "Try fragment".into(), text };
+            crate::mail::send(env, cfg, &mail).await?;
+            ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to) }).await?;
+            json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
+        }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
+}
+
+/// A person's page for operators: as the list shows them, their ledger,
+/// and their computer (none: `null`).
+async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
+    if !fragment_core::npub::is_identity(person) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
+    }
+    let row = ask_registry(env, &admin::Person { person: person.to_string() }).await?;
+    let ledger = crate::ledger::ask(env, person, &crate::ledger::Status {}).await.map_err(|e| CellError::new(e.code, e.message))?;
+    let id = fragment_core::computer::default_computer_of(person);
+    let computer = match crate::computer::ask(env, &id, "computer/view", &serde_json::json!({})).await {
+        Ok(v) => v,
+        Err(e) if e.code == ErrorCode::NotFound => serde_json::Value::Null,
+        Err(e) => return Err(e),
+    };
+    Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer }))
 }
 
 /// A new seat's mail to its email, from its org: where to sign in.

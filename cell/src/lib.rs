@@ -630,46 +630,55 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 /// username or identity.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-    let who = signer(env, &req, url, &body).await?;
     if let (Method::Get, []) = (req.method(), rest) {
+        let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
     }
     let (Method::Post, [person, command]) = (req.method(), rest) else {
         return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));
     };
-    if !cfg.is_operator(who.key.as_deref(), &who.id)? {
-        return Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators grant credit or set plans, seats and overdrafts"));
-    }
+    // the operator, as the admin's routes take one (its name: a grant's `by`)
+    let op = orgs::operator(env, cfg, &req, url, &body).await?;
     let person = match *person {
-        "me" => who.id.clone(),
+        "me" => op.clone(),
         id if npub::is_identity(id) => id.to_string(),
         username if fragment_proto::valid_username(username) => ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?.identity.id,
         other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (an npub), or `me`"))),
     };
+    // each command is the operators' log's too (docs/api.md, Operators)
+    let note = |detail: String| registry::admin::Note { by: op.clone(), action: format!("ledger-{command}"), target: person.clone(), detail };
     match *command {
         "grant" => {
             let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
             // who granted it is who signs
-            if g.by != who.id {
-                return Err(CellError::invalid(format!("a grant's `by` is the operator who signs it ({})", who.id)));
+            if g.by != op {
+                return Err(CellError::invalid(format!("a grant's `by` is the operator who signs it ({op})")));
             }
             g.id = commanded("grant", &g.id)?;
-            json_answer(&ledger::ask(env, &person, &g).await?)
+            let answer = ledger::ask(env, &person, &g).await?;
+            ask_registry(env, &note(format!("{} micros: {}", g.micros, g.why))).await?;
+            json_answer(&answer)
         }
         "plan" => {
             let mut c: fragment_proto::ledger::SetPlan = command_body(&body, "plan")?;
             c.id = commanded("plan", &c.id)?;
-            json_answer(&ledger::ask(env, &person, &c).await?)
+            let answer = ledger::ask(env, &person, &c).await?;
+            ask_registry(env, &note(format!("{:?}", c.plan))).await?;
+            json_answer(&answer)
         }
         "seat" => {
             let mut c: fragment_proto::ledger::SetSeat = command_body(&body, "seat")?;
             c.id = commanded("seat", &c.id)?;
-            json_answer(&ledger::ask(env, &person, &c).await?)
+            let answer = ledger::ask(env, &person, &c).await?;
+            ask_registry(env, &note(format!("{:?} at {}", c.seat, c.seq))).await?;
+            json_answer(&answer)
         }
         "overdraft" => {
             let mut c: fragment_proto::ledger::SetOverdraft = command_body(&body, "overdraft")?;
             c.id = commanded("overdraft", &c.id)?;
-            json_answer(&ledger::ask(env, &person, &c).await?)
+            let answer = ledger::ask(env, &person, &c).await?;
+            ask_registry(env, &note(format!("{} micros", c.micros))).await?;
+            json_answer(&answer)
         }
         other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, seat, or overdraft"))),
     }
@@ -1014,6 +1023,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         // the shell, for everyone: signed out it asks them to sign in,
         // without a username it asks for one; `/settings` opens its settings
         (Method::Get, [""] | ["settings"]) => Ok(shell::page(&req, cfg, &url)?),
+        (Method::Get, ["admin"]) => Ok(shell::admin_page()?),
         (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await

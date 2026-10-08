@@ -14,7 +14,7 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 13] = [
+const FILES: [(&str, &str, &[u8]); 15] = [
     ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
     ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
     ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
@@ -30,8 +30,12 @@ const FILES: [(&str, &str, &[u8]); 13] = [
     ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png", include_bytes!("../shell/agent.png")),
+    // the operators' admin page (`/admin`)
+    ("admin.js", "text/javascript; charset=utf-8", include_bytes!("../shell/admin.js")),
+    ("admin.css", "text/css; charset=utf-8", include_bytes!("../shell/admin.css")),
 ];
 const PAGE: &str = include_str!("../shell/index.html");
+const ADMIN_PAGE: &str = include_str!("../shell/admin.html");
 
 /// A file's validator: its bytes' hash (a release changes them).
 fn etag(body: &[u8]) -> String {
@@ -71,6 +75,23 @@ pub fn page(req: &Request, cfg: &Config, url: &Url) -> Result<Response> {
     h.set("referrer-policy", "strict-origin-when-cross-origin")?;
     let _ = req;
     Ok(Response::ok(PAGE)?.with_headers(h))
+}
+
+/// `GET /admin`: the operators' admin page (decision 59), for anyone: it
+/// holds nothing, and its API answers only the deployment's operators.
+/// It frames nothing and is never framed.
+pub fn admin_page() -> Result<Response> {
+    let h = Headers::new();
+    h.set("content-type", "text/html; charset=utf-8")?;
+    h.set("cache-control", "no-store")?;
+    h.set(
+        "content-security-policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+    )?;
+    h.set("x-frame-options", "DENY")?;
+    h.set("cross-origin-opener-policy", "same-origin")?;
+    h.set("referrer-policy", "same-origin")?;
+    Ok(Response::ok(ADMIN_PAGE)?.with_headers(h))
 }
 
 /// `GET /__shell/<file>`: one of its files, or `None`.
