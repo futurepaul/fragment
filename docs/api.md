@@ -146,7 +146,12 @@ is at most 2 MiB, measured as it arrives: a longer declared
 `content-length`, or a chunked body that runs past it, is 413 before
 anything is authenticated.
 
-Roles, weakest first: `public`, `viewer`, `editor`, `owner`. A member's
+Roles, weakest first: `public`, `viewer`, `contributor`, `editor`,
+`owner`. A `contributor` (the share sheet's "Use") calls the operations
+and posts to the channels declared for it, and does whatever a viewer
+may; it holds none of the routes below that need `editor` (files,
+deploys, secrets, the storage token, blobs, replay, pause), so a member
+who writes an app's data cannot change the app. A member's
 role is their membership. Otherwise visibility decides: on a `public`
 fragment everyone holds `public`; on a `public` or `link` fragment the
 share link (`?view=<token>`, which sets an HttpOnly cookie on the
@@ -186,11 +191,11 @@ on your behalf"; `fragment_core::access::agent_shares`). Sharing is
 members (other than leaving with `DELETE members/me`), invites,
 visibility, and rotation. An agent acting `for` its own owner, and not
 held below them, shares a fragment its owner owns as its owner would,
-under the same rules (it grants viewer or editor, never owner, and never
-changes or removes the owner). Every other agent's sharing request is
-403, saying why: one acting as itself or for anyone else, one its owner
-holds (at any hold), and one on a fragment its owner does not own (an
-editor's agent shares nothing there). Deleting a fragment and setting
+under the same rules (it grants viewer, contributor, or editor, never
+owner, and never changes or removes the owner). Every other agent's
+sharing request is 403, saying why: one acting as itself or for anyone
+else, one its owner holds (at any hold), and one on a fragment its owner
+does not own (an editor's agent shares nothing there). Deleting a fragment and setting
 its cap are 403 for every agent, whomever it acts for. What an agent
 shares names it: the member's `addedBy` and the invite's `createdBy` are
 the agent, and each change's event (`member.set`, `member.removed`,
@@ -223,7 +228,7 @@ the new key and meant it for this signer.
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
-| `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
+| `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "contributor" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
 | `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
@@ -585,8 +590,8 @@ platform, so the fragment decides who may do what.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (View, Use, or Edit: `viewer`, `contributor`, `editor`; or removing them; an invite's menu the same three), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `contributor`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
 | `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
 | `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
 
@@ -623,9 +628,9 @@ and styles only inline and images only from the platform
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|contributor\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
-| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role (viewer\|contributor\|editor), uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [...]}` without tokens |
 | `DELETE /api/f/{name}/invites/{id}` | owner, or their agent for them | → `{ok, revoked}` |
 | `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
@@ -697,6 +702,9 @@ the code the fragment's own.
 ```
 
 - `role` defaults to `viewer` for a query and `editor` for a mutation.
+  `contributor` is for the people who write an app's data and not its
+  code: they call it without the editor's routes (Principals and
+  access, above).
   `constructor`, `fetch`, and `alarm` are not operation names (the App
   class's own; `fragment_proto::RESERVED_OP_NAMES`): a manifest naming one
   is refused at deploy.

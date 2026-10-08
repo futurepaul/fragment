@@ -69,7 +69,7 @@ const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-const ROLES = ["public", "viewer", "editor", "owner"];
+const ROLES = ["public", "viewer", "contributor", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 // Skyler's agent colors; an agent's is chosen by its identity.
 const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];

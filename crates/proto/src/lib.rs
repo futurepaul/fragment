@@ -409,11 +409,15 @@ pub struct ErrorBody {
 
 /// A member's role in a fragment. `Public` is the floor anyone who can see
 /// the fragment holds; the others are granted. Ordered weakest first.
+/// `Contributor` (the share sheet's "Use") calls the operations and posts
+/// to the channels declared for it, and holds nothing an editor's role
+/// alone opens (files, deploys, secrets, blobs, replay, pause).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Public,
     Viewer,
+    Contributor,
     Editor,
     Owner,
 }
@@ -423,6 +427,7 @@ impl Role {
         match self {
             Role::Public => "public",
             Role::Viewer => "viewer",
+            Role::Contributor => "contributor",
             Role::Editor => "editor",
             Role::Owner => "owner",
         }
@@ -432,6 +437,7 @@ impl Role {
         match s {
             "public" => Some(Role::Public),
             "viewer" => Some(Role::Viewer),
+            "contributor" => Some(Role::Contributor),
             "editor" => Some(Role::Editor),
             "owner" => Some(Role::Owner),
             _ => None,
@@ -1472,8 +1478,8 @@ mod tests {
 
     #[test]
     fn roles_order_weakest_first() {
-        assert!(Role::Public < Role::Viewer && Role::Viewer < Role::Editor && Role::Editor < Role::Owner);
-        for r in [Role::Public, Role::Viewer, Role::Editor, Role::Owner] {
+        assert!(Role::Public < Role::Viewer && Role::Viewer < Role::Contributor && Role::Contributor < Role::Editor && Role::Editor < Role::Owner);
+        for r in [Role::Public, Role::Viewer, Role::Contributor, Role::Editor, Role::Owner] {
             assert_eq!(Role::parse(r.as_str()), Some(r));
             assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
         }

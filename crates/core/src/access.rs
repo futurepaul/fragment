@@ -288,7 +288,7 @@ pub fn refuse_set_role(actor: Option<Role>, target_current: Option<Role>, new_ro
         return Some("the owner's role cannot be changed");
     }
     match new_role {
-        Role::Viewer | Role::Editor => None,
+        Role::Viewer | Role::Contributor | Role::Editor => None,
         Role::Owner => Some("a fragment has one owner; ownership transfer is not supported"),
         Role::Public => Some("`public` is what everyone gets on a public fragment; it cannot be granted"),
     }
@@ -373,6 +373,33 @@ mod tests {
         assert_eq!(d(V::Link, st(None, true, false), Editor), Decision::Unauthenticated);
         assert_eq!(d(V::Members, st(Some(Editor), false, true), Editor), Decision::Allow(Editor));
         assert_eq!(d(V::Members, st(Some(Viewer), false, true), Editor), Decision::Forbidden);
+    }
+
+    /// Goal: a contributor calls what is declared for it and what a viewer
+    /// may, and nothing an editor's role opens; a viewer and the share link
+    /// do not reach it, and an agent capped at it acts with no more.
+    /// Method: `decide` at each role a request may need.
+    #[test]
+    fn a_contributor_is_between_viewer_and_editor() {
+        let d = |v, s, needs| decide(v, s, Purpose::Act, needs);
+        let contributor = st(Some(Contributor), false, true);
+        for needs in [Public, Viewer, Contributor] {
+            assert_eq!(d(V::Members, contributor, needs), Decision::Allow(Contributor), "{needs:?}");
+        }
+        assert_eq!(d(V::Members, contributor, Editor), Decision::Forbidden);
+        assert_eq!(d(V::Members, st(Some(Viewer), false, true), Contributor), Decision::Forbidden);
+        assert_eq!(d(V::Link, st(None, true, false), Contributor), Decision::Unauthenticated);
+        assert_eq!(d(V::Public, st(None, true, true), Contributor), Decision::Forbidden);
+        // an agent acting for a contributor, or for an editor while held at
+        // contributor, or for anyone while its owner contributes, acts as one
+        for capped in [
+            acting(Some(Contributor), None, Some(Owner)),
+            Standing { held: Some(Contributor), ..acting(Some(Editor), None, Some(Owner)) },
+            acting(Some(Editor), None, Some(Contributor)),
+        ] {
+            assert_eq!(d(V::Members, capped, Contributor), Decision::Allow(Contributor), "{capped:?}");
+            assert_eq!(d(V::Members, capped, Editor), Decision::Forbidden, "{capped:?}");
+        }
     }
 
     #[test]
@@ -498,7 +525,7 @@ mod tests {
             assert_eq!(agent_shares(for_owner, OwnerShare { role, people_only: false }), Err(ShareRefusal::NotOwner), "{role:?}");
         }
         // held below its owner, at any hold: it shares nothing above its hold
-        for held in [Viewer, Editor] {
+        for held in [Viewer, Contributor, Editor] {
             let held = Sharer { for_owner: true, held: Some(held) };
             assert_eq!(agent_may_ask(Reserved::Sharing, held), Err(ShareRefusal::Held));
             assert_eq!(agent_shares(held, owns), Err(ShareRefusal::Held));
@@ -529,7 +556,10 @@ mod tests {
     fn membership_changes() {
         assert!(refuse_set_role(Some(Owner), None, Editor).is_none());
         assert!(refuse_set_role(Some(Owner), Some(Viewer), Editor).is_none());
+        assert!(refuse_set_role(Some(Owner), None, Contributor).is_none());
+        assert!(refuse_set_role(Some(Owner), Some(Editor), Contributor).is_none());
         assert!(refuse_set_role(Some(Editor), None, Viewer).is_some());
+        assert!(refuse_set_role(Some(Contributor), None, Viewer).is_some());
         assert!(refuse_set_role(Some(Owner), Some(Owner), Viewer).is_some());
         assert!(refuse_set_role(Some(Owner), None, Owner).is_some());
         assert!(refuse_set_role(Some(Owner), None, Public).is_some());

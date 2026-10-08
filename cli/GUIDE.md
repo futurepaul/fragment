@@ -126,8 +126,8 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
   are built in.
 - **Triggers.** A cron, a new record on a channel (the inbox is one),
   or a change to matching files starts a run of an operation.
-- **Members.** Owner, editor, viewer; visibility (`public`, `link`,
-  `members`) decides what everyone else gets.
+- **Members.** Owner, editor, contributor, viewer; visibility (`public`,
+  `link`, `members`) decides what everyone else gets.
 - **The event log is ground truth.** `fragment events <name>` says what
   happened; believe it over your memory.
 
@@ -268,7 +268,12 @@ fragment verify my-thing --dir .            # full-content audit
   refuses (a bad name, an unknown kind) keeps the last good code serving,
   and `fragment deploy` says why and exits 1.
 - `role` is who may call it: `public`, `viewer` (default for queries),
-  `editor` (default for mutations and jobs), `owner`.
+  `contributor`, `editor` (default for mutations and jobs), `owner`.
+  On an app its members write to (adding, checking off, voting), give
+  those operations `contributor`: someone it is shared with to Use
+  writes its data, and cannot change its files, deploy it, or read its
+  secrets, nor can an agent acting for them. Keep `editor` for what only
+  the app's makers do. A channel's `post` takes the same roles.
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
@@ -470,6 +475,7 @@ FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragmen
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
 fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
+fragment members add my-thing <id:…> --role contributor   # uses it: its contributor operations, not its code
 fragment members rm my-thing <id:… | npub>
 fragment members leave my-thing
 fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)

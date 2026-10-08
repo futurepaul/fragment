@@ -191,6 +191,7 @@ pub(crate) fn label(name: &str) -> &str {
 fn role_phrase(role: Role) -> &'static str {
     match role {
         Role::Editor => "an editor (they can change it)",
+        Role::Contributor => "a contributor (they can use it, not change it)",
         Role::Owner => "its owner",
         _ => "a viewer (they can see it)",
     }
@@ -360,13 +361,22 @@ fn action_form(sheet: &Sheet, action: &str, fields: &str, button: &str, class: &
     )
 }
 
+/// A role as the sheet says it: what the owner grants is View, Use, or Edit.
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::Owner => "Owner",
-        Role::Editor => "Editor",
-        Role::Viewer => "Viewer",
+        Role::Editor => "Edit",
+        Role::Contributor => "Use",
+        Role::Viewer => "View",
         Role::Public => "Anyone",
     }
+}
+
+/// The roles the owner grants, as a menu's options, `current` chosen.
+fn role_options(current: Option<Role>) -> String {
+    [Role::Viewer, Role::Contributor, Role::Editor]
+        .map(|r| format!("<option value=\"{}\"{}>{}</option>", r.as_str(), if current == Some(r) { " selected" } else { "" }, role_name(r)))
+        .concat()
 }
 
 /// Who can open it, as General access says it: an icon, its name, and
@@ -409,8 +419,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &action_form(
             sheet,
             "invite",
-            "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
-             <select name=\"role\" aria-label=\"role\"><option value=\"viewer\">Viewer</option><option value=\"editor\">Editor</option></select>",
+            &format!(
+                "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
+                 <select name=\"role\" aria-label=\"role\">{}</select>",
+                role_options(None)
+            ),
             "Invite",
             "add",
         );
@@ -422,12 +435,10 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &person(&m.principal, sheet.profiles.get(&m.principal), &sheet.me);
         if sheet.owner() && m.role != Role::Owner {
             let member = format!("<input type=\"hidden\" name=\"member\" value=\"{}\">", esc(&m.principal));
-            let choice = |r: Role| format!("<option value=\"{}\"{}>{}</option>", r.as_str(), if m.role == r { " selected" } else { "" }, role_name(r));
             // the menu ends in removing them (`share_post`)
             let select = format!(
-                "<select name=\"role\" aria-label=\"role\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{}{}<hr><option value=\"remove\">Remove access</option></select>",
-                choice(Role::Viewer),
-                choice(Role::Editor)
+                "<select name=\"role\" aria-label=\"role\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{}<hr><option value=\"remove\">Remove access</option></select>",
+                role_options(Some(m.role))
             );
             out += &action_form(sheet, "role", &format!("{member}{select}"), "", "");
         } else {
@@ -552,8 +563,8 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         m => Err(CellError::invalid(format!("{m:?} is not a member"))),
     };
     let role = || match Role::parse(field("role")) {
-        Some(r @ (Role::Viewer | Role::Editor)) => Ok(r),
-        _ => Err(CellError::invalid("a role is viewer or editor")),
+        Some(r @ (Role::Viewer | Role::Contributor | Role::Editor)) => Ok(r),
+        _ => Err(CellError::invalid("a role is viewer, contributor, or editor")),
     };
     // a member's role menu ends in "Remove access" (`render`)
     let action = match (field("action"), field("role")) {
