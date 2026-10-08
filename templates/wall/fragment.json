@@ -1,0 +1,23 @@
+{
+  "name": "wall",
+  "operations": {
+    "about": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["title"],
+        "additionalProperties": false,
+        "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 80 }, "intro": { "type": "string", "maxLength": 280 } }
+      }
+    },
+    "hide": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": { "type": "object", "required": ["seq"], "additionalProperties": false, "properties": { "seq": { "type": "integer", "minimum": 1 } } }
+    },
+    "wall": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "channels": { "posts": { "read": "public", "post": "public" } },
+  "meta": { "title": "Wall", "description": "A page anyone with the link can post to: a guestbook, or a party's wall. New posts land live." }
+}
