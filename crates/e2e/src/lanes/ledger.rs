@@ -562,6 +562,25 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let landed = s.eventually(wait, || aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
     s.ok("and is settled from its last, cumulative usage only", landed, json!(aig()));
+    // a slow one is hedged: the second call on a prefix-cache session of
+    // its own, the first aborted and charged on the second's hold
+    let calls = s.ai.calls().len();
+    s.ai.delay_next(&[fragment_core::hedge::AFTER_MS + 6_000]);
+    let t0 = std::time::Instant::now();
+    let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
+    let took = t0.elapsed();
+    let sent: Vec<_> = s.ai.calls().into_iter().skip(calls).collect();
+    let hedged = s.eventually(wait, || aig().iter().any(|e| e["ref"].as_str().is_some_and(|x| x.ends_with(":hedge")) && end_of(e) == "settled"));
+    s.ok(
+        "a streamed call slow to begin is hedged: a second, identical call on its own prefix-cache session answers, before the first would have, and the first is charged on the second's hold",
+        r.status == 200
+            && took < std::time::Duration::from_millis(fragment_core::hedge::AFTER_MS + 6_000)
+            && sent.len() == 2
+            && sent[0].body == sent[1].body
+            && sent[0].affinity.as_deref().is_some_and(|a| sent[1].affinity.as_deref() == Some(format!("{a}.hedge").as_str()))
+            && hedged,
+        json!({ "took_ms": took.as_millis() as u64, "affinities": sent.iter().map(|c| c.affinity.clone()).collect::<Vec<_>>(), "aig": aig() }),
+    );
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
     let worst = charge(&Usage::Tokens { model: FLASH.into(), input: chat(true).to_string().len() as u64 + 60, cached_input: 0, cache_write: 0, output: 16_384 });

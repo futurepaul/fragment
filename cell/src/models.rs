@@ -494,11 +494,16 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
     let cfg = Config::from_env(env);
     let t0 = js::now_ms();
     let mut race = Race::new();
-    // both calls are the same, prefix-cache session too: the mind's turns
-    // (no session) have the same tail as an agent's calls (one)
-    let open = |c: &AbortController| -> LocalBoxFuture<'a, Arrived> { Box::pin(arm(env, cfg, bounded, meta, c.signal())) };
+    // the second call on a prefix-cache session of its own (`Metadata::hedge`):
+    // an agent's first and second calls on one session were slow together
+    // (2026-10-08: both past 25 s), the mind's (on none) seldom
+    let mut hedge_meta = Some(meta.hedge());
+    let open = |meta: Metadata, c: &AbortController| -> LocalBoxFuture<'a, Arrived> {
+        let signal = c.signal();
+        Box::pin(async move { arm(env, cfg, bounded, &meta, signal).await })
+    };
     let first = AbortController::default();
-    let mut arms: [Option<LocalBoxFuture<'a, Arrived>>; 2] = [Some(open(&first)), None];
+    let mut arms: [Option<LocalBoxFuture<'a, Arrived>>; 2] = [Some(open(meta.clone(), &first)), None];
     let mut controllers: [Option<AbortController>; 2] = [Some(first), None];
     let mut arrived: [Option<Arrived>; 2] = [None, None];
     let mut timer = Some(Delay::from(std::time::Duration::from_millis(hedge::AFTER_MS)));
@@ -543,7 +548,7 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
                     hold = Some(h);
                     race.made();
                     let c = AbortController::default();
-                    arms[1] = Some(open(&c));
+                    arms[1] = Some(open(hedge_meta.take().expect("the second call is made once"), &c));
                     controllers[1] = Some(c);
                     Next::Wait
                 }
@@ -601,7 +606,14 @@ struct Normalized {
 impl Metadata {
     /// A call's, for its payer and the agent making it.
     pub(crate) fn of(payer: &str, agent: Option<&str>) -> Metadata {
-        Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) }
+        let agent_id = agent.map(opaque);
+        Metadata { user_id: opaque(payer), affinity: agent_id.clone(), agent_id }
+    }
+
+    /// A hedge's second call's: its prefix-cache session its own, so it
+    /// is not routed where its first is slow.
+    fn hedge(&self) -> Metadata {
+        Metadata { affinity: self.affinity.as_ref().map(|a| format!("{a}.hedge")), ..self.clone() }
     }
 }
 
@@ -642,9 +654,12 @@ impl futures_util::Stream for Normalized {
 }
 
 /// The AI Gateway's metadata for a call: opaque ids only.
+#[derive(Clone)]
 pub(crate) struct Metadata {
     user_id: String,
     agent_id: Option<String>,
+    /// GLM's prefix-cache session (`x-session-affinity`): the agent's own.
+    affinity: Option<String>,
 }
 
 /// Makes a bounded call: `input` to `model`, through the AI binding and
@@ -656,7 +671,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         metadata["agent_id"] = json!(agent);
     }
     // GLM caches a prefix per session: an agent's calls share theirs (lesson 8)
-    let headers = match &meta.agent_id {
+    let headers = match &meta.affinity {
         Some(agent) => json!({ "x-session-affinity": agent }),
         None => json!({}),
     };
@@ -668,7 +683,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         if reject_if_busy {
             h.set("x-fragment-ai-options", &json!({ "rejectIfBusy": true }).to_string())?;
         }
-        if let Some(agent) = &meta.agent_id {
+        if let Some(agent) = &meta.affinity {
             h.set("x-session-affinity", agent)?;
         }
         let mut init = RequestInit::new();

@@ -1281,7 +1281,7 @@ The steps:
     its answer says why it stopped, is called again under the same
     reservation.
   - Every call streams from the model, and is hedged
-    (fragment_core::hedge): one whose first data line has not come 4.5 s
+    (fragment_core::hedge): one whose first data line has not come 3.5 s
     after it was made, or that fails for now (a 429, a 5xx, no answer)
     before it, gets one second, identical call, under a reservation of its
     own (`<step's reference>/hedge/<hex>`). The first to stream is the
@@ -1353,7 +1353,7 @@ fragment_core::hedge; docs/optchat.md, "Latency"):
   over too. With every rung busy, it waits in its own model's queue. The
   model that answered is the step's `model` (its usage row names it), at
   that model's prices: each is in the default price book.
-- **A slow one is hedged.** One whose first data line has not come 4.5 s
+- **A slow one is hedged.** One whose first data line has not come 3.5 s
   after it was made, or that fails for now before it, gets one second,
   identical call under a reservation of its own; the first to stream
   answers, and the other is aborted and charged the answer's prompt, split

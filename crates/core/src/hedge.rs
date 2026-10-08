@@ -16,12 +16,15 @@ use crate::price::Usage;
 
 /// The wait for a call's first data line before its second call is made.
 /// Workers AI's tool-calling models (GLM-5.3, its Flash, and the others
-/// tried) stream their first line in 1 to 3 s for most calls and 15 to 60
-/// s for a few identical ones (measured 2026-10-08 against its REST API,
-/// and on the preview's turns). 4.5 s is past the usual worst, so few calls
-/// are hedged, and a slow one is answered about 4.5 s plus a usual call's
-/// first line after it was made.
-pub const AFTER_MS: u64 = 4_500;
+/// tried) stream their first line in 1 to 3 s for most calls and 5 to 60
+/// s for some identical ones (measured 2026-10-08 against its REST API,
+/// and on the preview: GLM-5.3 Flash's turns' first lines p50 1.1 s, and a
+/// second call made at 4.5 s began 1 to 2 s later). 3.5 s is past the
+/// usual worst, so about a quarter of the mind's calls and one in ten of
+/// goose's are hedged, and a slow one is answered about 3.5 s plus a usual
+/// call's first line after it was made. On GLM-5.3 Flash a hedge costs a
+/// few hundredths of a cent (`cancelled_usage`).
+pub const AFTER_MS: u64 = 3_500;
 /// An answer's head is read this far for its first data line, at most:
 /// past it the call is taken to have begun (a vendor sends no comments
 /// this long before its data).
