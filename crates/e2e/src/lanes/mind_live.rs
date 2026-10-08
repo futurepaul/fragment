@@ -17,7 +17,17 @@
 //! 4. the persona with hands (Builder) hands shell work to goose in thread
 //!    C; the task is done with the commands' outputs in its report, and
 //!    the mind follows up in the thread;
-//! 5. the run says its latencies, tool calls and paid calls.
+//! 5. Builder hands browsing to goose in thread D: Hacker News's top three
+//!    titles, read in the browser on the agent's own desktop; at least two
+//!    of them are among the front page's top ten as this process fetches it
+//!    (the ranks move while it reads), its browser calls printed;
+//! 6. in thread D again, a measurement and no check: goose scrolls to the
+//!    page's foot and clicks its "More" link with `screen_click` (Clef on a
+//!    numbered grid), then says the address it is on; whether it is page 2,
+//!    and where Clef clicked, are printed (a link 30 by 14 pixels is about
+//!    the finer grid's cell, so a miss says the grid is too coarse, not that
+//!    the loop is broken);
+//! 7. the run says its latencies, tool calls and paid calls.
 //!
 //! A model's words are checked only where the ask fixes them (a name, a
 //! city, a command's output). Every wait is a real model's: generous, and
@@ -38,8 +48,10 @@ pub const SECTION: &str = "mind-live";
 
 /// The paid calls the run lends the section's person: the turns' model
 /// calls (one a tool round), the compactor's, Clef's sorts and goose's
-/// calls; about 40. The run's default budget is 60.
-const PAID_CALLS: u64 = 60;
+/// calls (its screen tools' Clef and vision calls among them); about 40
+/// through the shell hand-off, about 30 more for the browsing two. Above
+/// the run's default budget (60): run it with `--max-paid-calls 100`.
+const PAID_CALLS: u64 = 100;
 /// The mind's code installed from the release.
 const INSTALL: Duration = Duration::from_secs(90);
 /// A turn answered in words (each real model call takes 3–40 s).
@@ -57,6 +69,13 @@ const POLL: Duration = Duration::from_secs(3);
 const FACT: &str = "Remember this: my sister's name is Ana and she lives in Porto.";
 const RECALL: &str = "What's my sister's name, and where does she live?";
 const WORK: &str = "Use the computer: run `uname -s` and `echo $((6*7))` in the shell and tell me both outputs exactly.";
+const BROWSE: &str = "Use the browser: open https://news.ycombinator.com and tell me the titles of the top 3 stories, exactly.";
+const CLICK: &str = "On the computer: in the browser, scroll to the bottom of the Hacker News page you have open, then use screen_click to click its 'More' link, then tell me the exact URL you're on.";
+/// Hacker News's front page, as this process reads it to compare.
+const HN: &str = "https://news.ycombinator.com/";
+/// A front page's titles a report's are compared with: its top this many
+/// (the ranks move while goose reads it).
+const TOP: usize = 10;
 
 /// The shell's agent colours and its first agent's soul (cell/shell/shell.js:
 /// `COLORS`, `colorOf`, `firstSoul`), so the agent is made as a person's is.
@@ -140,6 +159,49 @@ impl Mind<'_> {
     }
 }
 
+/// A title or a report as compared: lowercase words, punctuation and
+/// spacing gone (a model's quotes and dashes are not the page's).
+fn words(s: &str) -> String {
+    let s = s.replace("&amp;", "&").replace("&#x27;", "'").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&#x2F;", "/");
+    s.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Hacker News's front page's titles, in rank order, as this process
+/// fetches it (none when it does not answer).
+fn front_page() -> Vec<String> {
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).user_agent("Mozilla/5.0 (fragment e2e mind-live)").build();
+    let Ok(html) = client.and_then(|c| c.get(HN).send()).and_then(|r| r.text()) else { return vec![] };
+    titles(&html)
+}
+
+/// A front page's titles: each `titleline`'s link's text.
+fn titles(html: &str) -> Vec<String> {
+    html.split("class=\"titleline\"")
+        .skip(1)
+        .filter_map(|part| {
+            let a = &part[part.find("<a ")?..];
+            let text = &a[a.find('>')? + 1..];
+            Some(text[..text.find("</a>")?].to_string())
+        })
+        .collect()
+}
+
+/// The steps goose's turn `turn` recorded on the mind's `work`: each one's
+/// tool, and its arguments and result, cut.
+fn steps(api: &Api, owner: &Keys, mind: &str, turn: &str) -> Vec<(String, String)> {
+    let page = api.signed(owner, "GET", &format!("/api/f/{mind}/channels/work?after=0&limit=1000"), None).ok();
+    let records = page.and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+    records
+        .iter()
+        .map(|r| &r["body"])
+        .filter(|b| b["kind"] == "turn.step" && b["turn"] == turn)
+        .map(|b| {
+            let said = format!("{} → {}", b["args"].as_str().unwrap_or(""), b["excerpt"].as_str().unwrap_or(""));
+            (b["tool"].as_str().unwrap_or("").to_string(), said.chars().take(160).collect())
+        })
+        .collect()
+}
+
 /// The text of the thread's last `talk`.
 fn last_talk(said: &[Value]) -> &str {
     said.iter().rev().find(|m| m["kind"] == "talk").and_then(|m| m["text"].as_str()).unwrap_or("")
@@ -192,7 +254,7 @@ fn first_run(s: &Suite, api: &Api, owner: &Keys) -> Result<(Value, String)> {
 }
 
 pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
-    let why = format!("it runs the mind on real models and goose on a computer from cold, for up to half an hour, and spends up to {PAID_CALLS} of the run's paid calls");
+    let why = format!("it runs the mind on real models and goose on a computer from cold, for up to 45 minutes, and spends up to {PAID_CALLS} of the run's paid calls");
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Computers, Need::Models, Need::RealModels], &why) {
         return Ok(());
     }
@@ -273,13 +335,89 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
     let follow = said_c.as_deref().map_or(0.0, turn_secs);
     s.ok("the report comes back to thread C, and the mind follows up there", said_c.is_some(), json!(m.messages(&c)));
 
+    // ---- thread D: Builder hands browsing to goose
+    let d = thread_id();
+    m.say("d1", &d, BROWSE, Some(builder.as_str()).filter(|b| !b.is_empty()))?;
+    // a turn over with no task answered in words: no need to wait for one
+    let opened_d = within(REPLY, || m.task(&d, false).or_else(|| m.answered(&d).map(|_| Value::Null))).unwrap_or_default();
+    // the ask as the mind logged it, on its clock
+    let asked = |text: &str| m.messages(&d).iter().find(|x| x["kind"] == "user" && x["text"] == text).and_then(|x| x["at"].as_i64()).unwrap_or(0);
+    let posted_d = asked(BROWSE);
+    let ended_d = if opened_d.is_object() { within(HANDOFF, || m.task(&d, true)).unwrap_or(opened_d.clone()) } else { Value::Null };
+    let report_d = ended_d["report"].as_str().unwrap_or("").to_string();
+    let browse = (ended_d["ended"].as_i64().unwrap_or(0) - posted_d) as f64 / 1000.0;
+    let steps_d = steps(api, &owner, &m.name, ended_d["turn"].as_str().unwrap_or(""));
+    let browser_calls: Vec<&str> = steps_d.iter().map(|(t, _)| t.as_str()).filter(|t| t.starts_with("browser_")).collect();
+    let front = front_page();
+    let said = words(&report_d);
+    let matched: Vec<&String> = front.iter().take(TOP).filter(|t| { let w = words(t); !w.is_empty() && said.contains(&w) }).collect();
+    println!(
+        "      (thread D: the browsing hand-off reported {browse:.0} s after the ask; {} browser calls [{}] of its {} steps; {} of the report's titles among the front page's top {TOP}: {matched:?})",
+        browser_calls.len(),
+        browser_calls.join(", "),
+        steps_d.len(),
+        matched.len()
+    );
+    s.ok(
+        "thread D, as Builder: goose reads Hacker News in the browser on its desktop, and its report's titles are the front page's (at least 2 of its top 10)",
+        ended_d["state"] == "done" && !browser_calls.is_empty() && matched.len() >= 2,
+        json!({ "task": ended_d, "steps": steps_d, "front": front.iter().take(TOP).collect::<Vec<_>>() }),
+    );
+    // the report back in the thread, its follow-up over, before the next ask
+    let said_d = if ended_d.is_object() { within(REPLY, || m.answered(&d).filter(|said| said.iter().any(|x| x["kind"] == "user" && x["task"] == ended_d["id"]))) } else { None };
+
+    // ---- thread D again: Clef clicks a link it is told of, measured
+    let first = ended_d["id"].as_str().unwrap_or("").to_string();
+    let mut clicked = String::new();
+    if said_d.is_some() && !first.is_empty() {
+        m.say("d2", &d, CLICK, Some(builder.as_str()).filter(|b| !b.is_empty()))?;
+        let opened = within(REPLY, || m.task(&d, false).filter(|t| t["id"] != first.as_str()));
+        let posted = asked(CLICK);
+        let ended = opened.and_then(|o| within(HANDOFF, || m.task(&d, true).filter(|t| t["id"] == o["id"]))).unwrap_or_default();
+        let report = ended["report"].as_str().unwrap_or("");
+        let took = (ended["ended"].as_i64().unwrap_or(posted) - posted) as f64 / 1000.0;
+        let steps_e = steps(api, &owner, &m.name, ended["turn"].as_str().unwrap_or(""));
+        let clef: Vec<&String> = steps_e.iter().filter(|(t, _)| t == "screen_click").map(|(_, said)| said).collect();
+        let page2 = report.contains("news.ycombinator.com/?p=2") || report.contains("news.ycombinator.com/news?p=2");
+        clicked = format!("{}; screen_click {}", if page2 { "on page 2" } else { "not on page 2" }, if clef.is_empty() { "never called".to_string() } else { format!("{clef:?}") });
+        println!(
+            "      (thread D, a measurement: the click hand-off {} in {took:.0} s, {}, its steps [{}]; its report: {:?})",
+            ended["state"].as_str().unwrap_or("never ended"),
+            clicked,
+            steps_e.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(", "),
+            report.chars().take(300).collect::<String>()
+        );
+    } else {
+        println!("      (thread D, a measurement: no click asked: the browsing hand-off's report never reached the thread)");
+    }
+
     // ---- what it took
-    let (models, steps) = (entries(api, &identity, "aig:").len(), entries(api, &identity, "step:").len());
+    let (models, ai_steps) = (entries(api, &identity, "aig:").len(), entries(api, &identity, "step:").len());
     println!(
         "      (mind-live: thread A answered in {reply_a:.1} s; settled {settle:.0} s later; thread B answered in {reply_b:.1} s with {looked} zoom/search calls; \
          Family sorted thread A in {sort:.0} s; the hand-off reported {handoff:.0} s after the ask, followed up in {follow:.1} s; \
-         paid calls: {models} model calls (goose's) and {steps} AI steps (the mind's) of {PAID_CALLS} lent)"
+         browsing reported in {browse:.0} s ({} browser calls); Clef's click: {clicked}; \
+         paid calls: {models} model calls (goose's, its screen tools' among them) and {ai_steps} AI steps (the mind's) of {PAID_CALLS} lent)",
+        browser_calls.len()
     );
     let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A front page's titles in rank order, and a report's matched loosely:
+    /// a model's numbering, quotes and dashes are not the page's.
+    #[test]
+    fn a_reports_titles_are_the_front_pages() {
+        let html = r#"<tr><td><span class="titleline"><a href="https://a.example/x">Margaret Hamilton has died</a><span class="sitebit"> (<a href="from?site=mit.edu">mit.edu</a>)</span></span></td></tr>
+            <tr><td><span class="titleline"><a href="item?id=1">Ask HN: What&#x27;s your stack &amp; why?</a></span></td></tr>"#;
+        let t = titles(html);
+        assert_eq!(t, vec!["Margaret Hamilton has died".to_string(), "Ask HN: What&#x27;s your stack &amp; why?".to_string()]);
+        let report = words("1. \"Margaret Hamilton has died\"\n2. Ask HN — What's your stack & why?");
+        assert!(t.iter().all(|x| report.contains(&words(x))), "{report}");
+        assert!(!report.contains(&words("Rust Port of TypeScript")));
+    }
 }

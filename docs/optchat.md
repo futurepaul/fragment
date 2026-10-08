@@ -858,14 +858,20 @@ mind's events naming Claude.
   - topics run on `clef-flash`;
   - goose runs on `medium`.
 - **The live check:** `cargo xtask e2e --hosted --config … --branch
-  claude-optchat --only mind-live` (crates/e2e/src/lanes/mind_live.rs).
+  claude-optchat --only mind-live --max-paid-calls 100`
+  (crates/e2e/src/lanes/mind_live.rs).
   It runs only by name, and only on a preview (`Need::RealModels`): a
   local run's `mind` section checks the same loop on the fakes. An e2e
   person's first run, as the shell makes it; a fact told in one thread
-  and recalled in a fresh one; a topic Clef sorts that thread into; and a
-  Builder hand-off that goose runs on a computer from cold. It takes up
-  to half an hour, lends its person 60 paid calls, and prints each
-  latency, the recall's zoom and search calls, and the paid calls made.
+  and recalled in a fresh one; a topic Clef sorts that thread into; a
+  Builder hand-off that goose runs on a computer from cold; a browsing
+  one (Hacker News's top three titles, read in the browser on the
+  agent's desktop, at least two of them among the front page's top ten
+  as the test fetches it); and, measured but not checked, a click of the
+  page's "More" link by `screen_click` (Clef), whose landing and
+  coordinates it prints. It takes up to 45 minutes, lends its person 100
+  paid calls (about 70 spent), and prints each latency, the recall's zoom
+  and search calls, the browser calls, and the paid calls made.
 
 ## Merged from issue #232 (agent-friendly fragment)
 
