@@ -15,6 +15,7 @@ import { appIcon } from "./app-icons.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
+import { billingSections, returning } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 const ICON = {
@@ -1049,6 +1050,9 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
+  // Checkout's return, or a trial mailed, before the ledger is read
+  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false) };
+  const back = await returning(billingHelpers);
   const [ledger, linked, uses] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
@@ -1097,16 +1101,11 @@ async function openSettings(push = true) {
   actions.append(link, signout);
   account.append(actions);
   const standing = ledger?.standing?.standing;
-  const credit = ledger
-    ? section(
-        "Credit",
-        line("Plan", ledger.plan === "seat_always_on" ? "Always-on seat" : ledger.plan === "seat" ? "Seat" : "Guest"),
-        line("This month", `${usd(ledger.availableMicros)} left`),
-        ...(standing && standing !== "ok"
-          ? [el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + ".")]
-          : []),
-      )
-    : section("Credit", el("p", "muted", "Your credit could not be read."));
+  // the person's seat, credit and org (billing.js), and why agents stop
+  const billing = await billingSections(billingHelpers, ledger, back);
+  if (standing && standing !== "ok") {
+    billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
+  }
   const c = state.computer;
   const computer = section(
     "Computer",
@@ -1140,7 +1139,7 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, ...billing, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform
@@ -1598,13 +1597,16 @@ async function start(open) {
   if (!me.username) return chooseUsername();
   await load();
   watchList();
-  // the first agent is asked for at home; settings open as asked, chats or not
+  // the first agent is asked for at home; settings open as asked, chats or
+  // not; a guest's first run is a seat, since creating needs one (decision 49)
   const settings = !open && location.pathname === SETTINGS;
-  if (!chats().length && !open && !settings) return creatingAgent();
+  const first = !chats().length && !open && !settings;
+  const guest = first && (await api("GET", "/api/ledger").catch(() => null))?.plan === "guest";
+  if (first && !guest) return creatingAgent();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
-  if (settings) await openSettings(false);
+  if (settings || guest) await openSettings(guest);
   else if (pick) openChat(pick);
   else notice("No chats yet", "Make an agent to start.");
   prewake();

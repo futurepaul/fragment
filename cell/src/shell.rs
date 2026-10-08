@@ -14,7 +14,7 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 15] = [
+const FILES: [(&str, &str, &[u8]); 16] = [
     ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
     ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
     ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
@@ -23,6 +23,8 @@ const FILES: [(&str, &str, &[u8]); 15] = [
     ("app-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/app-icons.js")),
     ("lucide-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/lucide-icons.js")),
     ("tooltips.js", "text/javascript; charset=utf-8", include_bytes!("../shell/tooltips.js")),
+    // Settings' Billing: a seat, credit, an org (docs/billing.md)
+    ("billing.js", "text/javascript; charset=utf-8", include_bytes!("../shell/billing.js")),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_bytes!("../shell/vendor/split-grid.js")),
     ("manifest.webmanifest", "application/manifest+json", include_bytes!("../shell/manifest.webmanifest")),
     ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
