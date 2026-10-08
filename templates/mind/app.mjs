@@ -1,31 +1,32 @@
 // The mind template's code (docs/optchat.md): one memory and the main
-// agent, OptChat's design (its spec, ~/dev/finite/optchat-spec.md) in a
-// fragment app. Every message a person says on `say`, every reply, tool
-// call and result of the agent, and every report of its hands (goose, on
-// the person's computer, through `chat` and `work`) goes into one log
-// here, in SQLite. A compactor (job `pump`) summarizes the log into a
+// agent, UniiChat's design (VictorTaelin's gist of 2026-10-08, kept as
+// ~/dev/finite/uniichat-spec.md) in a fragment app. Every message a person
+// says on `say`, every reply, tool call and result of the agent, and every
+// report of its hands (goose, on the person's computer, through `chat` and
+// `work`) goes into one log here, in SQLite. A compactor (up to JOBS `pump`
+// runs at once, each building one node at a time) summarizes the log into a
 // binary tree of one-line nodes, and each turn (job `heard`) starts fresh
-// from the view: a fixed-size tiling of the whole log by those nodes, the
-// older the coarser (applib/optmem.mjs). Topics are Clef's (job
-// `classify`).
+// from the view: the whole log tiled by those nodes, the older the coarser
+// (applib/optmem.mjs). Topics are Clef's (job `classify`).
 //
-// The view is never stored: it is folded from the log and the tree at the
-// app's first call and kept on this instance, which the facet may evict
-// at any time. Every mutation that changes the log or the tree bumps
-// `rev` in kv, so an instance whose memory missed a change (a rolled-back
-// mutation) folds it again.
+// The views (the chat's and the compaction view), the nodes ready to build
+// and the sawtooths' state are saved in SQLite as they change, and loaded
+// at the instance's first call, never rebuilt from the log (§3.2): a mind
+// saved before the views were is folded from its log once, at its first
+// load. Every mutation that changes the memory bumps `rev` in kv, so an
+// instance whose memory missed a change (a rolled-back mutation) loads it
+// again.
 //
 // Jobs re-run from the top at every step (docs/api.md, Jobs): their
-// control flow follows only their steps' answers. The compactor's input
-// (the view up to a node) is read from this instance when its step is
-// built, not carried in a step's answer: it would be 128 KB per node in a
-// run's 4 MiB of answers, and what a past step was sent does not matter.
-// A turn's view is the one exception, frozen by a step (`view`) so every
-// model call of the turn sees the same one.
+// control flow follows only their steps' answers. A compaction's input
+// (the compaction view up to its node) is read from this instance when its
+// step is built, not carried in a step's answer: what a past step was sent
+// does not matter. A turn's view is the one exception, frozen by a step
+// (`turn_view`) so every model call of the turn sees the same one.
 import { DurableObject } from "cloudflare:workers";
 import * as F from "./applib/files.mjs";
 import * as M from "./applib/optmem.mjs";
-import { COMPACT, SUGGEST, TOOLS, system } from "./applib/prompts.mjs";
+import { CALL_TOOLS, SUGGEST, system, turnState } from "./applib/prompts.mjs";
 import * as W from "./applib/web.mjs";
 
 const THREAD = /^t_[0-9a-f]{16}$/;
@@ -57,21 +58,25 @@ const FETCH_ROOM_BYTES = 4 * 1024 * 1024 - 1024 * 1024 - 64 * 1024;
 // A web tool keeps this many steps for its answer's log, a last call and its log.
 const WEB_KEEP_STEPS = 3;
 const TURNS_PER_RUN = 4;
-// A turn's settle tries a failing node this many times, RETRY_MS apart.
+// A turn's wait gives up on a message whose node failed this many times.
 const SETTLE_FAILS_MAX = 3;
+// A node whose build failed waits this long before another run takes it
+// again (and is taken again at the next message, §4).
 const RETRY_MS = 10_000;
-// A node a pump took is another run's to build for this long.
+// A node a run took is that run's to build for this long.
 const LEASE_MS = 5 * 60_000;
-// One pump run's rounds; a node's steps at most (TRIES calls and its write),
-// and a batch's (the same: its lines are retried together).
-const PUMP_ROUNDS_MAX = 30;
-const NODE_STEPS = M.TRIES + 1;
+// A pump a step started counts as at work this long before its first step
+// (so pumps at work and starting stay at most JOBS).
+const SPAWN_MS = 60_000;
+// A pump run keeps this many steps for a node (TRIES calls) and the pumps
+// it starts; past it, a fresh run takes its place.
+const PUMP_KEEP_STEPS = M.TRIES + M.JOBS + 2;
+// A pump run passes at most this many nodes that failed (pump_step's skip).
+const PUMP_SKIPS_MAX = 32;
 const COMPACT_TOKENS = 4096;
-const BATCH_TOKENS = 8192;
-// The compactor is started by an import when no pump planned work this
-// long ago (a `compact` record, whose trigger runs `pump`), at most once
-// in KICK_AGAIN_MS.
-const PUMP_KICK_MS = 3 * 60_000;
+// The compactor is started by an import when no pump is at work (a
+// `compact` record, whose trigger runs `pump`), at most once in
+// KICK_AGAIN_MS.
 const KICK_AGAIN_MS = 60_000;
 // An import's part: at most this many messages (docs/optchat.md, "Importing
 // chats"); `imported` answers for at most this many conversations.
@@ -79,6 +84,9 @@ const IMPORT_MESSAGES_MAX = 64;
 const IMPORTED_ASK_MAX = 200;
 const IMPORT_SOURCE = /^[a-z][a-z0-9-]{0,31}$/;
 const IMPORT_ID_MAX = 200;
+// An imported message's text, at most (characters): a part's input is at
+// most 256 KiB. One past CAP is logged as several messages in a row.
+const IMPORT_TEXT_MAX = 128 * 1024;
 // A node a stubborn model wrote over twice NODE is cut there.
 const NODE_TEXT_MAX = 2 * M.NODE;
 // A `msg` record's text (docs/optchat.md, "Records on log"), and the most
@@ -93,9 +101,14 @@ const TASK_LOST_MS = 30 * 60_000;
 // Replies whose task is not recorded yet (its `task_open` a step behind),
 // kept for it, at most this many.
 const EARLY_REPLIES_MAX = 32;
-const SEARCH_TOOL_MAX = 20;
+// A turn's messages name its thread's last this many messages.
+const THREAD_RECENT = 6;
+// A mutation publishes at most 64 records: a turn's step logs at most this
+// many pieces with a record each (a page reads the rest from `thread`).
+const RECORDS_MAX = 60;
 // An operation's line in `apps`, at most (its description in full is app_ops').
 const OP_LINE_MAX = 160;
+const SEARCH_DEFAULT = 20;
 const SEARCH_MAX = 50;
 const SNIPPET_MAX_BYTES = 300;
 const QUERY_WORDS_MAX = 16;
@@ -343,10 +356,14 @@ class Steps {
 }
 
 export class App extends DurableObject {
-  // The memory folded from the log and the tree, and the `rev` it is of
-  // (null: unknown, folded again at the next read).
+  // The memory loaded from what was saved, and the `rev` it is of (null:
+  // unknown, loaded again at the next read).
   #mem = null;
   #rev = null;
+  // This instance, for `status`: a restart is a new one.
+  #instance = hex(4);
+  // Records the current mutation published for messages (RECORDS_MAX).
+  #records = 0;
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -355,6 +372,15 @@ export class App extends DurableObject {
       i INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, thread TEXT, persona TEXT, task TEXT)`);
     sql.exec("CREATE INDEX IF NOT EXISTS log_thread ON log (thread, i)");
     sql.exec("CREATE TABLE IF NOT EXISTS node (l INTEGER NOT NULL, i INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (l, i))");
+    // The views (§3.2: saved, never rebuilt from the log), a line a row by
+    // its first message: the chat's (`vline`) and the compaction view
+    // (`cline`). The nodes ready to build (§4, "The order"): `e` is the last
+    // message one covers; `run` and `until`, a run's lease on it, or (`run`
+    // null) when one that failed may be taken again.
+    sql.exec("CREATE TABLE IF NOT EXISTS vline (s INTEGER PRIMARY KEY, l INTEGER NOT NULL)");
+    sql.exec("CREATE TABLE IF NOT EXISTS cline (s INTEGER PRIMARY KEY, l INTEGER NOT NULL)");
+    sql.exec("CREATE TABLE IF NOT EXISTS ready (l INTEGER NOT NULL, i INTEGER NOT NULL, e INTEGER NOT NULL, run INTEGER, until INTEGER, PRIMARY KEY (l, i))");
+    sql.exec("CREATE INDEX IF NOT EXISTS ready_e ON ready (e, l)");
     sql.exec(`CREATE TABLE IF NOT EXISTS thread (
       id TEXT PRIMARY KEY, title TEXT NOT NULL, persona TEXT, started INTEGER NOT NULL, last INTEGER NOT NULL,
       first_i INTEGER NOT NULL, last_i INTEGER NOT NULL)`);
@@ -375,9 +401,12 @@ export class App extends DurableObject {
     sql.exec(`CREATE TABLE IF NOT EXISTS import (
       source TEXT NOT NULL, conv TEXT NOT NULL, thread TEXT NOT NULL, n INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (source, conv))`);
     sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(text, content='log', content_rowid='i')");
-    // a message's files (applib/files.mjs), JSON; null with none. A log made
-    // before them gains the column.
-    if (!sql.exec("SELECT * FROM log LIMIT 0").columnNames.includes("attachments")) sql.exec("ALTER TABLE log ADD COLUMN attachments TEXT");
+    // A message's files (applib/files.mjs), JSON, null with none; and
+    // whether it goes on from the message before it (a long text is several
+    // in a row, §1), 1 or null. A log made before them gains the columns.
+    const columns = sql.exec("SELECT * FROM log LIMIT 0").columnNames;
+    if (!columns.includes("attachments")) sql.exec("ALTER TABLE log ADD COLUMN attachments TEXT");
+    if (!columns.includes("cont")) sql.exec("ALTER TABLE log ADD COLUMN cont INTEGER");
     // The seeded personas, each once: a mind made before one was seeded
     // (`seeded` counts them; three before it was kept) gains it, and one
     // its person removed stays removed.
@@ -395,6 +424,10 @@ export class App extends DurableObject {
         this.#set("seeded", PERSONAS.length);
       });
     }
+    // A mind made before its views were saved (the spec's first version
+    // folded them again at every load): folded from its log once, here,
+    // and saved.
+    if (this.#get("saved") === null) ctx.storage.transactionSync(() => this.#migrate());
   }
 
   // ---- kv ----
@@ -427,43 +460,120 @@ export class App extends DurableObject {
 
   // ---- the memory ----
 
+  // T: the log's messages, its ids 0 to T - 1.
+  #count() {
+    const { n, top } = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n, MAX(i) AS top FROM log").one();
+    need(n === 0 || top === n - 1, `the log's ids are not 0 to ${n - 1}`);
+    return n;
+  }
+
+  // The views and the nodes ready, built once from the log as it stands
+  // (M.fold) and saved whole, for a mind made before they were saved; its
+  // old leases go. `folds` counts these: one at most, a mind's life long.
+  #migrate() {
+    const sql = this.ctx.storage.sql;
+    const T = this.#count();
+    const m = M.fold(T, sql.exec("SELECT l, i, text FROM node"), (i) => this.#line(i));
+    sql.exec("DELETE FROM vline");
+    sql.exec("DELETE FROM cline");
+    sql.exec("DELETE FROM ready");
+    for (const p of m.v.lines) sql.exec("INSERT INTO vline (s, l) VALUES (?, ?)", M.startOf(p), p.l);
+    for (const p of m.c.lines) sql.exec("INSERT INTO cline (s, l) VALUES (?, ?)", M.startOf(p), p.l);
+    this.#set("vshrink", m.v.shrink ? 1 : 0);
+    this.#set("cshrink", m.c.shrink ? 1 : 0);
+    this.#flush(m);
+    this.#del("busy");
+    if (T > 0) this.#set("folds", Number(this.#get("folds") ?? 0) + 1);
+    this.#set("saved", 1);
+    this.#mem = m;
+    this.#rev = this.#get("rev") ?? "0";
+  }
+
   #memory() {
     const rev = this.#get("rev") ?? "0";
     if (this.#mem !== null && this.#rev === rev) return this.#mem;
     const sql = this.ctx.storage.sql;
-    const { n, top } = sql.exec("SELECT COUNT(*) AS n, MAX(i) AS top FROM log").one();
-    need(n === 0 || top === n - 1, `the log's ids are not 0 to ${n - 1}`);
-    this.#mem = M.fold(n, sql.exec("SELECT l, i, text FROM node"));
+    this.#mem = M.load({
+      T: this.#count(),
+      nodes: sql.exec("SELECT l, i, text FROM node"),
+      v: sql.exec("SELECT s, l FROM vline ORDER BY s").toArray(),
+      c: sql.exec("SELECT s, l FROM cline ORDER BY s").toArray(),
+      vshrink: this.#get("vshrink") === "1",
+      cshrink: this.#get("cshrink") === "1",
+    });
     this.#rev = rev;
     return this.#mem;
   }
 
-  // A mutation that changes the log or the tree: the memory is unknown
-  // while it runs (an exception leaves it so, to be folded again), and of
-  // the new `rev` once it is done (a rollback after, of the old one).
+  // What the memory did (its journal), written: the nodes built (gone from
+  // those ready), the nodes ready, each view's lines, and each sawtooth's
+  // state.
+  #flush(m) {
+    const sql = this.ctx.storage.sql;
+    const table = (tag) => (tag === "v" ? "vline" : "cline");
+    for (const e of m.journal) {
+      switch (e[0]) {
+        case "node":
+          sql.exec("INSERT INTO node (l, i, text) VALUES (?, ?, ?)", e[1], e[2], e[3]);
+          sql.exec("DELETE FROM ready WHERE l = ? AND i = ?", e[1], e[2]);
+          break;
+        case "ready":
+          sql.exec("INSERT INTO ready (l, i, e) VALUES (?, ?, ?) ON CONFLICT (l, i) DO NOTHING", e[1], e[2], M.endOf(e[1], e[2]));
+          break;
+        case "line":
+          sql.exec(`INSERT INTO ${table(e[1])} (s, l) VALUES (?, ?) ON CONFLICT (s) DO UPDATE SET l = excluded.l`, e[2], e[3]);
+          break;
+        case "drop":
+          sql.exec(`DELETE FROM ${table(e[1])} WHERE s = ?`, e[2]);
+          break;
+        case "clear":
+          sql.exec(`DELETE FROM ${table(e[1])}`);
+          break;
+        case "shrink":
+          this.#set(e[1] === "v" ? "vshrink" : "cshrink", e[2] ? 1 : 0);
+          break;
+        default:
+          throw new Error(`the memory's journal has no entry ${e[0]}`);
+      }
+    }
+    m.journal.length = 0;
+  }
+
+  // A mutation that changes the memory: the memory is unknown while it
+  // runs (an exception leaves it so, to be loaded again: the platform rolls
+  // the mutation back), what it did is written, and it is of the new `rev`
+  // once it is done (a rollback after, of the old one).
   #changing(fn) {
     const m = this.#memory();
     this.#rev = null;
+    this.#records = 0;
     const out = fn(m);
+    this.#flush(m);
     const rev = String(Number(this.#get("rev") ?? 0) + 1);
     this.#set("rev", rev);
     this.#rev = rev;
     return out;
   }
 
-  // A log row as the page reads it: its files named, without their text.
+  // A log row as the page reads it: its files named, without their text,
+  // and whether it goes on from the message before it.
   #shown(r) {
-    return { ...r, attachments: F.described(F.filesOf(r.attachments)) };
+    const { cont, ...rest } = r;
+    return { ...rest, attachments: F.described(F.filesOf(r.attachments)), cont: cont === 1 };
   }
 
   #message(i) {
-    return this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i = ?", i).toArray()[0] ?? null;
+    return this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments, cont FROM log WHERE i = ?", i).toArray()[0] ?? null;
   }
 
-  // Message i as the memory reads it: its words and its files (applib/files.mjs).
+  // Message i as the memory reads it: its words and its files
+  // (applib/files.mjs), and whether its text goes on from the message
+  // before it, or in the one after.
   #full(i) {
-    const r = this.ctx.storage.sql.exec("SELECT kind, text, attachments FROM log WHERE i = ?", i).one();
-    return { kind: r.kind, text: F.rendered(r.text, F.filesOf(r.attachments)) };
+    const sql = this.ctx.storage.sql;
+    const r = sql.exec("SELECT kind, text, attachments, cont FROM log WHERE i = ?", i).one();
+    const more = sql.exec("SELECT cont FROM log WHERE i = ?", i + 1).toArray()[0]?.cont === 1;
+    return { kind: r.kind, text: F.rendered(r.text, F.filesOf(r.attachments)), cont: r.cont === 1, more };
   }
 
   #line(i) {
@@ -471,37 +581,51 @@ export class App extends DurableObject {
     return M.line0(r.kind, r.text);
   }
 
-  // The free nodes ready now, built and stored (no model: spec 3).
-  #free(m) {
-    for (const n of M.buildFree(m, (i) => this.#line(i))) {
-      this.ctx.storage.sql.exec("INSERT INTO node (l, i, text) VALUES (?, ?, ?)", n.l, n.i, n.text);
-    }
-  }
-
-  // One message appended to the log (capped: the 16 MiB debt), with its
-  // files (`attachments`, applib/files.mjs: their text, when read, kept
-  // with them), its thread touched, its free nodes built, and its record
-  // published on `log` (the files named, not their text). An import's
-  // message keeps its own time and publishes no record (a page reads an
-  // imported thread with `thread`).
+  // A text logged (§1): a message, or several in a row when it is past CAP
+  // characters (each piece after the first `cont`), the first with its
+  // files (`attachments`, applib/files.mjs: their text, when read, kept with
+  // them); its thread touched, each piece's line appended to the memory,
+  // and each published on `log` as a `msg` record (the files named, not
+  // their text), at most RECORDS_MAX a mutation. An import's message keeps
+  // its own time and publishes no record (a page reads an imported thread
+  // with `thread`). A tool's output is clipped before it comes here; no
+  // other text is cut. Answers its first id and how many it took.
   #log(call, m, kind, text, { thread = null, persona = null, task = null, attachments = [], at = null, publish = true } = {}) {
     const sql = this.ctx.storage.sql;
-    const i = m.T;
-    const t = M.capText(text);
     at ??= Date.now();
-    const files = attachments.length ? JSON.stringify(attachments) : null;
-    sql.exec("INSERT INTO log (i, kind, text, at, thread, persona, task, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", i, kind, t, at, thread, persona, task, files);
-    sql.exec("INSERT INTO log_fts (rowid, text) VALUES (?, ?)", i, t);
-    if (thread !== null) sql.exec("UPDATE thread SET last = ?, last_i = ? WHERE id = ?", at, i, thread);
-    M.append(m);
-    this.#free(m);
-    if (publish) {
-      const named = F.described(attachments);
-      const body = { type: "msg", i, kind, text: recordText(t, RECORD_JSON_MAX - sizeOf(named)), thread, at, persona, task };
-      if (named.length) body.attachments = named;
-      call.publish("log", body);
+    const pieces = M.splitText(text);
+    const first = m.T;
+    for (const [k, piece] of pieces.entries()) {
+      const i = m.T;
+      const files = k === 0 ? attachments : [];
+      sql.exec(
+        "INSERT INTO log (i, kind, text, at, thread, persona, task, attachments, cont) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        i, kind, piece, at, thread, persona, task, files.length ? JSON.stringify(files) : null, k > 0 ? 1 : null,
+      );
+      sql.exec("INSERT INTO log_fts (rowid, text) VALUES (?, ?)", i, piece);
+      if (thread !== null) sql.exec("UPDATE thread SET last = ?, last_i = ? WHERE id = ?", at, i, thread);
+      M.append(m, M.line0(kind, F.rendered(piece, files)));
+      if (publish && this.#records < RECORDS_MAX) {
+        this.#records++;
+        const named = F.described(files);
+        const body = { type: "msg", i, kind, text: recordText(piece, RECORD_JSON_MAX - sizeOf(named)), thread, at, persona, task };
+        if (named.length) body.attachments = named;
+        if (k > 0) body.cont = true;
+        call.publish("log", body);
+      }
     }
-    return { i, at };
+    return { i: first, n: pieces.length, at };
+  }
+
+  // A new message from the person or the hands (not an import's): the
+  // nodes whose build failed are tried again (§4: "A failed call is tried
+  // again at the next message").
+  #retryFailed() {
+    const sql = this.ctx.storage.sql;
+    for (const k of Object.keys(this.#json("fails", {}))) {
+      const [l, i] = k.split(":").map(Number);
+      sql.exec("UPDATE ready SET until = NULL WHERE l = ? AND i = ? AND run IS NULL", l, i);
+    }
   }
 
   // ---- threads, personas, the queue, the lock ----
@@ -526,10 +650,11 @@ export class App extends DurableObject {
     return l && now - l.touched <= TURN_LOCK_MS ? l : null;
   }
 
-  // A `user` message: logged in its thread (made on its first message,
-  // titled from its first line) and queued for a turn. Answers whether a
-  // turn is running, which takes it next.
-  #enqueue(call, m, { text, thread, persona = null, task = null, attachments = [] }) {
+  // A message for a turn, `user` (the person's) or `work` (a hand-off's
+  // report): logged in its thread (made on its first message, titled from
+  // its first line) and queued. Answers whether a turn is running, which
+  // takes it next (between its tool calls, or as its next turn).
+  #enqueue(call, m, { kind = "user", text, thread, persona = null, task = null, attachments = [] }) {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
     const t = this.#thread(thread);
@@ -543,10 +668,19 @@ export class App extends DurableObject {
     }
     const queue = this.#json("queue", []);
     need(queue.length < QUEUE_MAX, `${QUEUE_MAX} messages already wait for a turn`);
-    const { i } = this.#log(call, m, "user", text, { thread, persona: p, task, attachments });
-    queue.push({ i, thread });
+    this.#retryFailed();
+    const { i, n } = this.#log(call, m, kind, text, { thread, persona: p, task, attachments });
+    queue.push({ i, n, thread });
     this.#setJson("queue", queue);
     return { i, running: this.#lock(now) !== null };
+  }
+
+  // A queued message as a turn reads it: its pieces joined, then its files
+  // (applib/files.mjs); and its files named.
+  #queued(q) {
+    const rows = this.ctx.storage.sql.exec("SELECT text, attachments FROM log WHERE i >= ? AND i < ? ORDER BY i", q.i, q.i + (q.n ?? 1)).toArray();
+    const files = F.filesOf(rows[0]?.attachments);
+    return { text: F.rendered(rows.map((r) => r.text).join(""), files), files: F.described(files) };
   }
 
   // ---- internal operations: the jobs' halves (docs/optchat.md) ----
@@ -562,11 +696,36 @@ export class App extends DurableObject {
     return this.#changing((m) => this.#enqueue(call, m, { text, thread, persona, attachments: a.files }));
   }
 
+  // The queued messages of `thread` (all of them, or up to TEXTS_MAX_BYTES
+  // past the first), taken off the queue: their ids ({i, n}: a message's
+  // pieces), their texts as a turn reads them, and their files (at most
+  // FILES_MAX, which a hand-off of the turn carries).
+  #take(thread) {
+    const queue = this.#json("queue", []);
+    const taken = [];
+    const texts = [];
+    const attachments = [];
+    let bytes = 0;
+    for (const q of queue) {
+      if (q.thread !== thread) continue;
+      const { text, files } = this.#queued(q);
+      if (taken.length && bytes + M.utf8(text) > TEXTS_MAX_BYTES) break;
+      bytes += M.utf8(text);
+      taken.push({ i: q.i, n: q.n ?? 1 });
+      texts.push(text);
+      for (const f of files) if (attachments.length < F.FILES_MAX && !attachments.some((a) => a.sha256 === f.sha256)) attachments.push(f);
+    }
+    const took = new Set(taken.map((q) => q.i));
+    this.#setJson("queue", queue.filter((q) => !took.has(q.i)));
+    return { taken, texts, attachments };
+  }
+
   // Takes the turn lock (free, run out, or this run's) and the queued
   // messages of the oldest thread waiting. `tail` is where the turn's view
   // stops: before the newest run of messages still waiting for an answer,
-  // which the turn is given whole (spec 7: the view is rendered before the
-  // new messages are logged).
+  // which the turn is given whole (§6: the view is rendered before the new
+  // message is logged). `now` is the turn's time, which its messages say
+  // (§6: per-turn state starts each message).
   turn_begin({ run, agent = null }, call) {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
@@ -580,39 +739,30 @@ export class App extends DurableObject {
       return { took: false, why: "nothing is queued" };
     }
     const thread = queue[0].thread;
-    const taken = [];
-    const texts = [];
-    // the taken messages' files, which a hand-off of this turn carries
-    const attachments = [];
-    let bytes = 0;
-    for (const q of queue) {
-      if (q.thread !== thread) continue;
-      const r = sql.exec("SELECT text, attachments FROM log WHERE i = ?", q.i).one();
-      const files = F.filesOf(r.attachments);
-      const text = F.rendered(r.text, files);
-      if (taken.length && bytes + M.utf8(text) > TEXTS_MAX_BYTES) break;
-      bytes += M.utf8(text);
-      taken.push(q.i);
-      texts.push(text);
-      for (const f of F.described(files)) if (attachments.length < F.FILES_MAX && !attachments.some((a) => a.sha256 === f.sha256)) attachments.push(f);
-    }
-    const took = new Set(taken);
-    this.#setJson("queue", queue.filter((q) => !took.has(q.i)));
+    const waiting = new Set(queue.flatMap((q) => Array.from({ length: q.n ?? 1 }, (_, k) => q.i + k)));
+    const { taken, texts, attachments } = this.#take(thread);
     const m = this.#memory();
-    const waiting = new Set(queue.map((q) => q.i));
     let tail = m.T;
     while (tail > 0 && waiting.has(tail - 1)) tail--;
     const t = this.#thread(thread);
     const persona = this.#persona(t?.persona);
+    // the thread, as the turn's messages name it: its title, when it began,
+    // and its last messages before these (where to zoom in it)
+    const recent = sql
+      .exec("SELECT i FROM log WHERE thread = ? AND i < ? AND cont IS NULL ORDER BY i DESC LIMIT ?", thread, taken[0]?.i ?? tail, THREAD_RECENT)
+      .toArray()
+      .map((r) => r.i)
+      .reverse();
+    const chat = { id: thread, title: t?.title ?? "", started: t?.started ?? now, recent };
     this.#setJson("turn", { run, thread, since: now, touched: now, stop: false });
-    const settled = M.first(m) >= tail;
+    const settled = this.#firstUnbuilt(m) >= tail;
     call.publish("log", { type: "turn", thread, state: settled ? "thinking" : "settling" });
     // hand-offs with no reply in TASK_LOST_MS are lost (a reply later still reports)
     for (const { id } of sql.exec("SELECT id FROM task WHERE state = 'running' AND started < ? LIMIT 32", now - TASK_LOST_MS).toArray()) {
       sql.exec("UPDATE task SET state = 'lost' WHERE id = ?", id);
       this.#publishTask(call, this.#task(id));
     }
-    return { took: true, thread, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments };
+    return { took: true, thread, chat, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments, now };
   }
 
   // The lock kept by its run; answers whether Stop was asked.
@@ -624,10 +774,26 @@ export class App extends DurableObject {
     return { held: true, stopped: l.stop === true };
   }
 
+  // A turn's view, after its wait: the views fitted (§3.2: as at a new
+  // message, so a backlog built since the last one, an import's, merges
+  // before the turn sees it), then the chat's rendered up to the turn's
+  // messages.
+  turn_view({ upto }) {
+    need(isInt(upto), "turn_view: upto is where the turn's messages start");
+    return this.#changing((m) => {
+      M.fit(m);
+      const r = M.render(m, Math.min(upto, m.T));
+      return { text: r.text, bytes: r.bytes, parts: r.parts, T: m.T, settled: r.settled };
+    });
+  }
+
   // One model call's messages, in order: its reply (talk), each tool call
-  // (tool) and its result (echo). Touches the lock; answers whether Stop
-  // was asked.
-  logged({ run, thread, persona = null, entries }, call) {
+  // (tool) and its result (echo). Touches the lock and answers whether Stop
+  // was asked. With `take` (the call asked for tools: the turn goes on), the
+  // messages of its thread queued since are taken: they reach it between
+  // its tool calls (§6). `pump`: start one, none being at work while a node
+  // is ready (the compactor keeps up with a long turn).
+  logged({ run, thread, persona = null, entries, take = false }, call) {
     need(Array.isArray(entries) && entries.length <= 1 + 2 * TOOL_CALLS_ANSWERED, "logged: entries is a list");
     for (const e of entries) need(e && LOGGED_KINDS.has(e.kind) && typeof e.text === "string", "logged: each entry is {kind: talk|tool|echo, text}");
     const sql = this.ctx.storage.sql;
@@ -639,18 +805,26 @@ export class App extends DurableObject {
         if (e.kind === "tool" && task !== null) sql.exec("UPDATE task SET i = ? WHERE id = ? AND i IS NULL", i, task);
         ids.push(i);
       }
-      return { ids, ...this.turn_touch({ run }) };
+      const touched = this.turn_touch({ run });
+      const heard = take && touched.held && !touched.stopped ? this.#take(thread) : { taken: [], texts: [], attachments: [] };
+      // the nodes these messages readied, written before asking whether any is
+      this.#flush(m);
+      return { ids, ...touched, heard, pump: this.#kick(Date.now()) };
     });
   }
 
   // The lock let go, and what ended published. `requeue` puts a turn's
-  // messages back first in line (a turn handed on to a fresh run).
+  // messages ({i, n}) back first in line (a turn handed on to a fresh run).
   turn_end({ run, thread, state, error = null, requeue = [] }, call) {
     need(["done", "stopped", "error", "settling"].includes(state), "turn_end: state is done, stopped, error or settling");
     let queue = this.#json("queue", []);
     if (Array.isArray(requeue) && requeue.length) {
-      const back = new Set(requeue);
-      queue = [...requeue.filter(isInt).map((i) => ({ i, thread })), ...queue.filter((q) => !back.has(q.i))];
+      const back = requeue
+        .map((q) => (isInt(q) ? { i: q, n: 1 } : q))
+        .filter((q) => q && isInt(q.i))
+        .map((q) => ({ i: q.i, n: isInt(q.n) && q.n > 0 ? q.n : 1, thread }));
+      const ids = new Set(back.map((q) => q.i));
+      queue = [...back, ...queue.filter((q) => !ids.has(q.i))];
       this.#setJson("queue", queue);
     }
     const l = this.#json("turn", null);
@@ -660,109 +834,152 @@ export class App extends DurableObject {
     return { queued: queue.length, topics };
   }
 
-  // Spec 4.1, for a job, batched (docs/optchat.md, "Importing chats"): the
-  // level-0 nodes one call builds (`nodes`: `first`'s and the long messages
-  // after it, M.batch) and up to `max` ready merges (`merges`), each leased
-  // to this run (another's lease is skipped until it runs out), and whether
-  // the view is settled up to `upto` (all of it by default). A turn's
-  // settle (`upto` named) takes merges only while the view is over VIEW:
-  // they only coarsen it, but a long backlog (an import) would otherwise
-  // grow it, and every call's context with it, without bound. A query that
-  // writes its leases (as the brain's reindex writes its index), and when a
-  // pump planned last (`status`, and an import's start of the compactor).
-  pump_plan({ run = null, upto = null, skip = [], max = M.JOBS } = {}) {
+  // ---- the compactor's queue (§4, "The order"; never a scan of the tree) ----
+
+  // The first message not summarized yet, or T.
+  #firstUnbuilt(m) {
+    return this.ctx.storage.sql.exec("SELECT MIN(i) AS f FROM ready WHERE l = 0").one().f ?? m.T;
+  }
+
+  // The last message whose node may start: one starts once fewer than
+  // JOBS messages before it are unbuilt.
+  #window() {
+    return this.ctx.storage.sql.exec("SELECT i FROM ready WHERE l = 0 ORDER BY i LIMIT 1 OFFSET ?", M.JOBS - 1).toArray()[0]?.i ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  // Nodes leased now: compactions at work.
+  #leased(now) {
+    return this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM ready WHERE run IS NOT NULL AND until > ?", now).one().n;
+  }
+
+  // Nodes a run may take now, at most JOBS counted.
+  #takeable(now) {
+    const sql = this.ctx.storage.sql;
+    const free = "(until IS NULL OR until <= ?)";
+    const merges = sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE l > 0 AND ${free} LIMIT ?)`, now, M.JOBS).one().n;
+    const messages = sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE l = 0 AND i <= ? AND ${free} LIMIT ?)`, this.#window(), now, M.JOBS).one().n;
+    return Math.min(M.JOBS, merges + messages);
+  }
+
+  // The next node a run may build: of the merges whose halves are built
+  // and the messages that may start, the one whose last message is the
+  // oldest (a merge before a message it ends with); with `upto` (a turn's
+  // wait), a message before it only. One this run failed (`skip`) is passed.
+  #next(now, upto, skip) {
+    const sql = this.ctx.storage.sql;
+    const free = "(until IS NULL OR until <= ?)";
+    const want = skip.length + 1;
+    const skipped = new Set(skip.map(String));
+    const pick = (rows) => rows.find((r) => !skipped.has(M.key(r.l, r.i))) ?? null;
+    const w = this.#window();
+    if (upto !== null) return pick(sql.exec(`SELECT l, i, e FROM ready WHERE l = 0 AND i <= ? AND i < ? AND ${free} ORDER BY i LIMIT ?`, w, upto, now, want).toArray());
+    const message = pick(sql.exec(`SELECT l, i, e FROM ready WHERE l = 0 AND i <= ? AND ${free} ORDER BY i LIMIT ?`, w, now, want).toArray());
+    const merge = pick(sql.exec(`SELECT l, i, e FROM ready WHERE l > 0 AND ${free} ORDER BY e, l LIMIT ?`, now, want).toArray());
+    if (!message || !merge) return message ?? merge;
+    return merge.e <= message.e ? merge : message;
+  }
+
+  // Pumps a step started and not at work yet (each counted SPAWN_MS).
+  #spawns(now) {
+    return this.#json("spawns", []).filter((t) => Number.isFinite(t) && t > now);
+  }
+
+  // Whether to start a pump: none is at work or starting while a node is
+  // ready; if so, it is counted as starting.
+  #kick(now) {
+    const spawns = this.#spawns(now);
+    if (spawns.length || this.#leased(now) || !this.#takeable(now)) return false;
+    this.#setJson("spawns", [now + SPAWN_MS]);
+    return true;
+  }
+
+  // The compactor's step (§4), a pump's or a turn's wait: the node this run
+  // built written (`built`: {l, i, text}; or {l, i, error}, its failure
+  // kept, the node tried again after RETRY_MS or at the next message), then
+  // the next node it may build (`#next`) taken under a lease, while fewer
+  // than JOBS are leased. Answers it (`node`, or null) and `spawn`, how many
+  // pumps to start for what else is ready, each counted as at work until
+  // its first step (`first`) or SPAWN_MS. `end`: the run takes nothing more,
+  // `next` with a fresh run after it. With `upto` (a turn's wait, which holds
+  // the turn lock): whether every message before it is summarized
+  // (`settled`), Stop was asked (`stopped`), or the first one that is not
+  // failed SETTLE_FAILS_MAX times (`failing`), else a message before it.
+  pump_step({ run, built = null, skip = [], upto = null, first = false, end = false, next = false }) {
+    need(isInt(run), "pump_step: run is the run's number");
+    need(Array.isArray(skip) && skip.length <= 64, "pump_step: skip is at most 64 nodes");
+    need(upto === null || isInt(upto), "pump_step: upto is a message's id");
     const now = Date.now();
-    const m = this.#memory();
-    const leases = this.#json("busy", {});
-    for (const [k, v] of Object.entries(leases)) {
-      const [l, i] = k.split(":").map(Number);
-      if (v.until < now || M.isBuilt(m, l, i)) delete leases[k];
+    const sql = this.ctx.storage.sql;
+    if (built !== null) {
+      need(typeof built === "object" && isInt(built.l) && isInt(built.i), "pump_step: built is {l, i, text} or {l, i, error}");
+      if (typeof built.text === "string" && built.text.trim()) this.#changing((m) => this.#nodeBuilt(m, built.l, built.i, built.text));
+      else this.#nodeFailed(run, built.l, built.i, built.error ?? "the compactor wrote no line");
     }
-    const busy = new Set(Array.isArray(skip) ? skip.map(String) : []);
-    for (const [k, v] of Object.entries(leases)) if (v.run !== run) busy.add(k);
-    const f = M.first(m);
-    const settled = f >= (upto ?? m.T);
-    const n = clamp(max, 1, M.JOBS);
-    const nodes = settled ? [] : M.batch(m, (i) => this.#line(i), { busy, upto: upto ?? m.T, max: n });
-    const merges = upto === null || m.bytes > M.VIEW ? M.ready(m, { busy, max: n + 1 }).filter((x) => x.l > 0).slice(0, n) : [];
-    for (const x of [...nodes, ...merges]) leases[M.key(x.l, x.i)] = { run, until: now + LEASE_MS };
-    this.#setJson("busy", leases);
-    // a pump at work says when it last planned; one that found nothing has ended
-    if (upto === null && run !== null) {
-      if (nodes.length || merges.length) this.#set("pump_at", now);
-      else this.#del("pump_at");
+    const spawns = this.#spawns(now);
+    if (first && spawns.length) spawns.shift();
+    if (next) spawns.push(now + SPAWN_MS);
+    const out = { node: null, spawn: 0 };
+    let taking = !end;
+    if (upto !== null) {
+      const f = this.#firstUnbuilt(this.#memory());
+      out.settled = f >= upto;
+      const lock = this.#json("turn", null);
+      if (lock && lock.run === run) {
+        lock.touched = now;
+        this.#setJson("turn", lock);
+        out.stopped = lock.stop === true;
+      }
+      const fail = out.settled ? null : this.#json("fails", {})[M.key(0, f)];
+      if (fail && fail.tries >= SETTLE_FAILS_MAX) out.failing = { id: f, error: fail.error };
+      taking = taking && !out.settled && !out.stopped && !out.failing;
     }
-    const lock = this.#json("turn", null);
-    return { nodes, merges, settled, first: f, T: m.T, stopped: !!(run !== null && lock && lock.run === run && lock.stop) };
+    if (taking) {
+      const leased = this.#leased(now);
+      if (leased < M.JOBS) {
+        const node = this.#next(now, upto, skip);
+        if (node) {
+          sql.exec("UPDATE ready SET run = ?, until = ? WHERE l = ? AND i = ?", run, now + LEASE_MS, node.l, node.i);
+          out.node = { l: node.l, i: node.i };
+          this.#set("pump_at", now);
+        }
+      }
+      // more pumps for what else is ready, up to JOBS at work at once
+      const more = Math.min(M.JOBS - this.#leased(now) - spawns.length, this.#takeable(now));
+      for (let k = 0; k < more; k++) spawns.push(now + SPAWN_MS);
+      out.spawn = Math.max(0, more);
+    }
+    this.#setJson("spawns", spawns);
+    return out;
   }
 
-  // A node the compactor built: the first write wins, and the view is
-  // refitted. No text: the build failed, its lease let go, the failure
-  // kept for `status` (the next pump tries again).
-  node_built({ run = null, l, i, text = null, error = null }) {
-    need(isInt(l) && isInt(i), "node_built: l and i are counts");
-    if (text === null) return this.#nodeFailed(run, l, i, error);
-    need(typeof text === "string" && text.trim().length > 0, "node_built: text is the line");
-    return this.#changing((m) => this.#nodeBuilt(m, l, i, text));
-  }
-
-  // A batch's nodes (docs/optchat.md, "Importing chats"), each as
-  // node_built takes one, in order: a level-0 batch's messages, or a
-  // batch's merges (never a parent and its child).
-  nodes_built({ run = null, nodes }) {
-    need(Array.isArray(nodes) && nodes.length >= 1 && nodes.length <= 2 * M.BATCH, `nodes_built: 1 to ${2 * M.BATCH} nodes`);
-    for (const x of nodes) {
-      need(x && isInt(x.l) && isInt(x.i), "nodes_built: each node's l and i are counts");
-      need(x.text === null || x.text === undefined || (typeof x.text === "string" && x.text.trim().length > 0), "nodes_built: a node's text is its line, or null");
-    }
-    const out = [];
-    for (const x of nodes) if (typeof x.text !== "string") out.push(this.#nodeFailed(run, x.l, x.i, x.error ?? null));
-    const done = nodes.filter((x) => typeof x.text === "string");
-    if (done.length) out.push(...this.#changing((m) => done.map((x) => this.#nodeBuilt(m, x.l, x.i, x.text))));
-    return { built: out.filter((r) => r.built).length, first: M.first(this.#memory()) };
-  }
-
-  // A node's build failed: its lease let go, the failure kept for `status`
-  // (the next pump tries again).
+  // A node's build failed: its lease let go, the node tried again after
+  // RETRY_MS (or at the next message), the failure kept for `status`.
   #nodeFailed(run, l, i, error) {
     const k = M.key(l, i);
-    const leases = this.#json("busy", {});
-    if (k in leases) {
-      delete leases[k];
-      this.#setJson("busy", leases);
-    }
+    this.ctx.storage.sql.exec("UPDATE ready SET run = NULL, until = ? WHERE l = ? AND i = ?", Date.now() + RETRY_MS, l, i);
     const fails = this.#json("fails", {});
-    const first = !(k in fails);
     fails[k] = { id: i * 2 ** l, n: 2 ** l, error: String(error ?? "failed").slice(0, 500), at: Date.now(), tries: (fails[k]?.tries ?? 0) + 1, run };
     const keys = Object.keys(fails);
     if (keys.length > FAILS_KEPT) for (const old of keys.slice(0, keys.length - FAILS_KEPT)) delete fails[old];
     this.#setJson("fails", fails);
-    return { built: false, first };
+    return { built: false };
   }
 
-  // A node built, in a #changing: the first write wins, its lease let go,
-  // its failures forgotten, the view refitted and the free nodes it readied
-  // built.
+  // A node built, in a #changing: the first write wins (a lease that ran
+  // out may have let another run build it too), its failures forgotten, and
+  // the memory told (its parent readied, the compaction view fitted).
   #nodeBuilt(m, l, i, text) {
     const k = M.key(l, i);
-    const leases = this.#json("busy", {});
-    if (k in leases) {
-      delete leases[k];
-      this.#setJson("busy", leases);
-    }
     if (M.isBuilt(m, l, i)) return { built: false, why: "built already" };
-    need((i + 1) * 2 ** l <= m.T, `node_built: ${i * 2 ** l}+${2 ** l} covers messages past the log`);
-    need(l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)), "node_built: a parent comes after its children");
-    const t = M.cutBytes(text, NODE_TEXT_MAX);
-    this.ctx.storage.sql.exec("INSERT INTO node (l, i, text) VALUES (?, ?, ?)", l, i, t);
-    M.setNode(m, l, i, t);
-    this.#free(m);
+    need((i + 1) * 2 ** l <= m.T, `pump_step: ${M.nameOf(l, i)} covers messages past the log`);
+    need(l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)), "pump_step: a parent comes after its children");
+    M.setNode(m, l, i, M.cutBytes(text, NODE_TEXT_MAX));
     const fails = this.#json("fails", {});
     if (k in fails) {
       delete fails[k];
       this.#setJson("fails", fails);
     }
-    return { built: true, first: M.first(m) };
+    return { built: true };
   }
 
   // A hand-off opened: its task, published on `chat` at `seq`, recorded
@@ -777,7 +994,7 @@ export class App extends DurableObject {
       if (sql.exec("SELECT id FROM task WHERE id = ?", id).toArray().length) return { id, turn, opened: false };
       sql.exec(
         "INSERT INTO task (id, thread, i, text, seq, turn, state, report, steps, started, ended) VALUES (?, ?, NULL, ?, ?, ?, 'running', NULL, '[]', ?, NULL)",
-        id, thread, M.capText(text), seq, turn, Date.now(),
+        id, thread, text, seq, turn, Date.now(),
       );
       const early = this.#json("early", {});
       if (turn in early) {
@@ -804,17 +1021,18 @@ export class App extends DurableObject {
     call.publish("log", body);
   }
 
-  // A hand-off's end: its one reply is its report, queued as a `user`
-  // message `[<task>] …` in its thread, with the reply's files, which
-  // starts a turn. A reply to a task that ended already (a later part)
+  // A hand-off's end: its one reply is its report, logged whole as a `work`
+  // message `[<task>] …` in its thread (§1), with the reply's files, and
+  // queued, which starts a turn (or reaches the running one between its
+  // tool calls). A reply to a task that ended already (a later part)
   // changes nothing.
   #endTask(call, m, t, said, files = []) {
     if (t.report !== null) return { task: t.id, ended: false };
-    const report = M.capText(said.trim() || (files.length ? "(files)" : "(ended: idle: no words)"));
+    const report = said.trim() || (files.length ? "(files)" : "(ended: idle: no words)");
     const state = endedBy(report);
     this.ctx.storage.sql.exec("UPDATE task SET state = ?, report = ?, ended = ? WHERE id = ?", state, report, Date.now(), t.id);
     this.#publishTask(call, { ...t, state, report });
-    const q = this.#enqueue(call, m, { text: `[${t.id}] ${report}`, thread: t.thread, task: t.id, attachments: files });
+    const q = this.#enqueue(call, m, { kind: "work", text: `[${t.id}] ${report}`, thread: t.thread, task: t.id, attachments: files });
     return { task: t.id, ended: true, running: q.running, i: q.i };
   }
 
@@ -828,7 +1046,7 @@ export class App extends DurableObject {
     const id = this.ctx.storage.sql.exec("SELECT id FROM task WHERE turn = ?", turn).toArray()[0]?.id ?? null;
     if (id === null) {
       const early = this.#json("early", {});
-      if (!(turn in early)) early[turn] = { text: M.capText(text), attachments: a.files, at: Date.now() };
+      if (!(turn in early)) early[turn] = { text, attachments: a.files, at: Date.now() };
       const keys = Object.keys(early);
       if (keys.length > EARLY_REPLIES_MAX) for (const old of keys.slice(0, keys.length - EARLY_REPLIES_MAX)) delete early[old];
       this.#setJson("early", early);
@@ -867,8 +1085,35 @@ export class App extends DurableObject {
     return { text: r.text, bytes: r.bytes, parts: r.parts, T: m.T, settled: r.settled };
   }
 
-  zoom({ id, n }) {
-    return { text: M.zoom(this.#memory(), id, n, (i) => this.#full(i)) };
+  // §6: zoom(id, n) opens a line; zoom(id, 1) gives a message whole, in
+  // pages; zoom("<task id>") gives a computer task (`#taskText`), in pages.
+  zoom({ id, n = 1, page = 1 }) {
+    if (typeof id === "string" && !/^\d+$/.test(id)) {
+      const text = this.#taskText(id.trim());
+      if (text === null) return { text: `No task ${id}.` };
+      const pages = M.splitText(text, M.ZOOM_PAGE);
+      if (!isInt(page) || page < 1 || page > pages.length) return { text: `Task ${id} has ${pages.length} page${pages.length > 1 ? "s" : ""}.` };
+      const more = pages.length > 1 ? `\n[page ${page} of ${pages.length}${page < pages.length ? `: zoom("${id}", 1, ${page + 1}) gives the next` : ""}]` : "";
+      return { text: `${pages[page - 1]}${more}` };
+    }
+    return { text: M.zoom(this.#memory(), Number(id), n, (i) => this.#full(i), page) };
+  }
+
+  // A computer task whole, as zoom("<task id>") answers it (§6's
+  // zoom("Name"), an agent's whole chat): what it was given, its state and
+  // times, and its report whole. goose's own steps are on `work`, which the
+  // mind's code cannot read (docs/optchat.md, "Where we differ").
+  #taskText(id) {
+    const t = this.#task(id);
+    if (!t) return null;
+    const at = (ms) => new Date(ms).toISOString();
+    const report = this.ctx.storage.sql.exec("SELECT i FROM log WHERE task = ? AND kind IN ('work', 'user') AND cont IS NULL ORDER BY i LIMIT 1", t.id).toArray()[0]?.i;
+    const head = `Task ${t.id} (${t.state}) on the user's computer, from ${at(t.started)}${t.ended ? ` to ${at(t.ended)}` : ""}${isInt(t.i) ? `, handed off at message ${t.i}` : ""}.`;
+    const lines = [head, "", "Given:", t.text, ""];
+    if (t.report === null) lines.push("No report yet.");
+    else lines.push(`Its report${isInt(report) ? ` (message ${report})` : ""}:`, t.report);
+    lines.push("", "(Its steps on the computer are not kept in the memory: what it was given and its report are.)");
+    return lines.join("\n");
   }
 
   date({ id }) {
@@ -894,7 +1139,9 @@ export class App extends DurableObject {
     return rows.map((r) => ({ i: r.i, kind: r.kind, thread: r.thread, at: r.at, snippet: M.cutBytes(M.flat(r.snippet).trim(), SNIPPET_MAX_BYTES) }));
   }
 
-  search({ q, limit = SEARCH_TOOL_MAX, thread = null }) {
+  // The page's Search and an MCP client's; never a turn's tool (§5: zoom is
+  // the only way a turn navigates the memory).
+  search({ q, limit = SEARCH_DEFAULT, thread = null }) {
     return { results: this.#search(q, clamp(limit, 1, SEARCH_MAX), thread) };
   }
 
@@ -908,11 +1155,13 @@ export class App extends DurableObject {
 
   // Another agent's chat played into the log: a part of one conversation,
   // its messages `from` on, appended in order with their own times as
-  // `user` and `talk`, in the conversation's thread (made on its first
-  // part, titled from it). No turn is started: an import plays history, it
-  // asks the agent nothing. A part already landed changes nothing, so a
-  // retry or a rerun resumes; one past what landed is refused (parts go in
-  // order). The compactor is started when none ran lately.
+  // `user` and `talk` (a text past CAP as several messages in a row, §1),
+  // in the conversation's thread (made on its first part, titled from it).
+  // No turn is started: an import plays history, it asks the agent nothing.
+  // A part already landed changes nothing, so a retry or a rerun resumes;
+  // one past what landed is refused (parts go in order); `landed` counts
+  // the conversation's messages, not their pieces. The compactor is started
+  // when none is at work.
   import({ source, conversation, from = 0, total = null, messages }, call) {
     need(typeof source === "string" && IMPORT_SOURCE.test(source), "import: source is a word (claude-code, codex, …)");
     const id = conversation?.id;
@@ -921,6 +1170,7 @@ export class App extends DurableObject {
     need(Array.isArray(messages) && messages.length >= 1 && messages.length <= IMPORT_MESSAGES_MAX, `import: 1 to ${IMPORT_MESSAGES_MAX} messages`);
     for (const msg of messages) {
       need(msg && (msg.role === "user" || msg.role === "assistant") && typeof msg.text === "string" && msg.text.trim().length > 0 && isInt(msg.at), "import: each message is {role: user|assistant, text, at}");
+      need(msg.text.length <= IMPORT_TEXT_MAX, `import: a message's text is at most ${IMPORT_TEXT_MAX} characters`);
     }
     const sql = this.ctx.storage.sql;
     const thread = importThread(source, id);
@@ -947,10 +1197,11 @@ export class App extends DurableObject {
         source, id, thread, n, now,
       );
       call.publish("log", { type: "import", source, conversation: id, thread, n, total: isInt(total) ? total : null, T: m.T });
-      // a pump that planned lately is at work; else one is started, at most
-      // one a minute (each is a triggered run, under the hourly breaker)
-      const working = now - Number(this.#get("pump_at") ?? 0) <= PUMP_KICK_MS;
-      if (!working && now - Number(this.#get("kicked") ?? 0) > KICK_AGAIN_MS) {
+      // a pump at work (or starting) goes on; else one is started, at most
+      // one a minute (each is a triggered run, under the hourly breaker),
+      // and it starts the others (pump_step's `spawn`)
+      this.#flush(m);
+      if (now - Number(this.#get("kicked") ?? 0) > KICK_AGAIN_MS && this.#kick(now)) {
         this.#set("kicked", now);
         call.publish("compact", { at: now });
       }
@@ -1003,7 +1254,7 @@ export class App extends DurableObject {
         last: t.last,
         summary: this.#summary(m, t),
         topics: this.#threadTopics(t.id),
-        count: sql.exec("SELECT COUNT(*) AS n FROM log WHERE thread = ? AND kind IN ('user', 'talk')", t.id).one().n,
+        count: sql.exec("SELECT COUNT(*) AS n FROM log WHERE thread = ? AND kind IN ('user', 'talk') AND cont IS NULL", t.id).one().n,
       })),
     };
   }
@@ -1026,7 +1277,7 @@ export class App extends DurableObject {
     const n = clamp(limit, 1, 200);
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT i, kind, text, at, persona, task, attachments FROM log WHERE thread = ?${before !== null ? " AND i < ?" : ""} ORDER BY i DESC LIMIT ?`,
+        `SELECT i, kind, text, at, persona, task, attachments, cont FROM log WHERE thread = ?${before !== null ? " AND i < ?" : ""} ORDER BY i DESC LIMIT ?`,
         ...(before !== null ? [id, before, n + 1] : [id, n + 1]),
       )
       .toArray();
@@ -1038,7 +1289,7 @@ export class App extends DurableObject {
     need(isInt(i), "context: i is a message's id");
     const lo = Math.max(0, i - clamp(before, 0, 50));
     const hi = i + clamp(after, 0, 50);
-    const rows = this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i BETWEEN ? AND ? ORDER BY i DESC", lo, hi).toArray();
+    const rows = this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments, cont FROM log WHERE i BETWEEN ? AND ? ORDER BY i DESC", lo, hi).toArray();
     return { messages: this.#page(rows.map((r) => this.#shown(r))).messages };
   }
 
@@ -1051,12 +1302,12 @@ export class App extends DurableObject {
     need(after === null || isInt(after), "export: after is a message's id");
     const n = clamp(limit, 1, EXPORT_MAX);
     const rows = this.ctx.storage.sql
-      .exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i > ? ORDER BY i LIMIT ?", after ?? -1, n + 1)
+      .exec("SELECT i, kind, text, at, thread, persona, task, attachments, cont FROM log WHERE i > ? ORDER BY i LIMIT ?", after ?? -1, n + 1)
       .toArray();
     const entries = [];
     let bytes = 0;
     for (const r of rows.slice(0, n)) {
-      const e = { ...r, attachments: F.filesOf(r.attachments) };
+      const e = { ...r, attachments: F.filesOf(r.attachments), cont: r.cont === 1 };
       bytes += sizeOf(e);
       if (entries.length && bytes > RESULT_SOFT_BYTES) break;
       entries.push(e);
@@ -1077,7 +1328,7 @@ export class App extends DurableObject {
         break;
       }
     }
-    return { parts, bytes: m.bytes, T: m.T, ...(cut ? { cut } : {}) };
+    return { parts, bytes: m.v.bytes, T: m.T, ...(cut ? { cut } : {}) };
   }
 
   node({ id, n }) {
@@ -1136,20 +1387,30 @@ export class App extends DurableObject {
     const l = this.#lock(now);
     const imp = this.ctx.storage.sql.exec("SELECT COUNT(*) AS conversations, COALESCE(SUM(n), 0) AS messages, MAX(at) AS last FROM import").one();
     const pumped = Number(this.#get("pump_at") ?? 0);
+    const sql = this.ctx.storage.sql;
+    const left = sql.exec("SELECT COUNT(*) AS n FROM ready").one().n;
     return {
       turn: l ? { running: true, thread: l.thread, since: l.since } : null,
       queued: this.#json("queue", []).length,
-      unbuilt: m.T - M.first(m),
+      unbuilt: m.T - this.#firstUnbuilt(m),
       T: m.T,
       hands: this.#get("agent") !== null,
       failing: Object.values(this.#json("fails", {})).map((f) => ({ id: f.id, n: f.n, error: f.error, tries: f.tries })),
-      // the compactor: whether it has a node to build now, when a pump last
-      // planned, and the view's size (over VIEW while merges lag)
-      ready: M.ready(m, { max: 1 }).length > 0,
+      // the compactor: whether nodes are left to build (`ready`, how many),
+      // the compactions at work now (`pumps`) and when one was last taken,
+      // and the views' sizes (the chat's, and the compaction view's)
+      ready: left > 0,
+      left,
+      pumps: this.#leased(now),
       pump: pumped ? { at: pumped } : null,
-      view: m.bytes,
-      nodes: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM node").one().n,
+      view: m.v.bytes,
+      cview: m.c.bytes,
+      nodes: sql.exec("SELECT COUNT(*) AS n FROM node").one().n,
       import: imp.conversations ? { conversations: imp.conversations, messages: imp.messages, last: imp.last } : null,
+      // this instance (a restart is another), and how many times the views
+      // were built from the log (a mind made before they were saved: once)
+      instance: this.#instance,
+      folds: Number(this.#get("folds") ?? 0),
       now,
     };
   }
@@ -1274,12 +1535,25 @@ export class App extends DurableObject {
     return out;
   }
 
-  // Turns while messages are queued (spec 7, docs/optchat.md "Turns"), each
+  // Turns while messages are queued (§6, docs/optchat.md "Turns"), each
   // ended and its thread classified, then the compactor behind them. Past
   // a run's budget, the rest go to a fresh run.
   async #turns(job, s) {
     const members = await s.members();
-    const agent = members.filter((m) => m.kind === "agent").sort((a, b) => (a.addedAt ?? 0) - (b.addedAt ?? 0))[0]?.principal ?? null;
+    const lead = members.filter((m) => m.kind === "agent").sort((a, b) => (a.addedAt ?? 0) - (b.addedAt ?? 0))[0] ?? null;
+    const agent = lead?.principal ?? null;
+    // the hands, as each turn's messages name them: the lead agent, and
+    // whether its computer is awake (its bridge holds a live socket here)
+    let profiles = {};
+    if (agent !== null) {
+      try {
+        profiles = (await s.people([agent])) ?? {};
+      } catch {
+        profiles = {};
+      }
+    }
+    const named = String(profiles[agent]?.fragment ?? "").split(".")[0] || profiles[agent]?.username || "your agent";
+    const h = { agent, profiles, hands: agent !== null ? [{ name: named, awake: lead.here === true }] : [] };
     let turns = 0;
     for (;;) {
       if (turns > 0 && (turns >= TURNS_PER_RUN || s.n > TURN_START_STEPS || s.bytes > RESULTS_SOFT_BYTES)) {
@@ -1292,7 +1566,7 @@ export class App extends DurableObject {
         return { turns, why: b.why };
       }
       turns++;
-      const end = await this.#turn(job, s, b, agent);
+      const end = await this.#turn(job, s, b, h);
       const e = await s.call("turn_end", { run: job.run, thread: b.thread, state: end.state, error: end.error ?? null, requeue: end.requeue ?? [] });
       if (end.handOn) {
         await s.call("heard", { resume: true });
@@ -1306,9 +1580,13 @@ export class App extends DurableObject {
     }
   }
 
-  // One turn: settle, render the view once, then model calls with tools
-  // until one answers without a tool call (at most CALLS_MAX).
-  async #turn(job, s, b, agent) {
+  // One turn (§6): wait until every message before its own is summarized,
+  // render the view once, then model calls until one answers without a tool
+  // call (at most CALLS_MAX). Every call is [tools] [system prompt] [view]
+  // [the turn's state, then its messages], the tools and the system prompt
+  // the same for every persona and thread (and every compaction), so the
+  // cached prefix runs through the view.
+  async #turn(job, s, b, h) {
     const thread = b.thread;
     try {
       if (!b.settled) {
@@ -1316,11 +1594,8 @@ export class App extends DurableObject {
         if (settled !== true) return settled;
         await s.publish("log", { type: "turn", thread, state: "thinking" });
       }
-      const v = await s.call("view", { upto: b.tail });
+      const v = await s.call("turn_view", { upto: b.tail });
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
-      const hands = b.persona.hands === true && agent !== null;
-      // the same tools every turn, a persona with hands one more at the end
-      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, TOOLS.apps, TOOLS.app_ops, TOOLS.app_call, ...(hands ? [TOOLS.computer] : [])];
       // the web's steps (applib/web.mjs), and the providers it passes over
       // this turn (a secret found missing, DuckDuckGo found refusing)
       const web = {
@@ -1333,19 +1608,29 @@ export class App extends DurableObject {
         passed: new Set(),
       };
       // `apps`: the owner's apps, read once a turn (`#apps`)
-      const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [], apps: null };
+      const ctx = {
+        thread,
+        persona: b.persona,
+        hands: b.persona.hands === true && h.agent !== null,
+        agent: h.agent,
+        profiles: h.profiles,
+        web,
+        attachments: Array.isArray(b.attachments) ? [...b.attachments] : [],
+        apps: null,
+      };
+      const state = turnState({ now: b.now, chat: b.chat, persona: b.persona, hands: h.hands });
       const messages = [
-        { role: "system", content: system(b.persona, b.about) },
-        { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: b.texts.join("\n\n") }] },
+        { role: "system", content: system(b.about) },
+        { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: state }, { type: "text", text: b.texts.join("\n\n") }] },
       ];
       let convo = 0;
       let last = false;
       for (let calls = 0; calls < CALLS_MAX; calls++) {
-        last = last || calls === CALLS_MAX - 1 || s.left() < 3 || s.bytes > RESULTS_SOFT_BYTES || convo > CONVO_MAX_BYTES;
+        last = last || calls === CALLS_MAX - 1 || s.left() < 4 || s.bytes > RESULTS_SOFT_BYTES || convo > CONVO_MAX_BYTES;
         const a = await s.text({
           model: "medium",
           messages,
-          tools,
+          tools: CALL_TOOLS,
           tool_choice: last ? "none" : "auto",
           draft: { channel: "log", turn: `turn:${thread}` },
         });
@@ -1370,8 +1655,8 @@ export class App extends DurableObject {
           let out;
           if (k >= TOOL_CALLS_MAX) out = { text: `Error: at most ${TOOL_CALLS_MAX} tool calls run in one answer; call this one again.` };
           else if (args === null || typeof args !== "object") out = { text: "Error: the arguments are not a JSON object." };
-          // a tool's steps (3 at most), this answer's log, and a last call and its log
-          else if (s.left() < 6) {
+          // a tool's steps (3 at most), this answer's log, a pump, and a last call and its log
+          else if (s.left() < 7) {
             out = { text: "Error: this turn is out of steps; answer with what you have." };
             last = true;
           } else if (convo + adding > CONVO_MAX_BYTES) {
@@ -1379,18 +1664,28 @@ export class App extends DurableObject {
             out = { text: "Error: this turn has read all it can hold; answer with what you have." };
             last = true;
           } else out = await this.#tool(job, s, name, args, ctx);
+          // §1: a tool's output is clipped to its head and tail
           const echo = M.capText(out.text);
           adding += M.utf8(echo);
           entries.push({ kind: "tool", text: `${name} ${args === null ? String(raw) : JSON.stringify(args)}`, task: out.task ?? null });
           entries.push({ kind: "echo", text: echo, task: out.task ?? null });
           results.push({ role: "tool", tool_call_id: String(tc?.id ?? `call_${calls}_${k}`), content: echo });
         }
-        const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries });
+        const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries, take: asked.length > 0 });
+        if (lg.pump) await s.call("pump", {});
         if (!asked.length) return { state: "done" };
         if (lg.stopped) return { state: "stopped" };
         const said = { role: "assistant", content: msg.content ?? null, tool_calls: asked };
         messages.push(said, ...results);
         convo += sizeOf(said) + results.reduce((n, r) => n + sizeOf(r), 0);
+        // §6: what the person (or a hand-off's report) said meanwhile, between tool calls
+        const heard = lg.heard?.texts ?? [];
+        if (heard.length) {
+          const said = { role: "user", content: heard.join("\n\n") };
+          messages.push(said);
+          convo += sizeOf(said);
+          for (const f of lg.heard.attachments ?? []) if (ctx.attachments.length < F.FILES_MAX && !ctx.attachments.some((x) => x.sha256 === f.sha256)) ctx.attachments.push(f);
+        }
       }
       return { state: "done" };
     } catch (e) {
@@ -1398,153 +1693,105 @@ export class App extends DurableObject {
     }
   }
 
-  // Spec 6: no turn sees a placeholder. Builds the view's unsummarized
-  // lines before the turn's messages, level 0 in order a batch at a time
-  // (sharing the work with a pump through leases), and merges while the
-  // view is over its budget (a long backlog, as an import leaves); or waits
-  // for another run building them. Answers true, or how the turn ends.
+  // §6: no turn sees a placeholder. The turn waits until every message
+  // before its own is summarized: it builds those it may itself, one at a
+  // time under a lease as a pump does, and starts pumps for the rest (a
+  // message whose node failed is tried again RETRY_MS later; one that
+  // failed SETTLE_FAILS_MAX times ends the turn with an error). Past
+  // SETTLE_STEPS the turn hands its messages to a fresh run. Answers true,
+  // or how the turn ends.
   async #settle(job, s, b) {
     const began = s.n;
-    const fails = new Map();
-    const skip = [];
+    let built = null;
     let waits = 0;
     for (;;) {
-      const plan = await s.call("pump_plan", { run: job.run, upto: b.tail, skip });
-      if (plan.settled) return true;
-      if (plan.stopped) return { state: "stopped" };
-      if (s.n - began > SETTLE_STEPS || s.left() < 2 * NODE_STEPS + 2) return { state: "settling", requeue: b.taken, handOn: true };
-      if (plan.nodes.length || plan.merges.length) {
+      if (s.n - began > SETTLE_STEPS || s.left() < PUMP_KEEP_STEPS + 4) {
+        if (built !== null) await s.call("pump_step", { run: job.run, built, end: true });
+        return { state: "settling", requeue: b.taken, handOn: true };
+      }
+      const r = await s.call("pump_step", { run: job.run, built, upto: b.tail });
+      built = null;
+      for (let k = 0; k < r.spawn; k++) await s.call("pump", {});
+      if (r.settled) return true;
+      if (r.stopped) return { state: "stopped" };
+      if (r.failing) return { state: "error", error: `the memory could not summarize message ${r.failing.id}: ${r.failing.error}` };
+      if (r.node) {
         waits = 0;
-        const failed = [...(await this.#build(job, s, plan.nodes)), ...(await this.#build(job, s, plan.merges))];
-        for (const f of failed) {
-          // a merge that failed waits for the pump: the turn needs level 0 alone
-          if (f.l > 0) {
-            skip.push(M.key(f.l, f.i));
-            continue;
-          }
-          const k = M.key(f.l, f.i);
-          fails.set(k, (fails.get(k) ?? 0) + 1);
-          if (fails.get(k) >= SETTLE_FAILS_MAX) {
-            return { state: "error", error: `the memory could not summarize message ${f.i * 2 ** f.l}: ${f.error}` };
-          }
-        }
-        if (failed.some((f) => f.l === 0)) await s.sleep(RETRY_MS);
-      } else {
-        // another run is building what this turn waits for
-        waits++;
-        await s.sleep(Math.min(1000 * waits, 5000));
-        if ((await s.call("turn_touch", { run: job.run })).stopped) return { state: "stopped" };
+        built = await this.#compact(s, r.node);
+        continue;
       }
+      // pumps are building what this turn waits for
+      waits++;
+      await s.sleep(Math.min(1000 * waits, 5000));
     }
   }
 
-  // The compactor (spec 4.2, 4.3): a node alone in its own conversation,
-  // asked again with the line cut at the limit until it fits or TRIES,
-  // then written (`node_built`, first write wins). Two or more go in one
-  // call (#buildBatch): a job's steps run one at a time (cell/platform.mjs),
-  // so the spec's parallel JOBS would be one call after another, each with
-  // the whole view as its context. Answers the nodes that failed.
-  async #build(job, s, nodes) {
-    if (nodes.length >= 2) return this.#buildBatch(job, s, nodes);
-    const failed = [];
-    for (const { l, i } of nodes) {
-      // read from this instance as the step is built (see the top)
-      let messages = M.compactMessages(COMPACT, this.#compactInput(l, i));
-      let tries = [];
-      let text = null;
-      let error = null;
-      for (;;) {
-        let a;
-        try {
-          a = await s.text({ model: "cheap", messages, max_tokens: COMPACT_TOKENS });
-        } catch (e) {
-          error = describe(e);
-          break;
-        }
-        const r = M.compactTry(tries, a?.text);
-        if (r.fail) {
-          error = r.fail;
-          break;
-        }
-        tries = r.tries;
-        if (r.text !== undefined) {
-          text = r.text;
-          break;
-        }
-        messages = [...messages, { role: "assistant", content: a.text }, { role: "user", content: r.retry }];
-      }
-      await s.call("node_built", { run: job.run, l, i, text, error });
-      if (text === null) failed.push({ l, i, error });
-    }
-    return failed;
-  }
-
-  #compactInput(l, i) {
-    return M.compactInput(this.#memory(), l, i, (k) => this.#line(k));
-  }
-
-  // A batch in one call (docs/optchat.md, "Importing chats"): level-0
-  // nodes in a row, or merges, a numbered line each, with the spec's SCALE
-  // and its cut-at-limit retry line by line, all of them in the same
-  // conversation (M.batchTry). Its lines are written at once
-  // (`nodes_built`); a line that never came, or a call that failed, fails
-  // its node alone.
-  async #buildBatch(job, s, nodes) {
+  // One compaction (§4): the node's call, with the system prompt and the
+  // tools every turn has (none to be called), then the compaction view up
+  // to the node and its task; a line over NODE asked again in the same
+  // conversation, cut where the limit falls, until it fits or TRIES (the
+  // shortest kept). Answers {l, i, text}, or {l, i, error}.
+  async #compact(s, { l, i }) {
     // read from this instance as the step is built (see the top)
-    const m = this.#memory();
-    const input = nodes[0].l === 0 ? M.compactBatchInput(m, nodes, (k) => this.#line(k)) : M.compactMergeBatchInput(m, nodes);
-    let messages = M.compactMessages(COMPACT, input);
-    let state = M.batchStart(nodes.length);
-    let lines = null;
-    let error = null;
+    let messages = this.#compaction(l, i);
+    let tries = [];
     for (;;) {
       let a;
       try {
-        a = await s.text({ model: "cheap", messages, max_tokens: BATCH_TOKENS });
+        a = await s.text({ model: "cheap", messages, tools: CALL_TOOLS, tool_choice: "none", max_tokens: COMPACT_TOKENS });
       } catch (e) {
-        error = describe(e);
-        lines = M.batchDone(state);
-        break;
+        return { l, i, error: describe(e) };
       }
-      const r = M.batchTry(state, a?.text);
-      state = r.state;
-      if (r.lines) {
-        lines = r.lines;
-        break;
-      }
-      messages = [...messages, { role: "assistant", content: a?.text ?? "" }, { role: "user", content: r.retry }];
+      const r = M.compactTry(tries, a?.text);
+      if (r.fail) return { l, i, error: r.fail };
+      tries = r.tries;
+      if (r.text !== undefined) return { l, i, text: r.text };
+      messages = [...messages, { role: "assistant", content: a.text }, { role: "user", content: r.retry }];
     }
-    const results = nodes.map(({ l, i }, k) => ({ l, i, text: lines[k], error: lines[k] === null ? (error ?? "the compactor wrote no line for it") : null }));
-    await s.call("nodes_built", { run: job.run, nodes: results });
-    return results.filter((x) => x.text === null).map(({ l, i, error }) => ({ l, i, error }));
   }
 
-  // The compactor's job (docs/optchat.md, "The compactor"): rounds of a
-  // level-0 batch and up to JOBS ready merges until none is ready; a node
-  // that failed waits for the next pump. Past PUMP_ROUNDS_MAX or the run's
-  // budget with work left, a fresh pump takes the rest (a chain the hop
-  // limit ends at 16; an import's next part, or `fragment mind import`
-  // following it, starts another).
+  // A compaction's first messages: the system prompt of every call, then
+  // the compaction view up to the node and its task (M.compaction). A node
+  // another run built meanwhile (its lease ran out) is asked all the same:
+  // a past step's arguments do not matter, and the first write wins.
+  #compaction(l, i) {
+    const m = this.#memory();
+    const sys = { role: "system", content: system(this.#get("about") ?? "") };
+    const open = (i + 1) * 2 ** l <= m.T && !M.isBuilt(m, l, i) && (l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)));
+    if (!open) return [sys, { role: "user", content: `Compaction: ${M.nameOf(l, i)} is built already: answer "built".` }];
+    const c = M.compaction(m, l, i, (k) => this.#line(k));
+    return [sys, { role: "user", content: [{ type: "text", text: c.view }, { type: "text", text: c.task }] }];
+  }
+
+  // A compactor (§4, "The order"): one node at a time, each taken under a
+  // lease and written by `pump_step`, until none is left it may take; it
+  // starts pumps for what else is ready, up to JOBS at work at once (a
+  // run's steps go one at a time, so JOBS calls at once are JOBS runs). A
+  // node that failed is passed for the rest of this run. Past its budget a
+  // fresh pump takes its place (a chain the hop limit ends at 16; the next
+  // message, an import's next part, or `fragment mind import` following it
+  // starts another).
   async pump(input, job) {
     const s = new Steps(job);
     const skip = [];
-    let built = 0;
-    for (let round = 0; round < PUMP_ROUNDS_MAX; round++) {
-      if (s.left() < 2 * NODE_STEPS + 2 || s.bytes > RESULTS_SOFT_BYTES) {
+    let built = null;
+    let made = 0;
+    let first = true;
+    for (;;) {
+      if (s.left() < PUMP_KEEP_STEPS || s.bytes > RESULTS_SOFT_BYTES || skip.length >= PUMP_SKIPS_MAX) {
+        await s.call("pump_step", { run: job.run, built, first, end: true, next: true });
         await s.call("pump", {});
-        return { built, continued: true };
+        return { built: made, continued: true };
       }
-      const plan = await s.call("pump_plan", { run: job.run, skip });
-      if (!plan.nodes.length && !plan.merges.length) return { built, unbuilt: plan.T - plan.first };
-      // level 0 first (a turn waits on it, spec 6), then the merges behind
-      // it, which keep the view near its budget while level 0 catches up
-      const failed = [...(await this.#build(job, s, plan.nodes)), ...(await this.#build(job, s, plan.merges))];
-      built += plan.nodes.length + plan.merges.length - failed.length;
-      for (const f of failed) skip.push(M.key(f.l, f.i));
+      const r = await s.call("pump_step", { run: job.run, built, skip, first });
+      first = false;
+      if (typeof built?.text === "string") made++;
+      built = null;
+      for (let k = 0; k < r.spawn; k++) await s.call("pump", {});
+      if (!r.node) return { built: made };
+      built = await this.#compact(s, r.node);
+      if (typeof built.text !== "string") skip.push(M.key(built.l, built.i));
     }
-    // its rounds spent with work left: a fresh run takes the rest
-    await s.call("pump", {});
-    return { built, rounds: PUMP_ROUNDS_MAX, continued: true };
   }
 
   // The owner's apps (`job.owner.fragments`), read once a turn: an answer's
@@ -1561,29 +1808,30 @@ export class App extends DurableObject {
     return ctx.apps;
   }
 
-  // One tool call of a turn: zoom, date and search are queries; the web's
-  // are fetches (applib/web.mjs); the apps' are the owner's (`job.owner`,
+  // One tool call of a turn: zoom and date are queries (§6; a turn has no
+  // search, §5: zoom is its one way through the memory); the web's are
+  // fetches (applib/web.mjs); the apps' are the owner's (`job.owner`,
   // docs/optchat.md "The user's apps"); computer hands the task to goose on
   // `chat` (docs/optchat.md, "Hand-offs").
   async #tool(job, s, name, args, ctx) {
     switch (name) {
       case "zoom": {
+        const page = args.page === undefined ? 1 : Number(args.page);
+        if (!isInt(page) || page < 1) return { text: `No page ${args.page}.` };
+        // zoom("<task id>"): a computer task whole
+        if (typeof args.id === "string" && !/^\s*\d+\s*$/.test(args.id)) {
+          const id = args.id.trim().replace(/^\[|\]$/g, "").slice(0, 64);
+          return { text: (await s.call("zoom", { id, page })).text };
+        }
         const id = Number(args.id);
-        const n = Number(args.n);
+        const n = args.n === undefined ? 1 : Number(args.n);
         if (!isInt(id) || !Number.isSafeInteger(n) || n < 1) return { text: `No line ${args.id}+${args.n}.` };
-        return { text: (await s.call("zoom", { id, n })).text };
+        return { text: (await s.call("zoom", { id, n, page })).text };
       }
       case "date": {
         const id = Number(args.id);
         if (!isInt(id)) return { text: `No message ${args.id}.` };
         return { text: (await s.call("date", { id })).text };
-      }
-      case "search": {
-        const q = String(args.q ?? "").slice(0, 256);
-        if (!words(q).length) return { text: "Error: search needs words (q)." };
-        const limit = clamp(Number(args.limit ?? SEARCH_TOOL_MAX), 1, SEARCH_TOOL_MAX);
-        const { results } = await s.call("search", { q, limit });
-        return { text: results.length ? results.map((r) => `${r.i}+1|${r.kind}: ${r.snippet}`).join("\n") : "No match." };
       }
       case "web_search": {
         const q = String(args.q ?? "").trim().slice(0, 400);
@@ -1626,11 +1874,13 @@ export class App extends DurableObject {
         }
       }
       case "computer": {
-        if (!ctx.hands) return { text: "Error: no computer is at hand for this persona; answer yourself." };
+        // offered to every persona (the tools are every call's), used by those with hands
+        if (ctx.agent === null) return { text: "Error: the user has no agent on a computer to hand work to; answer yourself, and tell them." };
+        if (!ctx.hands) return { text: `Error: as ${ctx.persona.name} you hand nothing to the computer in this chat; answer yourself, or tell the user a persona with hands can.` };
         const task = String(args.task ?? "").trim();
         if (!task) return { text: "Error: computer needs the task, in words." };
         // the agent's fragment names the turn its bridge gives the task
-        const agentFragment = (await s.people([ctx.agent]))?.[ctx.agent]?.fragment;
+        const agentFragment = ctx.profiles?.[ctx.agent]?.fragment ?? (await s.people([ctx.agent]))?.[ctx.agent]?.fragment;
         if (typeof agentFragment !== "string" || !agentFragment) return { text: "Error: the computer's agent has no fragment to hand work to." };
         // the run and this step: the same id on every re-run
         const id = `w${job.run}-${s.n}`;

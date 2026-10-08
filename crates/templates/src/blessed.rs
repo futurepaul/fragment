@@ -324,12 +324,12 @@ mod tests {
         for op in [
             "view", "zoom", "date", "search", "note", "threads", "thread", "context", "export", "memory", "node", "topics", "personas", "tasks", "status",
             "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop", "topic_suggest",
-            "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan", "node_built",
-            "task_open", "hands_reply", "topics_set", "import", "imported", "nodes_built",
+            "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_view", "turn_end", "logged", "pump_step",
+            "task_open", "hands_reply", "topics_set", "import", "imported",
         ] {
             assert!(m.operations.contains_key(op), "the mind declares {op}");
         }
-        assert_eq!(m.operations.len(), 41, "and nothing else");
+        assert_eq!(m.operations.len(), 40, "and nothing else");
         // an import starts the compactor through its own channel, and a long
         // history needs more than the platform's 16 MiB
         assert_eq!(runs("compact"), Some(("pump", None)));

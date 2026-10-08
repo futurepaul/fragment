@@ -12,12 +12,16 @@
     },
     "zoom": {
       "kind": "query",
-      "description": "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.",
+      "description": "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A long message comes in pages (page, from 1). zoom(\"<task id>\") gives a computer task: what it was given, and its report whole.",
       "input": {
         "type": "object",
-        "required": ["id", "n"],
+        "required": ["id"],
         "additionalProperties": false,
-        "properties": { "id": { "type": "integer", "minimum": 0 }, "n": { "type": "integer", "minimum": 1 } }
+        "properties": {
+          "id": { "type": ["integer", "string"], "minimum": 0, "minLength": 1, "maxLength": 64 },
+          "n": { "type": "integer", "minimum": 1 },
+          "page": { "type": "integer", "minimum": 1 }
+        }
       }
     },
     "date": {
@@ -46,7 +50,7 @@
         "type": "object",
         "required": ["text"],
         "additionalProperties": false,
-        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 30000 } }
+        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 131072 } }
       }
     },
     "threads": {
@@ -195,7 +199,7 @@
               "additionalProperties": false,
               "properties": {
                 "role": { "enum": ["user", "assistant"] },
-                "text": { "type": "string", "minLength": 1, "maxLength": 30000 },
+                "text": { "type": "string", "minLength": 1, "maxLength": 131072 },
                 "at": { "type": "integer", "minimum": 0 }
               }
             }
@@ -233,9 +237,8 @@
     "turn_touch": { "kind": "mutation" },
     "turn_end": { "kind": "mutation" },
     "logged": { "kind": "mutation" },
-    "pump_plan": { "kind": "query", "role": "editor" },
-    "node_built": { "kind": "mutation" },
-    "nodes_built": { "kind": "mutation" },
+    "turn_view": { "kind": "mutation" },
+    "pump_step": { "kind": "mutation" },
     "task_open": { "kind": "mutation" },
     "hands_reply": { "kind": "mutation" },
     "topics_set": { "kind": "mutation" }

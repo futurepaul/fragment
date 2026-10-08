@@ -1,23 +1,33 @@
 # Mind
 
-One memory for every chat (docs/optchat.md, the contract; OptChat's spec,
-which it follows). A blessed template: every mind runs the platform's
-release of this code, and its repo holds only its face.
+One memory for every chat (docs/optchat.md, the contract; UniiChat's
+design, VictorTaelin's gist as rewritten on 2026-10-08, which it follows
+but for docs/optchat.md's "Where we differ from the gist"). A blessed
+template: every mind runs the platform's release of this code, and its
+repo holds only its face.
 
 - `app.mjs`: the App. Its SQLite holds the log (every message, verbatim,
-  append-only), the tree of summaries, threads, topics, personas,
+  append-only; a text past 30,000 characters as several in a row), the
+  tree of summaries, the two views (`vline`, `cline`), the nodes ready to
+  build (`ready`, with the compactor's leases), threads, topics, personas,
   hand-offs (`task`), and `kv` (the default persona, the about-me, the
-  turn lock, the queue, the compactor's leases). Its operations are
-  docs/optchat.md's table.
-- `applib/optmem.mjs`: the memory itself, pure: the fold (append, then
-  merge the most due pair; never split), render (`id+n|text`), zoom, the
-  compactor's readiness (spec 4.1, rules 1 to 3), free nodes, its
-  two-block input with SCALE (512 bytes, checked at load), the cut-at-limit
-  retry, CAP, and byte-safe cuts.
-- `applib/prompts.mjs`: COMPACT, MASTER, VIEW_DOC and the subagent framing,
-  the spec's verbatim with "OptChat" as "Mind" and MASTER's one change
-  (the web, and the computer with its fragment CLI); the tools;
-  topic_suggest's prompt; research's.
+  turn lock, the queue, the sawtooths' state, pumps starting, failures).
+  Its operations are docs/optchat.md's table.
+- `applib/optmem.mjs`: the memory itself, pure: the merge order (the most
+  due pair, `(T + 1)/2^l - i`, its parent built, the oldest first), the
+  chat's view's sawtooth (128 KB down to 64 KB, merging only at a new
+  message) and the compaction view's (32 KB down to 16 KB, made again
+  from the chat's whenever that one merges), free nodes and what becomes
+  ready, a journal of what each change did (for the App to write), load
+  and the one-time fold for a mind saved before the views were, render
+  (`id+n|text`), zoom in pages, a compaction's view and task (UniiChat
+  §4, verbatim, its ruler 512 dashes), the "Too long" retry, CAP for a
+  tool's output, and long texts split.
+- `applib/prompts.mjs`: PROMPT, the one system prompt of every call
+  (UniiChat §5 with "Mind" and the mind's tools), the tools every call
+  offers, what starts each turn's message (the time, the chat, the
+  persona, the hands), the subagent framing goose's copy follows,
+  topic_suggest's prompt and research's.
 - `applib/web.mjs`: the web tools, through `job.fetch`: `web_search`
   (Perplexity, Brave or Tavily by the secret the owner set, else
   DuckDuckGo's HTML page, else Wikipedia's search), `web_fetch` (a page
@@ -28,22 +38,24 @@ release of this code, and its repo holds only its face.
 
 ## How it runs
 
-- **The view is never stored.** It is folded from the log and the tree at
-  the app's first call and kept on the instance. Each mutation that
-  changes the log or the tree bumps `kv.rev`; an instance whose memory
-  is of another `rev` (a rolled-back mutation, another instance) folds
-  again (2,000 messages: about 10 ms; 20,000: about 160 ms).
+- **The views are saved, never rebuilt.** Each change to the memory
+  writes what it did in its mutation; an instance loads the views at its
+  first call. Each mutation that changes the memory bumps `kv.rev`; an
+  instance whose memory is of another `rev` (a rolled-back mutation)
+  loads it again. A mind saved before the views were is folded from its
+  log once, by its first instance (`folds`: 1).
 - **`heard`** (`say`'s trigger) logs the message (`hear`), then runs turns
   while messages wait: `turn_begin` takes the lock and the oldest
-  thread's queued messages; the settle builds the view's unsummarized
-  lines before them (level 0, one at a time, the spec's rule 3) or waits
-  for a pump that holds them; `view {upto}` renders the view once for
-  the turn, stopping before the newest messages still waiting (they go
-  whole, as block 2: the spec renders before it logs); then model calls
-  (`medium`, drafting on `log` as `turn:<thread>`) with zoom, date,
-  search, web_search, web_fetch, research, and computer (a persona with
-  hands, and an agent member), each answer logged (`logged`: talk, tool,
-  echo). `turn_end` lets the lock go; the thread is classified; when
+  thread's queued messages; the wait builds the unsummarized messages
+  before them it may (`pump_step` with `upto`) and starts pumps for the
+  rest; `turn_view` fits the views and renders the chat's once for the
+  turn, stopping before the newest messages still waiting (they go whole
+  after the turn's state: the gist renders before it logs); then model
+  calls (`medium`, drafting on `log` as `turn:<thread>`), every one with
+  the same tools and system prompt, each answer logged (`logged`: talk,
+  tool, echo; it also takes the thread's messages queued since, which
+  reach the model between its tool calls, and starts a pump when none is
+  at work). `turn_end` lets the lock go; the thread is classified; when
   nothing waits, `pump` runs.
 - **Files:** a `say` record's `attachments` (the mind's blobs) are
   logged with the message; `heard` reads the small text ones first
@@ -55,22 +67,23 @@ release of this code, and its repo holds only its face.
   `TAVILY_API_KEY`). With none, search is DuckDuckGo's, then Wikipedia's
   (DuckDuckGo CAPTCHAs a datacenter's address, so on Workers it is, in
   practice, Wikipedia's).
-- **`pump`** builds what is ready, the level-0 node alone first (a turn
-  waits on it), merges when none is: each node one conversation of up to
-  TRIES `cheap` calls, written by `node_built` (first write wins). A job's
-  steps run one at a time, so the spec's JOBS is how many nodes a round
-  takes, not how many calls run at once. Leases (`pump_plan`, a query
-  that writes them) keep a pump and a turn's settle from building the same
-  node.
+- **`pump`** is one of up to 8 compactors at once (a job's steps run one
+  at a time, so 8 calls at once are 8 runs): `pump_step` writes the node
+  it built and takes the next under a lease (the oldest by its last
+  message, of the merges ready and the first 8 unbuilt messages, while
+  fewer than 8 are leased), and says how many more pumps to start; each
+  node is one conversation of up to TRIES `cheap` calls with the turns'
+  tools (`tool_choice: "none"`) and system prompt, the compaction view up
+  to the node, and UniiChat's task.
 - **Hand-offs:** `computer` publishes the task on `chat` (to the agent),
   then `task_open` records it with the turn the agent's bridge gives that
   record (24 hex of SHA-256 of `<agent fragment>|<mind>/chat/<seq>`).
   goose posts one reply a hand-off, its report; `hands_said` (`chat`'s
-  trigger) queues it as `[<task>] …`, which runs a turn. A reply that
-  comes before its `task_open` is kept for it. The page follows goose's
-  steps on `work` itself, by `turn`; the mind runs nothing for them. A
-  task with no reply in 30 minutes is `lost` (a later reply still
-  reports).
+  trigger) logs it as a `work` message `[<task>] …` and queues it, which
+  runs a turn (or reaches the running one). A reply that comes before its
+  `task_open` is kept for it. The page follows goose's steps on `work`
+  itself, by `turn`; the mind runs nothing for them. A task with no reply
+  in 30 minutes is `lost` (a later reply still reports).
 - **Topics:** `classify` asks Clef (`job.ai.decide`, `clef-flash`) one
   `noul` per topic about a thread; a thread is in a topic at p ≥ 0.6.
   `topic_add` publishes `{topic}` on `sort`, whose trigger classifies the
@@ -78,11 +91,11 @@ release of this code, and its repo holds only its face.
   names on `log`.
 
 **Jobs re-run from the top at each step**, so their control flow follows
-only their steps' answers. The compactor's input (the view up to a
-node, up to 128 KB) and Clef's state are read from the instance as their
-step is built, not carried in a step's answer: they would fill a run's 4
-MiB of answers, and what a past step was sent does not matter. A turn's
-view is a step's answer, so every call of the turn sees the same one.
+only their steps' answers. A compaction's input (the compaction view up
+to its node) and Clef's state are read from the instance as their step
+is built, not carried in a step's answer: what a past step was sent does
+not matter. A turn's view is a step's answer, so every call of the turn
+sees the same one.
 
 **Budgets** (a run takes at most 256 steps and 4 MiB of answers): a turn
 makes at most 40 model calls, runs at most 8 tool calls an answer
@@ -90,9 +103,10 @@ makes at most 40 model calls, runs at most 8 tool calls an answer
 when the run nears its steps, its answers' bytes, or 512 KiB of
 conversation (a step's arguments travel in a Workflow step of at most 1
 MiB). A run takes at most 4 turns and starts one only below 64 steps; a
-settle takes at most 96 steps; past any of these the rest goes to a
-fresh run (`heard {resume}`, `pump`), one hop deeper each (the platform
-blocks a chain past 16).
+turn's wait takes at most 96 steps; a pump keeps steps for a node and
+its spawns; past any of these the rest goes to a fresh run (`heard
+{resume}`, `pump`), one hop deeper each (the platform blocks a chain past
+16).
 
 ## Debt and open problems
 
@@ -100,23 +114,22 @@ blocks a chain past 16).
   declares at 1 GiB (`storage.maxBytes`; the platform's 16 MiB holds a
   few tens of thousands of messages, less than an imported history may
   be). No meter counts it, and the instance keeps every node's text in
-  memory. Every logged message is capped at 30,000 characters, head and
-  tail kept. Moving the log out (R2, git) is not in the spike.
+  memory. Moving the log out (R2, git) is not in the spike.
 - **An import's backlog holds turns** (docs/optchat.md, "Importing
   chats"): no call sees a placeholder, so a turn after a long import
-  waits, settling, while the compactor (batched, 8 nodes a call) catches
-  up.
+  waits, settling, while the pumps catch up.
 - **`log` is never trimmed** (no post role): every message is a record
   there too, at most 48 KiB.
 - **Triggered runs pause past 120 an hour** (docs/api.md, Jobs): one
   `hands_said` a hand-off, and one `heard` a message, so only a person
-  saying 120 things an hour reaches it.
+  saying 120 things an hour reaches it. Pumps are job calls, not
+  triggered runs.
 - **A turn that dies holds the lock** until it runs out (15 minutes after
   its last touch); its messages wait for the next message or report.
 - **A node that never builds** (a model that refuses one message) blocks
-  every turn after it: the settle tries it 3 times, 10 s apart, then ends
-  the turn with an error, its message logged and unanswered; each pump
-  tries again.
+  every turn after it: a turn ends with an error once that message failed
+  3 times, its message logged and unanswered; pumps try it again 10 s
+  after each failure, and at each new message.
 - `date` answers UTC: the mind does not know its person's time zone.
 - **A web page is kept whole in its run.** `job.fetch` answers up to 1
   MiB, kept with the run's 4 MiB of answers, so a turn reads three or so
