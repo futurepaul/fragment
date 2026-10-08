@@ -51,7 +51,7 @@ pub const SECTION: &str = "mind-live";
 /// calls (its screen tools' Clef and vision calls among them); about 40
 /// through the shell hand-off, about 30 more for the browsing two. Above
 /// the run's default budget (60): run it with `--max-paid-calls 100`.
-const PAID_CALLS: u64 = 100;
+const PAID_CALLS: u64 = 60;
 /// The mind's code installed from the release.
 const INSTALL: Duration = Duration::from_secs(90);
 /// A turn answered in words (each real model call takes 3–40 s).
