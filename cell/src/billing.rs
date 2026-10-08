@@ -5,7 +5,8 @@
 //! taken from what it was handed; the registry keeps the copy
 //! (registry/billing.rs) and pushes what it means to each holder.
 
-use fragment_core::stripe::{self as core_stripe, CheckoutSession, Event, Form, List, Price, Subscription, META_DEPLOYMENT, META_KIND, META_ORG, META_PERSON};
+use fragment_core::stripe::{self as core_stripe, CheckoutSession, Event, Form, List, Price, Subscription, META_BUYER, META_DEPLOYMENT, META_KIND, META_ORG, META_PACK, META_PERSON};
+use fragment_proto::ledger::GrantCredit;
 use fragment_proto::org::{MySeat, SeatKind};
 use fragment_proto::{limits, ErrorCode};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::registry::billing::{ApplyCheckout, ApplySubscription, CheckoutBegin, CustomerOf, SetCustomer, SubscriptionCopy};
+use crate::registry::billing::{ApplyCheckout, ApplySubscription, CheckoutBegin, CustomerOf, PackBegin, SetCustomer, SubscriptionCopy};
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
 use crate::stripe::Stripe;
@@ -81,22 +82,7 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     let kind = plan.kind;
     let stripe = crate::stripe::client(env, cfg).await?;
     let deployment = cfg.stripe_deployment();
-    let customer = match plan.customer {
-        Some(c) => c,
-        None => {
-            #[derive(Deserialize)]
-            struct Made {
-                id: String,
-            }
-            let form = Form::new()
-                .push("email", plan.email.clone())
-                .push("name", plan.org_name.clone())
-                .push(format!("metadata[{META_DEPLOYMENT}]"), deployment)
-                .push(format!("metadata[{META_ORG}]"), plan.org.clone());
-            let made: Made = stripe.post("/v1/customers", &form, &format!("fragment-customer-{}", plan.org)).await?;
-            ask_registry(env, &SetCustomer { org: plan.org.clone(), customer: made.id }).await?.customer
-        }
-    };
+    let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
     let price = price(&stripe, kind).await?;
     let platform = cfg.platform();
     let mut form = Form::new()
@@ -133,6 +119,77 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     Ok(Checkout { url, session: session.id })
 }
 
+/// An org's Stripe customer: the one it has, or one made for it, once.
+async fn customer(env: &Env, cfg: &Config, stripe: &Stripe, org: &str, name: &str, email: &str, has: Option<String>) -> CellResult<String> {
+    if let Some(c) = has {
+        return Ok(c);
+    }
+    #[derive(Deserialize)]
+    struct Made {
+        id: String,
+    }
+    let form = Form::new()
+        .push("email", email)
+        .push("name", name)
+        .push(format!("metadata[{META_DEPLOYMENT}]"), cfg.stripe_deployment())
+        .push(format!("metadata[{META_ORG}]"), org);
+    let made: Made = stripe.post("/v1/customers", &form, &format!("fragment-customer-{org}")).await?;
+    Ok(ask_registry(env, &SetCustomer { org: org.to_string(), customer: made.id }).await?.customer)
+}
+
+/// `POST /api/billing/packs {member?}`: a Checkout for a $25 credit pack
+/// (decision 55), for the buyer's own ledger or an org member's.
+async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellResult<Checkout> {
+    let stripe_cfg = cfg.stripe()?;
+    let plan = ask_registry(env, &PackBegin { by, member }).await?;
+    let stripe = crate::stripe::client(env, cfg).await?;
+    let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
+    let found: List<Price> = stripe.get(&format!("/v1/prices?lookup_keys[]={}&active=true", core_stripe::PACK_LOOKUP_KEY)).await?;
+    let price = found.data.into_iter().next().ok_or_else(|| CellError::host(format!("Stripe has no active price {}: run `cargo xtask stripe setup`", core_stripe::PACK_LOOKUP_KEY)))?;
+    if price.unit_amount != Some(core_stripe::PACK_CENTS) || price.currency.as_deref() != Some("usd") {
+        return Err(CellError::host(format!("Stripe's price {} is not ${} in USD", core_stripe::PACK_LOOKUP_KEY, core_stripe::PACK_CENTS / 100)));
+    }
+    let platform = cfg.platform();
+    let deployment = cfg.stripe_deployment();
+    let mut form = Form::new()
+        .push("mode", "payment")
+        .push("customer", customer)
+        .push("client_reference_id", plan.org.clone())
+        .push("line_items[0][price]", price.id)
+        .push("line_items[0][quantity]", "1")
+        .push("success_url", format!("{platform}/settings?pack={{CHECKOUT_SESSION_ID}}"))
+        .push("cancel_url", format!("{platform}/settings?pack=canceled"))
+        .push("expires_at", (js::now_ms() / 1000 + CHECKOUT_TTL_S).to_string())
+        .push(format!("metadata[{META_DEPLOYMENT}]"), deployment)
+        .push(format!("metadata[{META_ORG}]"), plan.org.clone())
+        .push(format!("metadata[{META_PERSON}]"), plan.person.clone())
+        .push(format!("metadata[{META_BUYER}]"), plan.buyer.clone())
+        .push(format!("metadata[{META_PACK}]"), (core_stripe::PACK_CENTS / 100).to_string());
+    if stripe_cfg.tax {
+        form = form.push("automatic_tax[enabled]", "true").push("customer_update[address]", "auto");
+    }
+    let attempt = hex::encode(js::random_bytes::<8>());
+    let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;
+    let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
+    Ok(Checkout { url, session: session.id })
+}
+
+/// A paid pack's credit on its person's ledger, once by its Checkout.
+async fn pack_paid(env: &Env, session: &CheckoutSession) -> CellResult<bool> {
+    let person = session.metadata.get(META_PERSON).ok_or_else(|| CellError::host(format!("{} has no {META_PERSON}", session.id)))?;
+    if !fragment_core::npub::is_identity(person) {
+        return Err(CellError::host(format!("{}'s {META_PERSON} is no identity", session.id)));
+    }
+    let grant = GrantCredit {
+        id: format!("pack:{}", session.id),
+        micros: core_stripe::PACK_MICROS,
+        by: "stripe".into(),
+        why: format!("a ${} credit pack (Stripe Checkout {})", core_stripe::PACK_CENTS / 100, session.id),
+    };
+    crate::ledger::ask(env, person, &grant).await.map_err(|e| CellError::new(e.code, format!("{person}'s ledger: {}", e.message)))?;
+    Ok(true)
+}
+
 /// The subscription `id`, fetched from Stripe, as the registry keeps it.
 async fn fetched(stripe: &Stripe, id: &str) -> CellResult<(Subscription, SubscriptionCopy)> {
     let sub: Subscription = stripe.get(&format!("/v1/subscriptions/{id}")).await?;
@@ -144,7 +201,16 @@ async fn fetched(stripe: &Stripe, id: &str) -> CellResult<(Subscription, Subscri
 /// subscription it made, fetched, and its buyer's seat. One of another
 /// deployment's, or that is not yet complete, changes nothing.
 async fn checked_out(env: &Env, cfg: &Config, stripe: &Stripe, session: &CheckoutSession) -> CellResult<bool> {
-    if !core_stripe::ours(&session.metadata, cfg.stripe_deployment()) || session.mode != "subscription" || session.status.as_deref() != Some("complete") {
+    if !core_stripe::ours(&session.metadata, cfg.stripe_deployment()) || session.status.as_deref() != Some("complete") {
+        return Ok(false);
+    }
+    if session.mode == "payment" && session.metadata.contains_key(META_PACK) {
+        return match session.payment_status.as_deref() {
+            Some("paid") => pack_paid(env, session).await,
+            _ => Ok(false),
+        };
+    }
+    if session.mode != "subscription" {
         return Ok(false);
     }
     let meta = |k: &str| session.metadata.get(k).cloned().ok_or_else(|| CellError::host(format!("{} has no {k}", session.id)));
@@ -168,8 +234,9 @@ async fn returned(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8
         return Err(CellError::new(ErrorCode::NotFound, format!("no Checkout {id}")));
     }
     let session: CheckoutSession = stripe.get(&format!("/v1/checkout/sessions/{id}")).await?;
-    // another's Checkout is none of the asker's
-    if session.metadata.get(META_PERSON) != Some(&who.id) || !core_stripe::ours(&session.metadata, cfg.stripe_deployment()) {
+    // another's Checkout is none of the asker's (a pack's is its buyer's)
+    let theirs = session.metadata.get(META_BUYER).or(session.metadata.get(META_PERSON));
+    if theirs != Some(&who.id) || !core_stripe::ours(&session.metadata, cfg.stripe_deployment()) {
         return Err(CellError::new(ErrorCode::NotFound, format!("no Checkout {id}")));
     }
     checked_out(env, cfg, &stripe, &session).await?;
@@ -207,6 +274,17 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             json_answer(&checkout(env, cfg, by, buy).await?)
         }
         (Method::Post, ["sessions", id]) => json_answer(&returned(env, cfg, &req, url, &bytes, id).await?),
+        (Method::Post, ["packs"]) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Buying {
+                #[serde(default)]
+                member: Option<String>,
+            }
+            let b: Buying = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let by = by(env, &req, url, &bytes)?;
+            json_answer(&pack(env, cfg, by, b.member).await?)
+        }
         (Method::Post, ["portal"]) => {
             let by = by(env, &req, url, &bytes)?;
             json_answer(&portal(env, cfg, by).await?)

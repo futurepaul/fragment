@@ -311,12 +311,14 @@ the batch, so a guest's fragments are billed nothing.
 
 ## Where Stripe plugs in
 
-- **Credit:** a paid checkout or invoice becomes `GrantCredit {id:
-  <payment id>, by: "stripe"}`. Its id may come again any time;
-  commands are never forgotten.
-- **A seat's state:** subscription events become `SetSeat {seat, seq:
-  <the event's time in ms>}`, and the subscription's price picks
-  `SetPlan`.
+- **Credit:** a paid credit pack's Checkout becomes `GrantCredit {id:
+  "pack:<Checkout's id>", by: "stripe"}` (docs/billing.md, decision 55).
+  Its id may come again any time (its webhook, its return); commands are
+  never forgotten.
+- **A seat's state:** the registry pushes `SetPlan` (the seat's kind)
+  and `SetSeat` (active while the seat is good, else canceled) in its own
+  `seq`, from the seat and its org's subscription as fetched from Stripe
+  (docs/billing.md, "What a seat does").
 
 ## Assumptions (Paul's to confirm)
 
