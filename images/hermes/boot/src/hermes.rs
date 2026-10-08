@@ -20,22 +20,26 @@ pub enum Tier {
     High,
 }
 
+/// New agents run on GLM-5.3 Flash (Paul, 2026-10-08).
+pub const DEFAULT_TIER: Tier = Tier::Cheap;
+
 impl Tier {
     /// An agent fragment's `agent.json` names its tier (`{"tier": …}`);
-    /// anything else is the medium tier. The high tier is off until
-    /// Cloudflare raises its limit (decision 23), so it falls back to medium
+    /// anything else is the default tier. The high tier is off until
+    /// Cloudflare raises its limit (decision 23), so it falls back to the default
     /// unless `high_on`.
     pub fn of(agent_json: Option<&[u8]>, high_on: bool) -> Tier {
         let tier = agent_json.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()).and_then(|v| v["tier"].as_str().map(str::to_string));
         match tier.as_deref() {
             Some("cheap") => Tier::Cheap,
+            Some("medium") => Tier::Medium,
             Some("high") if high_on => Tier::High,
-            _ => Tier::Medium,
+            _ => DEFAULT_TIER,
         }
     }
 
     /// An agent's tier as the platform answered for its fragment's
-    /// `agent.json`: the file's (`of`), or the medium tier when it has none
+    /// `agent.json`: the file's (`of`), or the default tier when it has none
     /// (403, 404); `None` when the platform did not answer for it.
     pub fn read(answer: &Result<bytes::Bytes, fragment_bridge::api::ApiError>, high_on: bool) -> Option<Tier> {
         match answer {
@@ -488,7 +492,7 @@ pub fn credentials_sh(agent: &Agent) -> String {
 /// The default profile (the gateway's own, no agent's): it runs no turns.
 pub fn default_config(model_base: &str) -> String {
     let base = model_base.trim_end_matches('/');
-    format!("# Written by hermes-boot: the gateway's own profile runs no agent's turns.\nmodel:\n  provider: \"custom\"\n  base_url: {}\n  default: \"cheap\"\n  api_key: \"fragment-model\"\n  context_length: 262144\n", q(&format!("{base}/v1")))
+    format!("# Written by hermes-boot: the gateway's own profile runs no agent's turns.\nmodel:\n  provider: \"custom\"\n  base_url: {}\n  default: {}\n  api_key: \"fragment-model\"\n  context_length: 262144\n", q(&format!("{base}/v1")), q(DEFAULT_TIER.name()))
 }
 
 /// The gateway's Relay settings (Hermes' `gateway/relay/__init__.py`): with
@@ -668,22 +672,33 @@ mod tests {
     #[test]
     fn tiers_read_and_fall_back() {
         assert_eq!(Tier::of(Some(br#"{"tier":"cheap"}"#), false), Tier::Cheap);
-        assert_eq!(Tier::of(Some(br#"{"tier":"high"}"#), false), Tier::Medium, "the high tier is off until its limit is raised");
+        assert_eq!(Tier::of(Some(br#"{"tier":"medium"}"#), false), Tier::Medium, "medium stays selectable");
+        assert_eq!(Tier::of(Some(br#"{"tier":"high"}"#), false), Tier::Cheap, "the high tier is off until its limit is raised");
         assert_eq!(Tier::of(Some(br#"{"tier":"high"}"#), true), Tier::High);
-        assert_eq!(Tier::of(Some(b"not json"), true), Tier::Medium);
-        assert_eq!(Tier::of(None, true), Tier::Medium);
+        for setting in [None, Some(b"not json".as_slice()), Some(b"{}".as_slice()), Some(br#"{"tier":"unknown"}"#.as_slice())] {
+            assert_eq!(Tier::of(setting, true), Tier::Cheap, "{setting:?}");
+        }
+    }
+
+    /// Goal: a new agent without settings runs on Flash. Method: read no
+    /// agent.json and check the config Hermes consumes at its first turn.
+    #[test]
+    fn a_new_agents_profile_defaults_to_cheap() {
+        let tier = Tier::of(None, false);
+        let config = profile_config(&agent(), tier, "http://model.fragment.internal", &[], Path::new("/c.sh"));
+        assert!(config.contains("  default: \"cheap\"\n"), "{config}");
     }
 
     /// An `agent.json` the platform answered for is a tier (none there is
-    /// the medium tier); one it did not answer for is none, never the
-    /// medium tier in its place.
+    /// the cheap tier); one it did not answer for is none, never the
+    /// default tier in its place.
     #[test]
     fn a_tier_unread_is_no_tier() {
         use fragment_bridge::api::ApiError;
         let refused = |status| Err(ApiError::Refused { status, error: String::new(), message: String::new() });
         assert_eq!(Tier::read(&Ok(bytes::Bytes::from_static(br#"{"tier":"cheap"}"#)), false), Some(Tier::Cheap));
-        assert_eq!(Tier::read(&refused(404), false), Some(Tier::Medium), "no agent.json");
-        assert_eq!(Tier::read(&refused(403), false), Some(Tier::Medium));
+        assert_eq!(Tier::read(&refused(404), false), Some(Tier::Cheap), "no agent.json");
+        assert_eq!(Tier::read(&refused(403), false), Some(Tier::Cheap));
         for unread in [refused(500), refused(502), Err(ApiError::Transport("no answer in 15000 ms".into())), Err(ApiError::TooLarge)] {
             assert_eq!(Tier::read(&unread, false), None, "{unread:?}");
         }

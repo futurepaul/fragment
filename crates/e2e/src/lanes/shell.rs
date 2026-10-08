@@ -568,6 +568,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
     let first_label = chat.split('.').next().unwrap_or("").trim_end_matches("-chat").to_string();
+    let settings = shell(api, &session, "GET", &format!("/api/f/{first_label}.{username}/file?path=agent.json"), None, &[])?;
+    s.ok("the shell's first agent names the cheap tier (GLM-5.3 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
     // ready is ready: its computer awake, and the agent following its chat
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
@@ -611,6 +613,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // its row may show before the dialog closes (the list is read again as it is made)
     let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2 && !document.getElementById('new-agent-dialog').open", agent_wait);
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
+    let settings = shell(api, &session, "GET", &format!("/api/f/reader.{username}/file?path=agent.json"), None, &[])?;
+    s.ok("an agent made from the sidebar also names the cheap tier", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
 
     // both agents in one chat, search, and archiving, as the person uses them
     let first_title = row.as_str().unwrap_or("").to_string();

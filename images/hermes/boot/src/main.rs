@@ -680,7 +680,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
         ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
-        (!config.exists()).then_some(hermes::Tier::Medium)
+        (!config.exists()).then_some(hermes::DEFAULT_TIER)
     });
     if let Some(tier) = tier {
         write_whole(&config, &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
