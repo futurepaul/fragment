@@ -581,10 +581,17 @@ a receiver reports (1005, none given; 1006, dropped), which workerd
 refuses to send: passed on as it was, it left the page's end open (p5,
 2026-10-05: a desktop that restarted froze its screen's page). Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
-(decision 11). The page is served at the
-port's root and reaches its sockets by relative URLs (our images':
-`websockify?viewer=` and `control?viewer=`), so it works under the
-port's prefix (`/p/6080/`).
+(decision 11), one for each agent: the shell opens an agent's at
+`/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
+…/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
+("Its screen" in the chat's menu), or with the agent picked from a group
+chat's menu ("<name>'s screen"), or from settings. The platform carries
+the query and reads nothing in it: which desktop is that agent's, and
+the refusal of an agent the computer does not run, are the image's. The
+page is served at the port's root and reaches its sockets by relative
+URLs, naming the agent again (our images': `websockify?viewer=&agent=`
+and `control?viewer=&agent=`), so it works under the port's prefix
+(`/p/6080/`).
 
 ## Our images
 
@@ -713,17 +720,62 @@ settings and state):
   running image answers its first message about a second after it is
   assigned. An agent unassigned leaves the ready file at once, so the
   bridge stops running it; its profile is retired at the next start, when
-  no Hermes could be winding down a turn in it. The screen is the first
-  agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
-  that moves with the first agent, started by `hermes-boot screen-start`
-  for the screen's first viewer (about a second on the lower rung, and
-  about 300 MiB more while it runs), or by Hermes at an agent's first
-  `computer_use` or browser call (`bot_desktop.auto_start`), never at
-  boot. The screen's page follows the desktop: a stream that ends (the
-  desktop stopped or restarted, its viewers' streams ending with it) is
-  opened again on its own, from 1 s backing off to 10 s, while the page's
-  control socket stays open, and the bridge starts the desktop for it at
-  once; Take over is kept. On that desktop an agent operates: Hermes'
+  no Hermes could be winding down a turn in it.
+
+  Each agent has a desktop of its own: Hermes v0.21.5 gives every profile
+  its Bot Desktop (its own Xvnc, browser profile, lease and activity
+  file, under `<profile>/bot-desktop/`), and each agent's screen is its
+  own (`images/hermes/boot/src/desktop.rs`). `hermes-boot` names each
+  agent's display, lease and activity file in the bridge's screens file
+  (`/var/lib/fragment-run/screens.json`, written with the ready file:
+  docs/bridge.md), so a socket that names an agent is that agent's
+  desktop, and one that names an agent not on this computer is refused.
+  A desktop starts for its screen's first viewer (`hermes-boot
+  screen-start <agent>`, which starts only an agent the ready file names:
+  about a second on the lower rung, and about 220 MiB more while it runs,
+  one Xvnc and Xfce per agent), or at the agent's first `computer_use` or
+  browser call (`bot_desktop.auto_start`), never at boot. Hermes refuses
+  to start one below 1.5 GB of free memory (`bot_desktop.min_free_memory_mb`),
+  which a 6 GiB computer reaches with a few agents' desktops, each with a
+  browser open.
+
+  Take over is the agent's own Bot Desktop lease (`lease.json`), which
+  Hermes' `computer_use` and browser tools read before every action: while
+  a person holds it they refuse (`human_has_control`, captures included),
+  and an action during which it changed hands is voided. The bridge
+  writes it as Hermes does, under its `lease.lock` flock with its epoch
+  bumped; Give back, or the taker's page leaving, gives it back to the
+  agent; a change by Hermes (its `screen stop --force`) reaches the
+  viewers within a quarter second, and the bridge's own input gate reads
+  the lease at each input. A lease a person held when the bridge last
+  stopped is given back as the next one starts: no viewer survives a
+  restart. Hermes' own lease RPCs (`display.lease.*`) are its TUI
+  gateway's, which this image does not run.
+
+  A desktop no one uses is stopped: up and unused for 10 minutes
+  (`desktop::IDLE_STOP_MS`: no `computer_use` action, no browser command
+  on it, no take over, and no one watching it, since the bridge touches
+  its activity file every 10 s while someone does), `hermes-boot` stops it
+  with Hermes' own `computer-use screen stop`, which refuses while a
+  person holds its lease (event `screen.idle_stopped`). Hermes stops an
+  idle desktop itself only from its TUI's gateway, which this image does
+  not run; the managed config names the same bound
+  (`bot_desktop.idle_stop_minutes`). Its next use starts it again, and
+  what it kept is there: its browser's profile is in the agent's work.
+
+  All of a computer's agents run as one user, the hermes user (decision
+  44: a person's agents are not fenced from each other), so nothing stops
+  one agent from driving another's display: the screen, the lease and
+  each agent's own tools keep each on its own desktop, and the platform
+  skill tells every agent never to touch another's.
+
+  The screen's page names the agent it shows (its `?agent=`, then the
+  name the control socket says) and follows the desktop: a stream that
+  ends (the desktop stopped or restarted, its viewers' streams ending with
+  it) is opened again on its own, from 1 s backing off to 10 s, while the
+  page's control socket stays open, and the bridge starts the desktop for
+  it at once; who holds it is the lease's, as the control socket says. On
+  that desktop an agent operates: Hermes'
   `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
   `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
   bridge and the agent calls it through `tool_call`; each screenshot is
@@ -784,8 +836,10 @@ and how a runtime finds them, is the image's.
   is an agent on a Fragment computer acting for its owner with no login,
   the apps and brain skills to load, its connections as placeholders in
   its environment, `GOOGLE_OAUTH_ACCESS_TOKEN` and the Google Workspace
-  skill, and its desktop, which its owner watches and can take over from
-  "Its computer's screen"), with a description for Hermes' skills index.
+  skill, and its own desktop, which its owner watches and can take over
+  from "Its screen", its computer-use and browser tools answering
+  `human_has_control` meanwhile, and never another agent's), with a
+  description for Hermes' skills index.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
   agents), so it is always the binary's in the image; the build fails if
@@ -1003,3 +1057,25 @@ for a host) and finds the same `HOME`, `~` and modes.
   while held, which is why a save names what it copied: its kanban
   dispatcher makes its board's database some seconds after a first start,
   and opens it on a timer.
+  The screens: in process against fake displays (`tests/screen.rs`:
+  each agent's socket is its own display, and an agent not on the
+  computer, one the image names no screen for, or no name, is refused;
+  Take over writes the agent's lease as Hermes does, the input gate
+  follows it whoever changes it, and a person's lease from the bridge's
+  last life is given back at its start); and with Docker
+  (`two_agents_two_desktops`): two agents, two desktops, each served by
+  its agent; juniper's taken over, its lease reads `human` to Hermes' own
+  code and its `computer_use` answers `human_has_control` while fred's
+  captures its own; given back, juniper's works again; an unwatched,
+  unused desktop stops after the bound (30 s there:
+  `HERMES_BOOT_SCREEN_IDLE_MS`), a watched one does not, and the next
+  viewer starts it again with its browser's profile kept.
+- The platform's side, with the stub: the `computers` lane's ticket that
+  lands on `?agent=` and refuses a path off its port, and an agent's
+  screen's control socket through the port (refused for an agent not on
+  the computer, 404, and for no name, 400: the image's answers); the
+  `shell-ui` lane's chat menus (a direct chat's "Its screen", a group's
+  screen per agent), each frame landing on `?agent=<that agent>`. The
+  hosted `agent-smoke` checks that its chat's agent's screen is the one
+  served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
+  the page names it, and another agent's is refused.

@@ -1394,6 +1394,34 @@ added, by `addedAt`). Which agents a chat has is its member list, as
 its row names them (`agents`), never its name; the sidebar stacks their
 avatars, each in its identity's colour (the chat page's FNV-1a choice).
 
+**A page of the person's own may ask for their agents.** A frame the
+shell made of a fragment its person owns (the open chat, an app's window)
+may `postMessage({fragment: "agents?"})` to it; the shell answers that
+frame, at that fragment's own origin only (its status's canonical URL),
+`{fragment: "agents", agents: [{identity, fragment, name, title}]}`: the
+agents its person's computer runs, `name` the label that `@mentions`
+each. It sends the list again when it changes. The frame may then ask
+`{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
+characters) for one of those agents. **The shell asks its person first**,
+in its own dialog, never in the frame: "Add Fred to <the fragment's
+title>? Fred will be able to read and edit it.", Add and Cancel, Add armed
+800 ms after it shows (so the click or key that sent the page's message
+cannot confirm it). Only on Add does it add the agent to the frame's
+fragment as an editor (`PUT …/members/{identity}`, as making a chat
+does). It answers `{fragment: "agent-added", nonce, identity, ok,
+error?}`: `ok: true` once added; `error` `"declined"` on Cancel or Escape,
+`"not answered"` when the dialog is left 90 s, `"busy"` while another ask
+is open, or the API's refusal. Nothing is remembered: each add is asked,
+in every fragment. A page is code its author or an agent writes (sometimes
+from what it read on the web, or a forked template's), so it asks and
+never grants: no page can put its person's agents (and their connections)
+into a fragment whose records it controls without them saying so. A frame
+of a fragment shared with the person (not theirs) gets no answer to
+either, so it neither learns their agents nor adds one, and no page adds
+anyone but its own owner's agents to its own fragment, which is an
+owner's share with their own agent (decision 36). It names no template;
+the chat's `@` is its user (docs/chat-records.md, "The page").
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a
@@ -1465,7 +1493,7 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
-| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
 sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by

@@ -777,11 +777,29 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
-    // a socket on its port, bridged through the Computer DO both ways: the
-    // screen's control socket speaks first (who holds control), as an RFB
-    // server does, and that first word reaches the page
-    let control = || Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
-    let heard = control().and_then(|mut c| {
+    // a ticket lands where its page asks, on its port: an agent's screen
+    // is the screen page at `?agent=<agent>`, the image's to read
+    let landing = format!("/?agent={agent_name}");
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": landing })))?;
+    let landed = match r.body["url"].as_str() {
+        Some(url) => Some(api.call(Call { method: "GET", url: url.to_string(), ..Call::default() })?),
+        None => None,
+    };
+    s.ok(
+        "a ticket that names a path lands there on its port (an agent's screen: the page at ?agent=)",
+        r.status == 200 && landed.as_ref().is_some_and(|l| l.status == 303 && l.header("location") == format!("/p/6080{landing}")),
+        format!("{r} / {}", landed.map(|l| l.to_string()).unwrap_or_default()),
+    );
+    let refused: Vec<u16> = ["//elsewhere.example/", "/../6081/", "no-slash", "/a#b"]
+        .iter()
+        .map(|path| api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": path }))).map(|r| r.status).unwrap_or(0))
+        .collect();
+    s.ok("a ticket's path is a path on its port, or refused (400)", refused.iter().all(|st| *st == 400), format!("{refused:?}"));
+    // a socket on its port, bridged through the Computer DO both ways: an
+    // agent's screen's control socket speaks first (whose screen, who holds
+    // control), as an RFB server does, and that first word reaches the page
+    let control = |agent: &str| Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let heard = control(&agent_name).and_then(|mut c| {
         let first = c.next()?;
         c.send(&json!({ "type": "take" }))?;
         let taken = c.next()?;
@@ -789,9 +807,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((first, taken))
     });
     s.ok(
-        "a socket on its port opens from its own page, and carries the container's first word and the page's answer",
-        heard.as_ref().is_ok_and(|(first, taken)| *first == json!({ "type": "control", "holder": null }) && taken["holder"] == "e2e"),
+        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, held by no one) and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first["name"].as_str().is_some_and(|n| !n.is_empty()) && first["holder"].is_null() && taken["holder"] == "e2e"),
         format!("{heard:?}"),
+    );
+    // an agent this computer does not run, or no agent's name, is refused
+    // by the image: the platform carries the query and reads nothing in it
+    let (absent, malformed) = (control(&format!("nobody.{}", api.username(&owner)?)).map(|_| ()), control("Not%20A%20Name").map(|_| ()));
+    s.ok(
+        "an agent's screen the computer does not run is refused (404), and a query that names no agent (400): the image's answers, through its port",
+        absent.as_ref().is_err_and(|e| format!("{e:#}").contains("404")) && malformed.as_ref().is_err_and(|e| format!("{e:#}").contains("400")),
+        format!("{absent:?} / {malformed:?}"),
     );
     // and in a frame of the platform's page (the shell's tab onto its screen),
     // where the platform is cross-site from the computer's origin

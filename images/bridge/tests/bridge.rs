@@ -530,6 +530,40 @@ async fn a_group_mention_picks_the_agent() {
     bridge.stop().await;
 }
 
+/// Goal (decision 8): two scripted agents told to name each other hand off
+/// A, B, A, B and stop at the hop cap. Invalid: an agent's post made around
+/// the bridge right after (the CLI's: no `hop`, which once read as 0 and
+/// started the loop over) is one hop past its turn just ended: answered
+/// once, and the answer hands on nothing.
+#[tokio::test]
+async fn a_scripted_hand_off_loop_stops_at_the_cap() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let group = fake.chat("group", &["juniper", "rowan"]);
+    let dir = support::dir("hand-off-loop");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 4).await;
+    // each echoes what it was told, so each reply names both agents
+    fake.say(&group, &person("paul"), json!({ "text": "loop @juniper @rowan", "to": ["id:juniper"] }));
+    let cap = 1 + fragment_bridge::limits::HOPS_MAX as usize;
+    fake.until(WAIT, "the loop's replies up to the cap", |w| replies(w, &group).len() == cap).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let by = |w: &World| -> Vec<String> { w.records(&group, "chat").into_iter().filter(|r| r["body"].get("turn").is_some()).map(|r| r["principal"].as_str().unwrap().to_string()).collect() };
+    fake.with(|w| {
+        assert_eq!(by(w), vec!["id:juniper", "id:rowan", "id:juniper", "id:rowan"], "A, B, A, B, then nothing");
+        let hops: Vec<Value> = replies(w, &group).iter().map(|r| r["hop"].clone()).collect();
+        assert_eq!(hops, vec![json!(1), json!(2), json!(3), json!(4)], "each hands on, the last past the cap");
+    });
+    // juniper posts around the bridge, as `fragment post` does: no hop
+    fake.say(&group, "id:juniper", json!({ "text": "@rowan once more, then back to @juniper", "to": ["id:rowan"] }));
+    fake.until(WAIT, "rowan's one answer", |w| replies(w, &group).len() == cap + 1).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    fake.with(|w| {
+        assert_eq!(replies(w, &group).len(), cap + 1, "answered once, the loop not started again: {:?}", by(w));
+        assert_eq!(replies(w, &group)[cap]["to"], json!(["id:juniper"]), "its answer names juniper, who does not take it");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: attachments both ways: a message's files reach the runtime, and a
 /// reply's files are uploaded as the chat's blobs and listed on it.
 #[tokio::test]
