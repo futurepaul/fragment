@@ -382,7 +382,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/` it opens their mind, at `/?apps` their chats and apps, at `/settings` its settings |
+| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/` their mind (or the open chat) in its middle column (`/?apps` is `/`), at `/settings` its settings |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
@@ -1675,12 +1675,12 @@ the computer's swap, each with a placeholder of its own
 
 The platform's one page is `/`, and `/settings` (cell/shell/, its files at
 `/__shell/<file>`): its script reads the path, opening its settings at
-`/settings` and the person's chats and apps at `/?apps`, and puts the view
-it shows in the address, so a reload stays put. At `/` it opens the
-person's mind (kind `mind`, docs/optchat.md) full-screen on its own origin
-(`/auth/fragment`); a person with none gets their first run there: their
-default agent on their computer, their mind (`members`, the agent an
-editor), then the mind. Its settings hold the person's
+`/settings` and otherwise the open chat or the person's mind (kind `mind`,
+docs/optchat.md) in its middle column, and puts the view it shows in the
+address, so a reload stays put (the mind's screen is the hash,
+`/#/t/<thread>`; `/?apps` is `/`). A person with no mind gets their first
+run at `/`: their default agent on their computer, their mind (`members`,
+the agent an editor), then the shell with the mind open. Its settings hold the person's
 account (username, sign-ins, identity id, picture, `/auth/link` to add
 another sign-in, a POST to `/auth/logout`), their credit and what their
 standing stops, their computer and agents, their skills (decision 17: the
@@ -1758,6 +1758,24 @@ either, so it neither learns their agents nor adds one, and no page adds
 anyone but its own owner's agents to its own fragment, which is an
 owner's share with their own agent (decision 36). It names no template;
 the chat's `@` is its user (docs/chat-records.md, "The page").
+
+**The mind in the shell.** The shell frames its person's mind with
+`?embed=shell` (the frame mint's `return`), and the mind's page then shows
+no rail and no header: the shell's sidebar lists the mind's personas (the
+default marked, each with its edit), New chat, Search, Topics, Memory and
+its recent threads, and the topbar names the screen. The page tells the
+shell what those show whenever it changes, `{fragment: "mind", state:
+{route, screen, title, face, personas, default, chosen, recent, topics,
+memory}}`, posted to the platform's origin only; the shell takes it only
+from that frame at the mind's origin (its status's canonical URL). The
+shell asks the page `{fragment: "mind", go}` (a route of its hash),
+`{new}` (New chat with a persona, null the default), `{sheet: "persona",
+id?}` or `{sheet: "settings"}`, and `{panel}` (true, false or "toggle");
+the page takes them from the page around it alone, from the platform's
+origin. The page may ask the shell for its computer's screen (`{screen:
+true}`) and to open a link to one of the person's fragments (`{app:
+<url>}`): the shell opens it beside the mind when the URL's origin is that
+fragment's and it is in their list, else in a tab.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 

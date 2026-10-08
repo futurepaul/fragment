@@ -459,7 +459,11 @@ person removed stays removed: `kv.seeded`):
 
 ### The page
 
-One screen at a time, and calm. Dark, warm, generous type.
+One screen at a time, and calm, in the shell's look (Paul, 2026-10-07):
+the platform's stylesheet (`__fragment.css`) with the shell's values.
+In the shell (`?embed=shell`, docs/api.md "The mind in the shell") the
+shell's sidebar is the rail and its topbar the header, and apps open
+beside the mind; opened on its own origin the page shows its own rail.
 - **Left rail:**
   - the persona switcher at the top (the default marked);
   - **New chat** (an empty screen with the current persona; nothing is
@@ -478,12 +482,19 @@ One screen at a time, and calm. Dark, warm, generous type.
   - A hand-off is a card that shows goose's live steps and its report.
   - Snippets of other threads (a search hit, a zoom result) are
     expandable.
-  - The composer sits at the bottom, with the persona chip and Stop.
+  - The composer sits at the bottom, with the persona chip, Stop, and
+    files (paperclip, drop, paste): each uploaded with `fragment.blob`
+    and posted as `say`'s `attachments: [{sha256, name, type, size}]`
+    (a message may be files alone); a message's and a report's
+    files show as pictures, players or download chips (`__blob`).
 - **Right panel** (toggle): the thread's topics, its hand-offs ("what it
   did here"), and the computer's state.
 - **Topic screen:** the threads in the topic, each a summary card that
   expands in place.
 - **The mobile layout** comes first: the rail is a drawer.
+- **Settings:** about you, the memory and **Export memory** (the whole
+  log as one JSON file, the `export` query paged), and **Connect another
+  agent** (`claude mcp add mind -- fragment mcp mind.<username>`).
 
 ## Platform additions (generic: no platform code names the mind)
 
@@ -521,8 +532,9 @@ One screen at a time, and calm. Dark, warm, generous type.
      the computer, makes `mind` (members) and adds the agent there as
      an editor;
    - it no longer makes a `<agent>-chat`;
-   - signed in with a mind, `/` opens the mind full-screen; the shell's
-     own UI is one link away ("Apps").
+   - signed in with a mind, `/` is the shell with the mind in its
+     middle column (2026-10-07: it was the mind full-screen on its own
+     origin, which left the apps a link away).
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 
