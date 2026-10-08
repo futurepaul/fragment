@@ -494,7 +494,8 @@ The first run starts once a seat is held, so a guest's first run is
 8. **The operator's admin** (built 2026-10-08, branch
    `claude/operator-admin`; docs/api.md, Operators: the admin): the
    API, the CLI (`fragment operator …`), `/admin`, and the audit log.
-9. **The shell's Billing page.**
+9. **The shell's Billing page** (built 2026-10-08, branch
+   `claude/shell-billing`; cell/shell/billing.js).
 10. **Go live** (Paul's):
     - live Products, Prices, portal and endpoint (`xtask stripe setup`);
     - the restricted key and signing secret (`secret set`);

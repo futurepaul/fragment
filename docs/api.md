@@ -1481,10 +1481,17 @@ the computer's swap, each with a placeholder of its own
 The platform's one page is `/`, and `/settings` (cell/shell/, its files at
 `/__shell/<file>`): its script reads the path, opening its settings at
 `/settings` and the person's chats at `/`, and puts the view it shows in
-the address, so a reload stays put. Its settings hold the person's
+the address, so a reload stays put. A guest's first run (no chats) is
+their Billing: creating needs a seat (decision 49). Its settings hold the person's
 account (username, sign-ins, identity id, picture, `/auth/link` to add
-another sign-in, a POST to `/auth/logout`), their credit and what their
-standing stops, their computer and agents, their skills (decision 17: the
+another sign-in, a POST to `/auth/logout`), their Billing
+(cell/shell/billing.js: a guest's two seats to buy and a trial code,
+which a mailed trial's `/settings?trial=<code>` fills in; a seat's kind,
+org, trial's end and lapse, "let it sleep" for a $200 seat, this month's
+credit and a $25 pack; for an org's admin, its seats and admins to add,
+change and remove, and Stripe's portal; Checkout's return,
+`/settings?checkout=<id>` or `?pack=<id>`, applied as the page opens),
+what their standing stops, their computer and agents, their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the
 skills fragment, kind `skills`, at setup beside their default agent),

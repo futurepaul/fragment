@@ -381,3 +381,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .agent-avatar { --agent-color: #a88bea; position: relative; isolation: isolate; display: inline-block; width: 40px; height: 40px; flex: none; background: var(--agent-color); -webkit-mask: url("agent.png") center / contain no-repeat; mask: url("agent.png") center / contain no-repeat; }
 .agent-avatar::after { content: ""; position: absolute; inset: 0; background: url("agent.png") center / contain no-repeat; mix-blend-mode: luminosity; }
 .agent-avatar.small { width: 26px; height: 26px; }
+/* Settings' Billing: an org's seats (billing.js) */
+.billing-seats { border-collapse: collapse; width: 100%; font-size: 14px; }
+.billing-seats td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-strong); vertical-align: middle; }
+.billing-seats td:last-child { display: flex; flex-wrap: wrap; gap: 6px; }

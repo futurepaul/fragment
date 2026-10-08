@@ -296,3 +296,77 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     }
     Ok(())
 }
+
+/// Settings' Billing in Chrome (cell/shell/billing.js): a guest's first run
+/// is a seat; they pay on Stripe's page (the fake's), come back to their
+/// seat, admin their org, add a seat, and buy credit; a trial mailed opens
+/// with its code. Stripe's pages are the fake's own.
+pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment]) {
+        return Ok(());
+    }
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for Billing's page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let wait = Duration::from_secs(20);
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op_session, &s.operator);
+    // a guest: the e2e's people are seats, so an operator makes one a guest
+    let gus = api.person()?;
+    let gus_id = api.identity(&gus)?;
+    let email = Api::email_of(&gus);
+    let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{gus_id}/plan"), Some(&json!({ "id": "billing-page-guest", "plan": "guest" })))?;
+    anyhow::ensure!(r.status == 200, "making a guest: {r}");
+    let session = api.sign_in(&email)?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    let text = |b: &mut crate::browser::Lease, p: &crate::browser::Page| b.eval(p, "document.getElementById('settings-page')?.innerText ?? ''").map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+    let first = b.until(&page, "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    s.ok("a guest's first run is Billing: what a seat is, and two to buy", first, text(&mut b, &page));
+
+    b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Get a $200 always-on seat').click()")?;
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
+    s.ok("its $200 seat goes to Stripe's Checkout", at_stripe, b.eval(&page, "location.href")?);
+    b.click(&page, "form button")?;
+    let back = b.until(&page, "location.pathname === '/settings' && /Paid: your seat is ready/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    let shown = text(&mut b, &page);
+    s.ok(
+        "paid, Checkout's return brings them back to their seat: a $200 always-on seat, in their org, which they admin",
+        back && shown.contains("$200 always-on seat") && shown.contains("you admin it") && !location_has_query(&mut b, &page),
+        &shown,
+    );
+
+    let teammate = format!("billing-page-mate-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
+    b.eval(&page, &format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find(f => f.textContent.includes('Add a seat')); f.querySelector('input[type=email]').value = {teammate:?}; f.requestSubmit(); }})()"))?;
+    let added = b.until(&page, &format!("[...document.querySelectorAll('.billing-seats tr')].some(r => r.textContent.includes({teammate:?}) && r.textContent.includes('invited'))"), wait);
+    s.ok("as its admin they add a seat by email: it waits, invited", added, text(&mut b, &page));
+
+    let before = ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
+    b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Buy $25 of credit').click()")?;
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
+    b.click(&page, "form button")?;
+    let credited = b.until(&page, "/Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    s.ok("they buy $25 of credit on Stripe's page, and it is theirs as they land", at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + 25_000_000), ledger(api, &gus));
+
+    // a trial mailed: its link opens Billing with its code
+    let code = api.signed(&s.operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Page", "kind": "seat", "days": 5, "capacity": 5 })))?;
+    let code = code.body["code"].as_str().unwrap_or("").to_string();
+    let ida = api.person()?;
+    let ida_id = api.identity(&ida)?;
+    api.signed(&s.operator, "POST", &format!("/api/ledger/{ida_id}/plan"), Some(&json!({ "id": "billing-page-guest-2", "plan": "guest" })))?;
+    let session = api.sign_in(&Api::email_of(&ida))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page2 = b.open(&format!("{}/settings?trial={code}", api.base))?;
+    let filled = b.until(&page2, &format!("document.querySelector('#settings-page input[placeholder=\"Trial code\"]')?.value === {code:?}"), wait);
+    // evidence for a person: a guest's Billing as it looks (kept with a run's scratch)
+    let _ = b.screenshot(&page2, &s.dir("billing-page").join("guest.png"));
+    s.ok("a trial's link opens Billing with its code filled in", filled, text(&mut b, &page2));
+    Ok(())
+}
+
+/// Whether the page's address still carries a query (Checkout's return
+/// takes its own off).
+fn location_has_query(b: &mut crate::browser::Lease, page: &crate::browser::Page) -> bool {
+    b.eval(page, "location.search").ok().and_then(|v| v.as_str().map(|s| !s.is_empty())).unwrap_or(true)
+}
