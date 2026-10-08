@@ -10,13 +10,15 @@
 //!                          SIGTERM, the agents followed as they change
 //!                          (agents.rs)
 //! hermes-boot readahead    warm the page cache with the gateway's files
-//! hermes-boot screen-start (the bridge's, when a viewer finds the screen
-//!                          down) the first agent's desktop
+//! hermes-boot screen-start <agent>
+//!                          (the bridge's, when a viewer finds an agent's
+//!                          screen down) that agent's desktop
 //! hermes-boot build-info   (at image build) the lean plugin list, the
 //!                          image's Chromium, the platform skill
 //! ```
 
 mod agents;
+mod desktop;
 mod held;
 mod hermes;
 mod skills;
@@ -79,11 +81,10 @@ const AGENTS_EVERY_MS: u64 = 3_000;
 /// rescan waits up to 5 s on its own loop before answering `pending`).
 const CONTROL_WAIT_MS: u64 = 8_000;
 /// Under `RUN`: the bridge's ready file (the agents whose profiles are
-/// written: its `ready.rs`), the screen's socket (a link to the first
-/// agent's display), and that agent's name (what `screen-start` starts).
+/// written: its `ready.rs`), and its screens file (each of those agents'
+/// own desktop: its `screens.rs`).
 const READY_FILE: &str = "agents.json";
-const SCREEN_SOCKET: &str = "screen.sock";
-const SCREEN_AGENT: &str = "screen-agent";
+const SCREENS_FILE: &str = "screens.json";
 
 const _: () = assert!(AGENTS_EVERY_MS >= 1_000 && AGENTS_EVERY_MS < SYNC_EVERY_MS, "agents are read often, and at most once a tick");
 
@@ -106,7 +107,7 @@ fn main() {
         Some("pre-init") => pre_init(),
         Some("main") => tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime").block_on(boot_main()),
         Some("readahead") => readahead(),
-        Some("screen-start") => screen_start(),
+        Some("screen-start") => screen_start(args.get(2).map(String::as_str)),
         Some("build-info") => build_info(),
         Some("copy") => copy(&args[2..]),
         Some("check-restore") => check_restore(),
@@ -475,16 +476,20 @@ fn readahead() -> ! {
     std::process::exit(0);
 }
 
-/// The first agent's desktop, as a viewer that finds the screen down asks
-/// for it (the bridge runs this at most once a minute while it stays
-/// down): the agent `point_screen` named last.
-fn screen_start() -> ! {
-    let agent = std::fs::read_to_string(format!("{RUN}/{SCREEN_AGENT}")).map(|s| s.trim().to_string()).unwrap_or_default();
-    if agent.is_empty() {
-        fail("no agent's desktop to start: this computer runs no agent yet");
+/// An agent's desktop, as a viewer that finds its screen down asks for it
+/// (the bridge runs this, the agent's fragment last, at most once a minute
+/// while it stays down): only an agent the ready file names, whose profile
+/// is whole.
+fn screen_start(agent: Option<&str>) -> ! {
+    let Some(agent) = agent else { fail("screen-start <agent fragment>") };
+    let ready = std::fs::read(format!("{RUN}/{READY_FILE}")).map_err(|e| e.to_string()).and_then(|b| fragment_bridge::ready::parse(&b));
+    match ready {
+        Ok(set) if set.contains(agent) => {}
+        Ok(_) => fail(&format!("no desktop to start: {agent} is no agent of this computer's")),
+        Err(e) => fail(&format!("no desktop to start: the ready file does not read: {e}")),
     }
     let home = home();
-    let profile = wire::profile(&agent);
+    let profile = wire::profile(agent);
     ev!("screen.start", { "agent": agent, "profile": profile });
     let err = Command::new("/command/s6-setuidgid")
         .args(["hermes", "/opt/hermes/.venv/bin/hermes", "-p", &profile, "computer-use", "screen", "start"])
@@ -748,8 +753,9 @@ fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
         .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
-        // The screen is the first agent's desktop, started at its first viewer.
-        .env("BRIDGE_SCREEN_RFB", format!("unix:{RUN}/{SCREEN_SOCKET}"))
+        // Each agent's screen is its own desktop (the screens file), started
+        // for its first viewer (the agent's fragment is the start's last word).
+        .env("BRIDGE_SCREENS_FILE", format!("{RUN}/{SCREENS_FILE}"))
         .env("BRIDGE_SCREEN_START", format!("{OPT}/bin/hermes-boot screen-start"))
         // The restore already happened: the bridge reads /data at once.
         .env_remove("RESTORE_PENDING");
@@ -762,31 +768,53 @@ fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
     }
 }
 
-/// The bridge's ready file: every agent whose profile is written.
-fn write_ready(agents: &[Agent]) {
+/// The bridge's screens file (each agent's own desktop), then its ready
+/// file (every agent whose profile is written): a screen is named before
+/// its agent runs, and goes with it.
+fn write_ready(agents: &[Agent], home: &Path) {
+    write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(agents, home), None);
     write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
 }
 
-/// Points the screen at `first`'s desktop: the screen's socket is a link to
-/// its profile's display socket, and `screen-start` starts its display. A
-/// computer with no agent shows no desktop.
-fn point_screen(first: Option<&Agent>, home: &Path) {
-    let link = PathBuf::from(format!("{RUN}/{SCREEN_SOCKET}"));
-    let agent_file = PathBuf::from(format!("{RUN}/{SCREEN_AGENT}"));
-    match first {
-        Some(a) => {
-            let target = hermes::profile_dir(home, &a.fragment).join("bot-desktop/rfb.sock");
-            let tmp = link.with_extension("sock-tmp");
-            let _ = std::fs::remove_file(&tmp);
-            let linked = std::os::unix::fs::symlink(&target, &tmp).and_then(|()| std::fs::rename(&tmp, &link));
-            write_whole(&agent_file, &a.fragment, None);
-            ev!("screen.agent", { "agent": a.fragment, "ok": linked.is_ok() });
+/// Hermes' own stop of `agent`'s desktop, which refuses while a person
+/// holds its lease, as the hermes user: its exit code and what it said.
+async fn stop_desktop(agent: &str, home: &Path) -> Result<(i32, String), String> {
+    let profile = wire::profile(agent);
+    let run = tokio::process::Command::new("/command/s6-setuidgid")
+        .args(["hermes", "/opt/hermes/.venv/bin/hermes", "-p", &profile, "computer-use", "screen", "stop"])
+        .env("HOME", home)
+        .env("HERMES_HOME", home)
+        .current_dir("/")
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(Duration::from_millis(desktop::STOP_MS_MAX), run).await.map_err(|_| format!("no stop within {} ms", desktop::STOP_MS_MAX))?.map_err(|e| e.to_string())?;
+    let said = String::from_utf8_lossy(&out.stdout).trim().chars().take(300).collect();
+    Ok((out.status.code().unwrap_or(-1), said))
+}
+
+/// The agents whose desktop's stop is under way.
+type Stopping = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
+
+/// Each running agent's desktop up and unused for `idle_ms` (desktop.rs)
+/// stopped, one stop at a time per agent (`stopping`), off the boot's path.
+fn stop_idle_desktops(agents: &[Agent], home: &Path, idle_ms: u64, stopping: &Stopping) {
+    let now = std::time::SystemTime::now();
+    for a in agents {
+        let profile = hermes::profile_dir(home, &a.fragment);
+        let (published, activity) = (desktop::mtime(&profile, desktop::PUBLISHED), desktop::mtime(&profile, desktop::ACTIVITY));
+        if !desktop::due(published, activity, now, idle_ms) || !stopping.lock().expect("stopping").insert(a.fragment.clone()) {
+            continue;
         }
-        None => {
-            let _ = std::fs::remove_file(&link);
-            let _ = std::fs::remove_file(&agent_file);
-            ev!("screen.agent", { "agent": null });
-        }
+        let idle = activity.or(published).and_then(|t| now.duration_since(t).ok()).map_or(0, |d| d.as_millis() as u64);
+        let (agent, home, stopping) = (a.fragment.clone(), home.to_path_buf(), stopping.clone());
+        tokio::spawn(async move {
+            let t = Instant::now();
+            match stop_desktop(&agent, &home).await {
+                Ok((code, said)) => ev!("screen.idle_stopped", { "agent": agent, "idleMs": idle, "code": code, "said": said, "ms": t.elapsed().as_millis() as u64 }),
+                Err(e) => ev!("screen.idle_stop_failed", { "agent": agent, "idleMs": idle, "error": e }),
+            }
+            stopping.lock().expect("stopping").remove(&agent);
+        });
     }
 }
 
@@ -832,7 +860,7 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String]) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
-    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "screen": change.screen, "credentials": names(&change.credentials), "agents": now.len() });
+    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
     for a in &change.added {
         write_profile(api, a, home, ids, model, credential_env).await;
     }
@@ -851,10 +879,7 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    if change.screen {
-        point_screen(now.first(), home);
-    }
-    write_ready(now);
+    write_ready(now, home);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }
 
@@ -1026,7 +1051,9 @@ async fn boot_main() {
     let _ = std::fs::create_dir_all("/etc/hermes");
     // HERMES_BOOT_APPROVAL_TIMEOUT_S: a test's shorter approval (and card)
     let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
-    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
+    // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
+    let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
+    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
@@ -1050,8 +1077,7 @@ async fn boot_main() {
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
-    point_screen(agents.first(), &home);
-    write_ready(&agents);
+    write_ready(&agents, &home);
     let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     // its answer to the platform's holds, for its whole life
@@ -1077,6 +1103,9 @@ async fn boot_main() {
     let skills_found = SkillsFound::default();
     let mut skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
     let mut last_skills = Instant::now();
+    // idle desktops: looked at on their cadence, never while held
+    let mut last_idle_look = Instant::now();
+    let stopping = Stopping::default();
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
@@ -1115,6 +1144,12 @@ async fn boot_main() {
         if skills_due {
             skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
             last_skills = Instant::now();
+        }
+        // a desktop no one uses is stopped (desktop.rs); not while held, so
+        // nothing under /data moves under a hold for it
+        if !quiet.paused() && last_idle_look.elapsed() >= Duration::from_millis(screen_idle_every_ms) {
+            last_idle_look = Instant::now();
+            stop_idle_desktops(&agents, &home, screen_idle_ms, &stopping);
         }
         // What waits on the platform (each call up to its 15 s), cut short by
         // SIGTERM: a slow platform never holds the stop. Cut, it is done

@@ -263,10 +263,11 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px; border: 1px solid var(--danger-border); border-radius: 14px; background: var(--danger-bg); color: var(--danger-text); font-size: .9rem; }
 .banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner button { border: 1px solid var(--danger-border); background: none; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
-/* @mentions: the chat's agents, as the composer's word starts one */
+/* @mentions: the chat's agents, then the owner's others, as the composer's word starts one */
 .mentions { position: absolute; left: 8px; bottom: calc(100% + 6px); z-index: 5; min-width: 180px; max-width: calc(100% - 16px); padding: 4px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
 .mentions button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
 .mentions button[aria-selected="true"], .mentions button:hover { background: var(--bg-hover); }
+.mentions .mention-note { margin-left: auto; padding-left: 12px; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; }
 
 @media (max-width: 680px) { .column { padding-top: 12px; } }
 @media (prefers-reduced-motion: reduce) {

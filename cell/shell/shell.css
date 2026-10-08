@@ -233,6 +233,7 @@ body.reordering iframe { pointer-events: none; }
 .rename-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
 .rename-actions button { padding: 9px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); }
 .rename-actions button[type=submit] { background: var(--text-primary); color: var(--bg-window); }
+.rename-actions button[type=submit]:disabled { opacity: .45; }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 @media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .agent-heading { max-width: none; flex: 1; padding: 6px 10px; } .topbar .grow { display: none; } }
 

@@ -22,9 +22,12 @@ and says how the page lays a chat out. The page is `site/`: `index.html`,
 relative, so it works on a fragment's own host, under `/f/<name>/`, and
 served from the platform's release.
 
-To talk with an agent here, add it as an editor and tell it so:
+To talk with an agent here, add it as an editor (the platform tells its
+computer, which follows the chat at once), or @mention it in the page,
+which adds one of its owner's agents first, or ask it from a terminal,
+which adds it too:
 
     fragment members add <chat> <agent id> --role editor
-    fragment post <agent fragment> tasks --body '{"kind": "joined", "fragment": "<chat>"}'
+    fragment ask <agent> "hello" --chat <chat>
 
 The look is Skyler's (the Fragment UI handoff, 2026-10-02).

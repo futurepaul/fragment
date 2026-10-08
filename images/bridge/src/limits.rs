@@ -120,8 +120,32 @@ pub const PROMPT_TTL_MS_MAX: u64 = 24 * 60 * 60 * 1000;
 pub const TURN_IDLE_MS_MAX: u64 = 15 * 60 * 1000;
 
 /// A message an agent writes to another agent (`to`) is answered only this
-/// many hops deep, so two agents handing off to each other stop.
+/// many hops deep, so two agents handing off to each other stop. The bridge
+/// that answers counts the hops itself (engine.rs, `hop_of`): never fewer
+/// than the record claims, and for an agent of its own computer from the
+/// turn that agent is in, so a post made outside the bridge (the CLI, the
+/// API) resets nothing.
 pub const HOPS_MAX: u32 = 3;
+
+/// Turns agents start of each other in one chat (a record an agent posts
+/// whose `to` names an agent), at most this many in `AGENT_TURNS_WINDOW_MS`
+/// by the causing records' own times (the platform's clock, so every life
+/// counts alike). Past it the turn is refused, and its end says why in the
+/// chat. A backstop under `HOPS_MAX`: a hand-off fanned out to several
+/// agents multiplies at each hop, and an agent of another computer is held
+/// only by the hop it claims. A person's message is never counted.
+pub const AGENT_TURNS_PER_CHAT_MAX: usize = 20;
+pub const AGENT_TURNS_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// Chats whose agent turns are counted at once, at most (the state keeps
+/// them; past it the chat counted least lately is let go).
+pub const AGENT_TURN_CHATS_MAX: usize = 256;
+
+/// A turn of this computer's that ended is remembered this long, at most
+/// this many at once (never written to `/data`): its agent's reply, read
+/// after the turn was let go, is one hop past it. One read later than that
+/// (a follower that was down, a restart) counts as said outside any turn.
+pub const ENDED_HOPS_MS: u64 = 5 * 60 * 1000;
+pub const ENDED_HOPS_MAX: usize = 256;
 
 /// Reconnects wait a jittered backoff (lesson 5): from this, doubling, up to
 /// the max, each wait a uniform 0.5–1.5 of it.
@@ -203,3 +227,6 @@ const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
+const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
+const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
+const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);

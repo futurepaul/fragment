@@ -11,6 +11,21 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## A wipe finds a person's fragments through their lists
+
+- **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
+  No index names every fragment under a username: a wipe finds the ones a
+  person owns on their and their agents' lists (each fragment's own
+  outbox delivers its rows) and the agent fragments the registry names.
+- **Risk:** a fragment whose create its owner's list never took (the
+  delivery failing from the create on, and still at the wipe) is not
+  ended, and outlives its owner, its repo with it; once their list is
+  wiped, a late delivery is taken and kept nowhere.
+- **First proof:** a wiped person's fragment answering after their wipe
+  said nothing was left.
+- **Delete when:** the registry (or a per-username index) records each
+  fragment as it is made, and the wipe reads it beside the lists.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
@@ -576,18 +591,32 @@ fragment.club until cutover (decisions 34–35).
   interval passes, proven by the Docker rung's `use the terminal twice`
   turn on an unpatched image.
 
-## The screen's Take over is the image's, not Hermes'
+## The screen writes Hermes' lease file, not through Hermes
 
-- **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen
-  proxies raw RFB from Hermes' desktop socket and passes input only from
-  the viewer holding control. Hermes' own take-over lease (its
-  dashboard's ticketed display socket) is not used, so the agent's
-  computer-use tools do not know a person holds the screen.
-- **Risk:** a person and the agent move the pointer at once.
-- **First proof:** a person taking over while a computer-use turn runs.
-- **Delete when:** the screen goes through Hermes' lease (its ticketed
-  `/api/display/ws`, or a lease the image can set), proven by a turn
-  that waits while a person holds control.
+- **Observed:** 2026-10-07 (`images/bridge/src/lease.rs`,
+  `images/hermes/boot/src/desktop.rs`). Take over is each agent's Hermes
+  Bot Desktop lease, so its `computer_use` refuses while a person holds
+  the screen; but Hermes changes its lease only in its own process
+  (`tools/bot_desktop/lease.py`) or through its TUI gateway's
+  `display.lease.*` RPCs, which this image does not run. The bridge
+  writes the file as Hermes' `_transition` does (its `lease.lock` flock,
+  `lease.json.tmp` renamed over it, the epoch one on): Hermes' file
+  format, not an interface it promises. Likewise the idle stop reads the
+  desktop's `activity` and `env` files' times as Hermes' `stop_if_idle`
+  does (that watcher too is its TUI gateway's), and the screen touches
+  `activity` as Hermes' own viewer does.
+- **Risk:** a Hermes release that changes the lease's file, path or
+  lock: the screen and the agent's tools then disagree on who holds it
+  (a person typing while the agent acts, or an agent refused for good);
+  or that renames the activity file: desktops stop under their viewers,
+  or never.
+- **First proof:** the Docker rung's `two_agents_two_desktops` on a new
+  Hermes: it reads the lease with Hermes' own code, has the agent's
+  `computer_use` refuse while a person holds the screen, and has an
+  unwatched desktop stop and a watched one stay.
+- **Delete when:** Hermes offers a lease and an idle stop outside its TUI
+  gateway (a gateway control verb, or its RPCs on the messaging gateway),
+  and the image uses them, proven by the same test.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 

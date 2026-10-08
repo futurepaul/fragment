@@ -250,6 +250,7 @@ Every change is checked against this table.
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |

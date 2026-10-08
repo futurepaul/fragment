@@ -63,6 +63,7 @@ mod serve;
 mod share;
 mod shell;
 mod subscriptions;
+mod wipe;
 
 use fragment_core::access;
 use fragment_core::body::{LimitedBody, TooLarge};
@@ -182,7 +183,7 @@ fn shell_session(cfg: &Config, req: &Request, url: &Url) -> CellResult<Option<St
 }
 
 /// The key that signed the request (NIP-98), not yet resolved.
-fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<String> {
+pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<String> {
     let header = req.headers().get("authorization")?;
     let now_s = js::now_ms() / 1000;
     fragment_nip98::verify_request(header.as_deref(), req.method().as_ref(), url, payload, now_s, limits::AUTH_WINDOW_S)
@@ -226,7 +227,7 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
 
 /// The identity a request's signed URL names in `for`: an agent acting
 /// for whoever asked it (decision R17). At most one, an identity.
-fn acting_for(url: &Url) -> CellResult<Option<String>> {
+pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
     if named.next().is_some() {
@@ -562,7 +563,7 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
     Ok(key)
 }
 
-fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
+pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
@@ -1083,6 +1084,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
             }
             release_username(env, username).await
+        }
+        // an operator's wipe of a person (wipe.rs): GET its dry run, POST it
+        (Method::Get | Method::Post, ["api", "people", person, "wipe"]) => {
+            let person = person.to_string();
+            wipe::route(req, env, cfg, &url, &person).await
         }
         (method, ["api", "connections", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

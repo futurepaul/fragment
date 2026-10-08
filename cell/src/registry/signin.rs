@@ -426,6 +426,13 @@ impl RegistryCell {
         let known = self
             .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![issuer.into(), subject.into()])?
             .map(|r| r.identity);
+        // a person being wiped signs in as no one, until their wipe is done
+        // and their next sign-in makes a new person (wipe.rs)
+        for id in [known.as_deref(), link_to].into_iter().flatten() {
+            if self.wiping(id)? {
+                return Err(CellError::new(ErrorCode::Forbidden, "this account is being wiped: sign in again once that is done, as a new person"));
+            }
+        }
         let made = link_to.is_none() && known.is_none();
         let id = match (link_to, known) {
             // linking: explicit, from a signed-in session, never by email

@@ -15,17 +15,26 @@
 //! incarnation, and a list keeps the newer life's row). Once nothing is
 //! left to clean, with no life or claim, the object's storage goes whole
 //! (`deleteAll`).
+//!
+//! A delete keeps the life's code.storage repo (made again, the name finds
+//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators)
+//! is the same end with its repo recorded beside it (`ended_repos`), which
+//! the alarm deletes with the rest, retried as the rest are: the life is
+//! cleaned up only once its repo is gone too.
 
 use fragment_core::backoff::outbox_retry_ms;
+use fragment_core::npub;
+use fragment_proto::{ErrorCode, Identity, IdentityKind};
 use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{missing, FragmentCell, MetaKey, CLAIM_TTL_MS};
+use crate::fragment::{missing, Caller, FragmentCell, MetaKey, CLAIM_TTL_MS};
 use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
+use crate::routed::Signed;
 
 /// The ended lives (one row each, until all is cleaned) and the lists each
 /// has still to tell.
@@ -37,12 +46,31 @@ CREATE TABLE IF NOT EXISTS ended_index (
   incarnation INTEGER NOT NULL, principal TEXT NOT NULL, version INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, PRIMARY KEY (incarnation, principal));
 CREATE INDEX IF NOT EXISTS ended_index_due ON ended_index (next_at);
+CREATE TABLE IF NOT EXISTS ended_repos (
+  incarnation INTEGER PRIMARY KEY, repo TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 ";
 
 /// Ended lives one pass clears the storage of.
 const CLEARED_PER_PASS: i64 = 4;
 /// Pages of blobs (R2's, up to 1000 keys each) one pass deletes of one life.
 const BLOB_PAGES_PER_PASS: usize = 10;
+/// Ended lives' repos one pass deletes (one code.storage call each).
+const REPOS_PER_PASS: i64 = 4;
+
+/// `wipe/end`'s body: the person a wipe ends this fragment for.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WipeEnd {
+    owner: String,
+}
+
+/// `wipe/leave`'s body: a wiped person, or an agent of theirs, who leaves.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WipeLeave {
+    principal: String,
+    kind: IdentityKind,
+}
 
 /// A life a delete ended: whose list it tells first.
 pub(crate) struct Ended {
@@ -57,6 +85,14 @@ struct Untold {
     version: i64,
     attempts: i64,
     name: String,
+}
+
+/// An ended life's repo, still to delete (a wipe's).
+#[derive(Deserialize)]
+struct EndedRepo {
+    incarnation: i64,
+    repo: String,
+    attempts: i64,
 }
 
 /// An ended life whose facet's database or blobs are still to go.
@@ -114,10 +150,40 @@ impl FragmentCell {
         Ok(Ended { owner })
     }
 
+    /// A wipe's end of this life (docs/api.md, Operators): `end_life`, and
+    /// its repo recorded for the alarm to delete, in the same synchronous
+    /// step (no await): a crash leaves the life whole, or ended with its
+    /// repo's delete recorded. A delete keeps its repo; a wipe never does.
+    pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
+        let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
+        let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
+        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
+        assert!(!repo.is_empty(), "a created fragment names its repo");
+        self.exec(
+            "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+            vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        let ended = self.end_life()?;
+        assert_eq!(self.ended_repo_rows(incarnation)?, 1, "the ended life's repo is recorded beside it");
+        Ok(ended)
+    }
+
+    fn ended_repo_rows(&self, incarnation: i64) -> CellResult<u64> {
+        let rows = self.rows("SELECT COUNT(*) AS n FROM ended_repos WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
+        rows.first().and_then(|r| r["n"].as_u64()).ok_or_else(|| CellError::host("COUNT answered no row"))
+    }
+
+    /// How many ended lives this object has still to clean up (a wipe asks:
+    /// its fragments are cleaned once none is left).
+    pub(crate) fn ended_left(&self) -> CellResult<u64> {
+        self.count("SELECT COUNT(*) AS n FROM ended")
+    }
+
     /// When an ended life's cleanup is next due, if one has any left.
     pub(crate) fn ended_due_at(&self) -> CellResult<Option<i64>> {
         let rows = self.rows(
-            "SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM ended_index UNION ALL SELECT MIN(next_at) FROM ended WHERE stored = 1)",
+            "SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM ended_index UNION ALL SELECT MIN(next_at) FROM ended WHERE stored = 1
+               UNION ALL SELECT MIN(next_at) FROM ended_repos)",
             vec![],
         )?;
         Ok(rows.first().and_then(|r| r["at"].as_i64()))
@@ -129,6 +195,7 @@ impl FragmentCell {
     pub(crate) async fn drain_ended(&self) {
         self.tell_ended(None).await;
         self.clear_ended().await;
+        self.clear_repos().await;
         self.forget_ended().await;
     }
 
@@ -202,6 +269,41 @@ impl FragmentCell {
         }
     }
 
+    /// Deletes the repos of the ended lives due (a wipe's), at most
+    /// `REPOS_PER_PASS`, and forgets each one code.storage says is gone.
+    async fn clear_repos(&self) {
+        let due: Vec<EndedRepo> = match self.typed(
+            "SELECT incarnation, repo, attempts FROM ended_repos WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(REPOS_PER_PASS)],
+        ) {
+            Ok(due) => due,
+            Err(e) => return console_error!("the ended lives' repos did not read ({:?}): {}", e.code, e.message),
+        };
+        assert!(due.len() as i64 <= REPOS_PER_PASS, "a pass deletes a bounded batch of repos");
+        let cs = match self.cs() {
+            Ok(cs) => cs,
+            Err(e) => return console_error!("no code.storage to delete the ended lives' repos ({:?}): {}", e.code, e.message),
+        };
+        for r in due {
+            let inc = SqlStorageValue::Integer(r.incarnation);
+            let wrote = match cs.delete_repo(&r.repo).await {
+                Ok(gone) => {
+                    console_log!("{}", json!({ "event": "ended.repo-deleted", "repo": r.repo, "incarnation": r.incarnation, "gone": format!("{gone:?}") }));
+                    self.exec("DELETE FROM ended_repos WHERE incarnation = ?", vec![inc])
+                }
+                Err(e) => {
+                    console_error!("the ended life {}'s repo {} did not go ({:?}): {}", r.incarnation, r.repo, e.code, e.message);
+                    let attempts = r.attempts + 1;
+                    let at = SqlStorageValue::Integer(js::now_ms() + outbox_retry_ms(attempts));
+                    self.exec("UPDATE ended_repos SET attempts = ?, next_at = ? WHERE incarnation = ?", vec![SqlStorageValue::Integer(attempts), at, inc])
+                }
+            };
+            if let Err(e) = wrote {
+                console_error!("the ended life {}'s repo row did not write ({:?}): {}", r.incarnation, e.code, e.message);
+            }
+        }
+    }
+
     /// Forgets each ended life with nothing left to clean. The last one
     /// forgotten, with no life made since and no create claiming the name,
     /// lets the object's storage go whole, as a delete's did before it
@@ -209,6 +311,7 @@ impl FragmentCell {
     async fn forget_ended(&self) {
         let forgot = self.rows(
             "DELETE FROM ended WHERE stored = 0 AND NOT EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = ended.incarnation)
+               AND NOT EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = ended.incarnation)
              RETURNING name, incarnation, ended_at",
             vec![],
         );
@@ -246,10 +349,76 @@ impl FragmentCell {
     pub(crate) fn ended_view(&self) -> CellResult<Value> {
         let lives = self.rows(
             "SELECT e.incarnation, e.name, e.stored, e.attempts,
-               (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists
+               (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists,
+               (SELECT COUNT(*) FROM ended_repos r WHERE r.incarnation = e.incarnation) AS repos
              FROM ended e ORDER BY e.incarnation",
             vec![],
         )?;
         Ok(json!({ "ended": lives, "dueAt": self.ended_due_at()? }))
+    }
+
+    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs),
+    /// only from inside the platform (`wipe::WIPE_HEADER`):
+    ///
+    /// - `end {owner}`: ends this fragment's life for the wiped person who
+    ///   owns it, its repo with it (`end_life_wiped`), and cleans up what
+    ///   one pass of its alarm would; answers `{ended, left}`, `left` the
+    ///   ended lives still to clean (0: done). Again, with no life, it only
+    ///   cleans: a wipe asks until nothing is left. A fragment someone else
+    ///   owns is refused (403), and nothing of it changes.
+    /// - `leave {principal, kind}`: the wiped person, or an agent of theirs,
+    ///   leaves this fragment of someone else's, as a member leaves (their
+    ///   membership, subscriptions and the browsers' pushes they asked for
+    ///   go); `{left}`, false when they were no member (or it is gone).
+    pub(crate) async fn wipe_route(&self, route: &str, body: &[u8]) -> CellResult<Value> {
+        match route {
+            "end" => {
+                let b: WipeEnd = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/end: {e}")))?;
+                if !npub::is_identity(&b.owner) {
+                    return Err(CellError::invalid("wipe/end names the owner by identity"));
+                }
+                let [created_at, owner, name] = self.metas([MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Name])?;
+                let ended = match (created_at, owner) {
+                    (None, _) => false,
+                    (Some(_), Some(owner)) if owner == b.owner => {
+                        let ended = self.end_life_wiped()?;
+                        console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
+                        self.tell_ended(Some(&ended.owner)).await;
+                        true
+                    }
+                    (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
+                    (Some(_), None) => return Err(missing(MetaKey::Owner)),
+                };
+                // what one pass of the alarm cleans, now; the rest is its
+                self.drain_ended().await;
+                self.schedule().await?;
+                let left = self.ended_left()?;
+                assert!(!ended || self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
+                Ok(json!({ "ended": ended, "left": left }))
+            }
+            "leave" => {
+                let b: WipeLeave = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/leave: {e}")))?;
+                if !npub::is_identity(&b.principal) {
+                    return Err(CellError::invalid("wipe/leave names who leaves by identity"));
+                }
+                if self.meta(MetaKey::CreatedAt)?.is_none() {
+                    return Ok(json!({ "left": false }));
+                }
+                // the browsers they asked pushes for here, member or not
+                let pushes = self.rows("DELETE FROM push_subs WHERE principal = ? RETURNING id", vec![b.principal.as_str().into()])?.len();
+                // as themselves: leaving is any member's own (members.rs)
+                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, username: None, held: None };
+                let url = url::Url::parse("https://fragment.internal/wipe/leave").expect("a constant URL parses");
+                let caller = Caller { signed: Some(Signed::new(identity, None)), unresolved: None, url, site: false };
+                let left = match self.remove_member(&caller, "me").await {
+                    Ok(_) => true,
+                    Err(e) if e.code == ErrorCode::NotFound => false,
+                    Err(e) => return Err(e),
+                };
+                assert!(self.member_role(&b.principal)?.is_none(), "who left is no member");
+                Ok(json!({ "left": left, "pushes": pushes }))
+            }
+            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
+        }
     }
 }

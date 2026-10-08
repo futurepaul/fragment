@@ -101,21 +101,24 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     answered
 }
 
-/// Its screen through the platform (docs/computers.md, Ports; Paul,
-/// 2026-10-05), before the agent has used its desktop: the first agent's
-/// desktop starts for the screen's first viewer, its RFB stream and its
-/// control socket pass through the computer's port, each server's first
-/// word included, and in a frame of the platform's page (as the shell's
-/// "Its computer's screen" opens it) the page connects and takes over; and
-/// it follows the desktop: stopped under it, the page opens its stream
-/// again on its own, the desktop started for it, Take over kept (p5,
-/// 2026-10-05: the agent's browser showed only once the viewer was
-/// reopened). That input then reaches the screen, and the browser shows on
-/// it, is the lower rung's (`images/bridge/tests/docker.rs`,
-/// `the_hermes_desktop`).
-fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, stop_desktop: &dyn Fn(&Suite) -> Result<String>) -> Result<()> {
+/// Its agent's screen through the platform (docs/computers.md, Ports; Paul,
+/// 2026-10-05), before the agent has used its desktop: the agent's own
+/// desktop starts for its screen's first viewer, its RFB stream (the
+/// agent's desktop, by its name) and its control socket pass through the
+/// computer's port, each server's first word included, and in a frame of
+/// the platform's page (as the chat's "Its screen" opens it, at
+/// `?agent=`) the page names the agent, connects and takes over; and it
+/// follows the desktop: stopped under it (Hermes' `screen stop --force`,
+/// which hands the screen back to the agent first), the page opens its
+/// stream again on its own, the desktop started for it, and says the agent
+/// holds it (p5, 2026-10-05: the agent's browser showed only once the
+/// viewer was reopened). That input then reaches the screen, Take over is
+/// the agent's lease, and the browser shows on it, is the lower rung's
+/// (`images/bridge/tests/docker.rs`, `the_hermes_desktop` and
+/// `two_agents_two_desktops`).
+fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agent: &str, stop_desktop: &dyn Fn(&Suite) -> Result<String>) -> Result<()> {
     let ticket = || -> Result<String> {
-        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
+        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": format!("/?agent={agent}") })))?;
         anyhow::ensure!(r.status == 200, "a ticket: {r}");
         Ok(r.body["url"].as_str().unwrap_or("").to_string())
     };
@@ -125,20 +128,24 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, stop
     let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string());
     let socket = |path: &str| Socket::connect(api, &format!("{origin}/p/6080/{path}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
     let t = std::time::Instant::now();
-    let greeting = socket("websockify?viewer=e2e").and_then(|mut rfb| {
+    let desktop = socket(&format!("websockify?viewer=e2e&agent={agent}")).and_then(|mut rfb| {
         rfb.patience(Duration::from_secs(30))?;
-        let version = rfb.bytes(12)?;
+        let name = rfb.rfb_desktop()?;
         rfb.close();
-        Ok(String::from_utf8_lossy(&version).into_owned())
+        Ok(name)
     });
     println!("      (the screen's first viewer to its RFB greeting: {:.1?})", t.elapsed());
-    s.ok("its screen's RFB stream opens through its port before the agent used its desktop: the desktop starts for its first viewer", greeting.as_deref().is_ok_and(|g| g.starts_with("RFB 003.")), format!("{greeting:?}"));
-    let control = socket("control?viewer=e2e").and_then(|mut c| {
+    s.ok(
+        "its agent's screen's RFB stream opens through its port before the agent used its desktop: the agent's own desktop (Hermes names it by its profile), started for its first viewer",
+        desktop.as_deref().is_ok_and(|d| d == format!("hermes:{}", agent.replace('.', "-"))),
+        format!("{desktop:?}"),
+    );
+    let control = socket(&format!("control?viewer=e2e&agent={agent}")).and_then(|mut c| {
         let first = c.next()?;
         c.close();
         Ok(first)
     });
-    s.ok("its control socket says who holds the screen, through its port", control.as_ref().is_ok_and(|c| c["type"] == "control" && c["holder"].is_null()), format!("{control:?}"));
+    s.ok("its control socket says whose screen it is and who holds it, through its port", control.as_ref().is_ok_and(|c| c["type"] == "control" && c["agent"] == agent && c["holder"].is_null()), format!("{control:?}"));
 
     let Some(mut chrome) = super::frames::safari_like(s)? else {
         s.ok("Chrome is installed for the computer's screen (set CHROME_BIN)", false, "no Chrome found");
@@ -150,22 +157,23 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, stop
     super::isolation::frame(&mut chrome, &shell, &ticket()?)?;
     let computer = origin.split("//").nth(1).unwrap_or("").to_string();
     let wait = Duration::from_secs(60);
-    // shown, and Take over ready: its button is enabled once both sockets are open
-    let ready = "document.getElementById('status')?.textContent === \"Watching the agent's screen\" && !document.getElementById('control').disabled";
-    let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, ready).ok() == Some(json!(true)));
-    let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "document.getElementById('status')?.textContent ?? ''").unwrap_or_default();
-    s.ok("in a frame of the platform's page, the screen's page connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
+    // shown, its agent named, and Take over ready: its button is enabled once both sockets are open
+    let ready = format!("document.body.dataset.state === 'watching' && document.getElementById('screen')?.dataset.agent === {} && !document.getElementById('control').disabled", serde_json::to_string(agent)?);
+    let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, &ready).ok() == Some(json!(true)));
+    let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "[document.body.dataset.state, document.getElementById('status')?.textContent ?? '']").unwrap_or_default();
+    s.ok("in a frame of the platform's page, the agent's screen's page names it and connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
     chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
-    let taken = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "You have the screen", Duration::from_secs(20));
+    let mine = "document.body.dataset.state === 'mine'";
+    let taken = s.eventually(Duration::from_secs(20), || chrome.eval_in_frame(&shell, &computer, mine).ok() == Some(json!(true)));
     s.ok("and Take over gives the person the screen", taken, said(&mut chrome));
 
     let stopped = stop_desktop(s)?;
     let connects = "Number(document.getElementById('screen')?.dataset.connects ?? 0)";
-    let back = format!("{connects} >= 2 && document.getElementById('status')?.textContent === 'You have the screen' && !document.getElementById('control').disabled");
+    let back = format!("{connects} >= 2 && document.body.dataset.state === 'watching' && !document.getElementById('control').disabled");
     let followed = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, &back).ok() == Some(json!(true)));
     let streams = chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default();
     s.ok(
-        "the desktop stopped under the page, the page opens its stream again on its own: the desktop started for it, the person still holding the screen",
+        "the desktop stopped under the page by Hermes' forced stop, which hands it back to the agent: the page opens its stream again on its own, the desktop started for it, and says the agent holds it",
         followed,
         json!({ "agent": stopped, "status": said(&mut chrome), "streams": streams }),
     );
@@ -221,9 +229,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let turn_for = |r: &crate::api::Reply| turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let reply_of = |turn: &str| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
     let ended = |turn: &str| work_of(&records(api, &owner, &chat_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
-    // the agent stops its desktop from its terminal, as Hermes' own command does
+    // the agent stops its desktop from its terminal, as Hermes' own command
+    // does: forced, since a person holds it (Hermes hands it back first)
     let stop_desktop = |s: &Suite| -> Result<String> {
-        let r = say(120, "run: /opt/hermes/.venv/bin/hermes computer-use screen stop")?;
+        let r = say(120, "run: /opt/hermes/.venv/bin/hermes computer-use screen stop --force")?;
         let turn = turn_for(&r);
         s.eventually(TURN, || ended(&turn).is_some());
         Ok(reply_of(&turn).unwrap_or_default())
@@ -319,7 +328,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // with the screen's terminal call before the first, its step went missing in
     // 3 runs of 4 (Hermes sends progress on a tick, and a turn this model
     // ends at once can end before it)
-    screen(s, api, &owner, &id, &stop_desktop)?;
+    screen(s, api, &owner, &id, &agent_name, &stop_desktop)?;
 
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
     let r = say(3, "run: rm -rf /tmp/fragment-risky && echo tool-ran")?;

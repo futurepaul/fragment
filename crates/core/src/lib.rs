@@ -37,6 +37,7 @@ pub mod secrets_store;
 pub mod webpush;
 pub mod site;
 pub mod steps;
+pub mod wipe;
 pub mod swap;
 pub mod transcribe;
 pub mod tree;
