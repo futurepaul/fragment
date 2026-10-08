@@ -34,9 +34,14 @@ it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
 ## Use it
 
-fragment.club is invite-only for now. Install the CLI (macOS or Linux,
-no sudo; put `~/.local/bin` on your PATH if it is not), then pair it
-with you:
+fragment.club is invite-only for now. To start, tell your agent:
+
+```
+Read https://fragment.club/llms.txt and help me make my first fragment.
+```
+
+Or install the CLI yourself (macOS or Linux, no sudo; put
+`~/.local/bin` on your PATH if it is not), then pair it with you:
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
