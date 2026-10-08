@@ -1211,6 +1211,7 @@ impl FragmentCell {
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
+            page: self.cards()?.page,
             name: facts.name,
         })
     }
