@@ -119,6 +119,10 @@
       "kind": "query",
       "input": { "type": "object", "additionalProperties": false, "properties": { "thread": { "type": "string", "minLength": 1, "maxLength": 64 } } }
     },
+    "task": {
+      "kind": "query",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 64 } } }
+    },
     "status": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
     "settings": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
     "topic_add": {

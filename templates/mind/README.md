@@ -82,7 +82,9 @@ repo holds only its face.
   trigger) logs it as a `work` message `[<task>] …` and queues it, which
   runs a turn (or reaches the running one). A reply that comes before its
   `task_open` is kept for it. The page follows goose's steps on `work`
-  itself, by `turn`; the mind runs nothing for them. A task with no reply
+  itself, by `turn`; the mind runs nothing for them, and a turn's
+  `zoom("<task>")` reads them when it zooms (`job.records`, by `turn`),
+  for the task's whole run. A task with no reply
   in 30 minutes is `lost` (a later reply still reports).
 - **Topics:** `classify` asks Clef (`job.ai.decide`, `clef-flash`) one
   `noul` per topic about a thread; a thread is in a topic at p ≥ 0.6.
