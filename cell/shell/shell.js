@@ -1197,7 +1197,9 @@ async function openSettings(push = true) {
   renderChats();
   leaveSidebar();
   // Checkout's return, or a trial mailed, before the ledger is read
-  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false) };
+  // with no chats yet, a seat's Billing offers the first run (home makes
+  // the first agent: `start`)
+  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false), firstAgent: chats().length ? null : firstAgentOnceSeated };
   const back = await returning(billingHelpers);
   const [ledger, linked, uses] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
@@ -1552,6 +1554,18 @@ function signIn() {
   const go = el("a", "primary", "Sign in");
   go.href = `/auth/login?return=${encodeURIComponent(location.pathname)}`;
   firstRun(el("h1", null, "Agents that work for you, and the apps they make."), el("p", "muted", "Sign in to start."), go);
+}
+// A seat bought (or given) before any chat: home's first run, once the
+// seat's plan has reached the ledger (the registry pushes it from its
+// alarm, a moment after), so the first run's creates are a seat's. Bounded:
+// ten seconds, then home anyway, which shows Billing again if it has not.
+async function firstAgentOnceSeated() {
+  for (let i = 0; i < 20; i++) {
+    const ledger = await api("GET", "/api/ledger").catch(() => null);
+    if (ledger && ledger.plan !== "guest") break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  location.assign("/");
 }
 // The first agent (Paul, 2026-10-03): no question asked. It is the
 // person's default agent, in charge, made with its computer and its chat

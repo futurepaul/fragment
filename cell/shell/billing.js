@@ -9,7 +9,11 @@
 
 const KIND = { seat: "$100 seat", seat_always_on: "$200 always-on seat" };
 
-/** The shell's helpers this module uses: `{api, el, section, line, usd, reopen}`. */
+/**
+ * The shell's helpers this module uses: `{api, el, section, line, usd,
+ * reopen, firstAgent}` (`firstAgent`: home's first run, for a person with
+ * no chats yet; otherwise null).
+ */
 let h = null;
 
 function button(text, onclick) {
@@ -86,6 +90,17 @@ export async function billingSections(helpers, ledger, back) {
     const kind = KIND[seat.kind] + (seat.comped ? " (given)" : "");
     billing.append(line("Seat", kind), line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
+    if (seat.good && h.firstAgent) {
+      const first = el("button", "primary", "Make your first agent");
+      first.type = "button";
+      first.onclick = () => {
+        first.disabled = true;
+        h.firstAgent();
+      };
+      const go = el("div", "settings-actions");
+      go.append(first);
+      billing.append(go);
+    }
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
       if (seat.admin) billing.append(button("Pay again", () => goCheckout({ kind: seat.kind })));

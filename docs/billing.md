@@ -421,7 +421,9 @@ Settings gains **Billing**, which replaces the read-only Credit section:
 - **A lapsed person** sees why, and how to pay again.
 
 The first run starts once a seat is held, so a guest's first run is
-"get a seat".
+"get a seat". A seat holder with no chats yet sees "Make your first
+agent" in Billing: once the seat's plan has reached their ledger, it
+goes home, where the first run makes their default agent.
 
 ## The API, in sketch
 

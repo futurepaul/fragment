@@ -349,6 +349,27 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let credited = b.until(&page, "/Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
     s.ok("they buy $25 of credit on Stripe's page, and it is theirs as they land", at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + 25_000_000), ledger(api, &gus));
 
+    // a seat and no chats yet: Billing offers the first run, which makes
+    // their first agent (a guest's create would be refused)
+    let offered = b.until(&page, "[...document.querySelectorAll('#settings-page button')].some(b => b.textContent === 'Make your first agent')", wait);
+    s.ok("with their seat and no chats, Billing offers their first agent", offered, text(&mut b, &page));
+    b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Make your first agent').click()")?;
+    let creating = b.until(&page, "location.pathname === '/' && /Creating your agent/.test(document.getElementById('first-run')?.innerText ?? '')", wait);
+    let started = std::time::Instant::now();
+    let mut theirs = Value::Null;
+    // bounded: the wait
+    while started.elapsed() < wait {
+        theirs = api.signed(&gus, "GET", "/api/fragments", None)?.body;
+        if theirs["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["kind"] == "agent" && f["role"] == "owner")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let made = theirs["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["kind"] == "agent" && f["role"] == "owner"));
+    s.ok("and it runs: the shell's first run makes their agent, a seat's create", creating && made, &theirs);
+    // its computer's start is the shell-ui section's; this page stops here
+    b.close(page)?;
+
     // a trial mailed: its link opens Billing with its code
     let code = api.signed(&s.operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Page", "kind": "seat", "days": 5, "capacity": 5 })))?;
     let code = code.body["code"].as_str().unwrap_or("").to_string();
