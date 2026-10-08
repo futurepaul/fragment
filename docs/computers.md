@@ -1086,9 +1086,12 @@ actually makes a chat a Bot Chat"), so the image does both
   own chat's) with an active-session lease marked as a live-delivery
   consumer, and takes each message waiting in its mailbox: it posts it
   into the agent's own chat as the agent that sent it, naming the agent
-  in `to` (`fragment ask <agent> --chat <its chat> --id dm-<delivery>
-  --wait 1800`, acting as the sender, which adds the sender to the chat),
-  and once the agent's turn of it ends, settles the delivery with its
+  in `to` (id `dm-<delivery>`, acting as the sender for their owner, as
+  `fragment ask --chat` posts a question, but adding the sender to no
+  chat: the bridge answers a record by `to`, and the chat's page names an
+  agent that is no member by its profile), and once the agent's turn of
+  it ends (read from the chat's `work`, as `fragment ask --wait` reads it,
+  for up to 30 minutes), settles the delivery with its
   replies (up to 16,000 characters; a failure with why). That wakes the
   sender, whose turn says the answer in the sender's own chat (a message
   of its runtime's own: docs/chat-records.md). The message's text is

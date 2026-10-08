@@ -2132,6 +2132,8 @@ async fn bots_message_each_other() {
     let kept = bot_chat_of(&c, "maple--k3x9");
     let texts = kept["texts"].to_string();
     assert!(texts.contains("Message from") && texts.contains("ping from juniper"), "the message is in maple's Bot Chat: {kept}");
+    let joined = fake.with(|w| w.requests.iter().filter(|(r, ..)| r.starts_with("PUT ") && r.contains("/members/")).map(|(r, ..)| r.clone()).collect::<Vec<_>>());
+    assert!(joined.is_empty(), "juniper is added to no chat: {joined:?}");
     let logs = c.logs();
     let delivered: Vec<&str> = logs.lines().filter(|l| l.contains("\"botmode.delivered\"")).collect();
     assert!(delivered.len() == 1 && delivered[0].contains("\"status\": \"settled\"") && delivered[0].contains("\"sender\": \"juniper--k3x9\""), "one delivery, settled: {delivered:?}");

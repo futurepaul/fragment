@@ -792,7 +792,6 @@ fn spawn_keeper(home: &Path) -> Option<Child> {
         .env("HERMES_HOME", home)
         .env("FRAGMENT_RUN", RUN)
         .env("FRAGMENT_HOLD", held::HOLD)
-        .env("FRAGMENT_CLI", FRAGMENT_CLI)
         .current_dir("/")
         .spawn();
     match keeper {

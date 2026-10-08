@@ -124,10 +124,10 @@ pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
 }
 
 /// The bots file: for each agent whose Bot Chat is found (`chats`, by
-/// `bot_chat`), its profile's home, that chat, and the session key Hermes
-/// keeps that chat's session under (`wire::session_key`), whose session the
-/// hook titles `Bot Chat`. An agent with none yet is left out: the hook and
-/// the keeper leave it alone.
+/// `bot_chat`), its identity and owner, its profile's home, that chat, and
+/// the session key Hermes keeps that chat's session under
+/// (`wire::session_key`), whose session the hook titles `Bot Chat`. An
+/// agent with none yet is left out: the hook and the keeper leave it alone.
 pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
     let bots: Vec<serde_json::Value> = agents
         .iter()
@@ -136,6 +136,7 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
             let chat = chats.get(&a.fragment)?;
             Some(json!({
                 "agent": a.fragment,
+                "identity": a.identity,
                 "owner": a.owner,
                 "profile": profile,
                 "home": crate::hermes::profile_dir(home, &a.fragment).display().to_string(),
@@ -260,6 +261,7 @@ mod tests {
             f["bots"][0],
             json!({
                 "agent": "juniper--k3x9",
+                "identity": "npub1juniper",
                 "owner": "npub1paul",
                 "profile": "juniper--k3x9",
                 "home": "/data/hermes/profiles/juniper--k3x9",
