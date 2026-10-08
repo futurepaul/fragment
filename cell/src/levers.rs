@@ -91,6 +91,28 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
         }
+        (Method::Post, ["list"]) => {
+            /// `{identity, op}`: a lever on that identity's list (principal.rs `test_lever`).
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestList {
+                identity: String,
+                op: String,
+            }
+            let t: TestList = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !npub::is_identity(&t.identity) || !t.op.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                return Err(CellError::invalid("name an identity, and a lever's op"));
+            }
+            if cfg.levers_scoped {
+                // an agent's list is reached through its owner, an e2e person
+                let who = ask_registry(env, &calls::Lookup { who: t.identity.clone() }).await?;
+                let person = who.owner.clone().unwrap_or_else(|| t.identity.clone());
+                if !is_e2e(env, &person).await? {
+                    return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the list levers reach e2e people's lists (and their agents') alone"));
+                }
+            }
+            json_answer(&routed::ask_object(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
+        }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).
             #[derive(Deserialize)]

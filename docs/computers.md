@@ -407,6 +407,25 @@ expires within 30 days. The container application is the deployment's
   too. Before, a capture went to the agent's own tier's model, which on
   the medium tier reads no images. DeepSeek Flash's vision build is only
   on DeepSeek's own API (decision 23, its status).
+- **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
+  - **Config.** Each profile has `stt: {provider: openai, language: "",
+    openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
+    whisper}}`.
+  - **When it runs.** A voice note a person attaches is transcribed
+    before its turn, and the agent is given the words. Hermes does this
+    under the routed profile's scope for every inbound message, even
+    one that answers a question or arrives while the agent works.
+  - **No language is forced.** Whisper detects it; Hermes' default,
+    `en`, mangles the rest.
+  - **No transcript of its own.** The managed overlay's
+    `stt.echo_transcripts: false` keeps a memo to one reply a turn, with
+    no 🎙️ message before it.
+  - **Before (2026-10-07).** Hermes tried local Whisper first: a
+    person's first voice note installed faster-whisper and its model
+    into `/data`.
+
+  The Docker lane's `a_voice_memo_is_transcribed_through_the_route`
+  proves it.
 - A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
@@ -415,10 +434,33 @@ expires within 30 days. The container application is the deployment's
   so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
   GLM-5.3 Flash's price, the fee and the margin) until it settles at what
   the model counted; a payer with less is refused it (402).
-- A call without `x-fragment-agent` is refused (401: no one to bill).
-  Our Hermes image sets it on every call of an agent's profile (its
-  `model.default_headers`), the main model's and the auxiliary ones'
-  (titles, the smart-approval guardian, vision).
+- `POST http://model.fragment.internal/v1/audio/transcriptions`,
+  OpenAI's multipart shape with `model` `whisper`: a voice memo
+  transcribed (decision 9, its status). It is the platform's
+  transcription route as the agent: Workers AI's Whisper, at most 10 MiB
+  of audio, metered to the agent's owner at 46.63 neurons a minute of
+  audio (docs/api.md, Models).
+- **Whose call it is**, one rule for both paths
+  (`fragment_core::models::agent_named`):
+  - its `x-fragment-agent`; or
+  - from a client that sends no header of its own (OpenAI's SDKs take a
+    base URL and a key, nothing more), its key: `Authorization: Bearer
+    agent:<label>.<username>`. Any other key (Hermes' `fragment-model`)
+    is the guest's own placeholder and names no one.
+
+  Named both ways, the two must agree. Refusals:
+  - none named, a malformed name, or two that disagree: 401;
+  - an agent that does not run on this computer: 403 (the computer signs
+    only for its own).
+
+  The guest's auth headers, its key among them, go no further than the
+  computer: only the agent's name, the content type and `accept` are
+  sent on, and nothing of them reaches the gateway, Workers AI or a log.
+- Our Hermes image sets `x-fragment-agent` on every call of an agent's
+  profile (its `model.default_headers`), the main model's and the
+  auxiliary ones' (titles, the smart-approval guardian, vision). Its
+  speech-to-text, whose client takes no header, names the agent by its
+  key (each profile's `stt.openai.api_key`, `agent:<name>`).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -1026,7 +1068,10 @@ for a host) and finds the same `HOME`, `~` and modes.
   Hermes gateway; and, with Docker, both images built and run against
   the fake API and a scripted model on the host
   (`cargo test -p fragment-bridge --test docker -- --ignored`), real
-  Hermes included. These are lower rung: fakes at the platform's edge.
+  Hermes included. CI runs the Docker ones (images.yml's `docker`) on
+  pull requests and master's pushes that touch images/hermes,
+  images/bridge or images/stub, the rest on every change to `images/`.
+  These are lower rung: fakes at the platform's edge.
   Among them, saves of our Hermes image taken as the DO takes them
   (`a_save_taken_while_it_writes_opens`: during turns whose tool writes a
   SQLite database every few ms, half under the hold and half hot, each

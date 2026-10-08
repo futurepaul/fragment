@@ -9,7 +9,10 @@
 //!
 //! Run: `cargo test -p fragment-bridge --test docker -- --ignored --nocapture`
 //! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built;
-//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag).
+//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag). CI runs it
+//! (.github/workflows/images.yml, `docker`) on pull requests and master's
+//! pushes that touch images/hermes, images/bridge or images/stub: the images
+//! built first, then this with `FRAGMENT_DOCKER_SKIP_BUILD=1`.
 
 mod support;
 
@@ -580,6 +583,12 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
 /// seconds (a commit every few ms), while Hermes writes its own.
 const WRITING: &str = "run: python3 -c \"import sqlite3,time;c=sqlite3.connect('tool.db');c.execute('pragma journal_mode=wal');c.execute('create table if not exists t(x)');[(c.execute('insert into t values(randomblob(8000))'),c.commit(),time.sleep(0.01)) for _ in range(500)];print('wrote')\"";
 
+/// Whether `WRITING`'s tool is running in `c` (a process whose command line
+/// names its `randomblob`).
+fn writing(c: &Container) -> bool {
+    c.exec(&["pgrep", "-f", "randomblob"])
+}
+
 /// Whether a reported file is one of Hermes' own databases (its home's
 /// `*.db`), or another SQLite file.
 fn hermes_db(file: &serde_json::Value) -> bool {
@@ -610,11 +619,20 @@ async fn a_save_taken_while_it_writes_opens() {
         let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
         fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
         // Hermes asks its owner before a script runs from `-c` ("script
-        // execution via -e/-c flag"): allowed for the session, once
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
-        if let Some(card) = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t)) {
-            fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
-            tokio::time::sleep(Duration::from_millis(1_000)).await;
+        // execution via -e/-c flag"): allowed for the session, once. So the
+        // tool waits on its card (the first round) or runs (the rest), and
+        // which is waited for, not a fixed time: a slow runner shows the card
+        // well after the step.
+        let asked = Instant::now();
+        let mut answered = false;
+        // bounded: a minute
+        while !writing(&c) {
+            if let (false, Some(card)) = (answered, fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t))) {
+                fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
+                answered = true;
+            }
+            assert!(asked.elapsed() < Duration::from_secs(60), "round {round}: its tool never wrote (its card answered: {answered}); the container said:\n{}", c.logs());
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
         // the tool writing for about six seconds: the save is taken in its midst
         tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -821,8 +839,13 @@ async fn held_nothing_under_data_changes() {
     fake.with(|w| assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["turn"] != t), "held, the message is not claimed"));
     unhold(&c);
     fake.until(120_000, "the message answered once the hold goes", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!c.exec(&["test", "-e", "/data/held-copies"]), "the copies go with the hold");
+    // the boot sees the hold go on its own poll (every 100 ms), apart from
+    // the bridge's: waited for, bounded, not a fixed time
+    let gone = Instant::now();
+    while c.exec(&["test", "-e", "/data/held-copies"]) {
+        assert!(gone.elapsed() < Duration::from_secs(10), "the copies go with the hold");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// What the agent's desktop looks like from inside the container, as the
@@ -847,6 +870,30 @@ print(json.dumps({"pointer": [v[2].value, v[3].value], "windows": names}))
     let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
     let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SCRIPT, &env]);
     serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
+}
+
+/// Waits until the pointer on `profile`'s desktop is at `at` (looked at every
+/// 200 ms, for at most 15 s), as a viewer's move puts it there: through the
+/// screen's socket, the bridge and Xvnc, which a loaded runner slows. How
+/// long it took.
+async fn pointer_at(c: &Container, profile: &str, at: [i64; 2], what: &str) -> Duration {
+    let t = Instant::now();
+    // bounded: 15 s
+    loop {
+        let seen = desk(c, profile)["pointer"].clone();
+        if seen == json!(at) {
+            return t.elapsed();
+        }
+        assert!(t.elapsed() < Duration::from_secs(15), "{what}: the pointer is at {seen}, not {at:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// How long a move that must not land is given to land before its absence
+/// counts: three times what a move that did land took, and at least a
+/// second, so a slower runner gives it longer.
+fn settle(took: Duration) -> Duration {
+    (took * 3).max(Duration::from_secs(1))
 }
 
 /// Where the window titled `title` is on the agent's desktop, `[x, y, w,
@@ -1019,11 +1066,10 @@ async fn the_hermes_desktop() {
     assert_eq!(driving.next().await.unwrap()["holder"], "driver");
     assert_eq!(watching.next().await.unwrap()["holder"], "driver", "every viewer hears who took over");
     driver.pointer(101, 57, 0).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the holder moves the pointer");
+    let took = pointer_at(&c, "juniper-paul", [101, 57], "the holder moves the pointer").await;
     watcher.pointer(301, 257, 0).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "a watcher does not");
+    tokio::time::sleep(settle(took)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "a watcher does not (given {:?}, the holder's move having taken {took:?})", settle(took));
     driving.say("give").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
 
@@ -1201,8 +1247,7 @@ async fn two_agents_two_desktops() {
     assert!(jl["holder"] == "human" && jl["viewer_id"] == "driver" && jl["refused"].is_string(), "juniper's lease is the person's, and Hermes refuses juniper's screen actions: {jl}");
     assert!(fl["holder"] == "agent" && fl["refused"].is_null(), "fred's is fred's: {fl}");
     driver.pointer(101, 57, 0).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the person drives juniper's desktop");
+    pointer_at(&c, "juniper-paul", [101, 57], "the person drives juniper's desktop").await;
     assert_ne!(desk(&c, "fred-paul")["pointer"], json!([101, 57]), "and not fred's");
 
     // each agent's computer_use, as the lease has it
@@ -1781,4 +1826,45 @@ async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
     let woke = hermes_python(&c, &[], REFRESH);
     assert_eq!(woke["catalog"], json!({}), "woken, its catalog is still off, the torn caches unread: {woke}");
     fake.with(|w| assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}", x.reply(w, &next)));
+}
+
+// ---- a voice memo (decision 9: a voice memo is one the agent transcribes
+// itself, through the platform's model route) ----
+
+/// Goal (decision 9; Paul, 2026-10-07): a voice note a person attaches in
+/// the chat reaches Hermes, which transcribes it through the model route's
+/// `whisper` (OpenAI's transcription shape, its agent named by its key,
+/// `agent:<name>`, since Hermes' STT client sends no header of ours; no
+/// language forced, so Whisper detects it), and answers once, having heard
+/// it: no transcript echoed as a message of its own, and no local Whisper
+/// installed for it. Method: a memo (a WAV that says its words, as the
+/// scripted model reads them) put in the chat's blobs and said as an
+/// attachment; the scripted model's calls, the turn's reply, and `/data`.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_voice_memo_is_transcribed_through_the_route() {
+    use sha2::Digest;
+    let (fake, model, chat, c) = hermes_running().await;
+    let words = "please remember the blue door";
+    let audio = support::model::memo(words);
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    let calls_before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "memo.wav" }] }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(180_000, "the memo's turn to end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let calls: Vec<support::model::Call> = model.calls.lock().unwrap()[calls_before..].to_vec();
+    let heard: Vec<&support::model::Call> = calls.iter().filter(|c| c.path.ends_with("/audio/transcriptions")).collect();
+    eprintln!("memo: transcriptions {:?}", heard.iter().map(|c| (&c.body, &c.authorization)).collect::<Vec<_>>());
+    assert_eq!(heard.len(), 1, "one transcription through the route: {:?}", calls.iter().map(|c| &c.path).collect::<Vec<_>>());
+    let h = heard[0];
+    assert_eq!(h.authorization.as_deref(), Some("Bearer agent:juniper.paul"), "its key names its agent");
+    assert_eq!((h.body["model"].clone(), h.body["language"].clone(), h.body["audio_bytes"].clone()), (json!("whisper"), serde_json::Value::Null, json!(audio.len())), "the route's whisper, the memo whole, no language forced");
+    let asked = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).any(|c| c.body["messages"].to_string().contains(words));
+    assert!(asked, "the turn's model call carries what the memo said: {:#?}", calls.iter().map(|c| c.body["messages"].to_string().chars().take(400).collect::<String>()).collect::<Vec<_>>());
+    let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).collect::<Vec<_>>());
+    eprintln!("memo: replies {replies:?}");
+    assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");
+    assert!(!replies[0]["text"].as_str().unwrap_or("").contains('🎙'), "{replies:?}");
+    assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
 }

@@ -89,7 +89,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, push, ai, ledger, transcribe, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
@@ -238,13 +238,19 @@ prebuilt bundle is in the debt ledger).
   `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
   docker -- --ignored` builds both images and runs them in Docker
   (linux/amd64) against a fake API and a scripted model, real Hermes
-  included. The e2e's computer sections run the stub image under
-  `wrangler dev`, which needs Docker.
+  included (CI: images.yml's `docker`, below). The e2e's computer
+  sections run the stub image under `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
   restore on every run and save only from master's pushes (each key's
-  contents are named in the workflow). `release.yml` builds the CLI for
-  macOS and Linux.
+  contents are named in the workflow). `images.yml` runs `images/`'s
+  `check` on every change there, and `docker`, the Docker lane above
+  (both images built, then every `--ignored` test of docker.rs on them,
+  in parallel; about 13 minutes), on pull requests and master's
+  pushes that touch images/hermes, images/bridge, images/stub, the
+  images' manifest or lock, or the workflow (its `changes` job reads what
+  changed), and on a run by hand. It keeps no layer cache: the workflow
+  says why. `release.yml` builds the CLI for macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
   zone `finite.place` in Paul's account, and production only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
