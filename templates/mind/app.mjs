@@ -100,6 +100,9 @@ const TOPICS_MAX = 256;
 const QUEUE_MAX = 1000;
 const FAILS_KEPT = 64;
 const ABOUT_MAX = 8000;
+// `export`'s pages: messages a page, unless named, and at most.
+const EXPORT_LIMIT = 500;
+const EXPORT_MAX = 2000;
 
 const PERSONAS = [
   {
@@ -854,6 +857,28 @@ export class App extends DurableObject {
     const hi = i + clamp(after, 0, 50);
     const rows = this.ctx.storage.sql.exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i BETWEEN ? AND ? ORDER BY i DESC", lo, hi).toArray();
     return { messages: this.#page(rows.map((r) => this.#shown(r))).messages };
+  }
+
+  // The raw log, a page at a time (the page's "Export memory"): every
+  // message after `after` (all from the first by default), oldest first,
+  // at most `limit` and RESULT_SOFT_BYTES of them, each with its files and
+  // the text the mind read of them. `next` is the `after` of the next page;
+  // null, the log's end.
+  export({ after = null, limit = EXPORT_LIMIT } = {}) {
+    need(after === null || isInt(after), "export: after is a message's id");
+    const n = clamp(limit, 1, EXPORT_MAX);
+    const rows = this.ctx.storage.sql
+      .exec("SELECT i, kind, text, at, thread, persona, task, attachments FROM log WHERE i > ? ORDER BY i LIMIT ?", after ?? -1, n + 1)
+      .toArray();
+    const entries = [];
+    let bytes = 0;
+    for (const r of rows.slice(0, n)) {
+      const e = { ...r, attachments: F.filesOf(r.attachments) };
+      bytes += sizeOf(e);
+      if (entries.length && bytes > RESULT_SOFT_BYTES) break;
+      entries.push(e);
+    }
+    return { entries, next: entries.length < rows.length ? entries[entries.length - 1].i : null };
   }
 
   memory() {

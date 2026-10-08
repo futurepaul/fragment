@@ -21,7 +21,8 @@
 //! internet, which a local run does not call: a skip. Files: a message's
 //! text file (the mind's blob, named on `say`) is read whole into its turn,
 //! goes with the hand-off on `chat`, the stub names it, and its reply's
-//! file comes back on the report and is read into the next turn.
+//! file comes back on the report and is read into the next turn. `export`
+//! pages the raw log.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -380,6 +381,34 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let r = say("m7", json!({ "text": "", "thread": bare, "attachments": [file] }))?;
     let titled = r.status == 200 && s.eventually(TURN, || logged(api, &owner, &mind, "thread").iter().any(|t| t["body"]["id"] == bare && t["body"]["title"] == "notes.txt"));
     s.ok("a message may be a file alone: its thread is titled by the file's name", titled, &r);
+
+    // ---- export: the raw log, a page at a time
+    let t0 = op(api, &owner, &mind, "status", json!({}))["T"].as_i64().unwrap_or(0);
+    let mut entries: Vec<Value> = vec![];
+    let mut after = Value::Null;
+    let mut pages = 0;
+    while pages < 200 {
+        let input = if after.is_null() { json!({ "limit": 7 }) } else { json!({ "after": after, "limit": 7 }) };
+        let page = op(api, &owner, &mind, "export", input);
+        pages += 1;
+        entries.extend(page["entries"].as_array().cloned().unwrap_or_default());
+        after = page["next"].clone();
+        if after.is_null() {
+            break;
+        }
+    }
+    let ids: Vec<i64> = entries.iter().filter_map(|e| e["i"].as_i64()).collect();
+    s.ok(
+        "export pages the whole log in order, seven a page, to its end",
+        t0 > 7 && ids.len() as i64 >= t0 && ids.iter().enumerate().all(|(k, i)| *i == k as i64) && pages as i64 == (ids.len() as i64 + 6) / 7,
+        json!({ "T": t0, "pages": pages, "ids": ids }),
+    );
+    let with_notes = entries.iter().find(|e| e["thread"] == hooks && e["kind"] == "user" && e["task"].is_null());
+    s.ok(
+        "each entry carries its files and the text the mind read of them",
+        with_notes.is_some_and(|e| e["attachments"][0]["name"] == "notes.txt" && e["attachments"][0]["text"] == "the spare key hangs on the third hook\n"),
+        format!("{with_notes:?}"),
+    );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())

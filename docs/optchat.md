@@ -300,7 +300,7 @@ reads are its steps, not the log's, as a subagent's are (spec 9).
 - **Out.** `msg` records, and `thread`, `context` and `node`'s
   messages, name a message's files without their text (`attachments`:
   on a record only when it has some; on a query's message always, `[]`
-  with none).
+  with none). `export` carries the text too.
 - **To the hands.** A `computer` hand-off's `chat` record carries the
   turn's files (its taken messages', at most 8): goose's bridge
   downloads them as local files for the runtime. goose's one reply may
@@ -395,6 +395,7 @@ membership, which only its owner and the agent hold. Operations with a
 | `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`, newest `last` first (`before` is a `last`); `summary` is the text of the smallest built node covering the thread's messages (`first_i` to `last_i`), else its first user line; `count` is its `user` and `talk` messages |
 | `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task, attachments}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row; `attachments` are `[{sha256, name, type, size}]` (`[]` with none), each read at `__blob/<sha256>` |
 | `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand), as `thread`'s |
+| `export` | query (editor) | `{after?, limit?}` → `{entries: [{i, kind, text, at, thread, persona, task, attachments}], next}`: the raw log oldest first, the messages after `after` (from the first by default), at most `limit` (500 unless named, at most 2000) and 768 KiB a page; `attachments` with the `text` the mind read of them; `next` is the next page's `after`, `null` at the end (the page's "Export memory") |
 | `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T, cut?}`: the view as structured parts (the Memory screen); past 768 KiB its last `cut` parts are left out |
 | `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` (as `thread`'s) |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |

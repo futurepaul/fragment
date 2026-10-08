@@ -322,14 +322,14 @@ mod tests {
             c.modules.keys()
         );
         for op in [
-            "view", "zoom", "date", "search", "note", "threads", "thread", "context", "memory", "node", "topics", "personas", "tasks", "status",
+            "view", "zoom", "date", "search", "note", "threads", "thread", "context", "export", "memory", "node", "topics", "personas", "tasks", "status",
             "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop", "topic_suggest",
             "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan", "node_built",
             "task_open", "hands_reply", "topics_set",
         ] {
             assert!(m.operations.contains_key(op), "the mind declares {op}");
         }
-        assert_eq!(m.operations.len(), 37, "and nothing else");
+        assert_eq!(m.operations.len(), 38, "and nothing else");
         let raw: serde_json::Value = serde_json::from_slice(template("mind").unwrap().iter().find(|(p, _)| *p == "fragment.json").unwrap().1).unwrap();
         let described: Vec<&str> = raw["operations"].as_object().unwrap().iter().filter(|(_, d)| d.get("description").is_some()).map(|(k, _)| k.as_str()).collect();
         assert_eq!(described, ["date", "note", "search", "view", "zoom"], "the MCP tools");
