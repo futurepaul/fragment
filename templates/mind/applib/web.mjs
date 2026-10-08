@@ -454,6 +454,8 @@ export async function research(io, question) {
   try {
     const a = await io.text({
       model: "cheap",
+      // an answer for the person: their model for chat
+      role: "chat",
       messages: [
         { role: "system", content: RESEARCH },
         { role: "user", content: `Question: ${question}\n\nSources:\n\n${sources}` },

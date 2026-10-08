@@ -1672,7 +1672,7 @@ export class App extends DurableObject {
       const state = turnState({ now: b.now, chat: b.chat, persona: b.persona, hands: h.hands });
       const messages = [
         { role: "system", content: system(b.about) },
-        { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: state }, { type: "text", text: b.texts.join("\n\n") }] },
+        { role: "user", content: [{ type: "text", text: v.text, cache: "blocks" }, { type: "text", text: state }, { type: "text", text: b.texts.join("\n\n") }] },
       ];
       let convo = 0;
       let last = false;
@@ -1684,6 +1684,8 @@ export class App extends DurableObject {
           tools: CALL_TOOLS,
           tool_choice: last ? "none" : "auto",
           draft: { channel: "log", turn: `turn:${thread}` },
+          // the person's model for chat (docs/optchat.md, "Your own models")
+          role: "chat",
         });
         // `message` is the platform's answer with tools; without it, the text
         const msg = a && typeof a.message === "object" && a.message !== null ? a.message : { role: "assistant", content: a?.text ?? "" };
@@ -1726,7 +1728,8 @@ export class App extends DurableObject {
         if (lg.pump) await s.call("pump", {});
         if (!asked.length) return { state: "done" };
         if (lg.stopped) return { state: "stopped" };
-        const said = { role: "assistant", content: msg.content ?? null, tool_calls: asked };
+        // an answer's thinking blocks (Anthropic's, opaque) go back with its calls
+        const said = { role: "assistant", content: msg.content ?? null, tool_calls: asked, ...(Array.isArray(msg.thinking_blocks) ? { thinking_blocks: msg.thinking_blocks } : {}) };
         messages.push(said, ...results);
         convo += sizeOf(said) + results.reduce((n, r) => n + sizeOf(r), 0);
         // §6: what the person (or a hand-off's report) said meanwhile, between tool calls
@@ -1789,7 +1792,7 @@ export class App extends DurableObject {
     for (;;) {
       let a;
       try {
-        a = await s.text({ model: "cheap", messages, tools: CALL_TOOLS, tool_choice: "none", max_tokens: COMPACT_TOKENS });
+        a = await s.text({ model: "cheap", role: "memory", messages, tools: CALL_TOOLS, tool_choice: "none", max_tokens: COMPACT_TOKENS });
       } catch (e) {
         return { l, i, error: describe(e) };
       }
@@ -1811,7 +1814,7 @@ export class App extends DurableObject {
     const open = (i + 1) * 2 ** l <= m.T && !M.isBuilt(m, l, i) && (l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)));
     if (!open) return [sys, { role: "user", content: `Compaction: ${M.nameOf(l, i)} is built already: answer "built".` }];
     const c = M.compaction(m, l, i, (k) => this.#line(k));
-    return [sys, { role: "user", content: [{ type: "text", text: c.view }, { type: "text", text: c.task }] }];
+    return [sys, { role: "user", content: [{ type: "text", text: c.view, cache: "blocks" }, { type: "text", text: c.task }] }];
   }
 
   // A compactor (§4, "The order"): one node at a time, each taken under a
@@ -2053,6 +2056,7 @@ export class App extends DurableObject {
     const view = M.render(this.#memory()).text;
     const a = await s.text({
       model: "cheap",
+      role: "memory",
       messages: [
         { role: "system", content: SUGGEST },
         { role: "user", content: `${view}\n\nTopics they have: ${have.length ? have.join(", ") : "none yet"}.` },
