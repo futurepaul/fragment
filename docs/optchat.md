@@ -104,10 +104,13 @@ Inspiration:
 The `operations` are listed below. Its members are the owner and the
 goose agent, an editor. The shell makes it `members` (private).
 
-- **`say`**: the person's messages, `{text, thread, persona?}`, posted
-  by the page (`fragment.post("say", …)`). `thread` is the page's id
-  for the screen, `t_` plus 16 hex. `persona` is the persona chosen for
-  that thread.
+- **`say`**: the person's messages, `{text, thread, persona?,
+  attachments?}`, posted by the page (`fragment.post("say", …)`).
+  `thread` is the page's id for the screen, `t_` plus 16 hex. `persona`
+  is the persona chosen for that thread. `attachments` are files the
+  page uploaded to the mind first (`fragment.blob(file)`), at most 8,
+  each docs/chat-records.md's ATTACHMENT, `{sha256, name, type, size}`
+  ("Attachments", below). A message is words, files, or both.
 - **`log`**: what the mind publishes from its mutations, for pages to
   follow live (below, "Records on `log`"). It has no `post` role, so it
   is never trimmed. The main agent's streaming draft is on `log` too,
@@ -122,7 +125,7 @@ goose agent, an editor. The shell makes it `members` (private).
 ### The log, the tree, the view: OptChat's spec, in SQLite
 
 ```sql
-log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT)
+log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT)  -- attachments: JSON, null with none
 node(l INTEGER, i INTEGER, text TEXT, PRIMARY KEY (l, i))     -- the tree; never rewritten
 thread(id TEXT PRIMARY KEY, title TEXT, persona TEXT, started INTEGER, last INTEGER, first_i INTEGER, last_i INTEGER)
 topic(id TEXT PRIMARY KEY, name TEXT, description TEXT, made INTEGER)
@@ -142,9 +145,15 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
   wrote past twice NODE is cut there.
 - **Prompts:** COMPACT, MASTER, VIEW_DOC and the subagent prompt are
   verbatim from the spec, with "OptChat" replaced by "Mind".
-  - MASTER's "Use subagents only when the user asks" becomes: use
-    `computer` for work that needs a computer (files, shell, browsing,
-    code). Answer everything else yourself.
+  - MASTER's "Use subagents only when the user asks" becomes: check on
+    the web what may have changed or what it is unsure of (`web_search`
+    to find pages, `web_fetch` to read one, `research` for a question
+    that needs several sources), saying where it came from; use
+    `computer` for real computer work (files, code, running programs,
+    anything that needs the user's accounts); the computer has the
+    fragment CLI and its skill, so it makes and updates the user's apps
+    (fragments), and any app they want made or changed is handed to it.
+    Answer everything else yourself.
   - The system prompt is MASTER + VIEW_DOC + the persona's
     instructions + the person's about-me. It is byte-identical across
     turns for one persona, with no dates.
@@ -168,10 +177,11 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
 
 The spec's §7, as a job:
 
-1. `hear`, a mutation: log the message (`user`), touch its thread
-   (making it, titled from the first line, on first use), publish it on
-   `log`, and push it on the queue. If a turn is running, stop there:
-   the running turn takes it next.
+1. `hear`, a mutation: log the message (`user`) with its files (their
+   small text ones read first: "Attachments"), touch its thread (making
+   it, titled from the first line, or the first file's name, on first
+   use), publish it on `log`, and push it on the queue. If a turn is
+   running, stop there: the running turn takes it next.
 2. `turn_begin`, a mutation: take the turn lock (it expires 15 minutes
    after its last touch), then take the queued messages of the oldest
    thread waiting. It answers `tail`: where the turn's view stops, before
@@ -191,9 +201,12 @@ The spec's §7, as a job:
      `[system, user: [view, texts joined]]`, then the turn's steps.
    - Log each reply `talk`, each tool call `tool` (name and JSON input),
      and each result `echo` (capped). Publish each on `log`.
-   - Run the tools: `zoom`, `date` and `search` are queries;
-     `computer` opens a hand-off. At most 8 run per answer; past 24, an
-     answer's calls are dropped (a mutation publishes 64 records).
+   - Run the tools: `zoom`, `date` and `search` are queries; the web's
+     are fetches ("The web"); `computer` opens a hand-off. At most 8 run
+     per answer; past 24, an answer's calls are dropped (a mutation
+     publishes 64 records). Past 512 KiB of conversation, an answer's
+     next tool is answered "this turn has read all it can hold" and the
+     next call is the last.
    - Stop when the model answers with no tool calls.
    - The last call offers no tools (`tool_choice: "none"`): the 40th, or
      one past 512 KiB of conversation (a step's arguments travel in a
@@ -210,11 +223,103 @@ Tools (descriptions verbatim from the spec where it has them):
 - `zoom(id, n)` and `date(id)`, as the spec defines them.
 - `search(q, limit?)`: FTS5 over the log. It answers `id+1|kind:
   snippet` lines, newest first, at most 20.
-- `computer(task)`: hand work to goose on the person's computer. It
-  answers `[<task id>] started` at once. The report arrives later as a
-  `user` message `[<task id>] <report>`, which starts a turn of its own
-  when none runs (MASTER: never wait or poll for it). It is offered only
-  when the persona has `hands` and the mind has an agent member.
+- `web_search(q, limit?)`: numbered results, each `title`, its URL and
+  a snippet (6 unless named, at most 10), then what failed on the way.
+- `web_fetch(url)`: a page's `# title`, its URL, and its readable text
+  (markdown-ish), capped at CAP, head and tail, as every result.
+- `research(question)`: an answer with numbered sources.
+- `computer(task)`: hand work to goose on the person's computer. Its
+  description says it has the fragment CLI and its skill, and makes and
+  updates the user's apps. It answers `[<task id>] started` at once.
+  The report arrives later as a `user` message `[<task id>] <report>`,
+  which starts a turn of its own when none runs (MASTER: never wait or
+  poll for it). It is offered only when the persona has `hands` and the
+  mind has an agent member. The turn's files go with it.
+
+Every persona has `zoom`, `date`, `search` and the web's three.
+
+### The web (`applib/web.mjs`)
+
+The web tools are a few steps of the turn that calls them, all
+`job.fetch` (the app's one way out). Their results are logged as any
+tool's (`tool`, then `echo`, capped); `research`'s own searches and
+reads are its steps, not the log's, as a subagent's are (spec 9).
+
+- **Providers, by the secret that names them.** The owner sets a key as
+  one of the mind's secrets (`fragment secret set <mind> NAME`, or `PUT
+  /api/f/<mind>/secrets/<NAME>`). The app never sees a secret nor which
+  exist: a fetch names one as `{{NAME}}` in a header, and the platform
+  fails the step "no secret named NAME" when it is not set. So the
+  keyed providers are tried in order, and a secret found missing is
+  passed over for the rest of the turn (one failed step each, at most,
+  per turn).
+  - `web_search`: Perplexity's Search API (`PERPLEXITY_API_KEY`, `POST
+    api.perplexity.ai/search`), Brave Search (`BRAVE_API_KEY`), Tavily
+    (`TAVILY_API_KEY`), then **with no key** DuckDuckGo's HTML page
+    (`html.duckduckgo.com/html/`, read for its results, its ads left
+    out). When DuckDuckGo gives nothing, Wikipedia's search, which
+    answers any server; its results say they are Wikipedia's alone and
+    name the keys. DuckDuckGo answers a datacenter's address with a
+    "prove you are human" page (2026-10-07: its duck CAPTCHA, fetched
+    from a datacenter; a home address gets results), which is read as
+    such, and DuckDuckGo is passed over for the rest of the turn: on
+    Workers the no-key search is, in practice, Wikipedia's. A keyed
+    provider that fails (a refused key, a 5xx) is noted and the next is
+    tried.
+  - `research`: with `PERPLEXITY_API_KEY`, one call of Perplexity's
+    `sonar` (`POST api.perplexity.ai/chat/completions`), which searches
+    and cites itself; its sources are its `search_results` (or
+    `citations`). Otherwise a `web_search` of 5, the first 3 pages that
+    read (each cut to 12 000 characters), and one `cheap` call
+    (`RESEARCH`) that answers from them alone, citing them as `[n]`.
+- **`web_fetch`** sends a browser-like `user-agent`, follows at most 3
+  redirects itself (a step's fetch answers them), and asks a page over
+  a fetch's 1 MiB again with `range: bytes=0-524287` (honoured by some
+  servers). A Wikipedia article (`<lang>.wikipedia.org/wiki/…`) is read
+  through Wikipedia's API instead (`prop=extracts`, plain text, its
+  headings as `#`s): its page is up to megabytes of HTML, sent whole
+  whatever range is asked (United States: 2.9 MB, past a fetch; its
+  text, 94 KB), and Wikipedia is the no-key search's source on Workers.
+  HTML becomes text: its `<main>` (else its `<article>`s, else
+  its body), less scripts, styles, media, `nav`, `footer`, `aside`, and
+  elements hidden or marked as chrome by a role or a class (menus,
+  dropdowns, navboxes, a Wikipedia section's "edit"); headings as `#`,
+  list items as `- `, links as `[words](absolute url)`, `<pre>` fenced,
+  table cells split by ` | `. Text types pass as they are; anything else
+  (a PDF, an image) is an error that says to hand it to the computer.
+- **Budgets.** A fetch's answer is kept whole in the run's 4 MiB of
+  answers, so one is taken only while the run has 1 MiB and a margin
+  left; a web tool takes a step only while 3 are left for its answer's
+  log, a last call and its log. Either way the tool answers why it
+  stopped, and the agent answers with what it has.
+
+### Attachments (`applib/files.mjs`)
+
+- **In.** A `say` record's `attachments` are the mind's blobs. The
+  `heard` job reads each small text one (a type `text/*`, JSON, XML,
+  YAML…, or a name like `.md`, `.csv`, `.py`; at most 64 KiB, and 128
+  KiB a message in all) with `job.blob` (Platform additions), and
+  `hear` logs them with the message: the log's `attachments` column,
+  `[{sha256, name, type, size, text?}]`, `text` capped as a message is.
+- **The memory reads a message with its files**: the tree's level 0
+  (the compactor), `zoom(id, 1)` and a turn's new messages are its words,
+  then each file as `[file: <name> (<type>, <size>)]`, a read one fenced
+  whole below it. So the agent sees every file's name, type and size,
+  and a small text file's words. `search` indexes the words alone.
+- **Out.** `msg` records, and `thread`, `context` and `node`'s
+  messages, name a message's files without their text (`attachments`:
+  on a record only when it has some; on a query's message always, `[]`
+  with none). `export` carries the text too.
+- **To the hands.** A `computer` hand-off's `chat` record carries the
+  turn's files (its taken messages', at most 8): goose's bridge
+  downloads them as local files for the runtime. goose's one reply may
+  carry files (its bridge uploads them to the mind); `hands_said` reads
+  the small text ones the same way, and they are the report message's
+  `attachments`. A reply of files alone reports `(files)`.
+- **Images** are named, not seen: the route's `vision` model is no tier
+  a job's step may name. Hand an image to the computer.
+- The records that name a file keep its blob (docs/api.md, Blobs): `say`
+  (its newest 10 000), `log` (never trimmed) and `chat`.
 
 ### The compactor (job `pump`)
 
@@ -251,8 +356,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 ### Hand-offs (job `computer` → `chat` → goose)
 
 1. **The task.** The tool's step publishes
-   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>]}`
-   on `chat` as the fragment (`job.publish`, which answers the record's
+   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>], attachments?}`
+   (the turn's files) on `chat` as the fragment (`job.publish`, which answers the record's
    `seq`); then `task_open` records the task, that `seq`, and the turn
    the agent's bridge gives that record: 24 hex of SHA-256 of `<agent
    fragment>|<mind>/chat/<seq>` (images/bridge `turn_id`; the agent
@@ -267,8 +372,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 3. **The mind takes the reply.** `hands_said` (`chat`'s trigger, each
    record an agent posts there) matches the reply to its task by
    `body.turn`. The first is the report: it puts it on the queue as a
-   `user` message, `[<task id>] <reply>`, and starts a turn like `heard`
-   does, in the task's thread. A later part changes nothing. A reply
+   `user` message, `[<task id>] <reply>`, with the reply's files, and
+   starts a turn like `heard` does, in the task's thread. A later part changes nothing. A reply
    that comes before its `task_open` is kept for it. The task's state is
    `done`, or `stopped` or `error` from an `(ended: …)` reply. The mind
    runs nothing for `work`: a page follows goose's steps there itself,
@@ -297,10 +402,11 @@ membership, which only its owner and the agent hold. Operations with a
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |
 | `note` | mutation (described) | `{text}` → `{i}`: append a `note` (an MCP client's write) |
 | `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`, newest `last` first (`before` is a `last`); `summary` is the text of the smallest built node covering the thread's messages (`first_i` to `last_i`), else its first user line; `count` is its `user` and `talk` messages |
-| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row |
-| `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand) |
+| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task, attachments}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row; `attachments` are `[{sha256, name, type, size}]` (`[]` with none), each read at `__blob/<sha256>` |
+| `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand), as `thread`'s |
+| `export` | query (editor) | `{after?, limit?}` → `{entries: [{i, kind, text, at, thread, persona, task, attachments}], next}`: the raw log oldest first, the messages after `after` (from the first by default), at most `limit` (500 unless named, at most 2000) and 768 KiB a page; `attachments` with the `text` the mind read of them; `next` is the next page's `after`, `null` at the end (the page's "Export memory") |
 | `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T, cut?}`: the view as structured parts (the Memory screen); past 768 KiB its last `cut` parts are left out |
-| `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` |
+| `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` (as `thread`'s) |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
 | `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
@@ -319,15 +425,23 @@ whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
 `task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
 `classify`, `topic_suggest` and `hands_said`.
 
-Seeded personas:
+Seeded personas (a persona's instructions say what it is for; each
+is seeded once, so a mind made before one was gains it, and one its
+person removed stays removed: `kv.seeded`):
 - **Mind**, the default: plain, warm, brief.
-- **Builder**: does things on the computer; `hands` is on.
+- **Builder**: does things on the computer, apps (fragments)
+  included; `hands` is on.
 - **Coach**: asks one question at a time.
+- **Researcher**: checks the web before it answers (`research`,
+  `web_search`, `web_fetch`), gives its sources, and says what it could
+  not confirm.
 
 ### Records on `log`
 
-- `{type: "msg", i, kind, text, thread, at, persona, task}`, where
-  `text` is at most 48 KiB, cut.
+- `{type: "msg", i, kind, text, thread, at, persona, task,
+  attachments?}`, where `text` is at most 48 KiB, cut, and
+  `attachments` (when it has files) name them, `[{sha256, name, type,
+  size}]`.
 - `{type: "turn", thread, state: "thinking" | "settling" | "done" | "error" | "stopped", error?}`.
 - `{type: "task", id, thread, state, text, turn, report?}`: as it opens,
   as its reply reports, and as it is found lost. Its live steps are
@@ -392,7 +506,11 @@ One screen at a time, and calm. Dark, warm, generous type.
 4. **Operation `description`** in `fragment.json`: an optional string of
    at most 1024 characters, shown in `status.code.operations`. It makes
    the operation an MCP tool.
-5. **The shell's first run:**
+5. **`job.blob(sha256)`** → `{sha256, size, text, cut}`: a job reads one
+   of its fragment's blobs, its first 64 KiB as text when they are UTF-8
+   (docs/api.md, Jobs). The mind reads a message's small text files
+   with it.
+6. **The shell's first run:**
    - it makes the agent (on the default image, goose), assigns it to
      the computer, makes `mind` (members) and adds the agent there as
      an editor;
@@ -518,3 +636,15 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
 - Mid-run injection of a new message between tool calls. A message
   sent mid-turn starts the next turn.
 - Moving the log out of the app's 16 MiB SQLite (to R2 or git).
+- The web as a browser: `web_fetch` reads what a server sends, so a
+  page its scripts draw reads as next to nothing, and a PDF is the
+  computer's. Cloudflare's Browser Rendering is no step a job has
+  (its REST API would take the owner's own Cloudflare token).
+- A whole-web search with no key from a Worker. DuckDuckGo's HTML page
+  answers a home address and CAPTCHAs a datacenter's (checked
+  2026-10-07; from a Worker itself it is untried), so the no-key search
+  there is Wikipedia's. Bing's `format=rss` answers both, but its feed
+  says its results are for a personal RSS reader alone (decision for
+  Paul). A key (Perplexity's, Brave's or Tavily's) is the way.
+- Images to the main agent (the `vision` model is no tier a job names),
+  and `search` over a file's words (FTS indexes the message's own).

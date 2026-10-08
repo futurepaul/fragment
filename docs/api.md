@@ -843,7 +843,8 @@ fragment's blobs go with it.
 
 A page reads one of its fragment's blobs by hash at `__blob/<sha256>`
 (Serving, below), with no row in the app's database and no record
-holding the bytes. A channel record that names one in its body's
+holding the bytes; a job reads its head as text with `job.blob` (Jobs
+and triggers, below). A channel record that names one in its body's
 `attachments` (`[{ "sha256": … }]`, as a chat's records do:
 docs/chat-records.md) keeps it while the channel keeps the record; one
 nothing names, by pointer or record, is deleted after the grace period
@@ -1147,7 +1148,7 @@ by nothing, so it may be sent again. Test fleets add `POST
 
 A job is a method called `(input, job)` that runs as a Cloudflare Workflow,
 outside any request. Each `await` on a `job.*` step is durable. The
-steps are the eight below, the files steps (`job.files.*`), `job.push`,
+steps are those below, the files steps (`job.files.*`), `job.push`,
 and the AI steps (`job.ai.*`), all above:
 
 - `job.call(op, input)`: an operation of this fragment as the run's
@@ -1167,6 +1168,13 @@ and the AI steps (`job.ai.*`), all above:
   fragment's), unless the job set its own.
 - `job.publish(channel, body, kind)`: a record, once per step.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
+- `job.blob(sha256)` → `{sha256, size, text, cut}`: one of the
+  fragment's blobs (Blobs, above: a page's upload, a chat's attachment),
+  read for its code. `text` is its first 64 KiB
+  (`steps::BLOB_READ_MAX_BYTES`) as UTF-8, less a last character the cut
+  split, or `null` when they are not text (not UTF-8, or a NUL); `cut`
+  says the blob goes on past them. A hash the fragment has no bytes for
+  fails the step.
 - What the fragment's own page reads, read for its code:
   `job.members()` → its members as `__members` lists them (`[{principal,
   role, kind, addedAt, …}]`, the first added first); `job.people(ids)` →

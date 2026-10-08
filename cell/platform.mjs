@@ -393,6 +393,14 @@ class Job {
     return this.#step("presence", {}).then((v) => v.here);
   }
 
+  // One of the fragment's blobs (a page's upload, a chat's attachment), by
+  // its hash: { sha256, size, text, cut }, `text` its first 64 KiB when
+  // they are UTF-8, else null.
+  blob(sha256) {
+    if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) throw new TypeError("job.blob(sha256): a blob's SHA-256, 64 lowercase hex");
+    return this.#step("blob", { sha256 });
+  }
+
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.
   sleep(duration) {
     const ms = durationMs(duration);

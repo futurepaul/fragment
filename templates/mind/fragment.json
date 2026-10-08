@@ -87,6 +87,18 @@
         }
       }
     },
+    "export": {
+      "kind": "query",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "after": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        }
+      }
+    },
     "memory": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
     "node": {
       "kind": "query",
