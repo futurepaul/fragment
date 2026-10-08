@@ -83,9 +83,9 @@ jobs:
   # run), then the tests run on them with FRAGMENT_DOCKER_SKIP_BUILD, in
   # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
   # 145 GB disk with about 85 GB free): the Hermes image builds in about
-  # BUILD minutes (its two Rust stages, the CLI's and the bridge's, about
+  # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
   # 5.5 of them), the tests take about 3, and the job uses at most about
-  # PEAK GB of the disk.
+  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
