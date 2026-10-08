@@ -9,7 +9,11 @@
 //!
 //! Run: `cargo test -p fragment-bridge --test docker -- --ignored --nocapture`
 //! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built;
-//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag).
+//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag). CI runs it
+//! (.github/workflows/images.yml, `docker`) on pull requests and master's
+//! pushes that touch images/hermes, images/bridge or images/stub, the images
+//! built first with their layers cached, then this with
+//! `FRAGMENT_DOCKER_SKIP_BUILD=1`.
 
 mod support;
 
