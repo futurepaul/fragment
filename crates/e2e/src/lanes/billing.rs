@@ -255,6 +255,36 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&dee, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&ann) })))?;
     s.ok("and makes them admin again", r.status == 200 && seat(api, &ann)["admin"] == true, &r);
 
+    // ---- credit packs: $25, kept until spent, once by their Checkout
+    let purchased = |k: &Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
+    let before = purchased(&ann);
+    let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({})))?;
+    let pack1 = r.body["session"].as_str().unwrap_or("").to_string();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a pack's Checkout")?;
+    let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
+    s.ok(
+        "a seat's holder opens a pack's Checkout: a payment at the pack's price, for their own ledger",
+        r.status == 200 && f("mode") == "payment" && f("metadata[fragment_person]") == ann_id && f("metadata[fragment_buyer]") == ann_id && f("metadata[fragment_pack]") == "25",
+        format!("{:?}", asked.form),
+    );
+    s.stripe.complete(&pack1).map_err(anyhow::Error::msg)?;
+    let granted = s.eventually(PUSHED, || purchased(&ann) == before + 25_000_000);
+    let back = api.signed(&ann, "POST", &format!("/api/billing/sessions/{pack1}"), Some(&json!({})))?;
+    std::thread::sleep(Duration::from_secs(1));
+    s.ok("paid, $25 of credit is theirs, once (its return again adds nothing)", granted && back.status == 200 && purchased(&ann) == before + 25_000_000, ledger(api, &ann));
+    let fay = api.person()?;
+    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&fay), "kind": "seat" })))?;
+    let fay_row = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let fay_before = purchased(&fay);
+    let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
+    let pack2 = r.body["session"].as_str().unwrap_or("").to_string();
+    s.stripe.complete(&pack2).map_err(anyhow::Error::msg)?;
+    let theirs = s.eventually(PUSHED, || purchased(&fay) == fay_before + 25_000_000);
+    s.ok("an org's admin buys a pack for a member who holds a seat: the credit is the member's", r.status == 200 && theirs && purchased(&ann) == before + 25_000_000, ledger(api, &fay));
+    let not_admin = api.signed(&fay, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
+    let seatless = api.signed(&api.person()?, "POST", "/api/billing/packs", Some(&json!({})))?;
+    s.ok("a member who is no admin buys none for others (403); someone with no seat buys none (400)", not_admin.status == 403 && seatless.status == 400, json!([not_admin.status, seatless.status]));
+
     // ---- invalid
     let refused = [
         ("a kind that is no seat's (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "guest" })))?, 400),

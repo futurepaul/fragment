@@ -82,6 +82,31 @@ impl Call for CheckoutBegin {
     type Answer = CheckoutPlan;
 }
 
+/// `POST /billing/pack`: a credit pack is to be bought by `by`, for
+/// themselves (a seat's holder) or for a member of the org they admin who
+/// holds a seat. Whose ledger it grants, and what Stripe needs.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PackBegin {
+    pub by: By,
+    pub member: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackPlan {
+    pub buyer: String,
+    pub person: String,
+    pub email: String,
+    pub org: String,
+    pub org_name: String,
+    pub customer: Option<String>,
+}
+
+impl Call for PackBegin {
+    const PATH: &'static str = "/billing/pack";
+    type Answer = PackPlan;
+}
+
 /// `POST /billing/customer`: an org's Stripe customer, once: the first
 /// named is kept, and answered.
 #[derive(Serialize, Deserialize)]
@@ -222,6 +247,28 @@ impl RegistryCell {
         }
         let customer = self.billing_row(&org.id)?.customer;
         Ok(CheckoutPlan { person: who.id, email, org: org.id, org_name: org.name, customer, kind, trial })
+    }
+
+    fn pack_begin(&self, b: PackBegin) -> CellResult<PackPlan> {
+        let who = self.person_by(&b.by)?;
+        let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a pack is bought by someone who signs in, with their email"))?;
+        let mine = self.member_of(&who.id)?;
+        let (org, person) = match (&b.member, mine) {
+            (None, Some(m)) if m.seat.is_some() => (m.org, who.id.clone()),
+            (None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none")),
+            (Some(id), Some(m)) if m.admin != 0 => {
+                let member = self.member(id)?;
+                match (member.org == m.org, member.person, member.seat) {
+                    (true, Some(p), Some(_)) => (m.org, p),
+                    (true, None, Some(_)) => return Err(CellError::invalid("that seat waits on its email: credit is bought once someone holds it")),
+                    _ => return Err(not_found(format!("no seat {id} in your org"))),
+                }
+            }
+            (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins buy credit for its members")),
+        };
+        let o = self.stored_org(&org)?;
+        let customer = self.billing_row(&org)?.customer;
+        Ok(PackPlan { buyer: who.id, person, email, org, org_name: o.name, customer })
     }
 
     fn set_customer(&self, b: SetCustomer) -> CellResult<Customer> {
@@ -366,6 +413,7 @@ impl RegistryCell {
     pub(super) async fn billing_route(&self, path: &str, bytes: &[u8]) -> Option<CellResult<Response>> {
         Some(match path {
             CheckoutBegin::PATH => reply::<CheckoutBegin>(body(bytes).and_then(|b| self.checkout_begin(b))),
+            PackBegin::PATH => reply::<PackBegin>(body(bytes).and_then(|b| self.pack_begin(b))),
             SetCustomer::PATH => reply::<SetCustomer>(body(bytes).and_then(|b| self.set_customer(b))),
             CustomerOf::PATH => reply::<CustomerOf>(body(bytes).and_then(|b| self.customer_of(b))),
             ApplyCheckout::PATH => reply::<ApplyCheckout>(self.armed_billing(|| self.apply_checkout(body(bytes)?)).await),

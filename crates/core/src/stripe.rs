@@ -35,6 +35,10 @@ pub const META_DEPLOYMENT: &str = "fragment_deployment";
 pub const META_ORG: &str = "fragment_org";
 pub const META_PERSON: &str = "fragment_person";
 pub const META_KIND: &str = "fragment_kind";
+/// A pack's Checkout: who bought it (whose return it is), and the pack;
+/// `META_PERSON` is whose ledger it grants.
+pub const META_BUYER: &str = "fragment_buyer";
+pub const META_PACK: &str = "fragment_pack";
 
 /// A seat's monthly price, found by its lookup key: a price change is a
 /// new Price with the key moved to it (`transfer_lookup_key`).
@@ -56,6 +60,13 @@ pub fn unit_amount(kind: SeatKind) -> i64 {
         SeatKind::SeatAlwaysOn => 20_000,
     }
 }
+
+/// The credit pack (decision 55): one, $25, a one-time price by its
+/// lookup key, granted on a ledger by its Checkout's id and kept until
+/// spent.
+pub const PACK_LOOKUP_KEY: &str = "fragment_credit_pack";
+pub const PACK_CENTS: i64 = 2_500;
+pub const PACK_MICROS: i64 = PACK_CENTS * 10_000;
 
 /// Whether metadata names this deployment: fragment's, and this one's.
 pub fn ours(metadata: &BTreeMap<String, String>, deployment: &str) -> bool {
