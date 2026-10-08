@@ -53,6 +53,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | the platform Worker |
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
+| `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret) | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
 - **Reading.** `cell/src/keys.rs` is the one place they are read.

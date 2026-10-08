@@ -299,6 +299,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         ai: Fake::absent("Workers AI"),
         push: Fake::absent("push service"),
         mail: Fake::absent("mail"),
+        stripe: Fake::absent("Stripe"),
         org_key: String::new(),
         host_secret: String::new(),
         test_secret: String::new(),

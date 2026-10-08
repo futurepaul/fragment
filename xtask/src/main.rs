@@ -74,6 +74,11 @@ const DEV_AI_PORT: u16 = 8796;
 /// The mail fake (`FRAGMENT_MAIL_URL`): dev never sends real mail, and
 /// prints each message instead.
 const DEV_MAIL_PORT: u16 = 8798;
+/// The Stripe fake (docs/billing.md): dev never charges a card; its
+/// Checkout is a page with a Pay button.
+const DEV_STRIPE_PORT: u16 = 8800;
+const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
+const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
 const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
@@ -139,6 +144,8 @@ fn dev(args: &[String]) -> Result<()> {
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
+    let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
+    stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -165,6 +172,13 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        stripe: Some(devstack::StripeVars {
+            key: DEV_STRIPE_KEY.into(),
+            webhook_secret: DEV_STRIPE_WEBHOOK.into(),
+            api_url: Some(stripe.url.clone()),
+            portal: None,
+            tax: false,
+        }),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
@@ -194,6 +208,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");

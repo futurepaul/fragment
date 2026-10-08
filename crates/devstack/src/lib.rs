@@ -295,6 +295,8 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
+    pub stripe: Option<StripeVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
@@ -327,6 +329,18 @@ pub struct Fleet {
     pub swap_upstream: Option<String>,
 }
 
+/// A Stripe account as the cell reads it.
+pub struct StripeVars {
+    pub key: String,
+    pub webhook_secret: String,
+    /// `None`: Stripe itself.
+    pub api_url: Option<String>,
+    /// The deployment's portal configuration (`FRAGMENT_STRIPE_PORTAL`).
+    pub portal: Option<String>,
+    /// Automatic tax on a Checkout (`FRAGMENT_STRIPE_TAX`).
+    pub tax: bool,
+}
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -339,7 +353,7 @@ impl Fleet {
     /// The store secrets its Worker is bound to, by name.
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        store::Bound::conventional(self.workos.is_some(), &providers)
+        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers)
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -353,6 +367,10 @@ impl Fleet {
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
             values.push((key.as_str(), w.api_key.as_str()));
+        }
+        if let (Some((key, webhook)), Some(s)) = (&bound.stripe, &self.stripe) {
+            values.push((key.as_str(), s.key.as_str()));
+            values.push((webhook.as_str(), s.webhook_secret.as_str()));
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
@@ -401,6 +419,17 @@ impl Fleet {
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
+        }
+        if let Some(s) = &self.stripe {
+            if let Some(u) = &s.api_url {
+                vars.push(("STRIPE_API_URL", u.as_str()));
+            }
+            if let Some(p) = &s.portal {
+                vars.push(("FRAGMENT_STRIPE_PORTAL", p.as_str()));
+            }
+            if !s.tax {
+                vars.push(("FRAGMENT_STRIPE_TAX", "off"));
+            }
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));

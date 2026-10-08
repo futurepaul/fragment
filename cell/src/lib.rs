@@ -29,6 +29,7 @@
 
 mod ai;
 mod auth;
+mod billing;
 mod blobs;
 mod card;
 mod config;
@@ -64,6 +65,7 @@ mod runs_on;
 mod serve;
 mod share;
 mod shell;
+mod stripe;
 mod subscriptions;
 mod wipe;
 
@@ -1049,6 +1051,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             inner.query_pairs_mut().append_pair("q", &q);
             let search = Request::new(inner.as_str(), Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(search).await?)
+        }
+        (Method::Post, ["api", "stripe", "webhook"]) => billing::webhook(req, env, cfg).await,
+        (_, ["api", "billing", rest @ ..]) => {
+            let rest = rest.to_vec();
+            billing::route(req, env, cfg, &url, &rest).await
         }
         (_, ["api", "seat"]) => orgs::seat(req, env, &url).await,
         (Method::Get, ["api", "org"]) => orgs::org(req, env, &url).await,

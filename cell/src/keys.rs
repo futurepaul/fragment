@@ -188,6 +188,16 @@ impl WorkOs<'_> {
     }
 }
 
+/// The account's restricted Stripe key (bound as `STRIPE_KEY`).
+pub async fn stripe_key(env: &Env) -> CellResult<String> {
+    required(env, store::STRIPE_KEY).await
+}
+
+/// This deployment's webhook endpoint's signing secret (bound as `STRIPE_WEBHOOK`).
+pub async fn stripe_webhook_secret(env: &Env) -> CellResult<String> {
+    required(env, store::STRIPE_WEBHOOK).await
+}
+
 /// The fleet's WorkOS environment, when sign-in is configured (`cfg.workos`).
 pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
     let api = &cfg.workos()?.api;

@@ -26,7 +26,10 @@ use super::*;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS orgs (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT);
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT,
+  customer TEXT UNIQUE, subscription TEXT UNIQUE, items TEXT, period_end INTEGER, trial_end INTEGER,
+  cancel_at_end INTEGER NOT NULL DEFAULT 0, event_at INTEGER, synced_at INTEGER);
+CREATE INDEX IF NOT EXISTS orgs_synced ON orgs (synced_at) WHERE subscription IS NOT NULL;
 CREATE TABLE IF NOT EXISTS org_members (
   id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL,
   seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL);
@@ -131,22 +134,22 @@ impl Call for SyncSeat {
 
 /// `org_members`, read whole.
 #[derive(Deserialize)]
-struct MemberRow {
-    id: String,
-    org: String,
-    person: Option<String>,
-    email: String,
-    admin: i64,
-    seat: Option<String>,
-    comped: i64,
-    sleeps: i64,
-    added_at: i64,
+pub(super) struct MemberRow {
+    pub(super) id: String,
+    pub(super) org: String,
+    pub(super) person: Option<String>,
+    pub(super) email: String,
+    pub(super) admin: i64,
+    pub(super) seat: Option<String>,
+    pub(super) comped: i64,
+    pub(super) sleeps: i64,
+    pub(super) added_at: i64,
 }
 
-const MEMBER_COLUMNS: &str = "m.id, m.org, m.person, m.email, m.admin, m.seat, m.comped, m.sleeps, m.added_at";
+pub(super) const MEMBER_COLUMNS: &str = "m.id, m.org, m.person, m.email, m.admin, m.seat, m.comped, m.sleeps, m.added_at";
 
 impl MemberRow {
-    fn seat(&self) -> CellResult<Option<SeatKind>> {
+    pub(super) fn seat(&self) -> CellResult<Option<SeatKind>> {
         self.seat.as_deref().map(|s| SeatKind::parse(s).ok_or_else(|| CellError::host(format!("org_members.seat of {} is {s:?}", self.id)))).transpose()
     }
 
@@ -164,19 +167,19 @@ impl MemberRow {
 }
 
 #[derive(Deserialize)]
-struct OrgRow {
-    id: String,
-    name: String,
-    created_at: i64,
-    status: Option<String>,
+pub(super) struct OrgRow {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) created_at: i64,
+    pub(super) status: Option<String>,
 }
 
 impl OrgRow {
-    fn status(&self) -> CellResult<Option<Status>> {
+    pub(super) fn status(&self) -> CellResult<Option<Status>> {
         self.status.as_deref().map(|s| Status::parse(s).ok_or_else(|| CellError::host(format!("orgs.status of {} is {s:?}", self.id)))).transpose()
     }
 
-    fn reference(&self) -> OrgRef {
+    pub(super) fn reference(&self) -> OrgRef {
         OrgRef { id: self.id.clone(), name: self.name.clone() }
     }
 }
@@ -198,16 +201,16 @@ struct SeqRow {
     seq: i64,
 }
 
-fn fresh_id(prefix: &str) -> String {
+pub(super) fn fresh_id(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(js::random_bytes::<8>()))
 }
 
-fn not_found(m: impl Into<String>) -> CellError {
+pub(super) fn not_found(m: impl Into<String>) -> CellError {
     CellError::new(ErrorCode::NotFound, m)
 }
 
 impl RegistryCell {
-    fn member_of(&self, person: &str) -> CellResult<Option<MemberRow>> {
+    pub(super) fn member_of(&self, person: &str) -> CellResult<Option<MemberRow>> {
         self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person = ?"), vec![person.into()])
     }
 
@@ -218,17 +221,17 @@ impl RegistryCell {
         self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.id = ?"), vec![id.into()])?.ok_or_else(|| not_found(format!("no seat {id}")))
     }
 
-    fn org_row(&self, id: &str) -> CellResult<Option<OrgRow>> {
+    pub(super) fn org_row(&self, id: &str) -> CellResult<Option<OrgRow>> {
         self.row::<OrgRow>("SELECT id, name, created_at, status FROM orgs WHERE id = ?", vec![id.into()])
     }
 
     /// The org a row names: missing, the rows contradict each other.
-    fn stored_org(&self, id: &str) -> CellResult<OrgRow> {
+    pub(super) fn stored_org(&self, id: &str) -> CellResult<OrgRow> {
         self.org_row(id)?.ok_or_else(|| CellError::host(format!("org_members names a missing org {id}")))
     }
 
     /// Queues `person`'s plan to be pushed (again), in the caller's turn.
-    fn queue_sync(&self, person: &str) -> CellResult<()> {
+    pub(super) fn queue_sync(&self, person: &str) -> CellResult<()> {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
             "INSERT INTO plan_syncs (person, since, due, tries) VALUES (?, ?, ?, 0)
@@ -242,7 +245,14 @@ impl RegistryCell {
     /// leaves the push queued for the alarm's next run.
     pub(super) async fn arm_syncs(&self) -> CellResult<()> {
         let due = self.row::<DueRow>("SELECT MIN(due) AS due FROM plan_syncs", vec![])?.and_then(|r| r.due);
-        let Some(due) = due else { return Ok(()) };
+        match due {
+            Some(due) => self.arm_at(due).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Arms the alarm for `due`, unless it is armed sooner already.
+    pub(super) async fn arm_at(&self, due: i64) -> CellResult<()> {
         let storage = self.state.storage();
         match storage.get_alarm().await? {
             Some(armed) if armed <= due => Ok(()),
@@ -257,7 +267,7 @@ impl RegistryCell {
         Ok(())
     }
 
-    fn new_org(&self, name: &str, by: &str) -> CellResult<OrgRow> {
+    pub(super) fn new_org(&self, name: &str, by: &str) -> CellResult<OrgRow> {
         let name = org::org_name(name).ok_or_else(|| CellError::invalid("an org's name is 1-320 bytes, no control characters"))?;
         let row = OrgRow { id: fresh_id("org-"), name, created_at: js::now_ms(), status: None };
         self.exec(
@@ -268,7 +278,7 @@ impl RegistryCell {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn insert_member(&self, org: &str, person: Option<&str>, email: &str, admin: bool, seat: Option<SeatKind>, comped: bool, by: &str) -> CellResult<MemberRow> {
+    pub(super) fn insert_member(&self, org: &str, person: Option<&str>, email: &str, admin: bool, seat: Option<SeatKind>, comped: bool, by: &str) -> CellResult<MemberRow> {
         let row = MemberRow {
             id: fresh_id("mem-"),
             org: org.to_string(),
@@ -413,7 +423,7 @@ impl RegistryCell {
     }
 
     /// The person a call names, a person (an agent holds no seat).
-    fn person_by(&self, by: &By) -> CellResult<Identity> {
+    pub(super) fn person_by(&self, by: &By) -> CellResult<Identity> {
         let who = self.by(by)?;
         if who.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "seats are people's: an agent's owner holds one"));
@@ -426,7 +436,7 @@ impl RegistryCell {
         self.my_seat(&who.id)
     }
 
-    fn my_seat(&self, person: &str) -> CellResult<MySeat> {
+    pub(super) fn my_seat(&self, person: &str) -> CellResult<MySeat> {
         let m = self.member_of(person)?;
         let (seat, org_ref, admin) = match &m {
             None => (None, None, false),
