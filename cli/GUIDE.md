@@ -356,6 +356,13 @@ A page imports the browser library from its own fragment:
 </script>
 ```
 
+`<link rel="stylesheet" href="./__fragment.css">` gives a page the
+platform's theme: warm neutrals and one accent, light and dark, as
+variables (`--bg`, `--fg`, `--muted`, `--line`, `--accent`, `--danger`,
+`--font`, `--radius`), and plain base styles for text, forms and
+buttons. Your rules after it override any of it; a page that doesn't
+link it gets none of it.
+
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
 `await fragment.push.register(who)` (from a click) subscribes the

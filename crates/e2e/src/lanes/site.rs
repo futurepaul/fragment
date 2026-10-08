@@ -161,11 +161,13 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = conditional("", &format!("\"other\", {page}"))?;
     s.ok("a page revalidates too, by any tag in the list", r.status == 304 && r.header("cache-control") == "private, no-cache", &r);
     s.ok("revalidating asks code.storage for nothing", s.fake.requests(&repo, "GET file") == reads, s.fake.requests(&repo, "GET file") - reads);
-    for script in ["__fragment.js", "__sw.js"] {
-        let first = tag(script);
-        let r = conditional(script, &first)?;
-        s.ok(&format!("{script} revalidates by its build-time hash"), first.len() == 18 && r.status == 304, format!("{first} {r}"));
+    for file in ["__fragment.js", "__fragment.css", "__sw.js"] {
+        let first = tag(file);
+        let r = conditional(file, &first)?;
+        s.ok(&format!("{file} revalidates by its build-time hash"), first.len() == 18 && r.status == 304, format!("{first} {r}"));
     }
+    let r = api.page(&name, "__fragment.css", Some(&cookie))?;
+    s.ok("__fragment.css is a stylesheet: the theme's variables", r.status == 200 && r.header("content-type") == "text/css; charset=utf-8" && r.text.contains("--accent:"), r.header("content-type"));
     s.commit(&c, &[("site/style.css", Some(b"body{color:blue}"))]);
     s.deploy(&c);
     let r = conditional("style.css", &css)?;
