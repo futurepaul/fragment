@@ -4,7 +4,7 @@ Status: **a spike on branch `claude/optchat`**, deployed as the preview
 `claude-optchat.finite.place`. It is a draft PR and is never merged. Paul
 asked for it on 2026-10-07: a fork of fragment that removes Hermes,
 goes back to goose as the agent, and rebuilds the personal agent around
-OptChat's memory design.
+OptChat's memory design (since 2026-10-08, its rewrite, UniiChat).
 
 This document is the contract every part of the spike builds against:
 the template, the platform additions, the goose image, and the MCP
@@ -43,14 +43,101 @@ He chose (2026-10-07):
   *thread*), and every turn goes into the one log.
 
 Inspiration:
-- OptChat's spec (VictorTaelin's gist 91837951…, kept as
-  `~/dev/finite/optchat-spec.md` on the build box; gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449). **Follow it exactly
-  unless this document says otherwise.**
+- **UniiChat** (VictorTaelin's gist 91837951…,
+  gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449, as he
+  rewrote it on 2026-10-08: "the original had a bug that trashed the
+  cache… I also add an explanation on how the cache is preserved"), kept
+  as `~/dev/finite/uniichat-spec.md` on the build box. **The mind follows
+  it, exactly but for "Where we differ from the gist", below.** Its first
+  version, OptChat's spec, which the spike was built from until then, is
+  kept as `~/dev/finite/optchat-spec-v1.md`: its merge order measured a
+  pair's age from its first message (it matches the rollback push at 481
+  of 20 001 steps), it merged at every message, and it folded the view
+  again at every load, each of which broke the cache.
 - Earendil's pi-durable: every step is a checkpointed task, many clients
   watch one conversation, and a handoff resets context. Fragment's jobs
   already give us checkpointed steps.
 - Sawyer Hood's personal-agent UI: personas in a sidebar, one chat pane,
   and a "what it did here" panel.
+
+## Where we differ from the gist
+
+The mind follows UniiChat's design (2026-10-08) exactly but for these,
+each with its reason. Everything else in the gist holds as it says.
+
+1. **Threads, personas and topics are ours** (Paul's sketch): the gist
+   has one chat and one agent. The log and the view stay one and global;
+   a thread is a label on the log's messages, a persona a name and
+   instructions, a topic Clef's sorting of threads.
+2. **The per-turn block says more** (§6 lists the date and the open
+   devices): after the view and before the person's words, each turn says
+   its time, its chat (the thread's id, title, start, and its last 6
+   messages' ids, so an old or switched-to thread is a zoom away), the
+   persona (name, emoji, instructions) and the hands. The persona sits
+   there, not in the system prompt, and every persona is offered the same
+   tools (`computer` too: one without hands is told so in its block and
+   answered an error), so the cached [tools] [system prompt] prefix is
+   one for every persona, thread and compaction. Replaying 3 000 messages
+   with each turn in one of 5 threads and 4 personas at random shares
+   96.4% of each turn's prompt with the previous turn's, as one persona
+   does; with the persona in the system prompt and `computer` offered by
+   persona it was 29.5%.
+3. **The tools are the mind's** (§5 drops the computers paragraph for
+   an agent with none): no shell, read, write or edit (the mind runs in a
+   fragment, on no device); the web's three (`web_search`, `web_fetch`,
+   `research`) and the person's apps' three (`apps`, `app_ops`,
+   `app_call`), described in the prompt's Turns section in the gist's
+   voice; and `computer`, which hands a task to goose on the person's
+   computer (its agent, the hands) instead of subagents and computer
+   tasks. The computers paragraph says so: the hands and whether each
+   computer is awake are in each message's block.
+4. **A hand-off's report is `work` `[<task id>] <report>`** (the gist:
+   `[Name]`), and **`zoom("<task id>")` gives what the task was given and
+   its report, not goose's steps** (the gist: an agent's whole chat).
+   goose's steps are records on the mind's `work` channel, which its code
+   cannot read: no job step reads a channel, and a trigger on `work`
+   would be a run a step, past the triggered runs' 120 an hour. A
+   `job.records` step would be the way (decision for Paul).
+5. **The kinds' names:** replies are `talk` (the gist's `unii`), which
+   every log and node so far uses; a `note` is another agent's, written
+   through MCP (the gist's are memories from before the chat).
+6. **Files, not images:** a message carries files, named in it, a small
+   text one read whole; the medium tier reads no image, so `zoom(id, 1)`
+   gives a message "with its files".
+7. **Imports are ours:** Claude Code's, claude.ai's, Codex's and
+   Hermes's conversations are played in as `user` and `talk` messages
+   with their own times, each in a thread of its own, after the log's
+   messages (the gist imported OptMem's notes keeping their ids). A text
+   past 96 KiB, more than one `import` part carries, is cut there, its
+   head and tail kept; up to that it is split like any long text.
+8. **Storage is the fragment's SQLite** (the gist: day files and
+   `view.json`): its views, queue and sawtooths are tables and kv rows,
+   written in the mutation that changes them. One Durable Object is the
+   one writer, so no lock is needed.
+9. **The view is also fitted just before a turn renders it** (the gist
+   merges only at a new message): the turn's wait may build lines after
+   its message was logged (an import's, by the thousand), which would
+   otherwise reach the turn unmerged. In a live chat it changes nothing.
+10. **The compactor is up to 8 job runs**, each a call at a time (a run's
+    steps are sequential), chained within the platform's 16 hops and
+    started again by the next message, an import's next part, or an
+    import's follower. Among ready nodes it takes the one whose last
+    message is the oldest (the gist names no order). Its model is the
+    cheap tier (GLM-5.3 Flash; the gist: Claude Haiku at xhigh effort).
+11. **A failed node is also tried again after 10 s** by any pump (the
+    gist: at the next message, which it also is): an import adds no
+    message for hours. A turn gives up on a message that failed 3 times.
+12. **No cache marks:** Workers AI caches prefixes itself; the gist's
+    4-line blocks, its marks and its waiting for a mark's writer are
+    Anthropic's.
+13. **Search stays, for people and other agents:** the page's Search and
+    the MCP `search` tool. A turn has none (§5).
+14. **zoom's pages are 24 000 characters**, so a page and its notes stay
+    within the 30 000 an echo keeps.
+15. **A mind made before the views were saved is folded once** from its
+    log at its first load (the gist: never rebuild): it has no saved view
+    to load. It is folded with the new order and sawtooth, and never
+    again.
 
 ## The shape
 
@@ -58,7 +145,7 @@ Inspiration:
  you (any device) ──say──▶ mind.<you>  (a fragment, blessed template `mind`)
                             │  SQLite: log, tree, threads, topics, personas
                             │  job `heard`: settle → turn loop (ai.text + tools)
-                            │  job `pump`: the compactor (ai.text, cheap tier)
+                            │  jobs `pump`: the compactor (ai.text, cheap tier), 8 at once
                             │  job `classify`: topics (ai.decide, Clef)
                             │
                             ├─ chat/work ─▶ goose on your computer (bridge, runtime `goose`)
@@ -137,101 +224,183 @@ goose agent, an editor. The shell makes it `members` (private).
 - **`capabilities`**: `owner`, so its turns use the person's other apps
   as them ("The user's apps", below).
 
-### The log, the tree, the view: OptChat's spec, in SQLite
+### The log, the tree, the views: UniiChat's design, in SQLite
 
 ```sql
-log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT)  -- attachments: JSON, null with none
+log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT, cont INTEGER)  -- attachments: JSON, null with none; cont: 1 when it goes on from i - 1
 node(l INTEGER, i INTEGER, text TEXT, PRIMARY KEY (l, i))     -- the tree; never rewritten
+vline(s INTEGER PRIMARY KEY, l INTEGER)                        -- the chat's view: a line a row, by its first message
+cline(s INTEGER PRIMARY KEY, l INTEGER)                        -- the compaction view
+ready(l INTEGER, i INTEGER, e INTEGER, run INTEGER, until INTEGER, PRIMARY KEY (l, i))  -- the nodes ready to build: e their last message; run/until a lease, or (run null) a failed one's wait
 thread(id TEXT PRIMARY KEY, title TEXT, persona TEXT, started INTEGER, last INTEGER, first_i INTEGER, last_i INTEGER)
 topic(id TEXT PRIMARY KEY, name TEXT, description TEXT, made INTEGER)
 thread_topic(thread TEXT, topic TEXT, p REAL, PRIMARY KEY (thread, topic))
 persona(id TEXT PRIMARY KEY, name TEXT, emoji TEXT, instructions TEXT, hands INTEGER, made INTEGER)
 task(id TEXT PRIMARY KEY, thread TEXT, i INTEGER, text TEXT, seq INTEGER, turn TEXT, state TEXT, report TEXT, steps TEXT, started INTEGER, ended INTEGER)  -- steps: '[]', unread (goose's are on work)
-kv(k TEXT PRIMARY KEY, v TEXT)                                 -- default persona, about-me, turn lock, queue
-log_fts USING fts5(text, content='log', content_rowid='i')    -- search
+kv(k TEXT PRIMARY KEY, v TEXT)                                 -- default persona, about-me, turn lock, queue, the sawtooths' state, pumps starting, failures
+log_fts USING fts5(text, content='log', content_rowid='i')    -- search (the page's and MCP's)
 import(source TEXT, conv TEXT, thread TEXT, n INTEGER, at INTEGER, PRIMARY KEY (source, conv))  -- an import landed conv's first n messages
 ```
 
-- `kind` is the spec's set: `user`, `talk`, `tool`, `echo`, `note`.
-  Hand-off reports are `user` messages starting `[<task id>] `, which
-  the compactor tags `work:`.
-- **The spec's constants hold:** NODE 512, VIEW 128 000, TRIES 5,
-  CAP 30 000, and the cut-at-limit retry. JOBS is up to 8 nodes in one
-  pump step round, built in batched calls ("The compactor"). RETRY is on
-  the next pump. A node a stubborn model wrote past twice NODE is cut
-  there.
-- **Prompts:** COMPACT, MASTER, VIEW_DOC and the subagent prompt are
-  verbatim from the spec, with "OptChat" replaced by "Mind".
-  - MASTER's "Use subagents only when the user asks" becomes: check on
-    the web what may have changed or what it is unsure of (`web_search`
-    to find pages, `web_fetch` to read one, `research` for a question
-    that needs several sources), saying where it came from; use
-    `computer` for real computer work (files, code, running programs,
-    anything that needs the user's accounts); use the user's apps
-    (fragments) directly, as the user (`apps`, `app_ops`, `app_call`: "add
-    milk to my todo", "what's on my board"); the computer has the
-    fragment CLI and its skill, so only making an app or changing an
-    app's code is handed to it. Answer everything else yourself.
-  - The system prompt is MASTER + VIEW_DOC + the persona's
-    instructions + the person's about-me. It is byte-identical across
-    turns for one persona, with no dates.
-- **The view is folded incrementally** (spec §5.2) and never stored. It
-  is rebuilt from the log at the app's first call (append + fit per
-  message) and kept on the App instance, which the facet may evict at
-  any time. Each mutation that changes the log or the tree bumps
-  `kv.rev`, and an instance whose view is of another `rev` (a mutation
-  rolled back) folds it again.
-- **A job reads the instance to build a step's arguments** (the
-  compactor's context, Clef's state): they would fill a run's 4 MiB of
-  answers if they were a step's answer, and a past step's arguments do
-  not matter. Its control flow follows only its steps' answers. A
-  turn's view is the exception: a step's answer (`view {upto}`), so every
-  call of the turn sees the same one.
+applib/optmem.mjs is the memory, pure (no SQLite, no clock, no model);
+app.mjs keeps one on the App instance and writes what each change did
+(its journal) in the same mutation.
+
+- **Kinds** are the gist's: `user`, `talk` (Mind's replies: the gist's
+  `unii`), `tool`, `echo`, `work` (a hand-off's report, `[<task id>]
+  <report>`), `note` (another agent's, through MCP). A mind logged before
+  `work` was holds its reports as `user` messages `[<task id>] …`; the
+  page reads both.
+- **Long texts are never cut (§1).** Only a tool's output is clipped, to
+  its head and tail, 30 000 characters in all. A user message, a reply, a
+  tool call, a report, a note or an imported message past 30 000
+  characters is logged as several messages in a row, each cut at a line's
+  end (else a space) in its last fifth: the first carries the files, each
+  later one `cont`, which its `msg` record says (`cont: true`) and the
+  page joins back into one bubble. A turn reads a queued message's pieces
+  joined.
+- **The tree (§2).** NODE 512; a source that fits is its own node with no
+  call (a short message's `kind: text`, two short lines joined by a
+  newline). Each node is built once and logged. A line a stubborn model
+  wrote past twice NODE after its five tries is cut there.
+- **The chat's view (§3).** Every turn sees it, as `<chat>`, a line
+  `id+n|text` a node, `</chat>`. Each new message appends its line; once
+  the view passes 128 000 bytes one batch merges the most due pairs until
+  it is at most 64 000, and a batch that cannot get there (a parent not
+  built) merges what it can at each new message until it does (the
+  sawtooth). Due is §3.2's: for sibling lines (l, i) and (l, i + 1), `(T -
+  last) / 2^l` with `last` the pair's last message, written as the gist's
+  code writes it, `(T + 1)/2^l - i`; the most due pair whose parent is
+  built merges first, the oldest of equal pairs first (`mergeDue`, a heap:
+  a batch over thousands of lines is quick). A line's bytes are its
+  `id+n|text` and newline; an unbuilt line counts none (no call sees one).
+  The view is also fitted, as at a new message, just before a turn renders
+  it after its wait (`turn_view`): after an import, the lines built since
+  its last message would otherwise reach the turn unmerged.
+- **The compaction view (§4).** Every compaction sees it: the chat's view
+  merged further, by the same sawtooth from past 32 000 bytes down to
+  16 000. The chat's new lines are appended to it; whenever the chat's view
+  merges, it is made again from the chat's and merged down to 16 000.
+  A compaction sees its lines up to the node (for a message, the lines
+  before it; for a merge, the lines up to its last message), stopping at
+  the first unbuilt one.
+- **Saved, never rebuilt (§3.2).** Both views (`vline`, `cline`), the
+  sawtooths' state (kv `vshrink`, `cshrink`) and the nodes ready (`ready`)
+  are written as they change, in the mutation that changes them, and
+  loaded when an App instance starts (`M.load`, checked to tile the log).
+  Each mutation that changes the memory bumps `kv.rev`; an instance whose
+  memory is of another `rev` (a mutation rolled back) loads it again.
+  `status` names the instance (`instance`: a restart is a new one) and
+  `folds`.
+- **Minds made before the views were saved** (the preview's, on the
+  first version's fold) have none to load: the first instance of the new
+  release folds the log once, as it stands, with the new order and
+  sawtooth (`M.fold`: each message appended and the views fitted as they
+  would have grown), finds the nodes ready by one scan of the tree, saves
+  all of it in one transaction (kv `saved`; `folds` 1), and never folds
+  again. Old leases go; a node a pump was building is ready again.
+- **The node's own message is whole.** A compaction's task carries its
+  message whole (its words and its files, a small text file read whole,
+  as `zoom(id, 1)` gives it); a merge's carries its two lines.
 - **The database's cap is debt.** The mind declares 1 GiB: the
   platform's 16 MiB holds a few tens of thousands of messages, and an
-  imported history can be more. No meter counts it, and the folded memory
+  imported history can be more. No meter counts it, and the loaded memory
   keeps every node's text on the instance (docs/technical-debt-ledger.md).
-  A message over
-  30 000 characters is capped at logging, as the spec caps tool results,
-  keeping head and tail.
+
+### The prompt (§5)
+
+One system prompt for every call, turns' and compactions':
+`applib/prompts.mjs` `PROMPT`, the gist's verbatim with "Unii" read
+"Mind" and the replies' kind `talk`, then the person's about-me ("The
+user's instructions:"). Its few changes are the mind's (each in "Where we
+differ from the gist"): the kinds' `work` and `note` lines; zoom's lines
+(files instead of images; `zoom("<task id>")` for a computer task instead
+of an agent's chat); in Turns, the web's, the apps' and `computer` lines
+instead of "Use subagents only when the user asks for them."; a paragraph
+on what starts each message (the chat and the persona); and the computers
+paragraph, rewritten for the hands. Nothing in it changes from call to
+call, for any persona or thread: no date, no state, no persona.
+
+**The tools are every call's** (`CALL_TOOLS`): `zoom`, `date`,
+`web_search`, `web_fetch`, `research`, `apps`, `app_ops`, `app_call`,
+`computer`, the same for every persona, offered to every compaction with
+`tool_choice: "none"`. So the cached prefix, [tools] [system prompt], is
+one for every turn, persona and thread, and every compaction, and runs on
+through the view (§3.3).
+
+**What starts each message** (`turnState`, after the view and before the
+person's words, §6):
+
+```
+Now: 2026-10-08 14:03 UTC, Thursday.
+Chat: t_0123456789abcdef "the garden", begun 2026-10-07 09:12 UTC; its last messages before this one: 12, 13, 14, 17, 18, 19.
+You are Builder 🛠️ in this chat. You get things done on the user's computer. …
+Your hands: goose (its computer awake).
+```
+
+- the time (the turn's `turn_begin`'s, so every call of a turn says the
+  same);
+- the chat: its thread's id and title, when it began, and the ids of its
+  last 6 messages before this turn's (where to zoom in an old thread, or
+  one switched to; "it begins here" for a new one). Threads stay a label
+  in the log: the view is one and global;
+- the persona: its name, emoji and instructions;
+- the hands: the mind's lead agent (its first agent member) by its
+  fragment's label, and whether its computer is awake (the platform's
+  `job.members()` `here`: its bridge holds a live socket on the mind while
+  it follows `chat`). A persona without hands is told "as Mind you hand
+  nothing to them in this chat", and its `computer` call answered with an
+  error to act on; with no agent, "Your hands: none."
 
 ### Turns (job `heard`, triggered by `say`)
 
-The spec's §7, as a job:
+The gist's §6, as a job:
 
-1. `hear`, a mutation: log the message (`user`) with its files (their
-   small text ones read first: "Attachments"), touch its thread (making
-   it, titled from the first line, or the first file's name, on first
-   use), publish it on `log`, and push it on the queue. If a turn is
-   running, stop there: the running turn takes it next.
+1. `hear`, a mutation: log the message (`user`, several in a row past
+   30 000 characters) with its files (their small text ones read first:
+   "Attachments"), touch its thread (making it, titled from the first
+   line, or the first file's name, on first use), publish it on `log`,
+   and push it on the queue. The nodes whose build failed are tried again
+   (§4: "at the next message"). If a turn is running, stop there: the
+   running turn takes it between its tool calls, or next.
 2. `turn_begin`, a mutation: take the turn lock (it expires 15 minutes
    after its last touch), then take the queued messages of the oldest
-   thread waiting. It answers `tail`: where the turn's view stops, before
-   the newest run of messages still waiting. They go whole as block 2,
-   as the spec renders the view before it logs them.
-3. **Settle:** while the view has an unbuilt part before `tail`, build it
-   inline, level 0 in order, a batch at a time ("The compactor"), and
-   merges too while the view is over VIEW (a backlog an import left). It
-   is normally a no-op, because the background pump ran after the last
-   turn. A node a pump holds (a lease from `pump_plan`) is waited for,
-   not built twice. A level-0 node that fails 3 times, 10 s apart, ends
-   the turn with an error, its messages logged and unanswered. A settle
-   past its budget (96 steps) puts the messages back first in line and
-   hands them to a fresh run.
-4. Render the view (`view {upto: tail}`). Then loop, at most 40 model
-   calls a turn:
-   - Call `job.ai.text({model: "medium", messages, tools, draft:
-     {channel: "log", turn: "turn:<thread>"}})`. The messages are
-     `[system, user: [view, texts joined]]`, then the turn's steps.
-   - Log each reply `talk`, each tool call `tool` (name and JSON input),
-     and each result `echo` (capped). Publish each on `log`.
-   - Run the tools: `zoom`, `date` and `search` are queries; the web's
-     are fetches ("The web"); the apps' are the owner's steps ("The
-     user's apps"); `computer` opens a hand-off. At most 8 run
-     per answer; past 24, an answer's calls are dropped (a mutation
-     publishes 64 records). Past 512 KiB of conversation, an answer's
-     next tool is answered "this turn has read all it can hold" and the
-     next call is the last.
+   thread waiting. It answers `tail` (where the turn's view stops: before
+   the newest run of messages still waiting, which go whole after it, as
+   the gist renders the view before it logs the message), the turn's time
+   and its chat (the thread's title, start and last 6 message ids).
+3. **The wait (§6: "wait until every message before m is summarized"):**
+   while a message before `tail` is unbuilt, the turn builds one itself
+   when it may (`pump_step` with `upto`: a message among the first 8
+   unbuilt, leased as a pump leases one) and starts pumps for the rest
+   (its `spawn`); otherwise it sleeps (1 to 5 s) while the pumps build
+   them. It is normally a no-op: the pumps ran during and after the last
+   turn. A message whose node failed 3 times ends the turn with an error,
+   its messages logged and unanswered; a wait past its budget (96 steps)
+   puts the messages back first in line and hands them to a fresh run.
+4. `turn_view`, a mutation: the views fitted, as at a new message (the
+   lines built since the last one, an import's, merge here before the
+   turn sees them), then the chat's view rendered up to `tail`, frozen as
+   the step's answer so every call of the turn sees the same one. Then
+   the calls, at most 40 a turn:
+   - `job.ai.text({model: "medium", messages, tools: CALL_TOOLS,
+     draft: {channel: "log", turn: "turn:<thread>"}})`. The messages are
+     `[system: PROMPT + about-me, user: [the view, the turn's state, its
+     messages joined]]`, then the turn's steps.
+   - Log each reply `talk`, each tool call `tool` (name and JSON input)
+     and each result `echo` (its head and tail, 30 000 characters in all),
+     in one `logged` step that publishes them on `log`. When the call
+     asked for tools, `logged` also takes the messages of the turn's
+     thread queued since (the person's, or a hand-off's report), which go
+     to the model after the tools' results (§6: "hand m to it between
+     tool calls"), and says to start a pump when none is at work and a
+     node is ready, so the compactor keeps up with a long turn.
+   - Run the tools: `zoom` and `date` are queries; the web's are fetches
+     ("The web"); the apps' are the owner's steps ("The user's apps");
+     `computer` opens a hand-off. At most 8 run per answer; past 24, an
+     answer's calls are dropped (a mutation publishes 64 records). Past
+     512 KiB of conversation, an answer's next tool is answered "this turn
+     has read all it can hold" and the next call is the last.
    - Stop when the model answers with no tool calls.
    - The last call offers no tools (`tool_choice: "none"`): the 40th, or
      one past 512 KiB of conversation (a step's arguments travel in a
@@ -239,34 +408,42 @@ The spec's §7, as a job:
      answers.
 5. `turn_end`, a mutation: release the lock, and classify the thread
    when the mind has topics. If messages are queued, go to 2 in the same
-   run; otherwise start the job `pump`. A run takes at most 4 turns, and
-   starts one only below 64 steps; past that, `heard {resume}` takes the
-   rest in a fresh run.
+   run; otherwise start a `pump`. A run takes at most 4 turns, and starts
+   one only below 64 steps; past that, `heard {resume}` takes the rest in
+   a fresh run.
 
-Tools (descriptions verbatim from the spec where it has them):
+Tools (descriptions verbatim from the gist's §6 where it has them):
 
-- `zoom(id, n)` and `date(id)`, as the spec defines them.
-- `search(q, limit?)`: FTS5 over the log. It answers `id+1|kind:
-  snippet` lines, newest first, at most 20.
+- `zoom(id, n, page?)`: the gist's "Open the line id+n of the view into
+  the two lines of n/2 under it; n = 1 gives the message whole.", then the
+  mind's: a long message comes in pages of 24 000 characters (`page`,
+  from 1, each naming the next, so a page stays within the echo's
+  30 000), and `zoom("<task id>")` gives a computer task: what it was
+  given, its state and times, and its report whole (the gist's
+  `zoom("Name")`, an agent's whole chat). A message's answer is
+  `id+0|kind: text` with its files, and says when its text goes on in
+  the next message or from the one before.
+- `date(id)`: "The date and time of message id."
 - `web_search(q, limit?)`: numbered results, each `title`, its URL and
   a snippet (6 unless named, at most 10), then what failed on the way.
 - `web_fetch(url)`: a page's `# title`, its URL, and its readable text
-  (markdown-ish), capped at CAP, head and tail, as every result.
+  (markdown-ish), clipped as every result.
 - `research(question)`: an answer with numbered sources.
 - `apps()`, `app_ops(fragment)`, `app_call(fragment, op, input)`: the
   user's apps ("The user's apps", below).
 - `computer(task)`: hand work to goose on the person's computer. Its
   description says it has the fragment CLI and its skill, and makes the
   user's apps and changes their code (to use one, `app_call`). It
-  answers `[<task id>] started` at once.
-  The report arrives later as a `user` message `[<task id>] <report>`,
-  which starts a turn of its own when none runs (MASTER: never wait or
-  poll for it). It is offered only when the persona has `hands` and the
-  mind has an agent member. The turn's files go with it.
+  answers `[<task id>] started` at once. The report arrives later as a
+  `work` message `[<task id>] <report>`, which reaches the running turn
+  between its tool calls or starts a turn of its own (the prompt: never
+  wait or poll for it). Every persona is offered it (the tools are every
+  call's); one without `hands`, or a mind with no agent member, is
+  answered an error saying why. The turn's files go with it.
 
-Every persona has `zoom`, `date`, `search`, the web's three and the
-apps' three, in that order, then `computer` with hands: the same tools
-every turn, so the prompt cache holds.
+A turn has no `search` (§5: "Never grep or search memories manually;
+zoom is your only allowed mechanism to navigate the tree"). The `search`
+operation stays: the page's Search and an MCP client's tool.
 
 ### The user's apps (`apps`, `app_ops`, `app_call`)
 
@@ -392,59 +569,79 @@ reads are its steps, not the log's, as a subagent's are (spec 9).
 - The records that name a file keep its blob (docs/api.md, Blobs): `say`
   (its newest 10 000), `log` (never trimmed) and `chat`.
 
-### The compactor (job `pump`)
+### The compactor (jobs `pump`, up to 8 at once)
 
-Spec §4, as a job. Each round asks `pump_plan` (a query that writes
-its leases in `kv`) for the nodes that are ready (spec §4.1 rules 1–3):
-a level-0 batch and up to 8 merges. It builds them with
-`job.ai.text({model: "cheap", …})` steps (the spec's two-block input,
-SCALE, the retry loop): the level-0 batch, then the merges. One node
-alone is the spec's call exactly; two or more go in one call (below).
-Each result goes to `node_built` (one) or `nodes_built` (a batch),
-mutations where the first write wins, which refit the view. Rounds
-repeat until none is ready. A failed node is left for the next pump.
-Past 30 rounds or the run's budget with work left, a fresh `pump` takes
-the rest.
+The gist's §4. A run's steps go one at a time (cell/platform.mjs), so its
+8 compactions at once are up to 8 `pump` runs, each building one node at
+a time:
 
-**Batched calls (a deviation from the spec, 2026-10-07).** The spec runs
-JOBS calls at once, one node each. A job's steps run one at a time
-(cell/platform.mjs), so here each call would wait for the one before,
-and each sends the whole view (up to 128 KB) as its context: an imported
-history of thousands of messages took hours and two calls a message.
-So:
-- **Level 0:** a call builds `first`'s node (the one rule 3 makes ready)
-  and each later message not built whose line is over NODE, up to 8 in
-  all, at most 192 KiB of them, within 64 messages of `first`
-  (`M.batch`). The context is the view before the first of them, as the
-  spec's; the step is SCALE, then the messages in order, each whole
-  under `--- n ---`, a short one between them shown as the line it
-  already is (`--- a line already ---`), then "Answer with exactly k
-  lines … each starting with its number and `) `". A later message of a
-  batch sees the earlier ones whole instead of their lines.
-- **Merges:** up to 8 ready merges in one call, each its two lines under
-  `--- n ---`. The context is the view before the earliest end among
-  them, so no merge sees past its own stretch (a later one sees less
-  than the spec's context, its own lines given whole in the step).
-- **Ids in the output:** the spec keeps ids out of a compactor's input
-  because a model copies them into its line. A batch needs numbers to
-  match lines to nodes; they are stripped (`M.batchLines`), and the view's
-  lines still carry none.
-- **The size rules hold line by line:** a line over NODE is asked again
-  in the same conversation, cut where the limit falls, with any line
-  that did not come; after TRIES calls each line is its shortest try
-  (`M.batchTry`). A line that never came, or a call that failed, fails
-  its node alone. Free nodes stay free: never sent to a model.
-- **Merges alongside level 0:** a round builds its merges after its
-  level-0 batch (the spec's pump runs them alongside), and a turn's settle
-  builds merges while the view is over VIEW: with level 0 far behind
-  (an import), the view would otherwise grow past its budget, and every
-  call's context with it.
+- **The queue (§4, "The order"; §7.13: never a scan of the tree).** The
+  `ready` table holds every node whose sources are there and that is not
+  free: a message when it is logged, a merge when its second half is
+  built (a free one is built at once, with no call). A message's node may
+  start once fewer than 8 messages before it are unbuilt (it is among the
+  first 8 rows of level 0); a merge, as soon as it is in the table. Of
+  those, a run takes the one whose last message is the oldest (a merge
+  before the message it ends with), leased to it for 5 minutes, while
+  fewer than 8 are leased. Every query is by index: the window's 8 rows,
+  the oldest merge, the count leased.
+- **`pump_step`, a mutation, is a pump's one step:** it writes the node
+  the run built (the first write wins; or keeps its failure), then takes
+  the next and answers it, and how many more pumps to start (`spawn`: as
+  many as nodes are ready to take, up to 8 at work, each counted as at
+  work until its first step, or a minute). A pump calls `pump` that many
+  times, builds its node, and steps again until nothing is left it may
+  take; past its budget (256 steps less a node's and its spawns'), a
+  fresh pump takes its place. A chain ends at the platform's 16 hops; the
+  next message, an import's next part (a `compact` record, at most one a
+  minute, when no pump is at work), `fragment mind import` or the page's
+  import following the compactor start another.
+- **One compaction, one node:** `job.ai.text({model: "cheap", messages,
+  tools: CALL_TOOLS, tool_choice: "none"})`, its messages `[system: the
+  turns' own, user: [the compaction view up to the node, the task]]`, so
+  it reads the turns' cached [tools] [system prompt], and the compactions'
+  view from each other (§3.3). The task is §4's verbatim: "Compaction:
+  compress message {id} into one line of at most 512 bytes (about 70
+  words), the length of this ruler:", the ruler of 512 dashes, and
+  `<input>` the message whole (`kind: text`, its files); or "Compaction:
+  merge lines {a} and {b}, adjacent, …", the ruler, "<chat> may hold their
+  messages, {id} to {end}, in more detail: take details of them from there
+  too.", and `<input>` the two lines (`id+n|text`). A line over NODE is
+  answered §4's "Too long: your line is {N} bytes, over the 512-byte
+  limit. Write the whole line again for the same <input>, cutting just
+  enough of the least valuable items to fit before this cut:" with its
+  first 512 bytes and `| ← LIMIT`, in the same conversation; at most 5
+  tries, the shortest kept. An `id+n|` head the model wrote anyway is
+  taken off.
+- **A failed node** (a call that failed, or an empty answer) waits 10 s
+  before another run takes it, and is taken again at the next message
+  (§4); the run that failed it passes it for the rest of its life. Its
+  failures are `status`'s `failing`; a turn waiting on a message whose
+  node failed 3 times ends with an error.
+- **What a step sends is read from the instance** as the step is built
+  (the compaction view up to the node), never carried in an answer: a
+  past step's arguments do not matter.
+
+**The batched path is gone.** The first version (OptChat's spec, on this
+branch until 2026-10-08) summarized up to 8 messages or merges in one
+call with a prompt of its own (numbered lines, its own system prompt),
+because a pump was one run and its calls went one after another with the
+whole 128 KB view as each one's context. That prompt shared no cache with
+the turns. Now each call is UniiChat's, 8 run at once, and each one's
+context is the 16 to 32 KB compaction view, which the next one reads from
+the cache. Measured and estimated for Paul's archive (15 437 messages:
+6 839 level-0 calls and 12 029 merges, about 23 600 calls with the
+retries): at GLM-5.3 Flash's 3 to 8 s a call, 8 at once, 2.5 to 6.6
+hours; the batched path's estimate was 6.6 hours at 8 s for each of its
+2 950 calls one at a time, a call that writes 8 lines (8 times the
+output) being the slower one. At the fake's latency the e2e prints what
+64 imported messages took.
 
 ### Importing chats (`import`, `fragment mind import`, the page's upload)
 
 Paul (2026-10-07): "chat upload … at least claude and codex and hermes
 sessions … import should simply 'play' the chats through the memory
-system so they get added just like any other messages". The spec's §10:
+system so they get added just like any other messages". OptChat's spec §10:
 old chats become messages, "the user's messages and the agent's final
 replies, without repeated pastes and tool noise", and the compactor
 builds the tree over them like any other.
@@ -464,7 +661,7 @@ builds the tree over them like any other.
   grew). When no pump planned work in 3 minutes (and none was started in
   the last minute), it publishes `{at}` on `compact`, whose trigger runs
   `pump`.
-- **Deviations from the spec's import:** the spec imported keeping ids;
+- **Deviations from OptChat's import** (UniiChat has none): it imported keeping ids;
   this log already has messages, so imported ones land after them (the
   log stays append-only, and an import may interleave with live chat, a
   thread's messages then not contiguous). Their times are their own, so
@@ -493,35 +690,43 @@ builds the tree over them like any other.
     a turn the harness started, a subagent's report, keeps its reply and
     not its words). Tool calls, results, reasoning and empty turns go; a
     user message of 1 KiB or more repeating an earlier one (a paste) goes;
-    each message is capped at CAP as the mind caps it. Oldest
-    conversation first.
+    each message goes whole up to 96 KiB (the mind logs one past 30 000
+    characters as several in a row), past which its head and tail are
+    kept. Oldest conversation first.
   - **`--dry-run`** counts conversations, messages and bytes by source,
-    and estimates the compactor's work by simulating the tree (a free
-    node for a line within NODE, a free merge for two that fit; every
-    other a call): level-0 calls, alone and batched; merges; tokens (the
-    view as each call's context); cost at the cheap tier's prices in the
-    default price book, all context cached or none; and hours at ~8 s a
-    call. `--show N` prints the first N conversations a line a message.
+    and estimates the compactor's work by simulating the tree (each
+    message as the mind logs it; a free node for a line within NODE, a
+    free merge for two that fit; every other a call): level-0 calls;
+    merges; tokens (the tools, the system prompt and the compaction view
+    as each call's cached context); cost at the cheap tier's prices in
+    the default price book, all context cached or none; and hours, 8
+    calls at once at ~5 s each (3 to 8 s). `--show N` prints the first N
+    conversations a line a message.
   - **An import** asks `imported` for each conversation, sends the rest
     in parts (at most 64 messages and 192 KiB), then follows `status`
-    every 15 s until nothing is unbuilt or ready, calling `pump` when
-    none is at work (a pump chain ends at the platform's 16 hops); it
-    stops after 5 such starts with no progress. Ctrl-C and a rerun
-    resume.
+    every 15 s until nothing is unbuilt or ready, calling `pump` when no
+    compaction is at work (`status`'s `pumps` is 0) and none was taken
+    in a minute (a pump chain ends at the platform's 16 hops); it stops
+    after 5 such starts with no progress. Ctrl-C and a rerun resume.
 - **The page's upload** (`site/import.js`, `mountImport(container)`):
   one `conversations.json` or one Claude Code or Codex `.jsonl`, parsed
   in the page by the same rules, sent the same way, then the compactor
-  followed through `status`.
+  followed through `status`, started again (`pump`) as the CLI starts it,
+  at most once a minute.
 - **While an import compacts**, a turn waits (`settling`): no call sees a
-  placeholder (spec §6), and the imported messages come before it. Its
-  settle builds alongside the pump; past its budget it hands on (a chain
-  of at most 16 runs), and the next message resumes it.
-- **The archive on the build box (2026-10-07, dry run):** Paul's Claude
-  Code and Codex sessions from his Mac and this box, 377 conversations,
-  15 437 messages, 12.2 MB: 6 839 messages over NODE (855 batched calls;
-  6 839 one a call), 12 029 merges needing a call (1 504 batched), about
-  135M tokens in (124M of them the view as context), $7.67 to $22.67 at
-  list price, about 6.6 hours.
+  placeholder (§4), and the imported messages come before it. Its wait
+  builds alongside the pumps; past its budget it hands on (a chain of at
+  most 16 runs), and the next message resumes it. Then its view is
+  fitted (the lines built since the import's last message merge), so it
+  is within its budget.
+- **The archive on the build box (2026-10-07, dry run, on the first
+  version):** Paul's Claude Code and Codex sessions from his Mac and this
+  box, 377 conversations, 15 437 messages, 12.2 MB: 6 839 messages over
+  NODE, 12 029 merges needing a call, about 135M tokens in (124M of them
+  the 128 KB view as context, batched 8 to a call), $7.67 to $22.67 at
+  list price, about 6.6 hours. Now each of the ~23 600 calls (with
+  retries) has the compaction view, 16 to 32 KB, as its context, and 8
+  run at once: 2.5 to 6.6 hours at 3 to 8 s a call.
 
 ### Topics (job `classify`)
 
@@ -558,9 +763,11 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
    when it stopped or failed.
 3. **The mind takes the reply.** `hands_said` (`chat`'s trigger, each
    record an agent posts there) matches the reply to its task by
-   `body.turn`. The first is the report: it puts it on the queue as a
-   `user` message, `[<task id>] <reply>`, with the reply's files, and
-   starts a turn like `heard` does, in the task's thread. A later part changes nothing. A reply
+   `body.turn`. The first is the report: it logs it whole as a `work`
+   message `[<task id>] <reply>` (several in a row past 30 000
+   characters), with the reply's files, and queues it: the running turn
+   takes it between its tool calls, or it starts a turn like `heard` does,
+   in the task's thread. A later part changes nothing. A reply
    that comes before its `task_open` is kept for it. The task's state is
    `done`, or `stopped` or `error` from an `(ended: …)` reply. The mind
    runs nothing for `work`: a page follows goose's steps there itself,
@@ -572,7 +779,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 5. **goose's context.** At the start of each hand-off turn, the goose
    runtime calls `POST /api/f/<mind>/ops/view` (a query) for the
    rendered view. It starts a fresh session whose first message is the
-   spec's subagent framing, VIEW_DOC, the view, and then the task.
+   first spec's subagent framing, its view doc (goose's copy, which
+   names reports `work`), the view, and then the task.
    Nothing of a session carries to the next.
 
 ### Operations (the contract for the page, the MCP server and goose)
@@ -584,12 +792,12 @@ membership, which only its owner and the agent hold. Operations with a
 | op | kind | input → result |
 |---|---|---|
 | `view` | query (described) | `{upto?}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>`, the parts that start before `upto` (all by default) up to the first not summarized yet (no call sees a placeholder); `settled` says none was left out |
-| `zoom` | query (described) | `{id, n}` → `{text}`: the spec's zoom |
+| `zoom` | query (described) | `{id, n?, page?}` → `{text}`: §6's zoom (`n` 1 unless named; a message in pages of 24 000 characters); `{id: "<task id>", page?}`, a computer task whole |
 | `date` | query (described) | `{id}` → `{text}`: ISO time of message `id`, in UTC (the mind knows no time zone) |
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |
 | `note` | mutation (described) | `{text}` → `{i}`: append a `note` (an MCP client's write) |
 | `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`, newest `last` first (`before` is a `last`); `summary` is the text of the smallest built node covering the thread's messages (`first_i` to `last_i`), else its first user line; `count` is its `user` and `talk` messages |
-| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task, attachments}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row; `attachments` are `[{sha256, name, type, size}]` (`[]` with none), each read at `__blob/<sha256>` |
+| `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task, attachments, cont}], more}`; `cont`: it goes on from the message before; `tool`/`echo` are returned so the page can fold them into a "steps" row; `attachments` are `[{sha256, name, type, size}]` (`[]` with none), each read at `__blob/<sha256>` |
 | `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand), as `thread`'s |
 | `export` | query (editor) | `{after?, limit?}` → `{entries: [{i, kind, text, at, thread, persona, task, attachments}], next}`: the raw log oldest first, the messages after `after` (from the first by default), at most `limit` (500 unless named, at most 2000) and 768 KiB a page; `attachments` with the `text` the mind read of them; `next` is the next page's `after`, `null` at the end (the page's "Export memory") |
 | `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T, cut?}`: the view as structured parts (the Memory screen); past 768 KiB its last `cut` parts are left out |
@@ -597,8 +805,8 @@ membership, which only its owner and the agent hold. Operations with a
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
 | `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
-| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}], ready, pump: {at} \| null, view, nodes, import: {conversations, messages, last} \| null, now}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed; `ready`, whether the compactor has a node to build now; `pump`, when a pump last planned work (none: no pump at work); `view`, the view's bytes; `nodes`, the tree's built nodes; `import`, what imports landed |
-| `import` | mutation | `{source, conversation: {id, title?, started?}, from, total?, messages: [{role: user \| assistant, text, at}]}` (1 to 64) → `{thread, landed, appended, T}`: "Importing chats" |
+| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}], ready, left, pumps, pump: {at} \| null, view, cview, nodes, import: {conversations, messages, last} \| null, instance, folds, now}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed; `ready`, whether nodes are left to build (`left`, how many); `pumps`, the compactions at work now; `pump`, when a node was last taken; `view` and `cview`, the views' bytes; `nodes`, the tree's built nodes; `import`, what imports landed; `instance`, the App instance's (a restart is a new one); `folds`, how many times the views were built from the log (a mind made before they were saved: once) |
+| `import` | mutation | `{source, conversation: {id, title?, started?}, from, total?, messages: [{role: user \| assistant, text, at}]}` (1 to 64, each text at most 131 072 characters) → `{thread, landed, appended, T}`: "Importing chats" |
 | `imported` | query | `{conversations: [{source, id}]}` (at most 200) → `{landed: [n]}`: how many of each conversation's messages are in |
 | `settings` | query | `{}` → `{about}` |
 | `topic_add` / `topic_remove` | mutation | `{name, description?}` / `{id}` |
@@ -609,9 +817,11 @@ membership, which only its owner and the agent hold. Operations with a
 
 The internal mutations (editor, no description) are named here so the
 two halves agree: `hear`, `turn_begin`, `turn_touch`, `turn_end`,
-`logged` (log one step's messages; it touches the lock and answers
-whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
-`nodes_built`, `task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
+`turn_view` (the views fitted, the turn's view rendered), `logged` (log
+one step's messages; it touches the lock, answers whether Stop was
+asked, takes the thread's messages queued since, and says to start a
+pump), `pump_step` (a compactor's step), `task_open`, `hands_reply`,
+`topics_set`. The jobs are `heard`, `pump`,
 `classify`, `topic_suggest` and `hands_said`.
 
 Seeded personas (a persona's instructions say what it is for; each
@@ -628,9 +838,11 @@ person removed stays removed: `kv.seeded`):
 ### Records on `log`
 
 - `{type: "msg", i, kind, text, thread, at, persona, task,
-  attachments?}`, where `text` is at most 48 KiB, cut, and
+  attachments?, cont?}`, where `text` is at most 48 KiB, cut,
   `attachments` (when it has files) name them, `[{sha256, name, type,
-  size}]`.
+  size}]`, and `cont: true` marks a message that goes on from the one
+  before it (a long text is several in a row). A mutation publishes at
+  most 60 of them; a page reads the rest with `thread`.
 - `{type: "turn", thread, state: "thinking" | "settling" | "done" | "error" | "stopped", error?}`.
 - `{type: "task", id, thread, state, text, turn, report?}`: as it opens,
   as its reply reports, and as it is found lost. Its live steps are
@@ -666,7 +878,10 @@ beside the mind; opened on its own origin the page shows its own rail.
   - The steps of a turn (tool and echo) fold into one "looked at memory
     ×3" row; one that used the person's apps reads "Used todo: add", the
     app's name a link to it.
-  - A hand-off is a card that shows goose's live steps and its report.
+  - A hand-off is a card that shows goose's live steps and its report
+    (a `work` message, or a `user` one `[<task id>] …` logged before).
+  - A long text the log holds as several messages in a row (`cont`) is
+    one bubble.
   - Snippets of other threads (a search hit, a zoom result) are
     expandable.
   - The composer sits at the bottom, with the persona chip, Stop, and
@@ -738,7 +953,15 @@ beside the mind; opened on its own origin the page shows its own rail.
    design's `fragments` capability (8edc2783 cut it) was a page's, gated
    by the owner viewing it; this one is a job's, gated by who can reach
    the fragment.
-7. **The shell's first run:**
+7. **`job.members()` says who is here** (docs/api.md, Jobs): each
+   member with `here`, whether a live socket of theirs is open on the
+   fragment now. An agent's bridge holds one on each fragment it follows
+   while its computer is awake: the mind's turns say whether the hands'
+   computer is awake.
+8. **The test lever `abort-app`** (`POST /api/test/fragment`): a
+   fragment's app instance ends as an eviction ends it, so the e2e proves
+   the mind loads its saved views rather than folding them again.
+9. **The shell's first run:**
    - it makes the agent (on the default image, goose), assigns it to
      the computer, makes `mind` (members) and adds the agent there as
      an editor;
@@ -973,10 +1196,6 @@ draft holds `ai.decide` steps as it holds every other AI step.
   newest 100 threads).
 - MCP Apps (the mind's page inline in a chat client): docs/api.md,
   "Inline views (MCP Apps): not yet".
-- Prompt-cache breakpoints. Workers AI caches prefixes by itself, and
-  the incremental fold keeps the prefix stable.
-- Mid-run injection of a new message between tool calls. A message
-  sent mid-turn starts the next turn.
 - Moving the log out of the app's SQLite (to R2 or git).
 - The web as a browser: `web_fetch` reads what a server sends, so a
   page its scripts draw reads as next to nothing, and a PDF is the

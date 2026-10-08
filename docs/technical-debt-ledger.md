@@ -561,7 +561,7 @@ fragment.club until cutover (decisions 34–35).
   meter still does not sample an app's database, so a declared GiB is
   stored unbilled.
 - **Risk:** the platform pays for up to 1 GiB of SQLite a fragment
-  ($0.20 a month at list) for each mind, and a mind's folded memory
+  ($0.20 a month at list) for each mind, and a mind's loaded memory
   (applib/optmem.mjs keeps every node's text on its instance) grows with
   its log toward the isolate's 128 MB long before its database reaches a
   GiB.
