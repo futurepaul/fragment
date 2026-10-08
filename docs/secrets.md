@@ -53,7 +53,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | the platform Worker |
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
-| `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret) | the platform Worker |
+| `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret; a branch whose deploy makes its own endpoint binds none, and its deploy uploads the endpoint's as the Worker secret `FRAGMENT_STRIPE_WEBHOOK`: decision 58) | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
 - **Reading.** `cell/src/keys.rs` is the one place they are read.
@@ -121,7 +121,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
   it records what was seeded), and `cargo xtask dev --clean` clears it
   with the rest of the state.
 
-**Two secrets stay local files**, named by path in the config, and are no
+**Three secrets stay local files**, named by path in the config, and are no
 store secrets:
 
 - `dns_token_file`: the deploying machine's own Cloudflare DNS token,
@@ -131,6 +131,12 @@ store secrets:
   e2e runner must send its value, and a store never gives one back; so
   it is a file, uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
   branch deploy.
+- `stripe.key_file`: the Stripe account's restricted key (the store's
+  `stripe.key` holds it for the Worker), which xtask itself uses: `xtask
+  stripe check|setup`, and on a branch deploy to make the branch's own
+  webhook endpoint, whose signing secret (Stripe gives it once, as it
+  makes the endpoint) is uploaded as the Worker secret
+  `FRAGMENT_STRIPE_WEBHOOK` (decision 58). Never printed.
 
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
