@@ -371,7 +371,14 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
                 .ok()
                 .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
         });
-    s.ok("its computer wakes and follows the mind's chat", following, phase(api, &owner, &computer));
+    // its bridge subscribes before it catches up and opens its live socket
+    // (images/bridge driver.rs `follow_once`): a turn sees it here once the
+    // socket is open, which the `here` lever says
+    let here = following
+        && s.eventually(WAKE, || {
+            api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": mind, "op": "here", "principal": identity }))).ok().is_some_and(|r| r.body["here"] == true)
+        });
+    s.ok("its computer wakes and follows the mind's chat, its live socket open there", here, phase(api, &owner, &computer));
 
     let shed = "t_00112233445566aa";
     // (the stub takes a step for a task that names a tool)

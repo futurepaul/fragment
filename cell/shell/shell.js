@@ -889,7 +889,7 @@ async function makeAgent(job, chosen) {
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-job",
     message: "its job",
-    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: "cheap", color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
   const chat = await api("POST", "/api/fragments", { name: `${label}-chat`, template: "chat", title: name });
@@ -1931,7 +1931,7 @@ async function defaultAgent(step) {
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-default",
     message: "the default agent",
-    files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: "cheap", color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
   step("mind");

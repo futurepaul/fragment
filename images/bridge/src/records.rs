@@ -434,6 +434,24 @@ pub fn turn_end(turn: &str, outcome: &Outcome) -> Value {
     }
 }
 
+/// How long a turn's phases took, as its runtime says (part `timing`):
+/// `{kind: "turn.timing", turn, …}` with the runtime's own names, each
+/// milliseconds or a list of them. At most `limits::TIMING_MAX_BYTES` of
+/// them; past it, the record says only that they were dropped.
+pub fn turn_timing(turn: &str, timing: &serde_json::Map<String, Value>) -> Value {
+    let mut body = json!({ "kind": "turn.timing", "turn": turn });
+    if serde_json::to_vec(timing).map_or(usize::MAX, |b| b.len()) <= limits::TIMING_MAX_BYTES {
+        for (k, v) in timing {
+            if k != "kind" && k != "turn" {
+                body[k] = v.clone();
+            }
+        }
+    } else {
+        body["dropped"] = json!(true);
+    }
+    body
+}
+
 /// An agent's reply on `chat`: its text and turn; `to` and `hop` when it
 /// hands off to another agent. Attachments are added by whoever uploads them.
 pub fn reply(text: &str, turn: &str, to: &[String], hop: u32) -> Value {

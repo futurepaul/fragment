@@ -140,7 +140,7 @@ spec, with every detail.
 **Files**
 - **Victor:** `zoom(id, 1)` gives a message "with its images".
 - **Ours:** "with its files"; a small text file is read whole.
-- **Why:** the medium tier reads no images.
+- **Why:** a job's step sends no image (the medium tier, the turns' model until 2026-10-08, reads none).
 
 **The kinds' names**
 - **Victor:** `unii`.

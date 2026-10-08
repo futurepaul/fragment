@@ -435,7 +435,7 @@ impl FragmentCell {
         if let Some(size) = draft.text.as_ref().map(String::len).filter(|n| *n > limits::RECORD_BODY_MAX_BYTES) {
             return Err(CellError::too_large("a draft's text", size, limits::RECORD_BODY_MAX_BYTES));
         }
-        if !self.broadcast_draft(channel, &who, &draft.turn, draft.text.as_deref()) {
+        if !self.broadcast_draft(channel, &who, &draft.turn, draft.text.as_deref(), None) {
             return Err(CellError::new(ErrorCode::RateLimited, format!("drafts past {} a second are dropped", limits::PRESENCE_PER_S)));
         }
         json_response(&json!({ "ok": true }))

@@ -36,8 +36,58 @@ use crate::steps::{AiText, ToolChoice};
 /// The tiers' models (decision 23), as Workers AI's catalog names them.
 pub const CHEAP_MODEL: &str = "@cf/zai-org/glm-5.3-flash";
 pub const MEDIUM_MODEL: &str = "@cf/zai-org/glm-5.3";
+/// The fallbacks a tier's call takes when its model is busy (`ladder`).
+pub const DEEPSEEK_FLASH_MODEL: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
+pub const GEMMA_MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 /// The route's name for the deployment's vision model.
 pub const VISION: &str = "vision";
+
+/// The models after a tier's own that its call may answer on, in order,
+/// when each before is busy (docs/optchat.md, "Latency"): Workers AI holds
+/// a call in a capacity queue while its model is busy, unless it asks
+/// `rejectIfBusy` (its 429, error 3040: changelog 2026-09-17). Each is on
+/// Workers AI, calls tools and streams, and is priced in the default book.
+/// A call asks each rung with `rejectIfBusy`, and when every one is busy,
+/// waits in its own model's queue. Any other model (the vision model's,
+/// an image's, Clef's) has none.
+pub fn ladder(model: &str) -> &'static [&'static str] {
+    match model {
+        // GLM-5.3 Flash, the default everywhere (Paul, 2026-10-08), then
+        // DeepSeek V4 Flash (1M context, agentic) and Gemma 4 26B A4B
+        CHEAP_MODEL => &[DEEPSEEK_FLASH_MODEL, GEMMA_MODEL],
+        MEDIUM_MODEL => &[CHEAP_MODEL, DEEPSEEK_FLASH_MODEL],
+        _ => &[],
+    }
+}
+
+/// The models one call of a hedged pair asks, in order, each with whether
+/// it asks `rejectIfBusy`: the first call its own model and then its
+/// ladder, each not to queue, then its own model's queue; the second (the
+/// hedge, crate::hedge) starts at its ladder's next model, a model of its
+/// own: the preview's slowest calls were slow on both calls of one model
+/// at once (2026-10-08: 15 and 30 s, neither busy). A model with no
+/// ladder waits in its queue, in both.
+pub fn plan(model: &'static str, arm: crate::hedge::Arm) -> Vec<(&'static str, bool)> {
+    let rungs = ladder(model);
+    if rungs.is_empty() {
+        return vec![(model, false)];
+    }
+    let own = match arm {
+        crate::hedge::Arm::First => Some((model, true)),
+        crate::hedge::Arm::Second => None,
+    };
+    own.into_iter().chain(rungs.iter().map(|m| (*m, true))).chain(std::iter::once((model, false))).collect()
+}
+
+/// Whether a model's refusal says it is busy: `rejectIfBusy`'s 429 with
+/// Workers AI's error 3040 ("Capacity temporarily exceeded").
+pub fn busy(status: u16, body: &[u8]) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(body);
+    text.contains("3040") || text.contains("Capacity temporarily exceeded")
+}
 /// The vision model unless the deployment names another
 /// (`FRAGMENT_VISION_MODEL`; Paul, 2026-10-05): GLM-5.3 Flash, the cheap
 /// tier's own, "Vision: Yes" in Workers AI's catalog
@@ -453,6 +503,9 @@ pub struct Stream {
     /// not the connection stays open after it (the gateway's may, for
     /// minutes).
     done: bool,
+    /// Characters of reasoning read (GLM's `reasoning_content`): never
+    /// kept, only counted, so a reader can say the model is thinking.
+    thought: u64,
 }
 
 impl Stream {
@@ -517,6 +570,11 @@ impl Stream {
         self.done
     }
 
+    /// Characters of reasoning read so far (none of them kept).
+    pub fn thought(&self) -> u64 {
+        self.thought
+    }
+
     fn take_line(&mut self, line: &[u8], out: Option<&mut Vec<u8>>) {
         self.lines += 1;
         let rewritten = self.read_line(line);
@@ -538,8 +596,13 @@ impl Stream {
         if let Some(id) = chunk.get("id").filter(|id| !id.is_null()) {
             self.id = Some(id.clone());
         }
-        if let (Some(answer), Some(choice)) = (self.answer.as_mut(), chunk.get("choices").and_then(|c| c.get(0))) {
-            answer.take(choice);
+        if let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) {
+            let delta = &choice["delta"];
+            let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).unwrap_or("");
+            self.thought += reasoning.chars().count() as u64;
+            if let Some(answer) = self.answer.as_mut() {
+                answer.take(choice);
+            }
         }
         let ending = if text.ends_with("\r\n") { "\r\n" } else if text.ends_with('\n') { "\n" } else { "" };
         match (chunk.get("choices"), chunk.get("usage").cloned()) {
@@ -573,6 +636,30 @@ mod tests {
     /// the tiers' cap, and is no tier (an agent, a job's step and a
     /// manifest name only tiers). Method: the route's names, the tiers'
     /// names, and a call bounded on it.
+    /// Goal: a tier's ladder is its fallbacks after its own model, each
+    /// priced in the default book (a call it answers is charged its usage,
+    /// not its reservation), none twice; other models have none; a busy
+    /// refusal is `rejectIfBusy`'s 429 with error 3040 alone.
+    #[test]
+    fn a_tiers_ladder_is_priced() {
+        let book = PriceBook::defaults();
+        for model in [CHEAP_MODEL, MEDIUM_MODEL] {
+            let rungs = ladder(model);
+            assert!(!rungs.is_empty() && !rungs.contains(&model), "{model}");
+            for r in rungs {
+                assert!(book.models.iter().any(|m| m.model == *r), "{r} is priced");
+            }
+        }
+        assert!(ladder(crate::decide::CLEF_MODEL).is_empty());
+        use crate::hedge::Arm;
+        assert_eq!(plan(CHEAP_MODEL, Arm::First), vec![(CHEAP_MODEL, true), (DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)]);
+        assert_eq!(plan(CHEAP_MODEL, Arm::Second), vec![(DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)], "a hedge starts on another model");
+        assert_eq!(plan("@cf/example/seeing", Arm::Second), vec![("@cf/example/seeing", false)]);
+        assert!(busy(429, br#"{"errors":[{"message":"Capacity temporarily exceeded, please try again.","code":3040}],"success":false}"#));
+        assert!(!busy(429, br#"{"errors":[{"message":"rate limited","code":3036}]}"#));
+        assert!(!busy(503, b"3040"));
+    }
+
     #[test]
     fn vision_is_the_routes_and_no_tier() {
         assert_eq!(route_named(Some("vision")), Ok(Named::Vision));
@@ -604,7 +691,7 @@ mod tests {
         assert_eq!(VISION_MODEL_DEFAULT, "@cf/zai-org/glm-5.3-flash");
         assert_eq!(vision_model(Some(MEDIUM_MODEL), &book).as_deref(), Ok(MEDIUM_MODEL));
         assert_eq!(vision_model(Some(" @cf/zai-org/glm-5.3-flash "), &book).as_deref(), Ok(CHEAP_MODEL));
-        let unpriced = vision_model(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"), &book).unwrap_err();
+        let unpriced = vision_model(Some("@cf/moonshotai/kimi-k2.6"), &book).unwrap_err();
         assert!(unpriced.contains("not in the price book") && unpriced.contains(CHEAP_MODEL), "{unpriced}");
         assert!(vision_model(Some(""), &book).is_err());
         // priced at Flash's prices: no new row, so no new book version

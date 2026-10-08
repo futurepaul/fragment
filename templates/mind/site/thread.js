@@ -33,6 +33,8 @@ import {
   running,
   say,
   stop,
+  thinkingOf,
+  typing,
 } from "./store.js";
 import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconButton, isReportKind, joined, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
 
@@ -167,6 +169,8 @@ export function composer(thread, { onSent } = {}) {
   ta.addEventListener("input", () => {
     unsent.set(key, ta.value);
     grow();
+    // to a persona with hands: its computer may start while they type
+    if (ta.value.trim() && persona(personaId())?.hands) typing();
   });
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !coarse) {
@@ -633,6 +637,10 @@ function indicator(label) {
 
 // the page looks again once a message's "heard" moment has passed
 let heardTimer = 0;
+// and each second while the model thinks, to count it
+let thinkTimer = 0;
+/// A thinking model's label: its seconds once there are a few.
+const THINK_COUNT_FROM_S = 2;
 
 /// The thread's items, in order, for `reconcile`.
 function items(id) {
@@ -771,8 +779,17 @@ function items(id) {
     });
   } else if (on) {
     agentSide(p);
-    const label = S.stopping.has(id) ? "Stopping" : turn?.state === "settling" ? "Gathering what I remember" : list.at(-1)?.kind === "tool" || list.at(-1)?.kind === "echo" ? "" : "Thinking";
+    // its model thinking, no words yet (the platform's `thinking` draft): counted
+    const secs = thinkingOf(id);
+    const thinking = secs === null ? null : secs >= THINK_COUNT_FROM_S ? `Thinking… ${secs}s` : "Thinking";
+    const label = S.stopping.has(id) ? "Stopping" : turn?.state === "settling" ? "Gathering what I remember" : thinking ?? (list.at(-1)?.kind === "tool" || list.at(-1)?.kind === "echo" ? "" : "Thinking");
     if (label) out.push({ key: "working", sig: label, make: () => indicator(label) });
+    if (secs !== null) {
+      thinkTimer ||= setTimeout(() => {
+        thinkTimer = 0;
+        changed();
+      }, 1000);
+    }
   } else {
     const last = list.at(-1);
     const unanswered = (S.pending.get(id)?.some((x) => !x.failed) || last?.kind === "user" || last?.kind === "work") && !(turn && turn.at >= lastAt);

@@ -49,9 +49,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -142,7 +142,7 @@ pub struct GooseConfig {
     pub api: String,
     /// `FRAGMENT_MODEL`: goose's OpenAI provider's host.
     pub model: String,
-    /// The model tier its calls name (`medium`).
+    /// The model tier its calls name (`cheap`: GLM-5.3 Flash, Paul, 2026-10-08).
     pub tier: String,
     /// The fragment CLI, for a mind's `fragment mcp <mind>`; none, no such
     /// extension.
@@ -598,6 +598,9 @@ struct Ctx {
     api: Api,
     spawn: Arc<dyn Spawn>,
     gooses: tokio::sync::Mutex<HashMap<String, Arc<Conn>>>,
+    /// Each agent's session made ahead for its next turn (`Spare`), by its
+    /// fragment's name.
+    spares: tokio::sync::Mutex<HashMap<String, Spare>>,
     /// The platform skill, made once from the CLI's (`fragment skill`).
     platform: tokio::sync::OnceCell<Option<String>>,
 }
@@ -633,7 +636,7 @@ async fn run(config: GooseConfig, spawn: Arc<dyn Spawn>, mut io: RuntimeIo) -> R
     if let Some((ca, bundle)) = config.ca.clone() {
         tokio::spawn(trust_ca(ca, bundle));
     }
-    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()), platform: tokio::sync::OnceCell::new() });
+    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()), spares: tokio::sync::Mutex::new(HashMap::new()), platform: tokio::sync::OnceCell::new() });
     let mut turns: HashMap<String, mpsc::Sender<Heard>> = HashMap::new();
     let mut shutdown = io.shutdown.clone();
     // Each agent's goose starts at its first turn, so turns can be taken now.
@@ -723,24 +726,72 @@ pub fn prompt(view: Option<&str>, ts: &TurnStart) -> Vec<String> {
 /// The session a turn runs in: the agent's browser, computer and web tools
 /// when the image has its desktop; `fragment mcp <mind>` among them for a
 /// mind, when the image has the CLI.
-fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
+/// It is `agent`'s in `fragment`, titled `title`: a turn's, or one made
+/// ahead for the next (`Spare`).
+fn session_of(cfg: &GooseConfig, agent: &Agent, fragment: &str, title: &str, mind: bool) -> Value {
     let mut servers = Vec::new();
     if let Some(desktop) = &cfg.desktop {
-        for (name, args) in [("browser", vec!["mcp", "browser", ts.agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", ts.agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
+        for (name, args) in [("browser", vec!["mcp", "browser", agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
             servers.push(json!({ "name": name, "command": desktop, "args": args, "env": [] }));
         }
     }
     if let (true, Some(cli)) = (mind, &cfg.cli) {
-        let env = [("FRAGMENT_AS_AGENT", ts.agent.fragment.as_str()), ("FRAGMENT_FOR", ts.agent.owner.as_str()), ("FRAGMENT_API", cfg.api.as_str())];
+        let env = [("FRAGMENT_AS_AGENT", agent.fragment.as_str()), ("FRAGMENT_FOR", agent.owner.as_str()), ("FRAGMENT_API", cfg.api.as_str())];
         servers.push(json!({
             "name": "mind",
             "command": cli,
-            "args": ["mcp", ts.fragment],
+            "args": ["mcp", fragment],
             "env": env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
         }));
     }
     // a title of ours: goose names no session itself (no model call for it)
-    json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": format!("turn {}", ts.turn) } })
+    json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": title } })
+}
+
+/// A session made ahead for an agent's next turn in a fragment, once a
+/// turn there ends: its MCP servers started (Playwright's Node, cua-driver,
+/// `fragment mcp`: over a second at each `session/new`) and its system
+/// prompt set. Nothing was said in it, so it is as fresh as one made at the
+/// turn; the next turn there with the same goose takes it.
+struct Spare {
+    fragment: String,
+    mind: bool,
+    conn: Arc<Conn>,
+    session: String,
+}
+
+/// Makes a session on `conn` (`session_of`) and sets its system prompt:
+/// its id, or why not (a half-made one is closed).
+async fn make_session(cfg: &GooseConfig, conn: &Arc<Conn>, agent: &Agent, fragment: &str, title: &str, mind: bool) -> Result<String, String> {
+    let made = conn.call("session/new", session_of(cfg, agent, fragment, title, mind), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
+    let made = made.map_err(|e| format!("goose made no session: {e}"))?;
+    let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
+    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(mind) });
+    if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
+        close(conn, &session);
+        return Err(format!("goose took no system prompt: {e}"));
+    }
+    Ok(session)
+}
+
+/// A session made ahead for `agent`'s next turn in `fragment` (`Spare`),
+/// unless it has one; one it had elsewhere is closed.
+async fn ready_next(ctx: Arc<Ctx>, agent: Agent, fragment: String, mind: bool) {
+    if ctx.spares.lock().await.get(&agent.fragment).is_some_and(|s| s.fragment == fragment && s.mind == mind && s.conn.alive()) {
+        return;
+    }
+    let Ok(conn) = ctx.goose_for(&agent).await else { return };
+    let t = Instant::now();
+    match make_session(&ctx.config, &conn, &agent, &fragment, "ready", mind).await {
+        Ok(session) => {
+            crate::ev!("goose.spare", { "agent": agent.fragment, "fragment": fragment, "ms": ms(t) });
+            let old = ctx.spares.lock().await.insert(agent.fragment.clone(), Spare { fragment, mind, conn, session });
+            if let Some(old) = old {
+                close(&old.conn, &old.session);
+            }
+        }
+        Err(e) => crate::ev!("goose.spare_failed", { "agent": agent.fragment, "error": e }),
+    }
 }
 
 /// The platform skill: the computer's page and the CLI's own skill, made
@@ -773,25 +824,112 @@ async fn install_skills(ctx: &Ctx, ts: &TurnStart) {
     }
 }
 
-/// The turn's session, made: its goose, its id, its updates, and its prompt.
-async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>), String> {
-    let (view, ()) = tokio::join!(view_of(&ctx.api, ts), async {
-        if ctx.config.skills {
-            install_skills(ctx, ts).await;
+/// Milliseconds since `t`.
+fn ms(t: Instant) -> u64 {
+    u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The turn's session, made: its goose, its id, its updates, its prompt,
+/// what each phase took (`turn.timing`'s first fields), and whether the
+/// fragment is a mind (it answered a view).
+#[allow(clippy::type_complexity)]
+async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>, Map<String, Value>, bool), String> {
+    let mut timing = Map::new();
+    let ((view, view_ms), skills_ms) = tokio::join!(
+        async {
+            let t = Instant::now();
+            let v = view_of(&ctx.api, ts).await;
+            (v, ms(t))
+        },
+        async {
+            let t = Instant::now();
+            if ctx.config.skills {
+                install_skills(ctx, ts).await;
+            }
+            ms(t)
         }
-    });
+    );
+    timing.insert("view_ms".into(), json!(view_ms));
+    timing.insert("skills_ms".into(), json!(skills_ms));
+    let t = Instant::now();
     let conn = ctx.goose_for(&ts.agent).await.map_err(|e| format!("goose: {e}"))?;
-    let made = conn.call("session/new", new_session(&ctx.config, ts, view.is_some()), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
-    let made = made.map_err(|e| format!("goose made no session: {e}"))?;
-    let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
-    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(view.is_some()) });
-    if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
-        close(&conn, &session);
-        return Err(format!("goose took no system prompt: {e}"));
-    }
+    timing.insert("goose_ms".into(), json!(ms(t)));
+    let mind = view.is_some();
+    // the session made ahead for this turn (`Spare`), when it is this goose's
+    // for this fragment; else one made now, its MCP servers started
+    let spare = ctx.spares.lock().await.remove(&ts.agent.fragment);
+    let t = Instant::now();
+    let session = match spare {
+        Some(s) if s.fragment == ts.fragment && s.mind == mind && Arc::ptr_eq(&s.conn, &conn) && conn.alive() => {
+            timing.insert("spare".into(), json!(true));
+            s.session
+        }
+        other => {
+            if let Some(s) = other {
+                close(&s.conn, &s.session);
+            }
+            make_session(&ctx.config, &conn, &ts.agent, &ts.fragment, &format!("turn {}", ts.turn), mind).await?
+        }
+    };
+    timing.insert("session_ms".into(), json!(ms(t)));
     let updates = conn.follow(&session);
-    crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len) });
-    Ok((conn, session, updates, prompt(view.as_deref(), ts)))
+    crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len), "timing": timing });
+    Ok((conn, session, updates, prompt(view.as_deref(), ts), timing, mind))
+}
+
+/// Steps a turn's timing lists, at most (the rest are counted).
+pub const TIMED_STEPS_MAX: usize = 64;
+
+/// A turn's timing from its prompt on: when goose first said anything,
+/// and each tool call's wait before it was asked (goose's model call, the
+/// most of it) and its run, then the wait after the last (its last model
+/// call). Pure: the turn's loop feeds it each update with the time.
+#[derive(Debug, Default)]
+pub struct Clock {
+    /// Milliseconds from the prompt to its first update.
+    first: Option<u64>,
+    /// When the last tool call ended (or the prompt was sent), in ms from the prompt.
+    mark: u64,
+    /// Calls asked and not yet done: their id, when asked, and the wait before.
+    open: Vec<(String, u64, u64)>,
+    steps: Vec<[u64; 2]>,
+    more: u64,
+}
+
+impl Clock {
+    /// One `session/update`'s `update`, `at` ms after the prompt was sent.
+    pub fn update(&mut self, u: &Value, at: u64) {
+        self.first.get_or_insert(at);
+        let id = u["toolCallId"].as_str().unwrap_or("").to_string();
+        match u["sessionUpdate"].as_str() {
+            Some("tool_call") if self.open.len() < CALLS_OPEN_MAX => {
+                let wait = at.saturating_sub(self.mark);
+                self.open.push((id, at, wait));
+            }
+            Some("tool_call_update") if matches!(u["status"].as_str(), Some("completed" | "failed")) => {
+                let Some(k) = self.open.iter().position(|(i, _, _)| *i == id) else { return };
+                let (_, asked, wait) = self.open.remove(k);
+                if self.steps.len() < TIMED_STEPS_MAX {
+                    self.steps.push([wait, at.saturating_sub(asked)]);
+                } else {
+                    self.more += 1;
+                }
+                self.mark = self.mark.max(at);
+            }
+            _ => {}
+        }
+    }
+
+    /// The fields it adds, the prompt answered `at` ms after it was sent.
+    pub fn fields(&self, at: u64, timing: &mut Map<String, Value>) {
+        timing.insert("first_ms".into(), json!(self.first));
+        timing.insert("steps".into(), json!(self.steps));
+        if self.more > 0 {
+            timing.insert("steps_more".into(), json!(self.more));
+        }
+        timing.insert("last_ms".into(), json!(at.saturating_sub(self.mark)));
+        timing.insert("prompt_ms".into(), json!(at));
+    }
 }
 
 /// Closes a turn's session (and its MCP servers), never waiting on it.
@@ -806,6 +944,7 @@ fn close(conn: &Arc<Conn>, session: &str) {
 }
 
 async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, events: mpsc::Sender<Event>) {
+    let t0 = Instant::now();
     let id = ts.turn.clone();
     let emit = |out: Vec<Event>| {
         let events = events.clone();
@@ -824,7 +963,7 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             return;
         }
     };
-    let (conn, session, mut updates, blocks) = match prepared {
+    let (conn, session, mut updates, blocks, mut timing, mind) = match prepared {
         Ok(p) => p,
         Err(e) => {
             crate::ev!("goose.turn_failed", { "turn": id, "error": e });
@@ -832,8 +971,11 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             return;
         }
     };
+    timing.insert("ready_ms".into(), json!(ms(t0)));
     let mut map = Mapper::new(&id);
+    let mut clock = Clock::default();
     let blocks: Vec<Value> = blocks.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
+    let sent = Instant::now();
     let prompt = conn.call("session/prompt", json!({ "sessionId": session, "prompt": blocks }), None);
     tokio::pin!(prompt);
     let (mut stopping, mut following, mut hearing) = (false, true, true);
@@ -842,7 +984,10 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
         tokio::select! {
             biased;
             u = updates.recv(), if following => match u {
-                Some(u) => emit(map.update(&u)).await,
+                Some(u) => {
+                    clock.update(&u, ms(sent));
+                    emit(map.update(&u)).await
+                }
                 None => following = false,
             },
             a = &mut prompt => break a,
@@ -861,11 +1006,19 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
             },
         }
     };
+    let answered = ms(sent);
     // what goose said before it answered, in order
     while let Ok(u) = updates.try_recv() {
+        clock.update(&u, answered);
         emit(map.update(&u)).await;
     }
     close(&conn, &session);
+    // the next turn here finds its session made (`Spare`)
+    tokio::spawn(ready_next(ctx.clone(), ts.agent.clone(), ts.fragment.clone(), mind));
+    clock.fields(answered, &mut timing);
+    timing.insert("total_ms".into(), json!(ms(t0)));
+    crate::ev!("goose.timing", { "turn": id, "timing": timing });
+    emit(vec![Event::Timing { turn: id.clone(), timing }]).await;
     emit(map.end(answer.as_ref(), stopping)).await;
 }
 
@@ -1052,6 +1205,28 @@ mod tests {
         Event::Draft { turn: "t".into(), text: text.into() }
     }
 
+    /// Goal: a turn's timing says when goose first spoke, each tool call's
+    /// wait before it (goose's model call) and its run, and the wait after
+    /// the last. Method: two calls in a row, then two at once, then words.
+    #[test]
+    fn a_turns_clock() {
+        let mut c = Clock::default();
+        c.update(&chunk("Let me", "m1"), 1200);
+        c.update(&call("c1", "shell", json!({})), 1500);
+        c.update(&done("c1", "completed", "ok"), 1700);
+        c.update(&call("c2", "shell", json!({})), 4700);
+        c.update(&call("c3", "shell", json!({})), 4710);
+        c.update(&done("c3", "failed", "no"), 4800);
+        c.update(&done("c2", "completed", "ok"), 5000);
+        c.update(&chunk("Done.", "m2"), 7000);
+        let mut t = Map::new();
+        c.fields(7400, &mut t);
+        assert_eq!(t["first_ms"], 1200);
+        assert_eq!(t["steps"], json!([[1500, 200], [3010, 90], [3000, 300]]));
+        assert_eq!(t["last_ms"], 2400, "from the last call's end to the answer");
+        assert_eq!(t["prompt_ms"], 7400);
+    }
+
     /// Goal: words stream as drafts, the words before a tool call are its
     /// step's (the draft stopped), a step posts once its result is in, and
     /// the words after the last call are the one reply, then the end.
@@ -1145,6 +1320,10 @@ mod tests {
         cut.note = Some("Your turn before this one was cut short.".into());
         cut.files = vec![crate::runtime::LocalFile { path: "/tmp/bridge-media/x/cat.png".into(), media_type: "image/png".into(), name: "cat.png".into(), size: 3 }];
         assert_eq!(prompt(None, &cut), vec!["Your turn before this one was cut short.\n\nhello\n\nIts files, on this computer:\n- /tmp/bridge-media/x/cat.png (image/png, 3 bytes)"]);
+    }
+
+    fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
+        session_of(cfg, &ts.agent, &ts.fragment, &format!("turn {}", ts.turn), mind)
     }
 
     fn config() -> GooseConfig {

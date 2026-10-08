@@ -1029,8 +1029,8 @@ mod tests {
             d.vision_model = m.map(str::to_string);
             d
         };
-        let refused = checked(with(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"))).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains("vision_model: the vision model \"@cf/deepseek-ai/deepseek-v4-flash-0731\" is not in the price book"), "{refused}");
+        let refused = checked(with(Some("@cf/moonshotai/kimi-k2.6"))).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("vision_model: the vision model \"@cf/moonshotai/kimi-k2.6\" is not in the price book"), "{refused}");
         assert!(checked(with(Some("@cf/zai-org/glm-5.3-flash"))).is_ok());
         assert!(checked(with(None)).is_ok());
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();

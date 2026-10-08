@@ -40,7 +40,8 @@ container starts until someone asks again).
 
 - **Wakes:** a record on a channel one of its agents subscribed to with
   `wake: true`; an open port tab; a pre-wake (a page opened a subscribed
-  fragment, or someone started typing there: it starts at once and stops
+  fragment, or someone started typing there, which their page says as
+  presence on its socket: it starts at once and stops
   after 60 s if nothing arrives; never by its own agents' sockets, which
   its guest opens as it boots and again after one drops, so its own guest
   never starts it again as it goes to sleep); one of its agents added as
@@ -376,7 +377,9 @@ expires within 30 days. The container application is the deployment's
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model through AI Gateway, streams its answer back, and
-  settles the final usage (lesson 7).
+  settles the final usage (lesson 7). A streamed call passes over a busy
+  model to its tier's next (Workers AI's `rejectIfBusy`), and a slow one is
+  hedged with a second (docs/api.md, Models).
 - `POST http://model.fragment.internal/v1/decide`, a Clef decision (a
   job's `ai.decide` input: `{model?, state, questions, images?}`, `model`
   `clef` or `clef-flash`, the default) with `x-fragment-agent`: the

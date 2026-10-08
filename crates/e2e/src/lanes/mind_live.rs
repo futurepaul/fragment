@@ -29,6 +29,17 @@
 //!    the loop is broken);
 //! 7. the run says its latencies, tool calls and paid calls.
 //!
+//! Between 4 and 5, measured and not checked (docs/optchat.md, "Latency"):
+//! `WORDS.len()` short asks answered in words in thread E,
+//! `HANDS_MEASURED` simple shell hand-offs in thread F with the computer
+//! awake, and two in thread G from asleep: one cold (its task's record
+//! wakes the computer), one whose person opened the mind's page `TYPING`
+//! before (its socket pre-wakes the computer). The run prints each turn's timing (its `turn` record on `log`:
+//! its wait, each model call's first data line and whole answer, its tries
+//! and hedge), each hand-off's marks (the task on `chat`, goose's claim, its
+//! `turn.timing` and steps on `work`, its reply, the report, the follow-up),
+//! and their percentiles (mind_timing.rs).
+//!
 //! A model's words are checked only where the ask fixes them (a name, a
 //! city, a command's output). Every wait is a real model's: generous, and
 //! asked every few seconds.
@@ -41,6 +52,7 @@ use serde_json::{json, Value};
 
 use super::computers::phase;
 use super::ledger::entries;
+use super::mind_timing::{self as timing, Handoff};
 use crate::api::{now_ms, Api};
 use crate::{Need, Suite};
 
@@ -48,10 +60,14 @@ pub const SECTION: &str = "mind-live";
 
 /// The paid calls the run lends the section's person: the turns' model
 /// calls (one a tool round), the compactor's, Clef's sorts and goose's
-/// calls (its screen tools' Clef and vision calls among them); about 40
-/// through the shell hand-off, about 30 more for the browsing two. Above
-/// the run's default budget (60): run it with `--max-paid-calls 100`.
-const PAID_CALLS: u64 = 60;
+/// calls (its screen tools' Clef and vision calls among them), and a hedged
+/// call's second (each its own reservation); about 40 through the shell
+/// hand-off, about 30 for the latency measures (thread G's from asleep
+/// among them), about 30 more for the
+/// browsing two. Above the run's default budget (60): run it with
+/// `--max-paid-calls 120`. Most are cheap: a run costs about $0.1 on
+/// GLM-5.3 Flash.
+const PAID_CALLS: u64 = 120;
 /// The mind's code installed from the release.
 const INSTALL: Duration = Duration::from_secs(90);
 /// A turn answered in words (each real model call takes 3–40 s).
@@ -71,6 +87,22 @@ const RECALL: &str = "What's my sister's name, and where does she live?";
 const WORK: &str = "Use the computer: run `uname -s` and `echo $((6*7))` in the shell and tell me both outputs exactly.";
 const BROWSE: &str = "Use the browser: open https://news.ycombinator.com and tell me the titles of the top 3 stories, exactly.";
 const CLICK: &str = "On the computer: in the browser, scroll to the bottom of the Hacker News page you have open, then use screen_click to click its 'More' link, then tell me the exact URL you're on.";
+/// Short asks a turn answers in words (thread E), each timed.
+const WORDS: [&str; 6] = [
+    "Quick one: what's 7 times 8? Just the number.",
+    "Name a primary colour. One word.",
+    "What's the opposite of cold? One word.",
+    "Spell cat backwards.",
+    "Is the sun a star? Yes or no.",
+    "What's the capital of Japan? One word.",
+];
+/// Simple hand-offs measured with the computer awake (thread F).
+const HANDS_MEASURED: usize = 2;
+/// A computer put to sleep, asleep (its save first).
+const ASLEEP: Duration = Duration::from_secs(180);
+/// How long the person "types" with the mind's page open before a
+/// hand-off from asleep (thread G): its socket pre-wakes the computer.
+const TYPING: Duration = Duration::from_secs(8);
 /// Hacker News's front page, as this process reads it to compare.
 const HN: &str = "https://news.ycombinator.com/";
 /// A front page's titles a report's are compared with: its top this many
@@ -153,10 +185,80 @@ impl Mind<'_> {
         (status["turn"].is_null() && status["queued"] == 0).then_some(said)
     }
 
+    /// `answered`, once the thread holds `n` of the person's messages: the
+    /// answer to the `n`th, not to one before it.
+    fn answered_n(&self, thread: &str, n: usize) -> Option<Vec<Value>> {
+        let said = self.answered(thread)?;
+        (said.iter().filter(|m| m["kind"] == "user").count() >= n).then_some(said)
+    }
+
     /// The thread's newest task (`done`: once it is no longer running).
     fn task(&self, thread: &str, done: bool) -> Option<Value> {
         let task = self.op("tasks", json!({ "thread": thread }))["tasks"].get(0).cloned()?;
         (!done || task["state"] != "running").then_some(task)
+    }
+
+    /// The compactor at work, watched until nothing is left to build or
+    /// `bound` passes: the most pumps at work at once, the most nodes
+    /// ready then, and how long it took (each look a request).
+    fn pumps(&self, bound: Duration) -> (u64, u64, f64) {
+        let t0 = Instant::now();
+        let (mut most, mut ready) = (0, 0);
+        while t0.elapsed() < bound {
+            let st = self.op("status", json!({}));
+            most = most.max(st["pumps"].as_u64().unwrap_or(0));
+            ready = ready.max(st["left"].as_u64().unwrap_or(0));
+            if st["left"] == 0 && st["unbuilt"] == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        (most, ready, t0.elapsed().as_secs_f64())
+    }
+
+    /// A channel's records, oldest first (at most 10 pages of 1000).
+    fn records(&self, channel: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut after = 0;
+        for _ in 0..10 {
+            let page = self.api.signed(self.owner, "GET", &format!("/api/f/{}/channels/{channel}?after={after}&limit=1000", self.name), None).ok();
+            let page = page.and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+            let full = page.len() >= 1000;
+            after = page.last().and_then(|r| r["seq"].as_i64()).unwrap_or(after);
+            out.extend(page);
+            if !full {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Each turn's timing, as its `turn` record on `log` says it: its
+    /// thread and the timing.
+    fn turn_timings(&self) -> Vec<(String, Value)> {
+        self.records("log")
+            .into_iter()
+            .filter(|r| r["body"]["type"] == "turn" && r["body"]["timing"].is_object())
+            .map(|r| (r["body"]["thread"].as_str().unwrap_or("").to_string(), r["body"]["timing"].clone()))
+            .collect()
+    }
+
+    /// A hand-off's marks (mind_timing.rs): its ask, its task on `chat`,
+    /// goose's claim, steps, timing and reply, the report and the follow-up.
+    fn handoff(&self, task: &Value) -> Handoff {
+        let (id, turn, thread) = (task["id"].as_str().unwrap_or(""), task["turn"].as_str().unwrap_or(""), task["thread"].as_str().unwrap_or(""));
+        let said = self.messages(thread);
+        let opened_at = task["i"].as_i64().unwrap_or(i64::MAX);
+        let asked = said.iter().rfind(|m| m["kind"] == "user" && m["i"].as_i64().is_some_and(|i| i < opened_at)).and_then(|m| m["at"].as_i64());
+        let reported_i = said.iter().find(|m| m["kind"] == "work" && m["task"] == id).and_then(|m| m["i"].as_i64());
+        let followed = reported_i.and_then(|r| said.iter().find(|m| m["kind"] == "talk" && m["i"].as_i64().is_some_and(|i| i > r))).and_then(|m| m["at"].as_i64());
+        let chat = self.records("chat");
+        let published = chat.iter().find(|r| r["seq"] == task["seq"]).and_then(|r| r["at"].as_i64());
+        let replied = chat.iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["at"].as_i64());
+        let work: Vec<Value> = self.records("work").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+        let at = |kind: &str| work.iter().find(|r| r["body"]["kind"] == kind).and_then(|r| r["at"].as_i64());
+        let goose = work.iter().find(|r| r["body"]["kind"] == "turn.timing").map(|r| r["body"].clone()).unwrap_or(Value::Null);
+        Handoff { asked, published, claimed: at("turn.start"), first_step: at("turn.step"), replied, reported: task["ended"].as_i64(), followed, goose }
     }
 }
 
@@ -215,6 +317,68 @@ fn turn_secs(said: &[Value]) -> f64 {
     (at("talk") - at("user")) as f64 / 1000.0
 }
 
+/// The run's latency (docs/optchat.md, "Latency"), printed: each turn's
+/// timing by thread, the turns answered in words, the mind's model calls'
+/// first data line and whole answer, each hand-off's marks, goose's model
+/// calls, and the hedges the ledger holds.
+fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &[(String, Handoff)], identity: &str, api: &Api) {
+    let label = |t: &str| threads.iter().find(|(id, _)| id.as_str() == t).map_or("?", |(_, l)| *l);
+    let turns = m.turn_timings();
+    for (thread, t) in &turns {
+        println!("      (turn in {}: {})", label(thread), timing::turn_line(t));
+    }
+    let words: Vec<f64> = turns.iter().filter(|(_, t)| timing::in_words(t)).filter_map(|(_, t)| timing::turn_total(t)).collect();
+    let calls: Vec<(Option<f64>, Option<f64>, bool)> = turns.iter().flat_map(|(_, t)| timing::calls(t)).collect();
+    let firsts: Vec<f64> = calls.iter().filter_map(|c| c.0).collect();
+    let wholes: Vec<f64> = calls.iter().filter_map(|c| c.1).collect();
+    let hedged = calls.iter().filter(|c| c.2).count();
+    let (fell, of) = timing::fell_back(&turns.iter().map(|(_, t)| t).collect::<Vec<_>>());
+    // simple ones, the computer awake (not D's browsing, nor G's from asleep)
+    let reports: Vec<f64> = handoffs.iter().filter(|(l, _)| l.starts_with('C') || l.starts_with('F')).filter_map(|(_, h)| h.total()).collect();
+    let follows: Vec<f64> = handoffs.iter().filter_map(|(_, h)| h.follow_up()).collect();
+    let goose: Vec<f64> = handoffs.iter().flat_map(|(_, h)| h.goose_calls()).collect();
+    for (l, h) in handoffs {
+        println!("      (hand-off {l}: {})", h.line());
+    }
+    // a message said (its `say` record) to logged (its `hear` step): the
+    // trigger, its run's start, and the steps before it
+    let said: Vec<(String, i64)> = m.records("say").iter().filter_map(|r| Some((r["body"]["text"].as_str()?.to_string(), r["at"].as_i64()?))).collect();
+    let mut heard = Vec::new();
+    for (id, _) in threads {
+        for msg in m.messages(id).iter().filter(|x| x["kind"] == "user") {
+            if let (Some(text), Some(at)) = (msg["text"].as_str(), msg["at"].as_i64()) {
+                if let Some((_, s)) = said.iter().find(|(t, _)| t == text) {
+                    heard.push((at - s) as f64 / 1000.0);
+                }
+            }
+        }
+    }
+    println!("      (said → logged, the trigger and the steps before hear: {})", timing::stats(&heard));
+    let holds = entries(api, identity, "");
+    let hedges = holds.iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains("hedge"))).count();
+    // which models answered (a fallback's when a tier's own was busy), the ledger's rows
+    let mut by_model: std::collections::BTreeMap<String, usize> = Default::default();
+    for e in &holds {
+        if let Some(m) = e["entry"]["end"]["usage"]["model"].as_str() {
+            *by_model.entry(m.rsplit('/').next().unwrap_or(m).to_string()).or_default() += 1;
+        }
+    }
+    println!(
+        "      (latency: turns in words, logged→answered {}; by the page's clock (ask→talk) {}; the mind's model calls, first data line {}, whole {}, {hedged} of {} hedged, {fell} of {of} answered on a fallback (their own model busy); \
+         simple hand-offs ask→report {}; follow-ups report→talk {}; goose's model calls (wait before each step, and its last) {}; \
+         the ledger: {hedges} hedge holds of {} reservations, settled by model {by_model:?})",
+        timing::stats(&words),
+        timing::stats(word_secs),
+        timing::stats(&firsts),
+        timing::stats(&wholes),
+        calls.len(),
+        timing::stats(&reports),
+        timing::stats(&follows),
+        timing::stats(&goose),
+        holds.len()
+    );
+}
+
 fn thread_id() -> String {
     format!("t_{}", fragment_devstack::random_hex(8))
 }
@@ -238,7 +402,7 @@ fn first_run(s: &Suite, api: &Api, owner: &Keys) -> Result<(Value, String)> {
     let of = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent.as_str()).cloned()).unwrap_or_default();
     let identity = of["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(assigned.status == 200 && identity.starts_with("id:"), "assigning the agent: {assigned}");
-    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium", "color": color_of(&identity) }))?);
+    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "cheap", "color": color_of(&identity) }))?);
     let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(&username) }, { "path": "agent.json", "text": agent_json }] });
     let r = api.signed(owner, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
     anyhow::ensure!(r.status == 200, "the agent's SOUL: {r}");
@@ -335,6 +499,69 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
     let said_c = within(REPLY, || m.answered(&c).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == task.as_str())));
     let follow = said_c.as_deref().map_or(0.0, turn_secs);
     s.ok("the report comes back to thread C, and the mind follows up there", said_c.is_some(), json!(m.messages(&c)));
+    let mut handoffs: Vec<(String, Handoff)> = vec![("C".into(), m.handoff(&ended))];
+
+    // ---- latency, measured: asks answered in words (thread E), then simple
+    // hand-offs with the computer awake (thread F)
+    let e = thread_id();
+    let mut word_secs = Vec::new();
+    for (k, ask) in WORDS.iter().enumerate() {
+        m.say(&format!("e{k}"), &e, ask, None)?;
+        match within(REPLY, || m.answered_n(&e, k + 1)) {
+            Some(said) => word_secs.push(turn_secs(&said)),
+            None => break,
+        }
+    }
+    let f = thread_id();
+    for k in 0..HANDS_MEASURED {
+        let before = m.task(&f, false).and_then(|t| t["id"].as_str().map(str::to_string));
+        let awake = phase(api, &owner, &id);
+        m.say(&format!("f{k}"), &f, &format!("Use the computer: run `echo hello-{k}` in the shell and tell me its output exactly."), Some(builder.as_str()).filter(|b| !b.is_empty()))?;
+        let opened = within(REPLY, || m.task(&f, false).filter(|t| t["id"].as_str() != before.as_deref()));
+        let Some(opened) = opened else {
+            println!("      (thread F, hand-off {k}: no task opened; the computer {awake})");
+            break;
+        };
+        let done = within(HANDOFF, || m.task(&f, true).filter(|t| t["id"] == opened["id"])).unwrap_or(opened.clone());
+        let _ = within(REPLY, || m.answered(&f).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == done["id"])));
+        let h = m.handoff(&done);
+        println!("      (thread F, hand-off {k} (the computer {awake} when asked), {}: {})", done["state"].as_str().unwrap_or("?"), h.line());
+        handoffs.push((format!("F{k}"), h));
+    }
+    // the compactor after them: its pumps at work at once (up to 8)
+    let (most, ready, took) = m.pumps(Duration::from_secs(60));
+    println!("      (the compactor after thread F: up to {most} pumps at work at once, with up to {ready} nodes ready, all built in {took:.1} s)");
+
+    // ---- from asleep, measured: a hand-off to a computer asleep, cold (the
+    // task's record wakes it), then one whose person opened the mind's page
+    // and typed a while first (the page's socket pre-wakes it)
+    let g = thread_id();
+    for (k, prewoken) in [(0, false), (1, true)] {
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        if within(ASLEEP, || (phase(api, &owner, &id) == "asleep").then_some(())).is_none() {
+            println!("      (thread G, hand-off {k}: the computer did not sleep: {})", phase(api, &owner, &id));
+            break;
+        }
+        let page = if prewoken { crate::api::Socket::open(api, &m.name, "__live", Some(&owner), None).ok() } else { None };
+        if prewoken {
+            std::thread::sleep(TYPING);
+        }
+        let before = m.task(&g, false).and_then(|t| t["id"].as_str().map(str::to_string));
+        let woke = phase(api, &owner, &id);
+        m.say(&format!("g{k}"), &g, &format!("Use the computer: run `echo woken-{k}` in the shell and tell me its output exactly."), Some(builder.as_str()).filter(|b| !b.is_empty()))?;
+        let opened = within(REPLY, || m.task(&g, false).filter(|t| t["id"].as_str() != before.as_deref()));
+        let done = opened.and_then(|o| within(HANDOFF, || m.task(&g, true).filter(|t| t["id"] == o["id"])));
+        let Some(done) = done else {
+            println!("      (thread G, hand-off {k}: no report)");
+            break;
+        };
+        let _ = within(REPLY, || m.answered(&g).filter(|said| said.iter().any(|x| x["kind"] == "work" && x["task"] == done["id"])));
+        let h = m.handoff(&done);
+        let how = if prewoken { format!("its page open {TYPING:?} before the ask (pre-woken: {woke})") } else { format!("cold: {woke}") };
+        println!("      (thread G, hand-off {k} from asleep, {how}, {}: {})", done["state"].as_str().unwrap_or("?"), h.line());
+        handoffs.push((format!("G{k}"), h));
+        drop(page);
+    }
 
     // ---- thread D: Builder hands browsing to goose
     let d = thread_id();
@@ -392,7 +619,12 @@ pub fn mind_live(s: &mut Suite, api: &Api) -> Result<()> {
         println!("      (thread D, a measurement: no click asked: the browsing hand-off's report never reached the thread)");
     }
 
+    if ended_d.is_object() {
+        handoffs.push(("D".into(), m.handoff(&ended_d)));
+    }
+
     // ---- what it took
+    latency(&m, &[(&a, "A"), (&b, "B"), (&c, "C"), (&d, "D"), (&e, "E"), (&f, "F"), (&g, "G")], &word_secs, &handoffs, &identity, api);
     let (models, ai_steps) = (entries(api, &identity, "aig:").len(), entries(api, &identity, "step:").len());
     println!(
         "      (mind-live: thread A answered in {reply_a:.1} s; settled {settle:.0} s later; thread B answered in {reply_b:.1} s with {looked} zoom/search calls; \

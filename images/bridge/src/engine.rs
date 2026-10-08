@@ -1029,7 +1029,7 @@ impl Engine {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
-                Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
+                Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::Timing { turn, .. } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Connected(_) | Event::Say { .. } => None,
             }
         };
@@ -1088,6 +1088,11 @@ impl Engine {
                     self.dirty = true;
                     crate::ev!("turn.asked", { "turn": turn });
                 }
+            }
+            Event::Timing { turn, timing } => {
+                let t = &self.state.turns[&turn];
+                let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+                self.post(&agent, &fragment, records::WORK, records::work_id(&turn, "timing"), records::turn_timing(&turn, &timing), Vec::new());
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
             Event::Say { agent, fragment, text } => {

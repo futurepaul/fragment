@@ -36,6 +36,8 @@ pub struct Log {
     pub sessions: Vec<Value>,
     /// Each `session/prompt`'s text blocks.
     pub prompts: Vec<Vec<String>>,
+    /// The session each `session/prompt` named, in order.
+    pub prompted: Vec<String>,
     /// Each system prompt set (`_goose/unstable/session/system-prompt/set`'s params).
     pub system: Vec<Value>,
     /// The sessions closed (`session/close`).
@@ -108,6 +110,7 @@ async fn goose(io: tokio::io::DuplexStream, log: Arc<Mutex<Log>>, mut killed: on
                         let blocks: Vec<String> = m["params"]["prompt"].as_array().map(|b| b.iter().map(|b| b["text"].as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
                         let said = blocks.last().and_then(|t| t.lines().map(str::trim).rfind(|l| !l.is_empty())).unwrap_or("").to_string();
                         log.lock().unwrap().prompts.push(blocks);
+                        log.lock().unwrap().prompted.push(session.clone());
                         match said.as_str() {
                             "die" => return,
                             "slow" => {

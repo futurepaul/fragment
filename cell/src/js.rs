@@ -537,11 +537,17 @@ pub fn transaction_sync<T: 'static>(state: &JsValue, f: impl FnOnce() -> CellRes
 /// `env.AI.run(model, input, {gateway, returnRawResponse: true})`: the
 /// model's answer as the vendor sent it, through the named AI Gateway
 /// (spike S4: the binding is pre-authenticated, so the Worker holds no
-/// token). `options` is `{gateway: {id, metadata, collectLog}, extraHeaders}`.
-pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, options: &serde_json::Value) -> CellResult<worker::Response> {
+/// token). `options` is `{gateway: {id, metadata, collectLog}, extraHeaders}`;
+/// `signal` aborts the call, its answer's body too (the binding passes it
+/// to its fetch).
+pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, options: &serde_json::Value, signal: Option<&worker::AbortSignal>) -> CellResult<worker::Response> {
     let ai = binding(env, "AI", "ai")?;
     let opts = to_js(options);
     set(opts.unchecked_ref::<Object>(), "returnRawResponse", true);
+    if let Some(signal) = signal {
+        let signal: &worker::web_sys::AbortSignal = signal;
+        set(opts.unchecked_ref::<Object>(), "signal", signal.clone());
+    }
     let out = await_js(call(&ai, "run", &[model.into(), to_js(input), opts]), "AI.run").await?;
     let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
     Ok(worker::Response::from(resp))

@@ -64,6 +64,7 @@ export const S = {
   about: null, // the person's about-me
   turns: new Map(), // thread -> { state, error, at }
   drafts: new Map(), // thread -> { text, at }: the main agent's reply as it streams
+  thinking: new Map(), // thread -> { ms, at }: its model thinking, no words yet (a draft's `thinking`)
   said: new Map(), // thread -> the text of its latest `talk`, which a late draft frame repeats
   landed: new Map(), // message i -> the key of what it took the place of (a pending message's; "" for a draft)
   tasks: new Map(), // task id -> { id, thread, text, state, steps, report, started, ended, turn? }
@@ -202,6 +203,8 @@ function onLog(record) {
           if (S.drafts.delete(m.thread)) S.landed.set(m.i, "");
           S.said.set(m.thread, m.text);
         }
+        // a step logged: the next call thinks afresh
+        S.thinking.delete(m.thread);
         const t = S.threads.get(m.thread);
         if (t) {
           if (!(t.last >= m.at)) {
@@ -218,6 +221,7 @@ function onLog(record) {
       if (b.state === "settling") S.said.delete(b.thread);
       if (b.state !== "thinking" && b.state !== "settling") {
         S.drafts.delete(b.thread);
+        S.thinking.delete(b.thread);
         S.stopping.delete(b.thread);
       }
       break;
@@ -260,7 +264,13 @@ function onLogDraft(d) {
   if (typeof d.turn !== "string" || !d.turn.startsWith("turn:")) return;
   const thread = d.turn.slice(5);
   if (typeof d.text !== "string") S.drafts.delete(thread);
-  else {
+  else if (d.text === "" && Number.isFinite(d.thinking)) {
+    // its model is thinking, no words yet, this long so far
+    const turn = S.turns.get(thread);
+    if (turn && turn.state !== "thinking" && turn.state !== "settling") return;
+    S.thinking.set(thread, { ms: d.thinking, at: Date.now() });
+  } else {
+    S.thinking.delete(thread);
     const turn = S.turns.get(thread);
     if (turn && turn.state !== "thinking" && turn.state !== "settling") return;
     if (S.said.get(thread)?.startsWith(d.text)) return;
@@ -404,6 +414,30 @@ export function draftOf(thread) {
     return null;
   }
   return d.text;
+}
+
+/// The seconds its model has been thinking in `thread` with no words yet
+/// (counted on from its last `thinking` draft), or null.
+export function thinkingOf(thread) {
+  const t = S.thinking.get(thread);
+  if (!t) return null;
+  if (Date.now() - t.at > DRAFT_STALE_MS) {
+    S.thinking.delete(thread);
+    return null;
+  }
+  return Math.floor((t.ms + Date.now() - t.at) / 1000);
+}
+
+/// The person is typing to a persona with hands: their computer may start
+/// now (the platform pre-wakes it at presence: decision 39), at most once
+/// in TYPING_EVERY_MS.
+let typedAt = 0;
+const TYPING_EVERY_MS = 20_000;
+export function typing() {
+  const now = Date.now();
+  if (now - typedAt < TYPING_EVERY_MS || typeof F?.presence?.set !== "function") return;
+  typedAt = now;
+  F.presence.set({ typing: now });
 }
 
 export const persona = (id) => S.personas.find((p) => p.id === id) ?? null;

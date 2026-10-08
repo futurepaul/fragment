@@ -32,13 +32,18 @@ pub(crate) struct DraftTo<'a> {
 /// The step an own provider's call is for: `key` keeps what it answered
 /// beside the step (`paid`, settled: nothing is reserved, so nothing
 /// settles), `run` is its run, `payer` whose computer counts it, `tier` the
-/// one it named, and `draft` where its text so far goes.
+/// one it named, and `draft` where its text so far goes; `t0` when this
+/// try began, `tries` and `began` the step's tries and its first's start
+/// (ai.rs `try_begins`), for its `timing`.
 pub(crate) struct StepAt<'a> {
     pub key: &'a str,
     pub run: i64,
     pub payer: &'a str,
     pub tier: Tier,
     pub draft: Option<DraftTo<'a>>,
+    pub t0: i64,
+    pub tries: u32,
+    pub began: i64,
 }
 
 /// What a text step of `t`, naming `tier`, runs on: its payer's choice for
@@ -89,14 +94,18 @@ impl FragmentCell {
     /// One draft of the text so far: its length, when it went (none past a
     /// record's size, or past the fragment's pace).
     fn own_draft(&self, d: &DraftTo<'_>, text: &str) -> Option<usize> {
-        (text.len() <= limits::RECORD_BODY_MAX_BYTES && self.broadcast_draft(d.channel, d.principal, d.turn, Some(text))).then_some(text.len())
+        (text.len() <= limits::RECORD_BODY_MAX_BYTES && self.broadcast_draft(d.channel, d.principal, d.turn, Some(text), None)).then_some(text.len())
     }
 
     /// The step's call on `own` (the module's doc), for the step `at`.
     pub(crate) async fn step_text_own(&self, at: StepAt<'_>, t: &AiText, own: Own, body: Value) -> Result<Value, StepFail> {
-        let StepAt { key, run, payer, tier, draft } = at;
+        let StepAt { key, run, payer, tier, draft, t0, tries, began } = at;
         let role = Role::of_step(t.role.as_deref(), tier).map_err(|u| permanent(u.message()))?;
         let bounded = bounds::bound_hinted(own::OWN, body, true).map_err(|why| permanent(why.message()))?;
+        // the page sees the call begin: thinking, until its words come (as on Fragment's models)
+        if let Some(d) = &draft {
+            self.broadcast_draft(d.channel, d.principal, d.turn, Some(""), Some(0));
+        }
         let opened = super::open(&self.env, &own, &bounded.input).await.map_err(|e| match e.code {
             ErrorCode::InvalidRequest => permanent(e.message),
             _ => StepFail::Retry(e.message),
@@ -110,9 +119,11 @@ impl FragmentCell {
         let mut folded = Stream::answering();
         let (mut sent, mut sent_at) = (0usize, None::<i64>);
         let mut out = vec![];
+        let mut first_ms = None::<i64>;
         // bounded by the model's answer: at most the cap's tokens
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|e| StepFail::Retry(format!("the model's stream broke: {e}")))?;
+            first_ms.get_or_insert_with(|| crate::js::now_ms() - t0);
             tr.push(&chunk, &mut out);
             folded.push(&out, None);
             out.clear();
@@ -148,9 +159,15 @@ impl FragmentCell {
         }
         let counted = tr.counted();
         super::record(&self.env, payer, &own, role, counted).await;
+        // its timing, in a hedged step's shape (ai.rs; docs/optchat.md, "Latency"): one call, never hedged nor laddered
+        let now = crate::js::now_ms();
+        let timing = json!({
+            "first_ms": first_ms, "ms": now - t0, "hedged": false, "won": null, "model": own.model, "passed": [], "thought": 0,
+            "tries": tries, "since_ms": now - began, "at": now, "provider": own.vendor,
+        });
         let result = json!({
             "text": answer.content, "message": own::message_of(&answer, tr.thinking_blocks()), "finish_reason": answer.finish_reason,
-            "model": own.model, "tier": tier, "provider": own.vendor, "usage": counted.map(|c| c.openai()),
+            "model": own.model, "tier": tier, "provider": own.vendor, "usage": counted.map(|c| c.openai()), "timing": timing,
         });
         // kept, and settled: nothing was reserved, so nothing settles it
         self.exec(

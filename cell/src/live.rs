@@ -249,7 +249,7 @@ impl FragmentCell {
     /// A draft to the sockets following its channel, at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
-    pub(crate) fn broadcast_draft(&self, channel: &str, principal: &str, turn: &str, text: Option<&str>) -> bool {
+    pub(crate) fn broadcast_draft(&self, channel: &str, principal: &str, turn: &str, text: Option<&str>, thinking: Option<u64>) -> bool {
         let now = js::now_ms();
         let due = self.live.borrow().draft_at;
         let Some(next) = presence_admit(due, now) else { return false };
@@ -257,7 +257,7 @@ impl FragmentCell {
         if !self.followed(channel) {
             return true;
         }
-        let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now };
+        let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             if state_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
                 send(&ws, &frame);
@@ -402,6 +402,12 @@ impl FragmentCell {
                 st.presence = (!data.is_null()).then_some(data);
                 st.presence_at = at;
                 ws.serialize_attachment(&st)?;
+                // someone here (typing, say) may soon post to a computer's
+                // channel: its computers start now, as a page opening one
+                // starts them (decision 39; at most every 30 s)
+                if st.presence.is_some() {
+                    self.prewake(&st.principal);
+                }
                 // clearing presence that was never shared changes nothing
                 if had || st.presence.is_some() {
                     self.broadcast_presence(Present { id: st.id, principal: st.principal, data: st.presence.unwrap_or(Value::Null) });
