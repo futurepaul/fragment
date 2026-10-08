@@ -334,6 +334,7 @@ impl FragmentCell {
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::Blessed)?;
+            self.del_meta(MetaKey::Capabilities)?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
@@ -352,7 +353,11 @@ impl FragmentCell {
         // a blessed template's fragment runs the release's manifest, with its own face
         let blessed = manifest.template.clone();
         let manifest = match &blessed {
-            None => manifest,
+            // a capability is lent to the platform's own release code alone
+            None => match manifest::own_code(&manifest) {
+                Ok(()) => manifest,
+                Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
+            },
             Some(t) => match blessed::manifest(t).and_then(|b| manifest::on_template(&manifest, &b)) {
                 Ok(m) => m,
                 Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
@@ -387,6 +392,10 @@ impl FragmentCell {
         match manifest.storage {
             Some(n) => self.set_meta(MetaKey::AppDbMax, &n.to_string())?,
             None => self.del_meta(MetaKey::AppDbMax)?,
+        }
+        match manifest.capabilities.as_slice() {
+            [] => self.del_meta(MetaKey::Capabilities)?,
+            caps => self.set_meta(MetaKey::Capabilities, &json!(caps.iter().map(|c| c.as_str()).collect::<Vec<_>>()).to_string())?,
         }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,

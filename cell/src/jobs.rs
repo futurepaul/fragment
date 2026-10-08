@@ -423,7 +423,7 @@ impl FragmentCell {
     /// Workflow binding is shared by every fragment, and a vendor scopes
     /// idempotency keys by account) and across a deleted fragment's
     /// reincarnations.
-    fn run_key(&self, run: i64) -> CellResult<String> {
+    pub(crate) fn run_key(&self, run: i64) -> CellResult<String> {
         let [npub, created_at] = self.metas([MetaKey::Npub, MetaKey::CreatedAt])?;
         let (npub, created_at) = (npub.ok_or_else(|| missing(MetaKey::Npub))?, created_at.ok_or_else(|| missing(MetaKey::CreatedAt))?);
         Ok(format!("{}-{}-r{run}", &npub[5..25], created_at))
@@ -817,11 +817,11 @@ impl FragmentCell {
     }
 
     /// Performs one step of `run`. An unclaimed draft reaches nothing
-    /// outside and pays for nothing (drafts.rs): its fetch and AI steps
-    /// fail for good, and a replay after its claim takes them.
+    /// outside and pays for nothing (drafts.rs): its fetch, AI and owner
+    /// steps fail for good, and a replay after its claim takes them.
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
-        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) {
-            self.draft_refuses("fetches nothing and runs no AI step").map_err(|e| match e.code {
+        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {} | Step::OwnerFragments {} | Step::OwnerCall { .. }) {
+            self.draft_refuses("fetches nothing, runs no AI step, and reaches no other fragment").map_err(|e| match e.code {
                 ErrorCode::Forbidden => permanent(e.message),
                 _ => StepFail::Retry(e.message),
             })?;
@@ -868,6 +868,9 @@ impl FragmentCell {
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
             Step::Blob { sha256 } => self.step_blob(&sha256).await,
+            // as its owner, on their other fragments (owner.rs)
+            Step::OwnerFragments {} => self.step_owner_fragments().await,
+            Step::OwnerCall { fragment, op, input } => self.step_owner_call(run, index, &fragment, &op, input).await,
         }
     }
 

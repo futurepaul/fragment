@@ -215,6 +215,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
+    } else if path.starts_with("owner/") {
+        Ok(Some((crate::owner::OWNER_HEADER, "1")))
     } else if path.starts_with("test/") {
         Ok(None)
     } else {

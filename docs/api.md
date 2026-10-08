@@ -186,7 +186,10 @@ and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. A site request's query is its app's: `for`
-there means nothing to the platform.
+there means nothing to the platform. A blessed template's job that acts
+as its fragment's owner on their other fragments (`job.owner.call`: Jobs
+and triggers) is recorded the same way: the app sees the owner, with the
+fragment's key as `call.agent`, and the records name that key.
 
 An agent shares for its owner (Paul, 2026-10-04: "your agent can share
 on your behalf"; `fragment_core::access::agent_shares`). Sharing is
@@ -974,6 +977,16 @@ the code the fragment's own.
   deploy. A fragment on a blessed template runs with its template's (the
   mind declares 1 GiB: a long history, imported) and declares none of its
   own. Below.
+- `capabilities` (optional): what the platform lends the code beyond its
+  own fragment. The one there is is `"owner"`: its jobs act as its owner
+  on their other fragments (`job.owner.*`, Jobs and triggers, below).
+  Only a blessed template's release declares one: a fragment on a
+  template declares none of its own, and a live commit with code of its
+  own that declares one keeps the last good code and says why in
+  `status.code.error` (`manifest::own_code`). What `owner` lends is a
+  person's reach over all their fragments, so it goes only to the one code
+  none of the fragment's members can change (decision 40); a fork that
+  wants it is refused it.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an identity,
@@ -1457,6 +1470,37 @@ and the AI steps (`job.ai.*`), all above:
   lists hold them (`[{id, principal, data}]`, one a socket that shares
   any). Each is a step, so a run reads what was true when it first took
   it, again on a retry.
+- As the fragment's owner, on their other fragments (the mind's apps:
+  docs/optchat.md): `job.owner.fragments()` and `job.owner.call(fragment,
+  op, input)`. Only a fragment whose live code is a blessed template's
+  release declaring the `owner` capability (Apps, above) takes them, and
+  only while no one but its owner reads or drives it: its visibility is
+  `members`, and its members are its owner and their own agents. Shared
+  with anyone else, what its jobs read of the owner's fragments would show
+  to them, and what they tell it would act as the owner. Each step asks
+  again (`access::owner_lent`); a step refused fails for good, saying why.
+  - `fragments()` → `[{name, title, kind, role, url, operations: [{name,
+    kind, description, input}]}]`: the fragments the owner is a member of
+    (their list, by name, at most 64, this one left out), each with the
+    owner's role there, its canonical URL, and the operations the owner
+    may call there that the MCP servers serve, mutations and jobs too
+    (`fragment_core::mcp::described`: a `description`, an object's input,
+    its schema `input`). One the owner no longer reaches is left out.
+  - `call(fragment, op, input)` → `{result, url}`: one of those operations,
+    in a fragment the owner is a member of, as a call from outside meets
+    it (the owner's role there, the schema, the overdraft; an operation
+    with no description is `unknown_operation`); `input` is an object. It
+    is recorded as an agent's call `for` someone is (Principals and
+    access): the app's `call.principal` is the owner, so what it does is
+    theirs, and `call.agent` is the calling fragment's key, which its
+    ledger row, records, runs and `ops` record name. A mutation or job it
+    runs (not a replay) appends `fragment.called` to the target's
+    `events`, `{op, id, principal, fragment, key}`: "add job:… by id:…
+    through mind.paul", as a connected client's call names the client.
+    Its id is `job:<fragment>-<life>-r<run>-s<step>`, the form of a fetch's
+    `Idempotency-Key`, the same on every try and replay of the step, so
+    the target applies it once; the call is one hop deeper than its run.
+    It is never this fragment's own (that is `job.call`).
 
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which; `job.via` how the run started (`call`, `job`, `cron`, `channel`,
