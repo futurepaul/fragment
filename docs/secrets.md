@@ -25,7 +25,8 @@ the old one still open, and come back resealed, which the cell stores.
 | Secret | Home |
 |---|---|
 | A person's GitHub token, other personal keys | the person's own cell |
-| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in |
+| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in, or (Anthropic's, OpenAI's) to make one model call of theirs on the model route (docs/optchat.md, "Your own models"); never given back to any client |
+| A person's Sign in with ChatGPT tokens (docs/optchat.md, "Your own models") | their computer's cell, sealed for it, beside their own keys: handed over once by `fragment connect chatgpt` (`PUT /api/connections/chatgpt/tokens`), refreshed there (the rotating refresh token replaced in the same row), revoked and forgotten by `DELETE …/tokens`; opened only to make one model call of theirs, or to list their models; never given back to any client, never on the CLI's machine after it hands them over |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
@@ -246,4 +247,14 @@ deployment's AI Gateway, called through the AI binding, and each call is
 reserved and settled on its payer's usage ledger (docs/ledger.md), which
 is what stops a person, not a vendor's key limit. No BYOK (Paul,
 2026-10-02).
+
+*On the optchat spike (branch `claude/optchat`), reversed for a person's
+own models (Paul, 2026-10-08; docs/optchat.md, "Your own models"):* a
+person may give their own Anthropic or OpenAI key, or sign in with
+ChatGPT, and choose its models for their chats, memory and agents.
+Fragment's own models still need no credential. Theirs are kept by their
+computer (the table above), and the model route reads one only to make a
+call of theirs (cell/src/providers/): it is in the cell for that call,
+sent to the vendor's own host alone, never logged, and never in an
+answer. The calls are counted on their computer, never charged.
 

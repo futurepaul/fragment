@@ -800,3 +800,39 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** any report of a downgrade.
 - **Delete when:** both zones send HSTS (at cutover, when they move to
   Cloudflare), checked by the hosted lane.
+
+## A call on Claude does not wait for another writing its marked prefix
+
+- **Observed:** 2026-10-08, a person's own models (docs/optchat.md, "Your
+  own models"; deviation 12). UniiChat §3.3 has a call whose marked prefix
+  another call is writing wait until that call's answer starts, so one
+  writes it and the rest read it. The model route sends each call at
+  once (cell/src/providers/).
+- **Risk:** up to 8 compactions started together on one compaction view
+  each pay Anthropic's cache write (1.25x input) for the same prefix,
+  instead of one write and seven reads (0.1x).
+- **First proof:** the person's counts (`GET /api/computers/{id}/uses`'
+  `models`) showing `cacheWrite` near `cached` for memory while an
+  import compacts.
+- **Delete when:** a call whose last mark's prefix (its hash) another
+  call of the same person is writing waits for that call's first byte,
+  through a lease their computer keeps, with a test that 8 at once write
+  it once.
+
+## goose sends Claude's thinking blocks nowhere
+
+- **Observed:** 2026-10-08, a person's own models on the hands role. An
+  answer's thinking blocks travel on its assistant message as
+  `thinking_blocks` (fragment_core::providers), which the mind sends
+  back with its tool calls; goose's OpenAI provider keeps only OpenAI's
+  fields, so its tool loop sends the history without them.
+- **Risk:** on a Claude model that thinks (Sonnet 5.5, Opus 5.5), each
+  tool step of a hand-off is answered without the reasoning of the step
+  before (Anthropic takes history stripped of thinking blocks: its
+  documented recovery); if Anthropic ever refuses a tool turn without
+  them, goose's hand-offs on Claude fail at their second step.
+- **First proof:** a hosted hand-off with hands on Claude Sonnet 5.5
+  that calls more than one tool (the mind-live section, with Paul's key).
+- **Delete when:** the route keeps an agent's last answer's thinking
+  blocks by its tool calls' ids and puts them back on the next call
+  that carries those calls, or goose's fork passes the field through.

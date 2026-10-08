@@ -1251,9 +1251,15 @@ usage is charged its reservation, `ai.cost-missing`, never nothing). So:
 The steps:
 
 - `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
-  tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
-  tier, usage}`: `model` is a tier, `cheap` (the default) or `medium`
-  (`high` is refused: Models); `max_tokens` is at most 16384;
+  tools?, tool_choice?, draft?, role?})` → `{text, message, finish_reason,
+  model, tier, usage}`: `model` is a tier, `cheap` (the default) or `medium`
+  (`high` is refused: Models); `role` is `chat` or `memory` (unnamed: the
+  tier's, `cheap` memory, else chat), and when the fragment's owner (or an
+  agent of theirs) runs it, the owner's choice for that role runs it
+  instead (Models, "A person's own models": another tier, or their own
+  provider, whose answer adds `provider`, its `model` the provider's, its
+  `usage` that provider's counts, and is charged nothing);
+  `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
   - `messages` reach the model as given, an assistant's `tool_calls` and
@@ -1369,6 +1375,34 @@ The same call, as a Rust function the cell's other parts make
 (`models::complete`: the payer, the agent, the fragment, the tier, the
 body, and whether it streams), is the computer's model intercept from
 phase 4.
+
+#### A person's own models (docs/optchat.md, "Your own models")
+
+A person chooses a model for each role: `chat`, `memory` (a job's text
+step names its role, or its tier says it: AI, above) and `hands` (their
+agents' calls on the route above). Each is Fragment's (`cheap`, GLM-5.3
+Flash, the default, kept as no choice; or `medium`) or a model of a
+provider the deployment offers (its catalog's `own` row: `anthropic`, or
+`openai` for both `openai` and `chatgpt`) and they connected: `anthropic`
+(their API key; Anthropic's Messages API), `openai` (their API key;
+OpenAI's Responses API) or `chatgpt` (their Sign in with ChatGPT tokens;
+the Responses API under its preview's rules). The choice applies to the
+calls they pay for that they or their agents make: a run of the
+fragment's owner or an agent of theirs, every call of an agent of
+theirs on the route; anyone else's runs as it names. A call on an own
+provider is the same OpenAI-shaped call to its client (translated:
+`fragment_core::providers`), reserves nothing and is charged nothing; its
+tokens are counted by the person's computer (`GET
+/api/computers/{id}/uses`' `models`: by provider, model and role, its
+calls, `input`, `cached`, `cacheWrite` and `output`). A provider's
+refusal is passed on under its status, in OpenAI's error shape. A
+choice whose provider is no longer connected fails its call, 403
+`not_connected`, saying to connect it again.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/models` | a person | → `{roles: {chat?, memory?, hands?: {provider, model}}, fragment: [{id, name, default}], providers: [{provider, state, models: [{id, name}], suggested: {chat, memory, hands}, error?, account?, clientId?, hostId?, expiresAt?}], uses: [ModelUse], computer}`: each offered provider's state (`set` or `not_set` for a key; `connected`, `needs_reauthorization` or `not_connected` for ChatGPT, with its account's email, the client it registered and this host's id for the next sign-in), its models as the provider lists them with the person's credential (`error` when that failed), and what the picker suggests; no credential is ever in it |
+| `PUT /api/models/choices` | a person | `{chat?, memory?, hands?}`, each `{provider, model}` or `null` (the default) → the same as `GET`: a role not named is left; a model is 1 to 128 of letters, digits and `. _ - : / @` (Fragment's: `cheap` or `medium`); a provider not offered is 400, one not connected 403 `not_connected`; kept by the person's computer (made first: 404) |
 
 ### Ledger (docs/ledger.md)
 
@@ -1769,6 +1803,8 @@ the computer's swap, each with a placeholder of its own
 | `POST /api/connections/{provider}/authorize` | a person | → `{provider, url}`: Pipes' consent, for the person's browser; followed, the account is connected. A provider not offered is 404, one that is no connection 400 |
 | `PUT /api/connections/{provider}/key` | a person | `{key}` → `{provider, state: "set"}`: the person's own key for an `own` provider, 1 to 4096 printable characters with no space, kept sealed by their computer (made first: 404 without one) and swapped in for their agents' placeholders. Any other provider is 400 |
 | `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}`: the key is gone; their agents' guests are given it no more |
+| `PUT /api/connections/chatgpt/tokens` | a person (`fragment connect chatgpt`) | `{client_id, access_token, refresh_token, expires_in, scope, email?}` → the picker (`GET /api/models`): their Sign in with ChatGPT tokens, kept sealed by their computer (made first: 404), which refreshes them; refused (400) unless `scope` grants `chatgpt.tokens.use.direct` and `client_id` is an issued one. Offered when the catalog has an `openai` row. Read only by the model route, for a call (Models, "A person's own models") |
+| `DELETE /api/connections/chatgpt/tokens` | a person | → the picker and `revoked`: the refresh token revoked at OpenAI (whether it confirmed) and the tokens forgotten; the client and host ids stay for a later sign-in |
 
 ## The shell (phase 5)
 
@@ -1781,8 +1817,13 @@ address, so a reload stays put (the mind's screen is the hash,
 run at `/`: their default agent on their computer, their mind (`members`,
 the agent an editor), then the shell with the mind open. Its settings hold the person's
 account (username, sign-ins, identity id, picture, `/auth/link` to add
-another sign-in, a POST to `/auth/logout`), their credit and what their
-standing stops, their computer and agents, their skills (decision 17: the
+another sign-in, a POST to `/auth/logout`), their models (Models, "A
+person's own models": a picker for each of Chat, Memory and Hands over
+Fragment's models and each connected provider's, a Claude or OpenAI key
+pasted there, ChatGPT's state with `fragment connect chatgpt` and
+OpenAI's terms, and this month's tokens on their own models; at
+`/settings#models`, where the mind's own settings link), their credit
+and what their standing stops, their computer and agents, their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the
 skills fragment, kind `skills`, at setup beside their default agent),

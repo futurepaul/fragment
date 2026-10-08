@@ -407,6 +407,15 @@ expires within 30 days. The container application is the deployment's
   payer's credit (at
   GLM-5.3 Flash's price, the fee and the margin) until it settles at what
   the model counted; a payer with less is refused it (402).
+- A tier's call runs on its owner's choice for their agents (`hands`;
+  docs/api.md, Models, "A person's own models"): another tier, or a
+  model of their own provider (Claude with their key, ChatGPT through
+  their sign-in, OpenAI with their key), translated from and back to
+  OpenAI's shape on the platform, reserved and charged nothing, counted
+  in the computer's `uses` (`models`). The guest sees the same OpenAI
+  stream; its own `OPENAI_API_KEY` placeholder (an `openai` own key's,
+  when its owner gave one) goes to the intercept and no further, as any
+  auth header does.
 - A call without `x-fragment-agent` is refused (401: no one to bill).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
@@ -450,6 +459,13 @@ the provider's own hosts.
   | `google-places` | operator | `places.googleapis.com` | `X-Goog-Api-Key: {}`, or `?key=` | `GOOGLE_PLACES_API_KEY` (no Google SDK reads one; the goplaces skill's helper does) | $0.035 |
   | `xai` | operator | `api.x.ai` | `Authorization: Bearer {}` | `XAI_API_KEY` (xAI's SDK) | $0.12 |
   | `elevenlabs` | operator | `api.elevenlabs.io` | `xi-api-key: {}` | `ELEVENLABS_API_KEY` (ElevenLabs' SDKs) | $0.15 |
+  | `anthropic` | own | `api.anthropic.com` | `x-api-key: {}` | `ANTHROPIC_API_KEY` (Anthropic's SDKs) | never charged |
+  | `openai` | own | `api.openai.com` | `Authorization: Bearer {}` | `OPENAI_API_KEY` (OpenAI's SDKs) | never charged |
+
+  The two own rows are also the model route's own providers (docs/api.md,
+  Models, "A person's own models"): the key a person gives runs the
+  roles they choose for it, and `openai`'s row offers Sign in with
+  ChatGPT too.
 
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key. `<tag>` is 32 hex of HMAC-SHA256 over

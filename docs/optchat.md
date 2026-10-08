@@ -135,9 +135,17 @@ each with its reason. Everything else in the gist holds as it says.
 11. **A failed node is also tried again after 10 s** by any pump (the
     gist: at the next message, which it also is): an import adds no
     message for hours. A turn gives up on a message that failed 3 times.
-12. **No cache marks:** Workers AI caches prefixes itself; the gist's
-    4-line blocks, its marks and its waiting for a mark's writer are
-    Anthropic's.
+12. **Cache marks only on Claude, and no waiting for a mark's writer:**
+    on Fragment's models (Workers AI) nothing is marked, since Workers AI
+    caches prefixes itself. On a person's Claude ("Your own models",
+    below) the marks are the gist's: the view goes as its own text part
+    hinted `cache: "blocks"`, which the platform's translation sends in
+    blocks of 4 lines with a mark on the last whole one, beside a mark on
+    the system prompt (the tools render before it) and one at the
+    request's end. Its waiting (a call whose marked prefix another call
+    is writing waits for that call's answer to start) is not built: up to
+    8 compactions starting together on one prefix may each write it once
+    (the debt ledger).
 13. **Search stays, for people and other agents:** the page's Search and
     the MCP `search` tool. A turn has none (§5).
 14. **zoom's pages are 24 000 characters**, so a page and its notes stay
@@ -392,9 +400,11 @@ The gist's §6, as a job:
    the step's answer so every call of the turn sees the same one. Then
    the calls, at most 40 a turn:
    - `job.ai.text({model: "medium", messages, tools: CALL_TOOLS,
-     draft: {channel: "log", turn: "turn:<thread>"}})`. The messages are
+     draft: {channel: "log", turn: "turn:<thread>"}, role: "chat"})`. The messages are
      `[system: PROMPT + about-me, user: [the view, the turn's state, its
-     messages joined]]`, then the turn's steps.
+     messages joined]]`, then the turn's steps; the view is its own text
+     part, hinted `cache: "blocks"` ("Your own models": Claude's marks), and
+     an answer's `thinking_blocks` go back with its tool calls.
    - Log each reply `talk`, each tool call `tool` (name and JSON input)
      and each result `echo` (its head and tail, 30 000 characters in all),
      in one `logged` step that publishes them on `log`. When the call
@@ -606,7 +616,7 @@ a time:
   minute, when no pump is at work), `fragment mind import` or the page's
   import following the compactor start another.
 - **One compaction, one node:** `job.ai.text({model: "cheap", messages,
-  tools: CALL_TOOLS, tool_choice: "none"})`, its messages `[system: the
+  tools: CALL_TOOLS, tool_choice: "none", role: "memory"})`, its messages `[system: the
   turns' own, user: [the compaction view up to the node, the task]]`, so
   it reads the turns' cached [tools] [system prompt], and the compactions'
   view from each other (§3.3). The task is §4's verbatim: "Compaction:
@@ -1011,6 +1021,127 @@ beside the mind; opened on its own origin the page shows its own rail.
     is the next page's `after`, `null` at the channel's newest record. A
     step like any other, its answer kept. The mind's zoom reads goose's
     run with it ("Hand-offs", 6).
+11. **A person's own models** ("Your own models", below): a model chosen
+    per role, on Claude (their API key) or ChatGPT (Sign in with ChatGPT,
+    or their OpenAI API key), for every call they pay for that they or
+    their agents make. A job's text step names its role (`role`).
+
+## Your own models (Paul, 2026-10-08)
+
+Paul: Workers AI's GLM has a heavy random latency tail; "I think we
+should add [Sign in with ChatGPT] and byo api key for claude [Max and
+Team plans include monthly API credits for the Claude API], and a model
+picker in settings." This reverses decision 23's "no BYOK" on this
+branch. (Later, and not now: a person's own tokens when operating
+someone else's fragment.) Fragment's own default for every role is
+GLM-5.3 Flash (`cheap`; Paul, 2026-10-08), GLM-5.3 (`medium`) a choice
+beside it. Nothing names the mind: roles, providers and translations
+are the platform's.
+
+- **Roles.** A person chooses a model for each: **chat** (a
+  conversation's turns: the mind's turns and its research), **memory**
+  (summaries and other bulk work: the compactor, topic suggestions) and
+  **hands** (their agents' calls through the model route: goose). Each is
+  Fragment's (`cheap`, the default, kept as no choice; or `medium`, billed
+  on their ledger as before) or a model of a provider they connected.
+  A job's text step names its role (`job.ai.text({…, role: "chat" |
+  "memory"})`); one that names none takes its tier's (`cheap` memory, any
+  other chat). An agent's call (the model route) is hands. `vision` stays
+  the deployment's model.
+- **Whose spending.** The choice applies to every call its person pays
+  for that they or their agents make, whoever's fragment it is in: a
+  step of a run whose principal is the fragment's owner or an agent of
+  theirs, and every call an agent of theirs makes on the route. Anyone
+  else's run in their fragment runs as it names, on Fragment's model,
+  under the fragment's cap (decision 26): a person's own account is never
+  spent by someone else.
+- **Providers** (`fragment_core::providers`, cell/src/providers/; each
+  offered when the deployment's catalog has its `own` row:
+  deploy/example.jsonc):
+  - `anthropic`: the Messages API with the person's API key (Claude Max
+    and Team plans include monthly API credits for the Claude API:
+    support.claude.com/en/articles/15036540). Its models from Anthropic's
+    `/v1/models`; the picker suggests the newest Sonnet for chat and
+    hands and the newest Haiku for memory.
+  - `chatgpt`: OpenAI's Responses API with the person's Sign in with
+    ChatGPT tokens (their plan's usage), under its preview's rules
+    (`store: false`, streamed, no `max_output_tokens` nor sampling
+    fields, the function tools in a namespace, instructions for the
+    system prompt). Its models from `/v1/models` (ChatGPT's list, those
+    marked `list`).
+  - `openai`: the same Responses API with the person's OpenAI API key
+    (top-level function tools, `max_output_tokens`).
+- **Where the credentials live** (docs/secrets.md): the person's computer
+  keeps their own keys (the catalog's `own` rows, `PUT
+  /api/connections/{anthropic,openai}/key`, as before: the swap gives
+  their agents' guests placeholders for them too), their Sign in with
+  ChatGPT tokens (sealed for it, refreshed there, one call at a time: a
+  rotating refresh token is never spent twice) and their choices. A call
+  asks it for the payer's choice for its role and gets the credential
+  with it; the cell holds it for that call alone. No answer gives one
+  back: `GET /api/models` says a provider's state, its models and the
+  account's email.
+- **Sign in with ChatGPT is the CLI's** (its redirect is a loopback on
+  the machine that asked): `fragment connect chatgpt` asks the platform
+  for its host id (`ext_agent_host_id`, a UUID URN the computer makes
+  once) and the client a sign-in before registered, reads OpenAI's
+  discovery, listens on `127.0.0.1:1455` (else a free port) at
+  `/auth/callback`, and opens the authorization (PKCE S256, a fresh
+  state and nonce, the scopes `openid profile email offline_access
+  resource.invoke chatgpt.tokens.use.direct`, the resource
+  `https://api.openai.com/v1`, `client_id=dynamic_agent_client` and
+  `agent_name_hint=Fragment` the first time, the issued client and a
+  `login_hint` after). It exchanges the code, checks the grant (plan
+  usage granted; the ID token's issuer, audience, nonce and expiry, its
+  signature not needed since it came from the token endpoint over TLS:
+  OpenID Connect Core 3.1.3.7) and hands the tokens to the platform (`PUT
+  /api/connections/chatgpt/tokens`), which keeps them as OpenAI's
+  self-hosted VMs page says (signed in locally, the credentials handed to
+  the host, which refreshes them). `--forget` signs out: the platform
+  revokes the refresh token (its discovery's `revocation_endpoint`) and
+  forgets the tokens, keeping the client and host ids for a later sign-in.
+- **The terms** (developers.openai.com/cookbook/articles/sign-in-with-chatgpt,
+  read 2026-10-08): OpenAI offers ChatGPT plan usage to open-source
+  projects, personal projects that run locally, and selected private
+  apps; a paid or remotely hosted app joins its waitlist before offering
+  it to users. Fragment is a hosted app: until it is approved, ChatGPT
+  plan usage is for Paul's own testing on his preview. The settings
+  screen and the CLI say so. (Decision for Paul: the waitlist.)
+- **The translation** (`fragment_core::providers`; host-tested, and run
+  through the vendors' fake: crates/fakes `vendors`): every caller speaks
+  OpenAI's chat completions, so a call is translated to the vendor's API
+  and its stream read back as OpenAI's chunks (text deltas, tool calls,
+  a finish reason, the usage last, `[DONE]`), whole for a client that did
+  not stream. Messages, tools and `tool_choice`, tool calls and their
+  results, images (`image_url`), stop sequences; Anthropic's thinking
+  blocks (each answer's, their text empty: its display `omitted`) travel
+  on the assistant message as `thinking_blocks` and go back as they came
+  with its tool calls (the mind passes them; a client that drops them,
+  goose's OpenAI provider, sends history without them). Upstream is
+  always streamed. A part Anthropic or OpenAI has no way to say (audio)
+  is refused, nothing sent.
+- **The cache** (UniiChat §3.3): on Claude, the gist's marks (deviation
+  12): the system prompt's, the view's last whole 4-line block's (the
+  mind sends the view as its own text part hinted `cache: "blocks"`; a
+  part may carry the hint, generically, and Workers AI never sees it),
+  and the request's end; at most 4. OpenAI caches prefixes itself.
+- **Metered, never charged.** An own provider's call reserves nothing on
+  the payer's ledger and is charged nothing; what it used (calls, input,
+  cached input, cache writes, output, as the vendor counted them) is
+  counted by the payer's computer, by month, provider, model and role
+  (`GET /api/computers/{id}/uses`' `models`), as an own key's swapped
+  calls are counted. A step's answer is kept beside it as any paid
+  step's, so a step tried again never calls again.
+- **The picker** (docs/api.md, Models): settings' **Models**, in the
+  shell's middle column: the three pickers over Fragment's models and
+  each connected provider's (its suggestion for the role first), Claude's
+  key pasted there, OpenAI's key, ChatGPT's state with `fragment connect
+  chatgpt` and the terms, and this month's tokens on the person's own
+  models. The mind's own settings screen (on its own origin, where a
+  page holds no key) links to it.
+- **Not built:** a call waiting for another that is writing its marked
+  prefix (deviation 12); a person's own models when operating someone
+  else's fragment (Paul: later); `vision` on an own provider.
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 
@@ -1191,7 +1322,9 @@ mind's events naming Claude.
 
 - **Config:** `~/.config/fragment/finite-place-optchat.jsonc`. It is
   `finite-place.jsonc` with `computers: {default_image: "goose", images:
-  {goose: {dockerfile: "images/goose/Dockerfile", build_context: "."}}}`.
+  {goose: {dockerfile: "images/goose/Dockerfile", build_context: "."}}}`,
+  and the `anthropic` and `openai` own rows ("Your own models": no
+  secret; a person gives their own).
 - **Deploy:** `cargo xtask deploy --config … --branch claude-optchat`.
   The mind of a person `paul` is at
   `https://mind--paul--claude-optchat.finite.place/`.
@@ -1199,7 +1332,15 @@ mind's events naming Claude.
   - turns run on `medium` (GLM-5.3);
   - the compactor and suggestions run on `cheap` (GLM-5.3 Flash);
   - topics run on `clef-flash`;
-  - goose runs on `medium`.
+  - goose runs on `medium`;
+  - each of these but topics runs instead on the person's own choice
+    for its role, when they made one ("Your own models": turns and
+    research are chat, the compactor and suggestions memory, goose
+    hands). Paul, to try Claude on the preview: paste a Claude API key in
+    Settings, Models (or `PUT /api/connections/anthropic/key`), then pick
+    it for chat, memory and hands; for ChatGPT, run `fragment host
+    https://claude-optchat.finite.place && fragment login`, then `fragment
+    connect chatgpt`, and pick its models.
 - **The live check:** `cargo xtask e2e --hosted --config … --branch
   claude-optchat --only mind-live --max-paid-calls 60`
   (crates/e2e/src/lanes/mind_live.rs).
