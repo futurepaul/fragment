@@ -177,20 +177,23 @@ pub fn began(head: &[u8]) -> bool {
     lines.any(|line| line.starts_with(b"data:"))
 }
 
-/// What the cancelled call of a hedged pair is charged: both sent the same
-/// request, so the same prompt; it is charged the prompt the answer
-/// reported, all of it as uncached input (it may have been routed where
-/// nothing of it was cached: the dearest reading of what its prefill cost),
-/// or, when the answer reported none, the reservation's own bound on it
-/// (the request's bytes as tokens). Never any output: it is cancelled
-/// before its first data line, so nothing it wrote was read. Workers AI
-/// says nothing of a cancelled call's cost; this is the most it can be.
+/// What the cancelled call of a hedged pair is charged. It reports
+/// nothing (it is aborted before its first data line), and Workers AI says
+/// nothing of what an aborted call cost. Both calls sent the same prompt
+/// to the same model at the same moment, under the same prefix-cache
+/// session, so it is charged the prompt the answer reported, split as the
+/// answer's was (its cached tokens at the cached price: the cache's state
+/// for that prompt then), and no output: nothing it wrote was read. When
+/// the answer reported no usage, the reservation's own bound on the prompt
+/// (the request's bytes as tokens, uncached). (Every token uncached would
+/// be the most its prefill could cost, at up to five times the price for
+/// a prefix the cache holds: decision for Paul.)
 pub fn cancelled_usage(model: &str, answer: Option<&Usage>, body_bytes: usize) -> Usage {
-    let input = match answer {
-        Some(Usage::Tokens { input, cached_input, cache_write, .. }) => input + cached_input + cache_write,
-        _ => body_bytes as u64,
+    let (input, cached_input) = match answer {
+        Some(Usage::Tokens { input, cached_input, cache_write, .. }) => (input + cache_write, *cached_input),
+        _ => (body_bytes as u64, 0),
     };
-    Usage::Tokens { model: model.to_string(), input, cached_input: 0, cache_write: 0, output: 0 }
+    Usage::Tokens { model: model.to_string(), input, cached_input, cache_write: 0, output: 0 }
 }
 
 #[cfg(test)]
@@ -287,12 +290,13 @@ mod tests {
         assert!(began(&vec![b':'; HEAD_MAX_BYTES]), "past the head's bound it is taken to have begun");
     }
 
-    /// Goal: the cancelled call is charged the answer's prompt, all of it
-    /// uncached, and never any output; with no usage, the request's bytes.
+    /// Goal: the cancelled call is charged the answer's prompt, split as the
+    /// answer's was, and never any output; with no usage, the request's
+    /// bytes, uncached.
     #[test]
     fn the_cancelled_call_pays_its_prompt_and_nothing_more() {
         let answer = Usage::Tokens { model: "m".into(), input: 54, cached_input: 2560, cache_write: 0, output: 300 };
-        assert_eq!(cancelled_usage("m", Some(&answer), 99_999), Usage::Tokens { model: "m".into(), input: 2614, cached_input: 0, cache_write: 0, output: 0 });
+        assert_eq!(cancelled_usage("m", Some(&answer), 99_999), Usage::Tokens { model: "m".into(), input: 54, cached_input: 2560, cache_write: 0, output: 0 });
         assert_eq!(cancelled_usage("m", None, 12_000), Usage::Tokens { model: "m".into(), input: 12_000, cached_input: 0, cache_write: 0, output: 0 });
     }
 }

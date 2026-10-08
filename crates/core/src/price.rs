@@ -256,7 +256,13 @@ pub struct PriceBook {
 /// read 2026-10-07) and caches nothing: every input class is its input
 /// price, its output free. A deployment whose ledgers already hold book 1
 /// takes Clef's rows by naming a newer `price_book_version`.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
+///
+/// The tiers' fallbacks when their model is busy (crate::models::ladder),
+/// from their Workers AI catalog pages (read 2026-10-08): DeepSeek V4
+/// Flash, and Gemma 4 26B A4B, which names no cached price (its cached
+/// tokens are its input's). A deployment whose ledgers hold an older book
+/// takes them by naming a newer `price_book_version`.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 7] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
@@ -267,6 +273,10 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
     ("@cf/cloudflare/clef", TokenPrices { input: 240_000, cached_input: 240_000, cache_write: 240_000, output: 0 }),
     // $0.09 per million input tokens
     ("@cf/cloudflare/clef-flash", TokenPrices { input: 90_000, cached_input: 90_000, cache_write: 90_000, output: 0 }),
+    // $0.44 in, $0.014 cached, $1.32 out
+    ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
+    // $0.10 in, $0.30 out
+    ("@cf/google/gemma-4-26b-a4b-it", TokenPrices { input: 100_000, cached_input: 100_000, cache_write: 100_000, output: 300_000 }),
 ];
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
