@@ -113,6 +113,10 @@ impl Container {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
         }
+        // FRAGMENT_DOCKER_CPUS: its CPUs held to a hosted computer's (2)
+        if let Ok(cpus) = std::env::var("FRAGMENT_DOCKER_CPUS") {
+            args.push(format!("--cpus={cpus}"));
+        }
         // its screen's port, on a port of this host's loopback (`port`)
         args.extend(["-p".into(), "127.0.0.1::6080".into()]);
         args.push(tag.into());
@@ -582,6 +586,104 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
     let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
     let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     (code, said, files)
+}
+
+/// Where a new computer's first reply spends its time, phase by phase (a
+/// measurement: it asserts only that the reply comes). The computer runs
+/// as a hosted one does (`Runtime::Hosted`; `FRAGMENT_DOCKER_CPUS=2` holds
+/// it to a hosted computer's 2 vCPU), its gate opened at once (a new
+/// computer has nothing to restore), and "hello" is said the moment its
+/// bridge follows its chat, as the hosted agent-smoke says it at ready.
+/// Each phase is printed from the container's own events, the scripted
+/// model's calls and the fake's records, all stamped in ms since the epoch.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_first_reply_phase_by_phase() {
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        let f = w.fragments.get_mut("juniper.paul").unwrap();
+        f.files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Juniper, a careful gardener.\n"));
+        f.files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"medium"}"#));
+    });
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let now = fragment_bridge::log::now_ms;
+
+    let run = now();
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let started = now();
+    assert!(c.exec(&["touch", "/run/computer/restored"]), "the marker, as the DO touches it");
+    let gate = now();
+    fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let following = now();
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let said = first["at"].as_u64().unwrap_or_else(now);
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    let is = |r: &serde_json::Value, kind: &str| r["body"]["turn"] == turn.as_str() && if kind == "reply" { r["body"].get("kind").is_none() } else { r["body"]["kind"] == kind };
+    fake.until(180_000, "Hermes' first reply", |w| w.records(&chat, "chat").iter().any(|r| is(r, "reply"))).await;
+    fake.until(30_000, "the turn's end", |w| w.records(&chat, "work").iter().any(|r| is(r, "turn.end"))).await;
+    let at_of = |channel: &str, kind: &str| fake.with(|w| w.records(&chat, channel).iter().find(|r| is(r, kind)).and_then(|r| r["at"].as_u64()));
+    let (start, replied, end) = (at_of("work", "turn.start"), at_of("chat", "reply"), at_of("work", "turn.end"));
+
+    let rel = |t: u64| t as i64 - run as i64;
+    let mut lines = vec![];
+    lines.push(format!("{:>7} ms  docker run returned", rel(started)));
+    lines.push(format!("{:>7} ms  the gate opened (marker touched)", rel(gate)));
+    // the container's own events: the boot's and the bridge's
+    let logs = c.logs();
+    for l in logs.lines() {
+        let Ok(e) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+        let (Some(at), Some(name)) = (e["at"].as_u64(), e["event"].as_str()) else { continue };
+        if matches!(name, "relay.op" | "keepalive" | "posted" | "note" | "said" | "relay.narration") {
+            continue;
+        }
+        let mut rest = e.clone();
+        if let Some(o) = rest.as_object_mut() {
+            o.remove("at");
+            o.remove("event");
+        }
+        lines.push(format!("{:>7} ms  {name} {}", rel(at), rest.to_string().chars().take(200).collect::<String>()));
+    }
+    lines.push(format!("{:>7} ms  the fake saw the bridge follow its chat", rel(following)));
+    lines.push(format!("{:>7} ms  \"hello\" said", rel(said)));
+    let calls: Vec<_> = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect();
+    for (i, call) in calls.iter().enumerate() {
+        let tools = call.body["tools"].as_array().map_or(0, Vec::len);
+        let messages = call.body["messages"].as_array().map_or(0, Vec::len);
+        let system = call.body["messages"][0]["content"].as_str().map_or(0, str::len);
+        lines.push(format!("{:>7} ms  model call {} ({}): {} bytes, {tools} tools, {messages} messages, a system prompt of {system} bytes", rel(call.at_ms), i + 1, call.model, call.bytes));
+    }
+    for (what, at) in [("turn.start recorded", start), ("reply recorded", replied), ("turn.end recorded", end)] {
+        lines.push(format!("{:>7} ms  {what}", at.map_or(-1, rel)));
+    }
+    lines.sort_by_key(|l| l.split_whitespace().next().and_then(|n| n.parse::<i64>().ok()).unwrap_or(i64::MIN));
+    lines.insert(0, format!("image {tag}, cpus {}", std::env::var("FRAGMENT_DOCKER_CPUS").unwrap_or_else(|_| "all".into())));
+    let first_call = calls.iter().map(|c| c.at_ms).min();
+    let last_call = calls.iter().map(|c| c.at_ms).max();
+    lines.push(format!(
+        "phases: docker run to gate {} ms; gate to following {} ms; following to said {} ms; said to the first model call {} ms; the last model call to the reply {} ms; said to the reply {} ms; docker run to the reply {} ms; {} model calls, {} bytes in all",
+        gate - run,
+        following - gate,
+        said.saturating_sub(following),
+        first_call.map_or(-1, |t| t as i64 - said as i64),
+        replied.zip(last_call).map_or(-1, |(r, c)| r as i64 - c as i64),
+        replied.map_or(-1, |r| r as i64 - said as i64),
+        replied.map_or(-1, rel),
+        calls.len(),
+        calls.iter().map(|c| c.bytes).sum::<usize>(),
+    ));
+    let out = lines.join("\n");
+    eprintln!("{out}");
+    let name = format!("first-reply-{}-{run}", tag.replace([':', '/'], "-"));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let _ = std::fs::write(dir.join(format!("{name}.txt")), &out);
+    let _ = std::fs::write(dir.join(format!("{name}.calls.json")), serde_json::to_string_pretty(&calls.iter().map(|c| c.body.clone()).collect::<Vec<_>>()).unwrap_or_default());
+    let hermes_logs = c.exec_out(&["sh", "-c", "for f in /data/hermes/logs/*.log /data/hermes/profiles/*/logs/*.log; do echo \"== $f\"; cat \"$f\"; done 2>/dev/null"]);
+    let _ = std::fs::write(dir.join(format!("{name}.hermes.log")), hermes_logs);
+    let _ = std::fs::write(dir.join(format!("{name}.container.log")), logs);
+    assert!(replied.is_some());
 }
 
 /// The Hermes image, running against the fake API and the scripted model,
