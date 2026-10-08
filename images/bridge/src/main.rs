@@ -45,7 +45,7 @@ fn runtime() -> Box<dyn Runtime> {
     match env_or("BRIDGE_RUNTIME", "goose").as_str() {
         "goose" => Box::new(Goose::new(GooseConfig {
             command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
-            args: ["acp", "--with-builtin", "developer"].map(String::from).to_vec(),
+            args: vec!["acp".into(), "--with-builtin".into(), env_or("BRIDGE_GOOSE_BUILTINS", "developer,skills")],
             work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
             home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
             root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
@@ -54,6 +54,8 @@ fn runtime() -> Box<dyn Runtime> {
             tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
             cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
             ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+            desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),
+            skills: env("BRIDGE_GOOSE_SKILLS").is_some_and(|v| v == "1"),
         })),
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),

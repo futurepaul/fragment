@@ -151,6 +151,17 @@ pub struct Page {
     pub next: u64,
 }
 
+/// One file of a fragment at main (`GET /api/f/{name}/files`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub path: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub last_commit_sha: String,
+}
+
 /// The fragment API at `FRAGMENT_API`.
 #[derive(Clone)]
 pub struct Api {
@@ -365,6 +376,35 @@ impl Api {
     pub async fn op(&self, agent: &str, fragment: &str, op: &str, id: &str, input: &Value) -> Result<Value, ApiError> {
         let v: Value = self.json(Method::POST, &format!("/api/f/{}/ops/{}", name(fragment)?, encode(op)), Some(agent), Some(json!({ "id": id, "input": input }))).await?;
         Ok(v["result"].clone())
+    }
+
+    // ---- as an agent acting for a person (`for`: decision 36) ----
+
+    /// `GET /api/fragments?for=`: the fragments the agent reaches acting for
+    /// `person`, each with its kind.
+    pub async fn fragments_for(&self, agent: &str, person: &str) -> Result<Vec<FragmentEntry>, ApiError> {
+        #[derive(Deserialize)]
+        struct A {
+            fragments: Vec<FragmentEntry>,
+        }
+        let a: A = self.json(Method::GET, &format!("/api/fragments?for={}", encode(person)), Some(agent), None).await?;
+        Ok(a.fragments)
+    }
+
+    /// `GET /api/f/{name}/files?for=`: the files at main, a blessed
+    /// template's data among them.
+    pub async fn files_for(&self, agent: &str, fragment: &str, person: &str) -> Result<Vec<FileEntry>, ApiError> {
+        #[derive(Deserialize)]
+        struct A {
+            files: Vec<FileEntry>,
+        }
+        let a: A = self.json(Method::GET, &format!("/api/f/{}/files?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
+        Ok(a.files)
+    }
+
+    /// `GET /api/f/{name}/file?path=&for=`: one file's bytes at main.
+    pub async fn file_for(&self, agent: &str, fragment: &str, person: &str, path: &str, max: usize) -> Result<Bytes, ApiError> {
+        self.call(Method::GET, &format!("/api/f/{}/file?path={}&for={}", name(fragment)?, encode(path), encode(person)), Some(agent), None, max).await
     }
 
     /// `GET /f/{name}/__live`, as the agent.

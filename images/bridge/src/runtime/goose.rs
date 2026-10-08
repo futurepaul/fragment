@@ -12,14 +12,22 @@
 //!   started again at the agent's next turn when none of its turns runs.
 //! - **A fresh session per turn** (`session/new`, cwd `/data/work`), never
 //!   loaded again, and closed when the turn ends (its MCP servers with it):
-//!   nothing of a session carries to the next. For a fragment that answers
-//!   a `view` (a mind), the session's system prompt gets the subagent
-//!   framing and VIEW_DOC (OptChat's spec, §9 and §7.2, "OptChat" read
-//!   "Mind"; the same bytes every turn, so its prefix caches), and its
-//!   prompt is the view, then the task: the turn's note, its text and its
-//!   files. Any other fragment's prompt is the task alone. A mind's session
-//!   also gets `fragment mcp <mind>` (read-only: view, zoom, date, search)
-//!   when the image names its CLI.
+//!   nothing of a session carries to the next. Every session's system
+//!   prompt gets `HANDS` (the computer, its tools, and the `fragment` CLI
+//!   for apps: top of mind), the same bytes every turn so its prefix
+//!   caches. For a fragment that answers a `view` (a mind), it gets the
+//!   subagent framing and VIEW_DOC too (OptChat's spec, §9 and §7.2,
+//!   "OptChat" read "Mind"), and its prompt is the view, then the task:
+//!   the turn's note, its text and its files. Any other fragment's prompt
+//!   is the task alone. A mind's session also gets `fragment mcp <mind>`
+//!   (read-only: view, zoom, date, search) when the image names its CLI.
+//! - **Its tools, on our image** (`desktop`, the image's
+//!   `fragment-desktop`): every session gets the agent's `browser` (its own
+//!   desktop's Chromium, over CDP), `computer` (that desktop: keys, mouse,
+//!   `screen_look`, `screen_click`) and `web` (`web_search`, `web_read`) as
+//!   MCP servers, and its goose runs with `DISPLAY` naming the agent's own
+//!   display. Its skills (runtime/skills.rs: the platform skill, the
+//!   owner's managed set) are installed at each turn's start.
 //! - **What goose says** (`session/update`): message chunks are the draft;
 //!   the words before a tool call are its step's (the draft stops); each
 //!   tool call, once completed or failed, is a step. The prompt's answer is
@@ -107,6 +115,15 @@ whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.";
 
+/// What every session's system prompt adds under goose's own: the
+/// computer, its tools, and fragments top of mind (the platform skill has
+/// the rest: runtime/computer.md).
+pub const HANDS: &str = "You work on your owner's Fragment computer: a Linux machine with your shell, your own desktop and a browser on it, which your owner can watch.
+
+Fragments are how you make things for people: apps, sites, pages, dashboards, trackers, brains. You make, publish and update your owner's fragments with the `fragment` CLI in your shell (it acts as you; no login). Before any app, site, page or fragment work, load the `fragment` skill, then `apps-finite`; give your owner the link to what you made.
+
+Your tools: web_search and web_read read the web fast with no browser: use them first. The browser tools drive the Chromium on your desktop: browser_snapshot reads the page as elements with refs, and you act on refs. The computer tools drive the whole desktop; you read no images, so screen_look asks a vision model what is on the screen and screen_click finds what you describe. If a tool answers human_has_control, your owner has taken over your screen: wait for them.";
+
 #[derive(Debug, Clone)]
 pub struct GooseConfig {
     /// goose (`BRIDGE_GOOSE_BIN`).
@@ -132,6 +149,11 @@ pub struct GooseConfig {
     pub cli: Option<PathBuf>,
     /// The interception CA to append to the system's bundle once it appears.
     pub ca: Option<(PathBuf, PathBuf)>,
+    /// The image's `fragment-desktop` (`BRIDGE_GOOSE_DESKTOP`): each agent's
+    /// desktop, and its browser, computer and web tools; none, no such tools.
+    pub desktop: Option<PathBuf>,
+    /// Whether each turn installs its agent's skills (`BRIDGE_GOOSE_SKILLS`).
+    pub skills: bool,
 }
 
 /// An agent's goose, as a pipe: its stdout, its stdin, and what keeps it
@@ -178,8 +200,8 @@ pub struct Process {
 }
 
 /// The environment an agent's goose runs with (and its tools, which
-/// inherit it).
-pub fn environment(cfg: &GooseConfig, a: &Agent) -> Vec<(String, String)> {
+/// inherit it): `display`, the agent's own desktop's, when it has one.
+pub fn environment(cfg: &GooseConfig, a: &Agent, display: Option<u32>) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = [
         ("GOOSE_PROVIDER", "openai".to_string()),
         ("GOOSE_MODEL", cfg.tier.clone()),
@@ -222,7 +244,29 @@ pub fn environment(cfg: &GooseConfig, a: &Agent) -> Vec<(String, String)> {
             env.push((name.clone(), c.placeholder.clone()));
         }
     }
+    if let Some(n) = display {
+        env.push(("DISPLAY".into(), format!(":{n}")));
+    }
     env
+}
+
+/// The agent's display, as the image's desktop gives it out
+/// (`fragment-desktop display <agent>`): none when the image has no
+/// desktop, or it did not answer.
+fn display_of(cfg: &GooseConfig, a: &Agent) -> Option<u32> {
+    let desktop = cfg.desktop.as_ref()?;
+    let out = std::process::Command::new(desktop).args(["display", &a.fragment]).stdin(std::process::Stdio::null()).output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().parse().ok(),
+        Ok(o) => {
+            crate::ev!("goose.no_display", { "agent": a.fragment, "why": String::from_utf8_lossy(&o.stderr).trim() });
+            None
+        }
+        Err(e) => {
+            crate::ev!("goose.no_display", { "agent": a.fragment, "why": e.to_string() });
+            None
+        }
+    }
 }
 
 /// What an agent's goose was started with that can change while it runs:
@@ -248,7 +292,7 @@ impl Spawn for Process {
         let mut child = tokio::process::Command::new(&cfg.command)
             .args(&cfg.args)
             .current_dir(&cfg.work)
-            .envs(environment(cfg, a))
+            .envs(environment(cfg, a, display_of(cfg, a)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -554,6 +598,8 @@ struct Ctx {
     api: Api,
     spawn: Arc<dyn Spawn>,
     gooses: tokio::sync::Mutex<HashMap<String, Arc<Conn>>>,
+    /// The platform skill, made once from the CLI's (`fragment skill`).
+    platform: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl Ctx {
@@ -587,7 +633,7 @@ async fn run(config: GooseConfig, spawn: Arc<dyn Spawn>, mut io: RuntimeIo) -> R
     if let Some((ca, bundle)) = config.ca.clone() {
         tokio::spawn(trust_ca(ca, bundle));
     }
-    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()) });
+    let ctx = Arc::new(Ctx { config, api, spawn, gooses: tokio::sync::Mutex::new(HashMap::new()), platform: tokio::sync::OnceCell::new() });
     let mut turns: HashMap<String, mpsc::Sender<Heard>> = HashMap::new();
     let mut shutdown = io.shutdown.clone();
     // Each agent's goose starts at its first turn, so turns can be taken now.
@@ -646,10 +692,13 @@ async fn view_of(api: &Api, ts: &TurnStart) -> Option<String> {
     None
 }
 
-/// A mind's sessions' system prompt, appended under goose's own: the
-/// framing and VIEW_DOC, the same bytes every turn.
-pub fn system_prompt() -> String {
-    format!("{FRAMING}\n\n{VIEW_DOC}")
+/// A session's system prompt, appended under goose's own: `HANDS`, and for
+/// a mind the framing and VIEW_DOC; the same bytes every turn.
+pub fn system_prompt(mind: bool) -> String {
+    match mind {
+        true => format!("{HANDS}\n\n{FRAMING}\n\n{VIEW_DOC}"),
+        false => HANDS.to_string(),
+    }
 }
 
 /// A turn's prompt, as its text blocks: for a mind (a fragment with a
@@ -671,10 +720,16 @@ pub fn prompt(view: Option<&str>, ts: &TurnStart) -> Vec<String> {
     blocks
 }
 
-/// The session a turn runs in: `fragment mcp <mind>` among its tools for
-/// a mind, when the image has the CLI.
+/// The session a turn runs in: the agent's browser, computer and web tools
+/// when the image has its desktop; `fragment mcp <mind>` among them for a
+/// mind, when the image has the CLI.
 fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
     let mut servers = Vec::new();
+    if let Some(desktop) = &cfg.desktop {
+        for (name, args) in [("browser", vec!["mcp", "browser", ts.agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", ts.agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
+            servers.push(json!({ "name": name, "command": desktop, "args": args, "env": [] }));
+        }
+    }
     if let (true, Some(cli)) = (mind, &cfg.cli) {
         let env = [("FRAGMENT_AS_AGENT", ts.agent.fragment.as_str()), ("FRAGMENT_FOR", ts.agent.owner.as_str()), ("FRAGMENT_API", cfg.api.as_str())];
         servers.push(json!({
@@ -688,19 +743,51 @@ fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
     json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": format!("turn {}", ts.turn) } })
 }
 
+/// The platform skill: the computer's page and the CLI's own skill, made
+/// once (none when the image has no CLI, or it printed no skill).
+async fn platform_skill(ctx: &Ctx) -> Option<String> {
+    let made = ctx.platform.get_or_init(|| async {
+        let cli = ctx.config.cli.as_ref()?;
+        let out = tokio::process::Command::new(cli).arg("skill").stdin(std::process::Stdio::null()).output().await.ok()?;
+        match super::skills::platform_skill(&String::from_utf8_lossy(&out.stdout)) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                crate::ev!("goose.no_platform_skill", { "why": e });
+                None
+            }
+        }
+    });
+    made.await.clone()
+}
+
+/// Installs the turn's agent's skills, waiting at most `INSTALL_MS_MAX`:
+/// what was installed before serves a turn whose install is slow.
+async fn install_skills(ctx: &Ctx, ts: &TurnStart) {
+    let platform = platform_skill(ctx).await;
+    let (dir, manifest) = super::skills::dirs(&ctx.config.root, &ts.agent.fragment);
+    let install = super::skills::install(&ctx.api, &ts.agent, &dir, &manifest, platform.as_deref());
+    match tokio::time::timeout(Duration::from_millis(super::skills::INSTALL_MS_MAX), install).await {
+        Ok(Ok(d)) => crate::ev!("goose.skills", { "agent": ts.agent.fragment, "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills }),
+        Ok(Err(e)) => crate::ev!("goose.skills_failed", { "agent": ts.agent.fragment, "error": e.to_string() }),
+        Err(_) => crate::ev!("goose.skills_failed", { "agent": ts.agent.fragment, "error": "not done in time: the next turn finishes it" }),
+    }
+}
+
 /// The turn's session, made: its goose, its id, its updates, and its prompt.
 async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>), String> {
-    let view = view_of(&ctx.api, ts).await;
+    let (view, ()) = tokio::join!(view_of(&ctx.api, ts), async {
+        if ctx.config.skills {
+            install_skills(ctx, ts).await;
+        }
+    });
     let conn = ctx.goose_for(&ts.agent).await.map_err(|e| format!("goose: {e}"))?;
     let made = conn.call("session/new", new_session(&ctx.config, ts, view.is_some()), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
     let made = made.map_err(|e| format!("goose made no session: {e}"))?;
     let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
-    if view.is_some() {
-        let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt() });
-        if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
-            close(&conn, &session);
-            return Err(format!("goose took no system prompt: {e}"));
-        }
+    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(view.is_some()) });
+    if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
+        close(&conn, &session);
+        return Err(format!("goose took no system prompt: {e}"));
     }
     let updates = conn.follow(&session);
     crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len) });
@@ -1047,9 +1134,11 @@ mod tests {
     /// a cut turn's note and its files are said around the text.
     #[test]
     fn the_prompt() {
-        let sys = system_prompt();
-        assert!(sys.starts_with("You are a subagent of Mind, an AI agent") && sys.contains("The view: the whole chat between Mind") && !sys.contains("OptChat"), "{sys}");
-        assert_eq!(system_prompt(), sys, "the same bytes every turn");
+        let sys = system_prompt(true);
+        assert!(sys.starts_with(HANDS) && sys.contains("You are a subagent of Mind, an AI agent") && sys.contains("The view: the whole chat between Mind") && !sys.contains("OptChat"), "{sys}");
+        assert_eq!(system_prompt(true), sys, "the same bytes every turn");
+        assert_eq!(system_prompt(false), HANDS, "any other turn: the computer and its tools alone");
+        assert!(HANDS.contains("`fragment` CLI") && HANDS.contains("load the `fragment` skill"), "fragments, top of mind");
         assert_eq!(prompt(Some("<chat>\n0+1|user: hi\n</chat>"), &ts("Find my notes")), vec!["<chat>\n0+1|user: hi\n</chat>", "Find my notes"]);
         assert_eq!(prompt(None, &ts("hello")), vec!["hello"]);
         let mut cut = ts("hello");
@@ -1059,7 +1148,7 @@ mod tests {
     }
 
     fn config() -> GooseConfig {
-        GooseConfig { command: "/usr/local/bin/goose".into(), args: vec![], work: "/data/work".into(), home: "/data/work/home".into(), root: "/tmp/goose".into(), api: "http://api.fragment.internal".into(), model: "http://model.fragment.internal".into(), tier: "medium".into(), cli: Some("/usr/local/bin/fragment".into()), ca: None }
+        GooseConfig { command: "/usr/local/bin/goose".into(), args: vec![], work: "/data/work".into(), home: "/data/work/home".into(), root: "/tmp/goose".into(), api: "http://api.fragment.internal".into(), model: "http://model.fragment.internal".into(), tier: "medium".into(), cli: Some("/usr/local/bin/fragment".into()), ca: None, desktop: None, skills: false }
     }
 
     /// Goal: a mind's session gets `fragment mcp <mind>` as the agent, any
@@ -1076,6 +1165,24 @@ mod tests {
         assert_eq!(new_session(&no_cli, &ts("x"), true)["mcpServers"], json!([]));
     }
 
+    /// Goal: on an image with a desktop, every session gets the agent's own
+    /// browser, computer and web tools (the browser's and the computer's
+    /// naming the agent), a mind's its view's besides.
+    #[test]
+    fn every_session_has_the_desktops_tools() {
+        let mut cfg = config();
+        cfg.desktop = Some("/usr/local/bin/fragment-desktop".into());
+        let s = new_session(&cfg, &ts("x"), false);
+        let servers = s["mcpServers"].as_array().unwrap();
+        let named: Vec<(&str, Vec<&str>)> = servers.iter().map(|s| (s["name"].as_str().unwrap(), s["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect())).collect();
+        assert_eq!(named, vec![("browser", vec!["mcp", "browser", "hands.paul"]), ("computer", vec!["mcp", "computer", "hands.paul"]), ("web", vec!["mcp", "web"])]);
+        assert!(servers.iter().all(|s| s["command"] == "/usr/local/bin/fragment-desktop"));
+        assert_eq!(new_session(&cfg, &ts("x"), true)["mcpServers"].as_array().unwrap().len(), 4, "a mind's view too");
+        let env: HashMap<String, String> = environment(&cfg, &ts("x").agent, Some(12)).into_iter().collect();
+        assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":12"), "its goose and tools on its own display");
+        assert!(!environment(&cfg, &ts("x").agent, None).iter().any(|(k, _)| k == "DISPLAY"));
+    }
+
     /// Goal: an agent's goose calls the model as the agent, its shell's CLI
     /// acts as it, its credentials are in their variables, and nothing of
     /// goose's own compacts, names, asks or reports.
@@ -1083,7 +1190,7 @@ mod tests {
     fn an_agents_environment() {
         let mut a = ts("x").agent;
         a.credentials = vec![crate::runtime::Credential { provider: "perplexity".into(), kind: "operator".into(), env: vec!["PERPLEXITY_API_KEY".into()], placeholder: "fck_perplexity_00".into(), hosts: vec![] }];
-        let env: HashMap<String, String> = environment(&config(), &a).into_iter().collect();
+        let env: HashMap<String, String> = environment(&config(), &a, None).into_iter().collect();
         for (k, v) in [
             ("OPENAI_HOST", "http://model.fragment.internal"),
             ("OPENAI_CUSTOM_HEADERS", "x-fragment-agent=hands.paul"),
