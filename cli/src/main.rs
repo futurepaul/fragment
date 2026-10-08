@@ -66,17 +66,8 @@ enum Cmd {
         #[arg(long)]
         no_browser: bool,
     },
-    /// Who the host says you are: your identity, username, this key, your other keys
+    /// Who the host says you are: your identity, email, this key, your other keys
     Whoami,
-    /// Your username, chosen once: your fragments live at
-    /// <label>--<username>.<host>
-    Username {
-        username: Option<String>,
-        /// Release this username instead (the fleet's operators: undoes one
-        /// taken by mistake, so its person chooses again)
-        #[arg(long, requires = "username")]
-        release: bool,
-    },
     /// Your keys: list them, rotate this one (a new key replaces it and
     /// keeps every grant), or revoke one
     Keys {
@@ -359,8 +350,8 @@ enum OperatorCmd {
     /// deployment's `operators`. It is held by no person, so a wipe never
     /// removes it
     Key { path: PathBuf },
-    /// Wipe a person (a username, or an npub): everything theirs and their
-    /// agents' is deleted, and their username and sign-in freed, so their
+    /// Wipe a person (an email, or an npub): everything theirs and their
+    /// agents' is deleted, and their email and sign-in freed, so their
     /// next sign-in is a new person. --dry-run says what it deletes and
     /// changes nothing; --yes deletes it (again: it goes on where it
     /// stopped)
@@ -379,7 +370,7 @@ enum OperatorCmd {
 
 #[derive(Subcommand)]
 enum LedgerCmd {
-    /// Grant someone credit (the deployment's operators): a username, an
+    /// Grant someone credit (the deployment's operators): an email, an
     /// identity (an npub), or `me`
     Grant {
         who: String,
@@ -522,10 +513,8 @@ fn save_config(key: &str, value: &str) -> Result<PathBuf> {
 
 fn print_identity(v: &IdentityView, this_key: &str) {
     println!("identity: {} ({})", v.id, v.kind.as_str());
-    match &v.username {
-        Some(u) => println!("username: {u} (your fragments are <name>.{u})"),
-        None if v.kind == fragment_proto::IdentityKind::Person => println!("username: none yet (fragment username <name>, or on the host's page)"),
-        None => {}
+    if let Some(email) = &v.email {
+        println!("email: {email}");
     }
     for k in &v.keys {
         let state = match (k.npub == this_key, k.revoked_at) {
@@ -558,6 +547,19 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
 /// agent"): `FRAGMENT_AS_AGENT` names the agent fragment the computer's
 /// egress signs each request as, and `FRAGMENT_FOR` the person it acts for.
 /// Neither set: this machine's key signs, as ever.
+/// A create of what a command names: a name in full as it is, or a label
+/// the platform names (decision 47: `todo` makes `todo--k3x9`).
+fn to_create(name: &str) -> fragment_proto::CreateFragment {
+    let full = fragment_proto::valid_fragment_name(name);
+    fragment_proto::CreateFragment {
+        name: if full { name.to_string() } else { String::new() },
+        label: (!full).then(|| name.to_string()),
+        visibility: None,
+        template: None,
+        title: None,
+    }
+}
+
 fn agent_mode() -> Result<Option<api::AgentMode>> {
     agent_mode_of(std::env::var("FRAGMENT_AS_AGENT").ok(), std::env::var("FRAGMENT_FOR").ok())
 }
@@ -572,7 +574,7 @@ fn agent_mode_of(agent: Option<String>, acting_for: Option<String>) -> Result<Op
         };
     };
     if !fragment_proto::valid_fragment_name(&agent) {
-        return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>.<username>), not {agent:?}")));
+        return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>--<suffix>), not {agent:?}")));
     }
     // an identity as the platform names one (an npub: the platform checks
     // it exactly, and only an agent's owner is honored)
@@ -908,24 +910,6 @@ fn run(cli: Cli) -> Result<()> {
     let c = require_client(&cli.host, cli.verbose)?;
 
     match cli.cmd {
-        Cmd::Username { username, release } => {
-            if release {
-                let u = username.unwrap_or_default();
-                let v = c.call(c.delete(&format!("/api/users/{u}"))?)?;
-                json_exit(j, &v);
-                println!("released {u} ({}): its person chooses a username again", v["identity"].as_str().unwrap_or(""));
-                return Ok(());
-            }
-            let v = match username {
-                Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
-                None => c.call(c.get("/api/identities/me")?)?,
-            };
-            json_exit(j, &v);
-            match v["username"].as_str() {
-                Some(u) => println!("username: {u}"),
-                None => println!("no username yet: fragment username <name>"),
-            }
-        }
         Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
             let v: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
             if let Some(mode) = c.agent() {
@@ -979,7 +963,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template, title };
+            let body = fragment_proto::CreateFragment { visibility, template, title, ..to_create(&name) };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
@@ -1189,11 +1173,22 @@ fn run(cli: Cli) -> Result<()> {
             if !j {
                 println!("scaffolded '{tpl_name}' into {}", dir.display());
             }
-            let created = c.post_json("/api/fragments", &json!({ "name": name })).and_then(|r| c.call(r));
-            if let Err(e) = created {
-                // nothing was created, so leave nothing here either: the same init can be retried
-                let _ = std::fs::remove_dir_all(&dir);
-                return Err(e);
+            let created = c.post_json("/api/fragments", &to_create(&name)).and_then(|r| c.call_as::<Created>(r));
+            let name = match created {
+                Ok(made) => made.name,
+                Err(e) => {
+                    // nothing was created, so leave nothing here either: the same init can be retried
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            };
+            // the name the platform made it under, in full (`todo--k3x9`)
+            if mf.exists() {
+                let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
+                if let Value::Object(o) = &mut m {
+                    o.insert("name".into(), Value::String(name.clone()));
+                }
+                std::fs::write(&mf, serde_json::to_vec_pretty(&m)?)?;
             }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
@@ -1568,9 +1563,8 @@ fn run(cli: Cli) -> Result<()> {
                 if j {
                     return Err(usage("--follow streams JSON lines; --json does not apply"));
                 }
-                // the live socket takes a full name (`<label>.<username>`); the
-                // signed API resolves a bare label to one of yours, so ask it
-                let name = if name.contains('.') { name } else { c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{name}/status"))?)?.name };
+                // the live socket takes a name in full (`todo--k3x9`)
+                let name = c.fragment(&name)?;
                 watch::follow_channel(&c, &name, &channel, after)?;
                 return Ok(());
             }
@@ -1709,14 +1703,14 @@ mod tests {
         let s = |v: &str| Some(v.to_string());
         assert_eq!(agent_mode_of(None, None).unwrap(), None, "no agent: this machine's key signs");
         assert_eq!(agent_mode_of(s(""), s("  ")).unwrap(), None, "empty is unset");
-        assert_eq!(agent_mode_of(s("juniper.paul"), None).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: None }));
+        assert_eq!(agent_mode_of(s("juniper--k3x9"), None).unwrap(), Some(api::AgentMode { agent: "juniper--k3x9".into(), acting_for: None }));
         let id = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
-        assert_eq!(agent_mode_of(s(" juniper.paul "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: s(id) }));
-        for bad in ["juniper", "Juniper.Paul", "a/b.paul", "juniper.paul?for=x"] {
+        assert_eq!(agent_mode_of(s(" juniper--k3x9 "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper--k3x9".into(), acting_for: s(id) }));
+        for bad in ["juniper", "Juniper--K3X9", "a/b--k3x9", "juniper--k3x9?for=x", "juniper.paul"] {
             assert_eq!(code_of(agent_mode_of(s(bad), None)), Code::InvalidUsage, "{bad}");
         }
         for bad in ["paul", "npub1", "id:0123456789abcdef0123456789abcdef", "NPUB180CVV07TJDRRGPA0J7J7TMNYL2YR6YR7L8J4S3EVF6U64TH6GKWSYJH6W6", "npub1paul&x=1", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"] {
-            assert_eq!(code_of(agent_mode_of(s("juniper.paul"), s(bad))), Code::InvalidUsage, "{bad}");
+            assert_eq!(code_of(agent_mode_of(s("juniper--k3x9"), s(bad))), Code::InvalidUsage, "{bad}");
         }
         assert_eq!(code_of(agent_mode_of(None, s(id))), Code::InvalidUsage, "for whom, with no agent?");
     }
@@ -1739,14 +1733,14 @@ mod tests {
     fn links_for_people_name_the_platform() {
         let status = |platform: &str| -> FragmentStatus {
             serde_json::from_value(json!({
-                "name": "g.paul", "npub": "n", "owner": "id:p", "role": "owner", "visibility": "link", "repo": "r",
+                "name": "g--k3x9", "npub": "n", "owner": "npub1p", "role": "owner", "visibility": "link", "repo": "r",
                 "pins": { "main": null, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
                 "code": { "sha": null, "operations": {}, "error": null }, "viewToken": null, "inboxToken": null,
-                "urls": { "canonical": "https://g--paul.fragment.boats/", "platform": platform },
+                "urls": { "canonical": "https://g--k3x9.fragment.boats/", "platform": platform },
             }))
             .expect("a status")
         };
-        let agent = api::Client::new("http://api.fragment.internal", api::Signer::Agent(api::AgentMode { agent: "j.paul".into(), acting_for: None }));
+        let agent = api::Client::new("http://api.fragment.internal", api::Signer::Agent(api::AgentMode { agent: "j--k3x9".into(), acting_for: None }));
         assert_eq!(platform_of(&agent, &status("https://fragment.club/")), "https://fragment.club");
         assert_eq!(platform_of(&agent, &status("")), "http://api.fragment.internal", "an older host names none");
     }
@@ -1759,7 +1753,7 @@ mod tests {
     #[test]
     fn a_deploy_mints_one_token_and_refreshes_once() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
+        mock.seed_repo("t--k3x9", &[]);
         let c = api::Client::new(&mock.url, auth::fixed(7));
         let dir = std::env::temp_dir().join(format!("fragment-deploy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1768,8 +1762,8 @@ mod tests {
         mock.take_requests("");
         let count = |routes: &[(&str, u32)]| -> std::collections::BTreeMap<String, u32> { routes.iter().map(|(r, n)| (r.to_string(), *n)).collect() };
 
-        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), None).unwrap() else { panic!("a live deploy") };
-        assert_eq!((mock.branch("t", "live"), mock.branch("t", "main")), (Some(live_tip.clone()), Some(live_tip)), "live at main's tip");
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t--k3x9", Some(&dir), None).unwrap() else { panic!("a live deploy") };
+        assert_eq!((mock.branch("t--k3x9", "live"), mock.branch("t--k3x9", "main")), (Some(live_tip.clone()), Some(live_tip)), "live at main's tip");
         assert_eq!(
             mock.take_requests(""),
             count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)]),
@@ -1777,9 +1771,9 @@ mod tests {
         );
 
         std::fs::write(dir.join("site/index.html"), "<h1>two</h1>").unwrap();
-        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), Some("two")).unwrap() else { panic!("a live deploy") };
-        assert_eq!(mock.file_at("t", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
-        assert_eq!(Some(live_tip), mock.branch("t", "live"));
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t--k3x9", Some(&dir), Some("two")).unwrap() else { panic!("a live deploy") };
+        assert_eq!(mock.file_at("t--k3x9", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
+        assert_eq!(Some(live_tip), mock.branch("t--k3x9", "live"));
         assert_eq!(
             mock.take_requests(""),
             count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)])

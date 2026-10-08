@@ -48,10 +48,6 @@ export class App extends DurableObject {
 "#;
 const POSTED_JSON: &str = r#"{ "operations": { "posts": { "kind": "query" } } }"#;
 
-pub(super) fn label(name: &str) -> &str {
-    name.split('.').next().unwrap_or("")
-}
-
 /// A fragment of `owner`'s from `template`, `files` written and deployed
 /// over it, opened to `visibility`.
 pub(super) fn made(api: &Api, owner: &Keys, label: &str, template: &str, files: Value, visibility: &str) -> Result<String> {
@@ -162,7 +158,7 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- an attack page: a stranger's fragment, one site with x
     let e = chrome.open(&api.site_url(&evil, ""))?;
-    let on_evil = format!("location.host.startsWith({:?}) && document.readyState === 'complete'", format!("{}--", label(&evil)));
+    let on_evil = format!("location.host.startsWith({:?}) && document.readyState === 'complete'", evil.clone());
     anyhow::ensure!(chrome.until(&e, &on_evil, wait), "the attack page did not open");
     let run = |chrome: &mut Browser, js: String| chrome.eval(&e, &js).unwrap_or_else(|err| json!(err.to_string()));
     let image = run(&mut chrome, format!("new Promise((done) => {{ const i = new Image(); i.onload = () => done('loaded'); i.onerror = () => done('refused'); i.src = {:?}; }})", api.site_url(&x, "pic.png")));
@@ -216,7 +212,7 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_millis(500));
     s.ok("an image of another fragment's __signin signs the owner in nowhere", cookie_of(&mut chrome, api, &y, "fragment_site").is_none(), json!(cookie_of(&mut chrome, api, &y, "fragment_site")));
     frame(&mut chrome, &e, &api.site_url(&z, "__signin?return=/"))?;
-    let told = frame_says(s, &mut chrome, &e, &format!("{}--", label(&z)), "can't sign you in inside this page", wait);
+    let told = frame_says(s, &mut chrome, &e, &z, "can't sign you in inside this page", wait);
     s.ok(
         "nor does a frame of it: the frame offers the fragment in a tab of its own instead",
         told && cookie_of(&mut chrome, api, &z, "fragment_site").is_none() && cookie_of(&mut chrome, api, &z, "fragment_frame").is_none(),
@@ -244,7 +240,7 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     if armed {
         chrome.click(&q, "button[data-arm]")?;
     }
-    let landed = chrome.until(&q, &format!("location.host.startsWith({:?})", format!("{}--", label(&evil))), wait);
+    let landed = chrome.until(&q, &format!("location.host.startsWith({:?})", evil.clone()), wait);
     s.ok("they say yes, once its button arms, and are signed in there", armed && landed && cookie_of(&mut chrome, api, &evil, "fragment_site").is_some(), "");
     drop(chrome);
 
@@ -324,7 +320,7 @@ fn by_url(s: &mut Suite, api: &Api) -> Result<()> {
     let open = made(api, &stranger, &s.name("uopen"), "blank", pages("inside open"), "public")?;
     let r = api.signed(&owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
-    let host_of = |name: &str| format!("{}--", label(name));
+    let host_of = |name: &str| name.to_string();
     let says = |text: &str| format!("document.contentType === 'text/html' && (document.body?.innerText ?? '').includes({text:?})");
     let shown = |chrome: &mut Browser, page: &Page| chrome.eval(page, "location.href + ' ' + document.contentType + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
 

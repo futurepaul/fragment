@@ -495,8 +495,8 @@ mod tests {
 
     #[test]
     fn tasks_read() {
-        assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c.paul" })), Task::Routine { text: "water".into(), chat: "c.paul".into() });
-        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c.paul" })), Task::Joined { fragment: Some("c.paul".into()) });
+        assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
+        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
         assert_eq!(task(&json!({ "kind": "joined" })), Task::Joined { fragment: None }, "a join naming no fragment still lists them again");
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "" })), Task::Joined { fragment: None });
         assert_eq!(task(&json!({ "kind": "routine", "text": "water" })), Task::Other);
@@ -514,11 +514,11 @@ mod tests {
 
     #[test]
     fn ids_are_stable_and_valid() {
-        let t = turn_id("juniper.paul", "talk.paul", "chat", 12);
+        let t = turn_id("juniper--k3x9", "talk--k3x9", "chat", 12);
         assert_eq!(t.len(), 24);
-        assert_eq!(t, turn_id("juniper.paul", "talk.paul", "chat", 12), "the same record, the same turn");
-        assert_ne!(t, turn_id("rowan.paul", "talk.paul", "chat", 12), "another agent, another turn");
-        assert_ne!(t, turn_id("juniper.paul", "talk.paul", "chat", 13));
+        assert_eq!(t, turn_id("juniper--k3x9", "talk--k3x9", "chat", 12), "the same record, the same turn");
+        assert_ne!(t, turn_id("rowan--k3x9", "talk--k3x9", "chat", 12), "another agent, another turn");
+        assert_ne!(t, turn_id("juniper--k3x9", "talk--k3x9", "chat", 13));
         for id in [work_id(&t, "start"), work_id(&t, "7"), work_id(&t, "p:ab12cd.0011aabb"), work_id(&t, "end"), reply_id(&t, 1)] {
             assert!(valid_post_id(&id), "{id}");
         }
@@ -533,9 +533,9 @@ mod tests {
 
     #[test]
     fn bodies_are_the_docs() {
-        let c = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 4 };
+        let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
-        assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new() };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "args": "ls", "ok": true, "excerpt": "" }));
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));

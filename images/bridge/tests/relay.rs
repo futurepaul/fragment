@@ -59,7 +59,7 @@ async fn a_reply_with_steps_and_drafts() {
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let said = fake.say(&chat, &person("paul"), json!({ "text": "use a tool please" }));
-    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] use a tool please", "turn": turn })]);
@@ -72,8 +72,8 @@ async fn a_reply_with_steps_and_drafts() {
     });
     hermes.with(|s| {
         let e = &s.heard[0];
-        assert_eq!(e["source"]["profile"], "juniper-paul", "routed to the agent's profile");
-        assert_eq!(e["source"]["chat_id"], wire::chat_id(&chat, "juniper.paul"));
+        assert_eq!(e["source"]["profile"], "juniper--k3x9", "routed to the agent's profile");
+        assert_eq!(e["source"]["chat_id"], wire::chat_id(&chat, "juniper--k3x9"));
         assert_eq!(e["source"]["user_name"], "paul");
         assert_eq!(e["message_id"], turn);
     });
@@ -90,7 +90,7 @@ async fn a_failed_turn_ends_at_its_cross() {
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let said = fake.say(&chat, &person("paul"), json!({ "text": "fail please" }));
-    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     let end = |w: &World| w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
     fake.until(WAIT, "the turn's end, and the notice", |w| end(w).is_some() && !replies(w, &chat).is_empty()).await;
     fake.with(|w| {
@@ -122,7 +122,7 @@ async fn text_beside_a_tool_call_is_the_steps_words() {
     let only = "echo: [paul] narrate only please";
     for (text, words) in [("narrate please", Some(support::hermes::NARRATION)), ("narrate late please", None), ("narrate only please", Some(only))] {
         let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
-        let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
         fake.until(WAIT, "the turn's end", |w| !of(w, "turn.end", &turn).is_empty()).await;
         fake.with(|w| {
             assert_eq!(of(w, "reply", &turn), vec![json!({ "text": format!("echo: [paul] {text}"), "turn": turn })], "{text}: one reply, its answer");
@@ -182,7 +182,7 @@ async fn stop_interrupts_hermes() {
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let said = fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
-    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     fake.until(WAIT, "a draft", |w| w.drafts.iter().any(|d| d.2 == turn)).await;
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
     fake.until(WAIT, "the turn's end, then its draft stopped", |w| !w.bodies(&chat, "work", "turn.end").is_empty() && w.drafts.last().is_some_and(|d| d.3.is_none())).await;
@@ -202,7 +202,7 @@ async fn stop_during_an_approval() {
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let said = fake.say(&chat, &person("paul"), json!({ "text": "something risky" }));
-    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     fake.until(WAIT, "the prompt card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
@@ -251,7 +251,7 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     // Hermes' approval timeout is the card's life (the image sets both)
     hermes.with(|s| s.approval_ms = CARD_MS);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
-    let say = |text: &str| records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let say = |text: &str| records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
     let risky = say("something risky");
     fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
     let expires_at = fake.with(|w| work_of(w, &chat, &risky, "turn.prompt")[0]["expiresAt"].as_u64().unwrap());
@@ -319,7 +319,7 @@ async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
     let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
     let hermes = Hermes::spawn(listen, "computer-test", SECRET);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
-    let say = |text: &str| records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let say = |text: &str| records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
     let risky = say("something risky");
     fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
     // the owner's sleep under the card: the hold and its answer, then the
@@ -373,10 +373,10 @@ async fn a_message_behind_an_expired_card_is_answered() {
     hermes.with(|s| s.approval_ms = CARD_MS);
     let chat = fake.chat("talk", &["juniper"]);
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
-    let risky = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "something risky" }))["seq"].as_u64().unwrap());
+    let risky = records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "something risky" }))["seq"].as_u64().unwrap());
     fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
-    let paul = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "hello?" }))["seq"].as_u64().unwrap());
-    let skyler = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("skyler"), json!({ "text": "me too" }))["seq"].as_u64().unwrap());
+    let paul = records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "hello?" }))["seq"].as_u64().unwrap());
+    let skyler = records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("skyler"), json!({ "text": "me too" }))["seq"].as_u64().unwrap());
     fake.until(WAIT, "both answered", |w| !work_of(w, &chat, &paul, "turn.end").is_empty() && !work_of(w, &chat, &skyler, "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(work_of(w, &chat, &risky, "turn.prompt.closed")[0]["outcome"], "expired");
@@ -411,7 +411,7 @@ async fn kept_until_acked() {
     let started = |w: &World, turn: &str| w.bodies(&chat, "work", "turn.start").iter().filter(|s| s["turn"] == turn).count();
     let say = |text: &str| {
         let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
-        records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+        records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap())
     };
 
     // away: its socket closes, and the bridge hears it go
@@ -466,7 +466,7 @@ async fn two_profiles_on_one_gateway() {
     hermes.with(|s| {
         let mut profiles: Vec<&str> = s.heard.iter().map(|e| e["source"]["profile"].as_str().unwrap()).collect();
         profiles.sort();
-        assert_eq!(profiles, vec!["juniper-paul", "rowan-paul"]);
+        assert_eq!(profiles, vec!["juniper--k3x9", "rowan--k3x9"]);
     });
     fake.with(|w| {
         let by = |chat: &str| w.records(chat, "chat").into_iter().find(|r| r["body"].get("turn").is_some()).unwrap()["principal"].clone();
@@ -517,7 +517,7 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
     let ended = |w: &World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
     let say = |text: &str| {
         let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
-        records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+        records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap())
     };
 
     let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));

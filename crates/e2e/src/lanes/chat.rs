@@ -120,7 +120,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let member_site = format!("fragment_site={}", site_cookie(api, &member_session, &chat_name)?);
     let served = s.eventually(Duration::from_secs(20), || api.page(&chat_name, "", Some(&owner_site)).is_ok_and(|r| r.status == 200 && r.text.contains("./chat.js")));
     s.ok("the chat serves the template's page", served, "");
-    let label = agent_name.split('.').next().unwrap_or("").to_string();
+    let label = fragment_proto::split_fragment_name(&agent_name).map_or("", |(l, _)| l).to_string();
     let r = api.page(&chat_name, &format!("__people?id={identity}"), Some(&owner_site))?;
     let profile = &r.body["profiles"][identity.as_str()];
     s.ok(

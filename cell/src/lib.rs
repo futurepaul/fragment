@@ -213,7 +213,7 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
     // Asked once: a throw may come after the registry acted (a failure
     // inside it, a connection dropped mid-answer), and its calls are not
     // idempotent (a second Mint is a second redemption, a second
-    // ClaimUsername answers "taken" to the person who got the name).
+    // RegisterAgent may answer as a replay what the first one made).
     let (status, bytes) = ask().await.map_err(|e| unavailable(e.to_string()))?;
     if status == 200 {
         let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| unavailable(format!("its answer: {e}")))?;
@@ -385,50 +385,58 @@ fn named_identity(who: &str) -> CellResult<Option<String>> {
     Err(CellError::invalid(format!("{who:?} is not an identity (an npub) or `me`")))
 }
 
-/// An operator's undo of a username taken by mistake (it was chosen once,
-/// and URLs name it): refused while its person owns a fragment under it.
-async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
-    let holder = ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?;
-    let list = Request::new("https://principal.internal/list", Method::Get)?;
-    let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&holder.identity.id)?.fetch_with_request(list).await?.json().await?;
-    let owned: Vec<&str> = listed
-        .fragments
-        .iter()
-        .filter(|f| f.role == fragment_proto::Role::Owner)
-        .map(|f| f.name.as_str())
-        .filter(|n| fragment_proto::split_fragment_name(n).is_some_and(|(_, u)| u == username))
-        .collect();
-    if !owned.is_empty() {
-        return Err(CellError::new(ErrorCode::AlreadyExists, format!("{username} owns fragments under it ({}): its URLs name it", owned.join(", "))));
-    }
-    json_answer(&ask_registry(env, &calls::ReleaseUsername { username: username.to_string() }).await?)
-}
+/// Names drawn for one create from a label, at most: a draw taken (2^20
+/// names a label) is drawn again.
+const NAME_DRAWS: usize = 3;
 
-/// Makes a fragment for a person, under their username: the API's create
-/// (the shell's catalog calls it), the one door every fragment is made
-/// through (an agent's or a template's included). An agent makes one for
-/// its owner: the owner's (billed to them, in their list), under their
-/// username, with the agent an editor of it. Its maker's ledger is asked
-/// first: a guest makes none (Paul, 2026-10-03), nor does someone whose
-/// fragments are read-only past the overdraft.
+/// Makes a fragment for a person: the API's create (the shell's catalog
+/// calls it), the one door every fragment is made through (an agent's or a
+/// template's included). It is named in full by its caller, or from a
+/// label with a random suffix (decision 47). An agent makes one for its
+/// owner: the owner's (billed to them, in their list), with the agent an
+/// editor of it. Its maker's ledger is asked first: a guest makes none
+/// (Paul, 2026-10-03), nor does someone whose fragments are read-only past
+/// the overdraft.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
-            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone(), held: None };
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
-    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform())))?;
-    create.name = qualify(&create.name, &username)?;
+    // the names to try, in turn: the one asked for, or draws from a label
+    let names: Vec<String> = match (create.name.is_empty(), create.label.take()) {
+        (false, None) if valid_fragment_name(&create.name) => vec![create.name.clone()],
+        (true, Some(label)) if fragment_proto::valid_label(&label) => (0..NAME_DRAWS).map(|_| fragment_proto::fragment_name(&label, js::random_bytes::<3>())).collect(),
+        (false, None) => return Err(CellError::invalid(format!("{:?} is no fragment's name: a name is <label>--<suffix> (todo--k3x9); to have one made, send its label", create.name))),
+        (true, Some(_)) => return Err(CellError::invalid(format!("a label is lowercase letters, digits, and single dashes, not starting or ending with one, at most {} bytes", limits::LABEL_MAX_BYTES))),
+        _ => return Err(CellError::invalid("a create names a label (the platform adds its suffix) or a name in full, one of the two")),
+    };
+    if !cfg.name_fits(&names[0]) {
+        return Err(CellError::invalid(format!("{} is too long for this fleet's hosts: a name and its branch's mark are one DNS label of at most 63 bytes", names[0])));
+    }
     may_create(env, &maker.id).await?;
-    let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
-    // a fresh request: nothing of the caller's but what the router decided
-    let bare = Request::new(url.as_str(), Method::Post)?;
-    let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker.clone()), credential: None };
-    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
+    let drawn = names.len() > 1;
+    let mut made = None;
+    // bounded: at most NAME_DRAWS names
+    for name in names {
+        create.name = name;
+        let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
+        // a fresh request: nothing of the caller's but what the router decided
+        let bare = Request::new(url.as_str(), Method::Post)?;
+        let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker.clone()), credential: None };
+        let answer = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
+        // a drawn name someone holds already: draw again
+        if drawn && answer.status_code() == ErrorCode::AlreadyExists.status() {
+            continue;
+        }
+        made = Some(answer);
+        break;
+    }
+    let made = made.ok_or_else(|| CellError::new(ErrorCode::AlreadyExists, format!("{NAME_DRAWS} names drawn for this label were all taken: try again")))?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
@@ -496,19 +504,6 @@ async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
     }
 }
 
-fn qualify(name: &str, username: &str) -> CellResult<String> {
-    if fragment_proto::valid_label(name) {
-        return Ok(fragment_proto::fragment_name(name, username));
-    }
-    match fragment_proto::split_fragment_name(name) {
-        Some((_, u)) if u == username => Ok(name.to_string()),
-        Some(_) => Err(CellError::new(ErrorCode::Forbidden, format!("you make fragments under your own username ({username})"))),
-        None => Err(CellError::invalid(
-            "a fragment's name is a label (lowercase letters, digits, and single dashes, at most 63), optionally followed by .<your username>",
-        )),
-    }
-}
-
 /// A picture's type from its first bytes (a request's content-type is not trusted).
 pub(crate) fn picture_type(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
@@ -520,33 +515,21 @@ pub(crate) fn picture_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// `GET /api/users/<username>` and `.../picture`: anyone may see who a
-/// username is, and their picture.
-async fn users(env: &Env, rest: &[&str]) -> CellResult<Response> {
-    let [username, tail @ ..] = rest else { return Err(CellError::new(ErrorCode::NotFound, "name a username")) };
-    if !fragment_proto::valid_username(username) {
-        return Err(CellError::new(ErrorCode::NotFound, format!("no one is {username}")));
+/// `GET /api/identities/<npub>/picture`: anyone may see a person's
+/// picture (a page shows it beside their name).
+async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
+    if !npub::is_identity(identity) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("{identity:?} is no identity")));
     }
-    let holder = ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?;
-    match tail {
-        [] => {
-            let picture = holder.picture.as_ref().map(|p| format!("/api/users/{username}/picture?v={}", &p.sha[..12]));
-            json_answer(&json!({ "id": holder.identity.id, "kind": holder.identity.kind, "username": username, "picture": picture }))
-        }
-        ["picture"] => {
-            let Some(picture) = holder.picture else {
-                return Err(CellError::new(ErrorCode::NotFound, format!("{username} has no picture")));
-            };
-            let blob =
-                js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
-            let headers = Headers::new();
-            headers.set("content-type", &picture.mime)?;
-            headers.set("cache-control", "public, max-age=300")?;
-            headers.set("x-content-type-options", "nosniff")?;
-            Ok(Response::from_body(ResponseBody::Stream(blob.body))?.with_headers(headers))
-        }
-        _ => Err(CellError::new(ErrorCode::NotFound, "no such route")),
-    }
+    let picture = ask_registry(env, &calls::PictureOf { identity: identity.to_string() })
+        .await?
+        .ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{identity} has no picture")))?;
+    let blob = js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+    let headers = Headers::new();
+    headers.set("content-type", &picture.mime)?;
+    headers.set("cache-control", "public, max-age=300")?;
+    headers.set("x-content-type-options", "nosniff")?;
+    Ok(Response::from_body(ResponseBody::Stream(blob.body))?.with_headers(headers))
 }
 
 fn key_in_path(k: &str) -> CellResult<String> {
@@ -590,7 +573,8 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             // a people-only share is the fragment's to know: a call decides again
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
             // the asker's own view (their search's preview, their archiving) stays theirs
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, ..f })
+            let owned = f.role == Role::Owner;
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, owned, ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -624,7 +608,7 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
 /// signer's (an agent's: its owner's); the deployment's operators grant
 /// credit and set a person's plan, seat and overdraft, the person named by
-/// username or identity.
+/// email or identity.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
@@ -640,8 +624,8 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     let person = match *person {
         "me" => who.id.clone(),
         id if npub::is_identity(id) => id.to_string(),
-        username if fragment_proto::valid_username(username) => ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?.identity.id,
-        other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (an npub), or `me`"))),
+        email if fragment_core::mail::valid_address(email) => ask_registry(env, &calls::Lookup { who: email.to_string() }).await?.id,
+        other => return Err(CellError::invalid(format!("{other:?} is not an email, an identity (an npub), or `me`"))),
     };
     match *command {
         "grant" => {
@@ -707,15 +691,6 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         Caller::Session(_) => Err(CellError::new(ErrorCode::Unauthenticated, "adding a key is signed by a key you hold (`fragment login`)")),
     };
     match (method, rest) {
-        (Method::Put, ["me", "username"]) => {
-            /// `PUT /api/identities/me/username`'s body.
-            #[derive(Deserialize)]
-            struct Choose {
-                username: String,
-            }
-            let choose: Choose = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_answer(&ask_registry(env, &calls::ClaimUsername { by: by(), username: choose.username }).await?)
-        }
         (Method::Put, ["me", "picture"]) => {
             if body.len() > limits::PICTURE_MAX_BYTES {
                 return Err(CellError::too_large("a picture", body.len(), limits::PICTURE_MAX_BYTES));
@@ -762,26 +737,19 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
     }
 }
 
-/// A fragment named in an API path: `<label>.<username>`, or a bare label
-/// for a signed caller's own (under its username; an agent's owner's).
-fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
-    if valid_fragment_name(name) {
-        return Ok(name.to_string());
-    }
-    if !fragment_proto::valid_label(name) {
-        return Err(CellError::invalid("a fragment's name is <label>.<username>"));
-    }
-    match signer.and_then(|s| s.username.as_deref()) {
-        Some(username) => Ok(fragment_proto::fragment_name(name, username)),
-        None => Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}: name it as {name}.<username>"))),
-    }
+/// A fragment named in an API path: its name in full (`todo--k3x9`). A
+/// bare label names nothing here: the CLI finds one among the caller's
+/// fragments (`GET /api/fragments`).
+fn named_fragment(name: &str) -> CellResult<String> {
+    check_name(name)?;
+    Ok(name.to_string())
 }
 
 fn check_name(name: &str) -> CellResult<()> {
-    if valid_fragment_name(name) {
-        Ok(())
-    } else {
-        Err(CellError::invalid("a fragment's name is <label>.<username>"))
+    match (valid_fragment_name(name), fragment_proto::valid_label(name)) {
+        (true, _) => Ok(()),
+        (false, true) => Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}: a fragment is named in full, <label>--<suffix> (todo--k3x9)"))),
+        (false, false) => Err(CellError::invalid("a fragment's name is <label>--<suffix> (todo--k3x9)")),
     }
 }
 
@@ -989,7 +957,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     }
     // any other name under the suffix is no one's: the platform answers on its own host only
     if host.and_then(|h| cfg.subdomain(h)).is_some() {
-        return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
+        return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <name>.<suffix>"));
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if let ["api", "test", lever @ ..] = segments.as_slice() {
@@ -1008,8 +976,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             Some(resp) => Ok(resp),
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
-        // the shell, for everyone: signed out it asks them to sign in,
-        // without a username it asks for one; `/settings` opens its settings
+        // the shell, for everyone: signed out it asks them to sign in;
+        // `/settings` opens its settings
         (Method::Get, [""] | ["settings"]) => Ok(shell::page(&req, cfg, &url)?),
         (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
@@ -1049,7 +1017,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let body = read_body(&mut req, ARCHIVED_BODY_MAX_BYTES).await?;
             let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
-            let name = named_fragment(name, Some(&who))?;
+            let name = named_fragment(name)?;
             let inner = json!({ "fragment": name, "archived": set.archived }).to_string();
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
@@ -1074,17 +1042,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             ledger_route(req, env, cfg, &url, &rest).await
         }
         (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
-        (Method::Get, ["api", "users", rest @ ..]) => {
-            let rest = rest.to_vec();
-            users(env, &rest).await
-        }
-        (Method::Delete, ["api", "users", username]) => {
-            let who = signer(env, &req, &url, &[]).await?;
-            if !cfg.is_operator(who.key.as_deref(), &who.id)? {
-                return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
-            }
-            release_username(env, username).await
-        }
+        (Method::Get, ["api", "identities", id, "picture"]) => picture(env, id).await,
         // an operator's wipe of a person (wipe.rs): GET its dry run, POST it
         (Method::Get | Method::Post, ["api", "people", person, "wipe"]) => {
             let person = person.to_string();
@@ -1113,14 +1071,14 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
             blob_length(&req)?;
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
-            let name = named_fragment(name, Some(&principal))?;
+            let name = named_fragment(name)?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };
             forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
-                return Err(CellError::invalid("a fragment's name is <label>.<username>"));
+                return Err(CellError::invalid("a fragment's name is <label>--<suffix>"));
             }
             let reserved = access::reserved(method.as_ref(), rest);
             let inner = match (method, rest) {
@@ -1154,7 +1112,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                     return Err(CellError::new(ErrorCode::Forbidden, refusal.message()));
                 }
             }
-            let name = named_fragment(name, principal.as_ref())?;
+            let name = named_fragment(name)?;
             let routed = Routed { name, url: url.clone(), signed: principal, credential: None };
             forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await
         }

@@ -84,8 +84,8 @@ const POLL: Duration = Duration::from_secs(3);
 const COLORS: [&str; 6] = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const TITLE: &str = "Novatron DX";
 
-fn first_soul(name: &str, username: &str) -> String {
-    format!("You are {name}, {username}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
+fn first_soul(name: &str, owner: &str) -> String {
+    format!("You are {name}, {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
 }
 
 /// The shell's `colorOf`: FNV-1a over the identity's UTF-16 units.
@@ -234,9 +234,14 @@ fn held_saves(s: &mut Suite, api: &Api, id: &str) {
 }
 
 /// The app `name`, once it is its owner's in their list and live.
-fn live_app(api: &Api, owner: &Keys, name: &str) -> Option<Value> {
+/// The person's own fragment labelled `label`, once it is live: its list
+/// row and live pin (the agent made it from a label: its suffix is the
+/// platform's).
+fn live_app(api: &Api, owner: &Keys, label: &str) -> Option<Value> {
     let listed = api.signed(owner, "GET", "/api/fragments", None).ok()?;
-    let row = listed.body["fragments"].as_array()?.iter().find(|f| f["name"] == name && f["role"] == "owner")?.clone();
+    let labelled = |f: &&Value| f["name"].as_str().and_then(fragment_proto::split_fragment_name).is_some_and(|(l, _)| l == label);
+    let row = listed.body["fragments"].as_array()?.iter().filter(labelled).find(|f| f["role"] == "owner")?.clone();
+    let name = row["name"].as_str()?.to_string();
     let status = api.signed(owner, "GET", &format!("/api/f/{name}/status"), None).ok()?;
     let live = status.body["pins"]["live"].as_str().filter(|l| !l.is_empty())?.to_string();
     Some(json!({ "listed": row, "live": live }))
@@ -387,20 +392,20 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let (session, owner_id) = api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?;
     let me = api.approve(&session, &keys)?;
-    let username = me.body["username"].as_str().context("the person takes a username")?.to_string();
-    println!("      ({} as {username}, lent {PAID_CALLS} paid calls)", Api::email_of(&keys));
+    let email = me.body["email"].as_str().context("the person has an email")?.to_string();
+    println!("      ({email}, lent {PAID_CALLS} paid calls)");
     let skills = api.create_with(&keys, json!({ "name": s.name("skills"), "template": "skills" }))?;
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let t_asleep = Instant::now();
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let agent_label = s.name("agent");
-    let agent = api.create_with(&keys, json!({ "name": agent_label, "template": "agent", "title": TITLE }))?;
+    let agent = api.create_with(&keys, json!({ "label": agent_label, "template": "agent", "title": TITLE }))?;
     let agent_name = agent.body["name"].as_str().unwrap_or("").to_string();
     // assigned before its computer's first start, which then runs it
     let assigned = api.signed(&keys, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium", "color": color_of(&identity) }))?);
-    let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(TITLE, &username) }, { "path": "agent.json", "text": agent_json }] });
+    let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(TITLE, &email) }, { "path": "agent.json", "text": agent_json }] });
     let soul = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/files"), Some(&files))?;
     let deployed = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/deploy"), Some(&json!({})))?;
     let chat_made = api.create_with(&keys, json!({ "name": format!("{agent_label}-chat"), "template": "chat", "title": TITLE }))?;
@@ -499,14 +504,14 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         }
     };
     let app_label = s.name("todo");
-    let app_name = format!("{app_label}.{username}");
     let note = format!("{app_label}.txt");
     let making = c.say(
         "smoke-3",
         &format!("Make me a todo app from the todo template called {app_label}, and deploy it. When it's live, run `date +%s > {note}` in your working directory, so we have a note of when it went live."),
     )?;
     let t3 = Instant::now();
-    let live = within(WORK, || live_app(api, &keys, &app_name));
+    let live = within(WORK, || live_app(api, &keys, &app_label));
+    let app_name = live.as_ref().and_then(|v| v["listed"]["name"].as_str()).unwrap_or_default().to_string();
     println!("      (asked for the app to its live: {:.1?})", t3.elapsed());
     s.ok(
         &format!("asked for a todo app called {app_label}, it is theirs within {}: in their GET /api/fragments, and live (its live pin set) (model-dependent)", mins(WORK)),
@@ -561,7 +566,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         c.close();
         Ok(first)
     });
-    let other = control(&format!("nobody.{username}")).map(|_| ());
+    let other = control("nobody--k3x9").map(|_| ());
     s.ok(
         "its control socket names the chat's agent, and another agent's screen, not on this computer, is refused (404)",
         named.as_ref().is_ok_and(|w| w["agent"] == agent_name.as_str() && w["holder"].is_null()) && other.as_ref().is_err_and(|e| format!("{e:#}").contains("404")),

@@ -212,7 +212,7 @@ export function mount(root) {
   let arrivals = 0;
 
   // ---- who: names and pictures from the fragment (`__people`), asked in
-  // batches; an agent by its name, a person by username ----
+  // batches; an agent by its name, a person by email ----
   const profiles = new Map(); // principal -> its profile, or null while asked
   const asking = new Set();
   let askTimer = 0;
@@ -254,10 +254,11 @@ export function mount(root) {
     const p = profiles.get(principal);
     if (isAgent(principal)) {
       const r = inRoster(principal);
-      const name = p?.title ?? r?.title ?? (p?.name ? capital(p.name) : r ? capital(r.name) : p?.username ? `${p.username}'s agent` : "Agent");
+      const name = p?.title ?? r?.title ?? (p?.name ? capital(p.name) : r ? capital(r.name) : "Agent");
       return { agent: true, name, color: colorOf(principal) };
     }
-    const name = p?.username ?? (p ? `npub…${principal.slice(-6)}` : "…");
+    // a member's email shows to a member (decision 48); anyone else is their npub's end
+    const name = p?.email ?? (p ? `npub…${principal.slice(-6)}` : "…");
     return { agent: false, name, picture: typeof p?.picture === "string" ? p.picture : null, initial: name.replace(/^npub…/, "").charAt(0).toUpperCase() || "?" };
   }
   /// The word that @mentions an agent: its name (its fragment's label).

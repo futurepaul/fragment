@@ -110,10 +110,10 @@ pub fn admit(day: Day, new: bool, paid_calls: u64) -> Result<Day, DayFull> {
     Ok(Day { people, paid_calls: lent })
 }
 
-/// Whether `name` (`<label>.<username>`) is a fragment the e2e made: its
+/// Whether `name` (`<label>--<suffix>`) is a fragment the e2e made: its
 /// label starts `e2e-`. On a branch deployment, levers reach no other.
 pub fn is_e2e_fragment(name: &str) -> bool {
-    name.split_once('.').is_some_and(|(label, _)| label.starts_with(E2E_LABEL_PREFIX))
+    fragment_proto::split_fragment_name(name).is_some_and(|(label, _)| label.starts_with(E2E_LABEL_PREFIX))
 }
 
 /// Why a test secret is not honoured.
@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn an_e2e_fragment_is_labelled_so() {
-        assert!(is_e2e_fragment("e2e-todo-1a2b.p0123456789"));
-        for other in ["todo.paul", "my-e2e-todo.paul", "e2e.paul", "e2e-", "e2e-todo"] {
+        assert!(is_e2e_fragment("e2e-1a2b3c-todo--k3x9"));
+        for other in ["todo--k3x9", "my-e2e-todo--k3x9", "e2e--k3x9", "e2e-todo.paul", "e2e-", "e2e-todo"] {
             assert!(!is_e2e_fragment(other), "{other}");
         }
     }

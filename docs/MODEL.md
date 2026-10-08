@@ -212,7 +212,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   as a viewer. Operation ids belong to their caller: the ledger keys a
   mutation by principal and id.
 - Origins: each fragment is served from
-  `<label>--<username>.fragment.boats`; the platform (login, the share
+  `<name>.fragment.boats`; the platform (login, the share
   sheet, invites) from `fragment.club`, another site
   (docs/cloudflare-v1.md, decision 5). The router checks the hostname against the configured
   suffix before it trusts it.

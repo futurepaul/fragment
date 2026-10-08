@@ -187,8 +187,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let me = s.cli_json(api, &home, &["whoami", "--json"])?;
     let cli_id = me["identity"]["id"].as_str().unwrap_or("").to_string();
     let first = s.cli_keys(&home).expect("the CLI logged in");
-    let made = s.name("rotating");
-    s.cli_json(api, &home, &["create", &made, "--json"])?;
+    let made = s.cli_json(api, &home, &["create", &s.name("rotating"), "--json"])?["name"].as_str().unwrap_or("").to_string();
     let rotated = s.cli_json(api, &home, &["keys", "rotate", "--json"]);
     let second = s.cli_keys(&home).expect("the CLI has a key");
     s.ok("fragment keys rotate switches the machine to a new key", rotated.is_ok() && second.pubkey_hex() != first.pubkey_hex(), format!("{rotated:?}"));

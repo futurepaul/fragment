@@ -244,7 +244,7 @@ mod tests {
         }
 
         fn start(&mut self, by: &str, turn: &str, seq: u64) -> u64 {
-            let cause = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq };
+            let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq };
             self.post(by, turn_start(turn, "npub1paul", by, &cause, LIFE))
         }
 
@@ -281,7 +281,7 @@ mod tests {
 
         let Before::Cut(c) = previous(w.before(next), ME, true) else { panic!("the turn after a cut one is told of it") };
         assert_eq!(c.turn, "cut");
-        assert_eq!(c.cause, Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 3 });
+        assert_eq!(c.cause, Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 3 });
         assert_eq!(c.steps, vec![CutStep { tool: "terminal".into(), args: "`ls -la`".into(), ok: true }, CutStep { tool: "terminal".into(), args: "rm -rf /tmp/x".into(), ok: false }], "its own steps, in order, another agent's left out");
         assert_eq!(c.cards, vec![CutCard { text: "Run `rm -rf /tmp/x`?".into(), closed: Some("expired".into()) }]);
         let note = text(&c, Some("do the risky thing"), &["Starting.".into()]);
@@ -339,7 +339,7 @@ mod tests {
 
         // a forged start (another principal naming this agent) is no turn of its
         let mut w = Work::default();
-        let cause = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 1 };
+        let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 };
         w.post("npub1mallory", turn_start("forged", "npub1paul", ME, &cause, LIFE));
         w.post("npub1mallory", turn_end("forged", &Outcome::Error(LOST.into())));
         let n = w.start(ME, "n", 2);
@@ -396,7 +396,7 @@ mod tests {
         // what was asked, read strictly from its record
         let msg = Record { channel: "chat".into(), seq: 1, at: 0, principal: "npub1paul".into(), kind: "message".into(), body: json!({ "text": "do\nthe risky thing" }) };
         assert_eq!(asked(&msg).as_deref(), Some("do\nthe risky thing"));
-        let routine = Record { channel: "tasks".into(), body: json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" }), ..msg.clone() };
+        let routine = Record { channel: "tasks".into(), body: json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }), ..msg.clone() };
         assert_eq!(asked(&routine).as_deref(), Some("your routine: water the plants"));
         assert_eq!(asked(&Record { body: json!({ "kind": "stop" }), ..msg.clone() }), None);
         let reply = |turn: &str, by: &str, text: &str| Record { principal: by.into(), body: json!({ "text": text, "turn": turn }), ..msg.clone() };

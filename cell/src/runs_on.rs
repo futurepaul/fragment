@@ -22,7 +22,7 @@
 //!   alarm; an agent that runs on no computer is told nothing.
 
 use fragment_core::npub;
-use fragment_proto::{split_fragment_name, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
+use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -294,9 +294,8 @@ impl FragmentCell {
     /// The fragment's owner as a caller, for what the platform does on the
     /// owner's behalf here (adding the agent as a member).
     fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
-        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let (_, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
-        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()), held: None };
+        let owner = self.must(MetaKey::Owner)?;
+        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
         let signed = crate::routed::Signed::new(identity, None);
         Ok(crate::fragment::Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false })
     }

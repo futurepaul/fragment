@@ -28,7 +28,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::isolation::{as_browser, cookie_of, frame, frame_says, label, made};
+use super::isolation::{as_browser, cookie_of, frame, frame_says, made};
 use super::templates::person;
 use crate::api::{Api, Call, Reply};
 use crate::browser::{Browser, Page};
@@ -266,7 +266,7 @@ pub(super) fn computer_ports(s: &mut Suite, api: &Api, owner: &fragment_nip98::K
         in_frame.status == 200 && in_frame.header("content-security-policy") == ancestors && at_top.status == 401 && bare.status == 401,
         format!("{in_frame} / {at_top} / {bare}"),
     );
-    let fragments_page = api.site_origin(&format!("page.{}", api.username(owner)?));
+    let fragments_page = api.site_origin(&api.qualified(owner, "page")?);
     let (framed, fetched, own) = (
         screen("iframe", "same-site", site)?,
         as_browser(api, "GET", at("/p/6080/version.txt"), "empty", "same-site", site)?,
@@ -316,7 +316,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         let expr = format!("heard.some((m) => m.origin === {platform:?} && m.data.fragment === 'signin-blocked' && m.data.name === {name:?} && m.data.why === {why:?})");
         chrome.until(page, &expr, wait)
     };
-    let host = |name: &str| format!("{}--", label(name));
+    let host = |name: &str| name.to_string();
 
     // ---- the owner's page frames their own members-only fragment
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", owner_session)?;

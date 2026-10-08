@@ -813,7 +813,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // an agent this computer does not run, or no agent's name, is refused
     // by the image: the platform carries the query and reads nothing in it
-    let (absent, malformed) = (control(&format!("nobody.{}", api.username(&owner)?)).map(|_| ()), control("Not%20A%20Name").map(|_| ()));
+    let (absent, malformed) = (control("nobody--k3x9").map(|_| ()), control("Not%20A%20Name").map(|_| ()));
     s.ok(
         "an agent's screen the computer does not run is refused (404), and a query that names no agent (400): the image's answers, through its port",
         absent.as_ref().is_err_and(|e| format!("{e:#}").contains("404")) && malformed.as_ref().is_err_and(|e| format!("{e:#}").contains("400")),

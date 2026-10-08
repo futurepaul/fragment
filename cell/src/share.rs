@@ -5,8 +5,8 @@
 //! what (only its owner changes anything; a member may see who is in;
 //! anyone else gets a 403 page).
 //!
-//!   GET  /share/<name>         the sheet: who is in (usernames and pictures) and their roles;
-//!                              for the owner, inviting by username, pending invites, roles,
+//!   GET  /share/<name>         the sheet: who is in (emails and pictures) and their roles;
+//!                              for the owner, inviting by email, pending invites, roles,
 //!                              removing, who may open it, and its share link (copy, a new one)
 //!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet
 //!                              (a role of `remove` removes the member);
@@ -31,7 +31,7 @@
 //!   window is severed from its opener;
 //! - it cannot hand them a grant: the sheet reads nothing from its URL, so
 //!   no link prefills what a click would approve (the join page's token is
-//!   the invite itself, and an invite by username is its invitee's alone);
+//!   the invite itself, and an invite by email is its invitee's alone);
 //! - the click that opened one cannot confirm it: their buttons (and the
 //!   sheet's selects, each sent as it changes) arm `form::DELAY_MS` after
 //!   the page shows, and a form sent sooner is refused.
@@ -251,13 +251,16 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
     serde_json::from_value(v).map_err(|e| CellError::host(format!("{what}: {e}")))
 }
 
-/// Usernames and pictures for identities, asked of the registry
-/// `PROFILES_MAX` at a time. One it cannot answer shows as its id.
+/// Emails and pictures for identities, asked of the registry
+/// `PROFILES_MAX` at a time. One it cannot answer shows as its id. Their
+/// emails are shown: the sheet is a member's, of the fragment's people and
+/// those its owner invited, and the join page names who invited its
+/// invitee (docs/cloudflare-v1.md, decision 48).
 async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {
-        let call = calls::Profiles { ids: chunk.to_vec() };
+        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec() };
         async move { ask_registry(env, &call).await }
     });
     let mut all = BTreeMap::new();
@@ -271,14 +274,13 @@ async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> 
 }
 
 /// Someone as a page shows them: a picture (or an initial), and their
-/// username, or whose agent they are.
+/// email, or that they are an agent, by its name.
 fn person(id: &str, p: Option<&Profile>, me: &str) -> String {
     let (name, initial) = match p {
-        Some(Profile { kind: fragment_proto::IdentityKind::Agent, username, .. }) => {
-            let u = username.as_deref().unwrap_or("someone");
-            (format!("{}'s agent", esc(u)), "✦".to_string())
+        Some(Profile { kind: fragment_proto::IdentityKind::Agent, name, .. }) => {
+            (format!("{} (an agent)", esc(name.as_deref().unwrap_or("someone"))), "✦".to_string())
         }
-        Some(Profile { username: Some(u), .. }) => (format!("@{}", esc(u)), u.chars().next().unwrap_or('?').to_uppercase().to_string()),
+        Some(Profile { email: Some(e), .. }) => (esc(e), e.chars().next().unwrap_or('?').to_uppercase().to_string()),
         _ => (format!("<code>{}</code>", esc(&npub::display(id))), "?".to_string()),
     };
     let picture = match p.and_then(|p| p.picture.as_deref()) {
@@ -395,7 +397,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
     match flash {
         Some(Flash::Invited { who, role, link }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>@{w}</b> as {r}. Send them this link: it works for them alone, once, for {d} days.</p>\
+            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}. Send them this link: it works for them alone, once, for {d} days.</p>\
              <p class=\"row\"><input id=\"invite-link\" readonly value=\"{l}\"><button type=\"button\" class=\"quiet\" data-copy=\"{l}\">Copy</button></p></div>",
             w = esc(&who),
             r = role_phrase(role),
@@ -409,7 +411,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &action_form(
             sheet,
             "invite",
-            "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
+            "<input name=\"email\" type=\"email\" required maxlength=\"320\" placeholder=\"Add people by email\" autocomplete=\"off\" aria-label=\"email\">\
              <select name=\"role\" aria-label=\"role\"><option value=\"viewer\">Viewer</option><option value=\"editor\">Editor</option></select>",
             "Invite",
             "add",
@@ -561,10 +563,10 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         (action, _) => action,
     };
     let done = match action {
-        "invite" => match invite(env, url, name, &who, field("username"), role()).await {
-            Ok((username, role, token)) => {
+        "invite" => match invite(env, url, name, &who, field("email"), role()).await {
+            Ok((email, role, token)) => {
                 let link = format!("{platform}/join/{name}?token={token}");
-                return shown(env, cfg, url, name, &who, &session, Some(Flash::Invited { who: username, role, link }), 200).await;
+                return shown(env, cfg, url, name, &who, &session, Some(Flash::Invited { who: email, role, link }), 200).await;
             }
             Err(e) => Err(e),
         },
@@ -601,25 +603,25 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
     }
 }
 
-/// Invites the person holding `username`, for them alone: the username as
-/// they hold it, the role, and the invite's token.
-async fn invite(env: &Env, url: &Url, name: &str, who: &Signed, username: &str, role: CellResult<Role>) -> CellResult<(String, Role, String)> {
+/// Invites the person a verified email names, for them alone: the email,
+/// the role, and the invite's token.
+async fn invite(env: &Env, url: &Url, name: &str, who: &Signed, email: &str, role: CellResult<Role>) -> CellResult<(String, Role, String)> {
     let role = role?;
-    let username = username.trim_start_matches('@').to_ascii_lowercase();
-    if !fragment_proto::valid_username(&username) {
-        return Err(CellError::invalid(format!("{username:?} is not a username")));
+    let email = email.trim().to_ascii_lowercase();
+    if !fragment_core::mail::valid_address(&email) {
+        return Err(CellError::invalid(format!("{email:?} is not an email")));
     }
-    let holder = match ask_registry(env, &calls::FindUsername { username: username.clone() }).await {
-        Err(e) if e.code == ErrorCode::NotFound => return Err(CellError::new(ErrorCode::NotFound, format!("no one is @{username}"))),
+    let invitee = match ask_registry(env, &calls::Lookup { who: email.clone() }).await {
+        Err(e) if e.code == ErrorCode::NotFound => return Err(CellError::new(ErrorCode::NotFound, format!("no one signs in as {email} yet"))),
         found => found?,
     };
-    if holder.identity.id == who.id {
+    if invitee.id == who.id {
         return Err(CellError::invalid("that is you: you are in already"));
     }
-    let made = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "role": role, "uses": 1, "invitee": holder.identity.id }))).await?;
+    let made = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "role": role, "uses": 1, "invitee": invitee.id }))).await?;
     let made: Invite = decoded(made, "the invite")?;
     let token = made.token.ok_or_else(|| CellError::host("an invite made answered no token"))?;
-    Ok((username, role, token))
+    Ok((email, role, token))
 }
 
 /// The invite a join page's URL names: its token, if it is one.
@@ -673,8 +675,8 @@ async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str
         r = role_phrase(role),
         f = esc(&form),
         t = esc(&token),
-        me_text = match names.get(&who.id).and_then(|p| p.username.as_deref()) {
-            Some(u) => format!("@{}", esc(u)),
+        me_text = match names.get(&who.id).and_then(|p| p.email.as_deref()) {
+            Some(e) => esc(e),
             None => format!("<code>{}</code>", esc(&who.id)),
         },
     );

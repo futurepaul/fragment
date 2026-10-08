@@ -159,8 +159,8 @@ fn sid_of(access_token: &str) -> Option<String> {
     serde_json::from_slice::<Claims>(&bytes).ok()?.sid
 }
 
-/// A live session's row, with whether its parent is live, its identity
-/// with its username, and their latest sign-in's email, all in one
+/// A live session's row, with whether its parent is live, its identity,
+/// and their latest sign-in's email, all in one
 /// statement (`live_session`).
 #[derive(Deserialize)]
 struct SessionRow {
@@ -172,7 +172,6 @@ struct SessionRow {
     parent_live: Option<String>,
     kind: Option<IdentityKind>,
     owner: Option<String>,
-    username: Option<String>,
     held: Option<fragment_proto::Role>,
     email: Option<String>,
 }
@@ -331,12 +330,11 @@ impl RegistryCell {
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, u.username, ",
+            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY signed_in_at DESC LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
             "LEFT JOIN identities i ON i.id = s.identity ",
-            username_join!(),
-            " WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
+            "WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
         );
         if !blob::valid_sha(token) {
             return Err(not_signed_in());
@@ -351,7 +349,7 @@ impl RegistryCell {
         if row.parent.is_some() && row.parent_live.is_none() {
             return Err(not_signed_in());
         }
-        let identity = joined_identity(row.identity, row.kind, row.owner, row.username, row.held, "a session")?;
+        let identity = joined_identity(row.identity, row.kind, row.owner, row.held, "a session")?;
         Ok(Live { hash, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 
@@ -621,13 +619,13 @@ impl RegistryCell {
             return Err(CellError::invalid("a frame redemption's embedder is an origin (scheme://host[:port])"));
         }
         let Live { hash, session, .. } = self.live_session(&b.token, None, false)?;
-        let identity = session.identity;
+        let (identity, email) = (session.identity, session.email);
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
         match b.consent {
             Consent::Member => {}
             Consent::Remembered => {
                 if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), b.fragment.as_str().into()])? == 0 {
-                    return Ok(Minted { redeem: None, identity });
+                    return Ok(Minted { redeem: None, identity, email });
                 }
             }
             Consent::Given => {
@@ -643,7 +641,7 @@ impl RegistryCell {
             }
         }
         let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
-        Ok(Minted { redeem: Some(redeem), identity })
+        Ok(Minted { redeem: Some(redeem), identity, email })
     }
 
     async fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {

@@ -186,11 +186,11 @@ pub fn person(name: &str) -> String {
 }
 
 impl Fake {
-    /// A fake with `agents` (`label`s: `<label>.paul`, `npub1<label>`, owned by
+    /// A fake with `agents` (`label`s: `<label>-k3x9`, `npub1<label>`, owned by
     /// paul) on one computer, listening on `bind` (`127.0.0.1:0` for tests;
     /// `0.0.0.0:0` for a container to reach).
     pub async fn start(bind: &str, agents: &[&str]) -> Fake {
-        let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}.paul"), "identity": format!("npub1{l}"), "name": l, "owner": "npub1paul" })).collect();
+        let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}--k3x9"), "identity": format!("npub1{l}"), "name": l, "owner": "npub1paul" })).collect();
         let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "npub1paul", "image": "test", "agents": agents }), page: 1000, ..World::default() };
         world.names.insert("npub1paul".into(), "paul".into());
         world.names.insert("npub1skyler".into(), "skyler".into());
@@ -218,10 +218,10 @@ impl Fake {
         f(&mut self.world.lock().expect("the world"))
     }
 
-    /// A chat `<label>.paul` with paul and `agents` (labels, in the order
+    /// A chat `<label>-k3x9` with paul and `agents` (labels, in the order
     /// added: the first is the lead).
     pub fn chat(&self, label: &str, agents: &[&str]) -> String {
-        let name = format!("{label}.paul");
+        let name = format!("{label}--k3x9");
         self.with(|w| {
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
             f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
@@ -235,10 +235,10 @@ impl Fake {
         name
     }
 
-    /// paul's skills fragment `<label>.paul` (the blessed `skills`
+    /// paul's skills fragment `<label>-k3x9` (the blessed `skills`
     /// template's: its agents reach it acting for paul), holding `files`.
     pub fn skills(&self, label: &str, files: &[(&str, &str)]) -> String {
-        let name = format!("{label}.paul");
+        let name = format!("{label}--k3x9");
         self.with(|w| {
             let mut f = Frag { kind: "skills".into(), ..Frag::default() };
             f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
@@ -251,11 +251,11 @@ impl Fake {
     }
 
     /// Assigns the agent `label` to the computer while it runs (its
-    /// fragment `<label>.paul`, identity `npub1<label>`), as its owner's
+    /// fragment `<label>-k3x9`, identity `npub1<label>`), as its owner's
     /// `PUT /api/computers/{id}/agents/{fragment}` does.
     pub fn add_agent(&self, label: &str) {
         self.with(|w| {
-            let (fragment, identity) = (format!("{label}.paul"), format!("npub1{label}"));
+            let (fragment, identity) = (format!("{label}--k3x9"), format!("npub1{label}"));
             w.fragments.insert(fragment.clone(), agent_fragment(&identity));
             let agent = json!({ "fragment": fragment, "identity": identity, "name": label, "owner": "npub1paul" });
             w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent);
@@ -264,7 +264,7 @@ impl Fake {
 
     /// Unassigns the agent `label` from the computer.
     pub fn remove_agent(&self, label: &str) {
-        let fragment = format!("{label}.paul");
+        let fragment = format!("{label}--k3x9");
         self.with(|w| w.computer["agents"].as_array_mut().expect("the computer's agents").retain(|a| a["fragment"] != fragment.as_str()));
     }
 
@@ -275,7 +275,7 @@ impl Fake {
         self.with(|w| {
             let at = w.now();
             w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
-            w.append(&format!("{label}.paul"), "tasks", "npub1paul", json!({ "kind": "joined", "fragment": fragment }));
+            w.append(&format!("{label}--k3x9"), "tasks", "npub1paul", json!({ "kind": "joined", "fragment": fragment }));
         });
     }
 
@@ -441,7 +441,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 let mut profiles = serde_json::Map::new();
                 for id in query(&q, "id") {
                     if let Some(u) = w.names.get(&id) {
-                        profiles.insert(id.clone(), json!({ "kind": "person", "username": u }));
+                        profiles.insert(id.clone(), json!({ "kind": "person", "email": u }));
                     }
                 }
                 answer(StatusCode::OK, json!({ "profiles": profiles }))

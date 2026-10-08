@@ -179,11 +179,11 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a misspelt field is refused, not read as nothing", r.status == 400, &r);
     let r = command(&owner_id, "grant", json!({ "id": "g3", "micros": 5, "by": owner_id, "why": "" }))?;
     s.ok("a grant names the operator who signs it", r.status == 400, &r);
-    let username = api.username(&owner)?;
-    let r = command(&username, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
-    let again = command(&username, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
-    let bad = command(&username, "overdraft", json!({ "id": "o2", "micros": 2_000 * USD }))?;
-    s.ok("an operator names a person by username too; an overdraft past its limit is refused", r.status == 200 && again.status == 200 && bad.status == 400, json!([r.status, again.status, bad.status]));
+    let email = Api::email_of(&owner);
+    let r = command(&email, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
+    let again = command(&email, "overdraft", json!({ "id": "o1", "micros": 2 * USD }))?;
+    let bad = command(&email, "overdraft", json!({ "id": "o2", "micros": 2_000 * USD }))?;
+    s.ok("an operator names a person by email too; an overdraft past its limit is refused", r.status == 200 && again.status == 200 && bad.status == 400, json!([r.status, again.status, bad.status]));
     let r = command(&owner_id, "plan", json!({ "id": "p1", "plan": "emperor" }))?;
     s.ok("a plan that is none is refused", r.status == 400, &r);
     // a seat's state, as its payment hook will send it: ordered by `seq`
@@ -224,13 +224,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let again = api.create(&guest, &made)?;
     let none = api.status(&guest, &made)?;
     s.ok("asked again it is refused again (a refusal is not remembered), and nothing was made", refused(&again) && none.status == 404, format!("{again} | {none}"));
-    let r = api.signed(&guest, "POST", "/api/fragments", Some(&json!({ "name": s.name("ledger-guest-todo"), "template": "todo" })))?;
+    let r = api.signed(&guest, "POST", "/api/fragments", Some(&json!({ "label": s.name("ledger-guest-todo"), "template": "todo" })))?;
     s.ok("nor does a guest make one from a template", refused(&r), &r);
     let hand = Keys::generate();
     let reg = "/api/identities";
     let r = api.signed(&guest, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &guest) })))?;
     anyhow::ensure!(r.status == 200, "a guest's agent key: {r}");
-    let r = api.signed(&hand, "POST", "/api/fragments", Some(&json!({ "name": s.name("ledger-guest-agent") })))?;
+    let r = api.signed(&hand, "POST", "/api/fragments", Some(&json!({ "label": s.name("ledger-guest-agent") })))?;
     s.ok("nor does an agent make one for a guest", refused(&r), &r);
     let calls = s.ai.calls().len();
     let r = api.op(&guest, &guest_app, "summarize", "g-1", json!({ "text": "a guest's step" }))?;

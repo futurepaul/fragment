@@ -8,7 +8,7 @@
 use std::sync::OnceLock;
 
 use fragment_proto::ledger::Plan;
-use fragment_proto::{flat_name, from_flat_name, ErrorCode};
+use fragment_proto::{valid_fragment_name, ErrorCode};
 use worker::Env;
 
 use crate::error::{CellError, CellResult};
@@ -34,12 +34,12 @@ pub struct WorkOsConfig {
 pub struct Config {
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
-    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from
-    /// `<label>--<username>.<suffix>`. Every deployment names one.
+    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
+    /// Every deployment names one.
     pub host_suffix: String,
     /// `FRAGMENT_HOST_LABEL_SUFFIX` (`--<branch>`): a branch deployment's
-    /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
-    /// other branches' in one zone.
+    /// fragments are `<name>--<branch>.<suffix>`, beside the other
+    /// branches' in one zone.
     host_label_suffix: Option<String>,
     /// `FRAGMENT_COMPUTER_IMAGE`: the image a new computer is pinned to (a
     /// name in wrangler.jsonc's `containers` images). Unset, the deployment
@@ -319,17 +319,24 @@ impl Config {
         &self.codestorage
     }
 
-    /// The fragment a hostname names, when it is `<label>--<username>.<suffix>`
-    /// (one DNS label, so the suffix's one wildcard certificate covers every
-    /// fragment). This is the only way a host becomes a fragment: an exact
-    /// single label under the suffix (with a branch's mark, its own).
+    /// The fragment a hostname names, when it is `<name>.<suffix>` (a
+    /// name is one DNS label, so the suffix's one wildcard certificate
+    /// covers every fragment). This is the only way a host becomes a
+    /// fragment: an exact single label under the suffix (with a branch's
+    /// mark, its own).
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
         let label = label_under(host, &self.host_suffix)?;
-        let flat = match &self.host_label_suffix {
+        let name = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?,
             None => &label,
         };
-        from_flat_name(flat)
+        valid_fragment_name(name).then(|| name.to_string())
+    }
+
+    /// Whether `name`'s host fits one DNS label with this fleet's branch
+    /// mark (a branch's `--<branch>` takes some of its 63 bytes).
+    pub fn name_fits(&self, name: &str) -> bool {
+        name.len() + self.host_label_suffix().len() <= fragment_proto::limits::NAME_MAX_BYTES
     }
 
     /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
@@ -377,7 +384,7 @@ impl Config {
     /// `Origin` (`scheme://host[:port]`).
     pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        let host = flat_name(name).unwrap_or_else(|| name.to_string());
+        let host = name;
         let branch = self.host_label_suffix.as_deref().unwrap_or("");
         format!("{}://{host}{branch}.{}{port}", arrived.scheme(), self.host_suffix)
     }
@@ -395,7 +402,7 @@ fn default_plan(env: &Env) -> Plan {
 }
 
 /// A branch's mark on its fragments' labels: `--` and its name, so
-/// `<label>--<username>--<branch>.<suffix>` stays one DNS label under the
+/// `<name>--<branch>.<suffix>` stays one DNS label under the
 /// zone's one wildcard certificate (docs/cloudflare-v1.md, decision 20).
 fn valid_label_suffix(s: &str) -> bool {
     s.strip_prefix("--").is_some_and(|b| {

@@ -592,7 +592,7 @@ mod tests {
     }
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
     #[test]
@@ -647,11 +647,11 @@ mod tests {
         assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
         assert!(managed_config(&[], 20, crate::desktop::IDLE_STOP_MS).contains("timeout: 20\n"));
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
-        let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
+        let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
         assert!(p.contains("default: \"medium\""));
-        assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
+        assert!(p.contains("x-fragment-agent: \"juniper--k3x9\""), "every model call names its agent");
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
@@ -664,21 +664,21 @@ mod tests {
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
-        assert!(p.contains("\n  cwd: \"/data/work/juniper-paul\"\n"), "its terminal works in its work directory: {p}");
-        assert_eq!(work_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul"));
+        assert!(p.contains("\n  cwd: \"/data/work/juniper--k3x9\"\n"), "its terminal works in its work directory: {p}");
+        assert_eq!(work_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9"));
         assert!(
-            p.contains("  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\", \"/data/hermes/profiles/juniper-paul/credentials.sh\"]\n"),
+            p.contains("  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\", \"/data/hermes/profiles/juniper--k3x9/credentials.sh\"]\n"),
             "its shell starts as Hermes' does, then reads its credentials: {p}"
         );
         let e = profile_env(&agent());
-        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper.paul\n") && e.contains("\nFRAGMENT_FOR=npub1paul\n"), "{e}");
+        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper--k3x9\n") && e.contains("\nFRAGMENT_FOR=npub1paul\n"), "{e}");
         assert!(!e.contains("KEY") && !e.contains("TOKEN"), "no credential, and none held: {e}");
         let env = gateway_env("127.0.0.1:8650", "computer", &"s".repeat(32));
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         assert!(env.contains("HERMES_GATEWAY_MAX_STARTS=0\n"), "no start is slept for the starts before it");
-        assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
+        assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper--k3x9"), PathBuf::from("/data/hermes/profiles/juniper--k3x9"));
     }
 
     /// The image's Chromium starts Playwright's with the container's flags,
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(pins.get("TERMINAL_HOME_MODE"), Some(&"profile"), "one of Hermes' auto, real, profile");
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
-        let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
+        let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), Tier::Medium, "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
@@ -739,11 +739,11 @@ mod tests {
     /// something in it set aside whole, and nothing of it carried over.
     #[test]
     fn a_profiles_home_is_a_link_into_its_work() {
-        assert_eq!(home_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul/home"));
+        assert_eq!(home_dir("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9/home"));
         assert!(PROFILE_DIRS.contains(&PROFILE_HOME), "Hermes' name for it: {PROFILE_DIRS:?}");
         let root = std::env::temp_dir().join(format!("hermes-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (profile, home) = (root.join("hermes/profiles/juniper-paul"), root.join("work/juniper-paul/home"));
+        let (profile, home) = (root.join("hermes/profiles/juniper--k3x9"), root.join("work/juniper--k3x9/home"));
         std::fs::create_dir_all(&profile).unwrap();
         let link = profile.join(PROFILE_HOME);
         let linked = |l: &Path| std::fs::read_link(l).ok();
@@ -841,8 +841,8 @@ mod tests {
         let r: serde_json::Value = serde_json::from_str(control_request("rescan-profiles").trim_end()).unwrap();
         assert_eq!(r, serde_json::json!({ "verb": "rescan-profiles", "id": 1, "protocol": 1 }));
         assert!(control_request("status").ends_with('\n'), "one line");
-        let ok = br#"{"ok": true, "protocol": 1, "result": {"multiplex": true, "added": ["maple-paul"], "served_profiles": ["default", "maple-paul"]}, "id": 1}"#;
-        assert_eq!(control_answer(ok).unwrap()["added"][0], "maple-paul");
+        let ok = br#"{"ok": true, "protocol": 1, "result": {"multiplex": true, "added": ["maple--k3x9"], "served_profiles": ["default", "maple--k3x9"]}, "id": 1}"#;
+        assert_eq!(control_answer(ok).unwrap()["added"][0], "maple--k3x9");
         assert_eq!(control_answer(br#"{"ok": false, "error": "unknown verb: 'x'", "protocol": 1}"#).unwrap_err(), "unknown verb: 'x'");
         assert!(control_answer(b"not json").is_err());
         assert!(control_answer(br#"{"ok": true, "result": null}"#).is_err());

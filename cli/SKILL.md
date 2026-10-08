@@ -34,8 +34,7 @@ this nor pairing: `fragment` is installed there, and acts as the agent.
 person signs in and approves this machine's key (the page and the
 terminal show the same ending). With no browser at hand, `fragment login
 --no-wait` prints the link: give it to the person, and run `fragment
-login` again once they have approved it. A new person also chooses a
-username once, on that page or with `fragment username <name>`.
+login` again once they have approved it.
 
 ## Your fragments
 
@@ -51,8 +50,9 @@ fragment deploy <name>                           # main goes live: the site and 
 fragment call <name> <operation> --input '{}'    # one of its operations
 ```
 
-A fragment is named `<label>.<username>`; a bare label names one of yours
-(an agent's: its owner's).
+A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
+the suffix to the label you create it with); a bare label names the one
+of yours with it (an agent's: its owner's).
 
 ## Ask another agent
 

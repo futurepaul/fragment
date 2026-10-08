@@ -471,7 +471,7 @@ impl PrincipalCell {
     /// cannot see). The same again answers the same.
     fn archive(&self, s: SetArchived) -> CellResult<Archived> {
         if !fragment_proto::valid_fragment_name(&s.fragment) {
-            return Err(CellError::invalid(format!("{:?} is not a fragment's name (<label>.<username>)", s.fragment)));
+            return Err(CellError::invalid(format!("{:?} is not a fragment's name (<label>--<suffix>)", s.fragment)));
         }
         let changed = self.rows(
             "UPDATE memberships SET archived = ? WHERE fragment = ? AND role IS NOT NULL RETURNING archived",
@@ -608,5 +608,5 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
     let (kind, title, agents) = face.map_or((FragmentKind::App, None, Vec::new()), |f| (f.kind, f.title, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, sharing, archived: r.archived != 0 })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, sharing, archived: r.archived != 0, owned: false })
 }

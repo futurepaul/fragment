@@ -99,6 +99,9 @@ pub struct FragmentEntry {
     /// `fragment.json`'s `kind`.
     #[serde(default)]
     pub kind: String,
+    /// Listed `for` someone: whether they own it.
+    #[serde(default)]
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,8 +193,8 @@ fn encode(s: &str) -> String {
     out
 }
 
-/// A fragment's name in a path: `<label>.<username>` only, so no name
-/// ever reaches another route.
+/// A fragment's name in a path: a name's characters only, so no name ever
+/// reaches another route.
 fn name(fragment: &str) -> Result<&str, ApiError> {
     let ok = !fragment.is_empty() && fragment.len() <= 128 && fragment.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
     if ok {
@@ -324,8 +327,9 @@ impl Api {
         let mut out = BTreeMap::new();
         if let Some(profiles) = v["profiles"].as_object() {
             for (id, p) in profiles {
-                if let Some(u) = p["username"].as_str() {
-                    out.insert(id.clone(), u.to_string());
+                // a person by their email, which a member is shown (decision 48)
+                if let Some(e) = p["email"].as_str() {
+                    out.insert(id.clone(), e.to_string());
                 }
             }
         }
@@ -448,7 +452,7 @@ mod tests {
 
     #[test]
     fn names_and_queries_stay_in_their_route() {
-        assert!(name("talk.paul").is_ok());
+        assert!(name("talk--k3x9").is_ok());
         for bad in ["", "../x", "a/b", "a?b", "a b"] {
             assert!(name(bad).is_err(), "{bad}");
         }

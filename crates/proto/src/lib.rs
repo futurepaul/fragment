@@ -10,12 +10,15 @@ use serde_json::Value;
 
 /// Limits every side enforces the same way (docs/MODEL.md, Limits).
 pub mod limits {
-    /// A label: one part of a name (a fragment's label, a username, an
-    /// agent's name), `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` with no `--`.
+    /// A fragment's name: one DNS label (decision 47), its label and a
+    /// suffix (`NAME_SUFFIX_BYTES`) after a `--`.
     pub const NAME_MAX_BYTES: usize = 63;
-    /// A username: a label of 3 to 32 bytes, not a reserved word.
-    pub const USERNAME_MIN_BYTES: usize = 3;
-    pub const USERNAME_MAX_BYTES: usize = 32;
+    /// A label: the part of a name its maker gives it (an agent's name),
+    /// `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` with no `--`, room left in a
+    /// name for its suffix.
+    pub const LABEL_MAX_BYTES: usize = NAME_MAX_BYTES - 2 - NAME_SUFFIX_BYTES;
+    /// A name's suffix, of `NAME_SUFFIX_ALPHABET`: 2^20 names a label.
+    pub const NAME_SUFFIX_BYTES: usize = 4;
     /// A profile picture (PNG, JPEG, WebP, or GIF).
     pub const PICTURE_MAX_BYTES: usize = 256 * 1024;
     /// An operation id: `^[A-Za-z0-9._:-]{1,128}$`.
@@ -228,64 +231,53 @@ pub const VALID_REPO_PATH_JS: &str = r#"export function validRepoPath(path) {
   return !/[\x00-\x1f\\]/.test(path);
 }"#;
 
-/// One part of a name, and one DNS label: a fragment's label, a username,
-/// an agent's name. Never `--` (a repo's name joins two with it).
+/// A fragment's label (and an agent's name): lowercase letters, digits,
+/// and single dashes, not starting or ending with one, at most
+/// `LABEL_MAX_BYTES`. Never `--` (a host joins a branch's mark with it).
 pub fn valid_label(label: &str) -> bool {
     let b = label.as_bytes();
     let alnum = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
     !b.is_empty()
-        && b.len() <= limits::NAME_MAX_BYTES
+        && b.len() <= limits::LABEL_MAX_BYTES
         && alnum(&b[0])
         && alnum(&b[b.len() - 1])
         && b.iter().all(|c| alnum(c) || *c == b'-')
         && !label.contains("--")
 }
 
-/// Words no one may take as a username: the platform's own hosts and paths.
-pub const RESERVED_USERNAMES: [&str; 25] = [
-    "www", "api", "app", "apps", "auth", "admin", "root", "system", "platform", "fragment", "fragments", "static", "assets",
-    "cdn", "mail", "docs", "blog", "help", "support", "status", "new", "cli", "anonymous", "operator",
-    // a computer's origin is `<id>--computer` (computer.rs): never a fragment's host
-    "computer",
-];
+/// What a name's suffix is made of: lowercase letters and digits, less
+/// those read as each other (`l`, `o`, `0`, `1`), 32 of them.
+pub const NAME_SUFFIX_ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
-/// A username: chosen once, a label of 3 to 32 bytes, not reserved.
-pub fn valid_username(username: &str) -> bool {
-    (limits::USERNAME_MIN_BYTES..=limits::USERNAME_MAX_BYTES).contains(&username.len())
-        && valid_label(username)
-        && !RESERVED_USERNAMES.contains(&username)
-}
-
-/// A fragment's name: `<label>.<username>` (decision R16), served at
-/// `<label>--<username>.<suffix>` ([`flat_name`]).
+/// A fragment's name (decision 47): its label, then `--` and a suffix of
+/// `NAME_SUFFIX_BYTES` from `NAME_SUFFIX_ALPHABET`, as `todo--k3x9`. A
+/// label never holds `--`, so no label reads as a name (`reader-chat`
+/// would, with one dash). One DNS label: its host under the fleet's
+/// suffix, so one wildcard certificate covers every fragment, and its
+/// code.storage repo's name.
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
 }
 
-/// (label, username) of a fragment's name.
+/// (label, suffix) of a fragment's name.
 pub fn split_fragment_name(name: &str) -> Option<(&str, &str)> {
-    let (label, username) = name.split_once('.')?;
-    (valid_label(label) && valid_username(username)).then_some((label, username))
+    let (label, suffix) = name.rsplit_once("--")?;
+    let suffix_ok = suffix.len() == limits::NAME_SUFFIX_BYTES && suffix.bytes().all(|c| NAME_SUFFIX_ALPHABET.contains(&c));
+    (suffix_ok && valid_label(label)).then_some((label, suffix))
 }
 
-/// A fragment's name from its label and its owner's username.
-pub fn fragment_name(label: &str, username: &str) -> String {
-    format!("{label}.{username}")
-}
-
-/// A fragment's name as one DNS label, `<label>--<username>` (neither part
-/// contains `--`): its host under the fleet's suffix, so one wildcard
-/// certificate covers every fragment, and its code.storage repo (repo
-/// names are global in the org).
-pub fn flat_name(name: &str) -> Option<String> {
-    let (label, username) = split_fragment_name(name)?;
-    Some(format!("{label}--{username}"))
-}
-
-/// The fragment a flat name (`<label>--<username>`) names.
-pub fn from_flat_name(flat: &str) -> Option<String> {
-    let (label, username) = flat.split_once("--")?;
-    (valid_label(label) && valid_username(username)).then(|| fragment_name(label, username))
+/// A fragment's name from its label and a suffix of 20 bits of
+/// `random` (the caller's randomness: the platform's own, or for a name
+/// that must come out the same each time, a digest's).
+pub fn fragment_name(label: &str, random: [u8; 3]) -> String {
+    assert!(valid_label(label), "a name is made from a valid label");
+    let bits = u32::from_be_bytes([0, random[0], random[1], random[2]]);
+    let suffix: String = (0..limits::NAME_SUFFIX_BYTES)
+        .map(|i| char::from(NAME_SUFFIX_ALPHABET[((bits >> (5 * i)) & 31) as usize]))
+        .collect();
+    let name = format!("{label}--{suffix}");
+    assert!(valid_fragment_name(&name), "a name made is a valid name");
+    name
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -513,7 +505,16 @@ impl Visibility {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateFragment {
+    /// The name to make, in full (`todo-k3x9`), for a client that must
+    /// know it beforehand (an ask's chat, a test); a name taken is 409.
+    /// Empty: the platform makes one from `label`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// The label of a fragment the platform names (`todo` makes
+    /// `todo-k3x9`, its suffix random: decision 47). A create names a
+    /// label or a name, never both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     /// Starts the fragment from one of the platform's templates (`todo`,
@@ -632,6 +633,10 @@ pub struct ListedFragment {
     /// shell's sidebar leaves it out; search still finds it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// An agent's list `for` someone: whether that someone owns it (beside
+    /// the role the agent acts with there), as no name says any more.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owned: bool,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
@@ -782,10 +787,6 @@ pub struct Identity {
     /// An agent's owner.
     #[serde(default)]
     pub owner: Option<String>,
-    /// A person's username; an agent's owner's (the namespace its
-    /// fragments go in). `None` until a person chooses one.
-    #[serde(default)]
-    pub username: Option<String>,
     /// An agent held below its owner (decision 36): the most it acts with
     /// anywhere. `None`: as its owner would.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -856,11 +857,10 @@ pub struct IdentityView {
     /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// A person's username (decision R16): their fragments are
-    /// `<label>.<username>`. An agent's fragments go under its owner's.
+    /// A person's email: their latest sign-in's, verified (decision 45).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    /// Where a person's picture is served (`/api/users/<username>/picture`).
+    pub email: Option<String>,
+    /// Where a person's picture is served (`/api/identities/<npub>/picture`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
     pub created_at: i64,
@@ -1341,13 +1341,12 @@ mod tests {
     /// is unchanged). Method: the literal old forms, decoded and encoded.
     #[test]
     fn identity_and_subject_keep_their_wire_form() {
-        let facts = r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"agent","owner":"id:ffffffffffffffffffffffffffffffff","username":null}"#;
+        let facts = r#"{"id":"npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6","kind":"agent","owner":"npub1paul"}"#;
         let who: Identity = serde_json::from_str(facts).unwrap();
         assert_eq!(who.kind, IdentityKind::Agent);
-        assert_eq!(who.owner.as_deref(), Some("id:ffffffffffffffffffffffffffffffff"));
-        assert_eq!(who.username, None);
+        assert_eq!(who.owner.as_deref(), Some("npub1paul"));
         let bare: Identity = serde_json::from_str(r#"{"id":"npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6","kind":"person"}"#).unwrap();
-        assert_eq!((bare.owner, bare.username), (None, None));
+        assert_eq!(bare.owner, None);
         assert!(serde_json::from_str::<Identity>(r#"{"id":"npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6","kind":"robot"}"#).is_err(), "an unknown kind is refused");
         for kind in [IdentityKind::Person, IdentityKind::Agent] {
             assert_eq!(IdentityKind::parse(kind.as_str()), Some(kind), "a kind's column reads back as itself");
@@ -1363,23 +1362,26 @@ mod tests {
         assert!(!valid_label("todo-"));
         assert!(!valid_label("to--do"));
         assert!(!valid_label("Todo"));
-        assert!(!valid_label(&"a".repeat(64)));
-        assert!(valid_username("futurepaul"));
-        assert!(!valid_username("ab"));
-        assert!(!valid_username("www"));
-        assert!(!valid_username(&"a".repeat(33)));
-        assert!(valid_fragment_name("desktop.futurepaul"));
-        assert!(!valid_fragment_name("desktop"));
-        assert!(!valid_fragment_name("desktop.www"));
-        assert!(!valid_fragment_name("a.b.futurepaul"));
-        assert_eq!(split_fragment_name("todo-1.futurepaul"), Some(("todo-1", "futurepaul")));
-        assert_eq!(fragment_name("todo", "paul"), "todo.paul");
-        assert_eq!(flat_name("todo-1.futurepaul").as_deref(), Some("todo-1--futurepaul"));
-        assert_eq!(flat_name("todo"), None);
-        assert_eq!(from_flat_name("todo-1--futurepaul").as_deref(), Some("todo-1.futurepaul"));
-        for not in ["todo", "todo--", "--paul", "a--b--c", "Todo--paul", "todo--pa", "todo.x--paul"] {
-            assert_eq!(from_flat_name(not), None, "{not}");
+        assert!(!valid_label("todo.paul"));
+        assert!(valid_label(&"a".repeat(limits::LABEL_MAX_BYTES)));
+        assert!(!valid_label(&"a".repeat(limits::LABEL_MAX_BYTES + 1)));
+        assert!(valid_fragment_name("todo--k3x9"));
+        assert!(valid_fragment_name("my-todo--k3x9"));
+        assert_eq!(split_fragment_name("my-todo--k3x9"), Some(("my-todo", "k3x9")));
+        // a label is never a name, whatever it ends in
+        assert!(valid_label("reader-chat") && !valid_fragment_name("reader-chat"));
+        for not in ["todo", "todo--", "--k3x9", "todo--k3x", "todo--k3x99", "todo--K3X9", "todo--k3l9", "todo--k3o9", "todo--k309", "todo--k319", "to--do--k3x9", "todo.paul", "todo-k3x9", "todo---k3x9"] {
+            assert!(!valid_fragment_name(not), "{not}");
         }
+        let longest = format!("{}--k3x9", "a".repeat(limits::LABEL_MAX_BYTES));
+        assert!(valid_fragment_name(&longest) && longest.len() == limits::NAME_MAX_BYTES);
+        // 20 bits, five a character: the same bits make the same name, and
+        // each character of the alphabet comes out of some bits
+        assert_eq!(fragment_name("todo", [0, 0, 0]), "todo--aaaa");
+        assert_eq!(fragment_name("todo", [0x0f, 0xff, 0xff]), "todo--9999");
+        assert_eq!(fragment_name("todo", [1, 2, 3]), fragment_name("todo", [1, 2, 3]));
+        let made: std::collections::BTreeSet<char> = (0..=255u8).flat_map(|b| fragment_name("t", [0, 0, b]).chars().skip(3).take(2).collect::<Vec<_>>()).collect();
+        assert_eq!(made.len(), 32);
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));
@@ -1504,18 +1506,18 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, sharing: None, archived: false }] };
-        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, sharing: None, archived: false, owned: false }] };
+        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["id:0123456789abcdef0123456789abcdef".into()], preview: Some("hi".into()), sharing: Some(sharing), archived: true }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["npub1juniper".into()], preview: Some("hi".into()), sharing: Some(sharing), archived: true, owned: false }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["id:0123456789abcdef0123456789abcdef"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
         // a row not archived leaves the flag out, and reads back so
-        let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
+        let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
         assert!(!read.archived);
         let found = SearchAnswer {
             fragments: vec![],
