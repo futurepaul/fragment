@@ -30,6 +30,7 @@ pub mod models;
 pub mod npub;
 pub mod oauth;
 pub mod price;
+pub mod providers;
 pub mod ratelimit;
 pub mod registry;
 pub mod schema;

@@ -361,8 +361,17 @@ fn tokens(v: Option<&Value>) -> Result<Option<u64>, Refusal> {
 }
 
 /// `body`, an OpenAI-shaped chat completion, bounded for its model `t`
-/// (`model_of` a tier, or `capped`).
+/// (`model_of` a tier, or `capped`), less the hints only a person's own
+/// providers read (`providers::strip_hints`: Workers AI never sees them).
 pub fn bound(t: Capped, body: Value, stream: bool) -> Result<Bounded, Refusal> {
+    let mut b = bound_hinted(t, body, stream)?;
+    crate::providers::strip_hints(&mut b.input);
+    Ok(b)
+}
+
+/// `bound`, its hints kept: what a person's own provider's translation
+/// reads (crate::providers).
+pub fn bound_hinted(t: Capped, body: Value, stream: bool) -> Result<Bounded, Refusal> {
     let Value::Object(mut input) = body else { return Err(Refusal::NotAnObject) };
     match input.get("messages") {
         Some(Value::Array(m)) if !m.is_empty() => {}
