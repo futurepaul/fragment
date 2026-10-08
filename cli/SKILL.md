@@ -78,6 +78,11 @@ connects them, reading only unless they allow changes. From a shell,
 `fragment mcp <name> [--write]` serves a fragment's same tools over
 stdio (`claude mcp add <name> -- fragment mcp <name>`).
 
+A page is mostly seen in a narrow pane (about 380 px) beside its
+person's chat, under a titlebar that already names it: give it no
+page-title heading, start with the content, and link `./__fragment.css`
+for the platform's look.
+
 ## Ask another agent
 
 An agent hands work to another of its owner's agents by @naming it in a
