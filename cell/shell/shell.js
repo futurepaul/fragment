@@ -1548,7 +1548,7 @@ $("settings").onclick = () => openSettings().catch((e) => notice("Settings did n
 function firstRun(...children) {
   $("layout").hidden = true;
   $("first-run").hidden = false;
-  $("first-run-card").replaceChildren(el("div", "brand", "Finite.Computer"), ...children);
+  $("first-run-card").replaceChildren(el("div", "brand", $("brand").textContent), ...children);
 }
 function signIn() {
   const go = el("a", "primary", "Sign in");

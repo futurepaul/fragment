@@ -127,7 +127,11 @@ that bounced before, a field it refuses) 400, and the rest (an unverified
 sender, an outage) 502. Dev and the e2e send to the mail fake instead
 (`FRAGMENT_MAIL_URL`). On a preview, whose mail is real, a message to an
 e2e person (`<name>@e2e.test`, an address with no mailbox) goes nowhere
-rather than bounce. What it sends: invites by email (Sharing).
+rather than bounce. What it sends: invites by email (Sharing), seats
+and trials (Billing). Each names the platform as its shell does
+(`fragment_core::mail::PRODUCT`, Finite.Computer, held to the shell's
+page and web manifest by a test); the address it comes from, and that
+address's display name, are the deployment's `mail_from`.
 
 ## Principals and access
 

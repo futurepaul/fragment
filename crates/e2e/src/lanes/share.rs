@@ -203,10 +203,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mailed = s.mail.sent_to(&guest_name);
     let link = api.site_url(&chat, "");
     s.ok(
-        "they are mailed, from the deployment's address: who shares it, and the fragment's own address, which holds no secret",
+        "they are mailed, from the deployment's address: who shares it, on the platform the shell names, and the fragment's own address, which holds no secret",
         mailed.len() == 1
             && mailed[0].from == crate::MAIL_FROM
             && mailed[0].subject.starts_with(&format!("{owner_name} shared "))
+            && mailed[0].text.contains(&format!(" on {}.\n", fragment_core::mail::PRODUCT))
             && mailed[0].text.contains(&format!("Open it: {link}\n"))
             && mailed[0].text.contains(&format!("Sign in as {guest_name}"))
             && !mailed[0].text.contains("?view=")

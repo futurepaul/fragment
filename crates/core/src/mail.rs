@@ -5,6 +5,11 @@
 
 use serde_json::{json, Value};
 
+/// What the platform calls itself to people: the shell's name (its page's
+/// title and brand, and its web manifest's name: a test below holds them
+/// to this), and what every mail it sends says they were invited to.
+pub const PRODUCT: &str = "Finite.Computer";
+
 /// An address, at most (RFC 5321's path limit).
 pub const ADDRESS_MAX_BYTES: usize = 320;
 /// A subject, at most.
@@ -80,7 +85,7 @@ pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i
         to: to.to_string(),
         subject: format!("{from} shared \u{201c}{title}\u{201d} with you"),
         text: format!(
-            "{from} invited you to {may} \u{201c}{title}\u{201d} on Fragment.\n\n\
+            "{from} invited you to {may} \u{201c}{title}\u{201d} on {PRODUCT}.\n\n\
              Open it: {link}\n\n\
              Sign in as {to} to open it. The invite waits {days} days.\n\n\
              If you did not expect this, ignore this mail: nothing happens unless you sign in as {to}.\n"
@@ -129,7 +134,7 @@ mod tests {
     fn an_invite_names_its_sharer_fragment_and_role_on_one_line() {
         let m = invite("bea@example.com", "ann@example.com", "Garden\nplans", true, "https://garden--k3x9.fragment.boats/", 30);
         assert_eq!(m.subject, "ann@example.com shared \u{201c}Garden plans\u{201d} with you");
-        assert!(m.text.contains("invited you to edit"), "{}", m.text);
+        assert!(m.text.contains("invited you to edit \u{201c}Garden plans\u{201d} on Finite.Computer.\n"), "{}", m.text);
         assert!(m.text.contains("Open it: https://garden--k3x9.fragment.boats/\n"), "{}", m.text);
         assert!(m.text.contains("Sign in as bea@example.com to open it. The invite waits 30 days."), "{}", m.text);
         assert_eq!(refusal(&m), None);
@@ -137,6 +142,18 @@ mod tests {
         let m = invite("bea@example.com", &long, &long, false, "https://a--k3x9.fragment.boats/", 30);
         assert_eq!(refusal(&m), None, "{}", m.subject);
         assert!(m.text.contains("invited you to view"));
+    }
+
+    /// Goal: a person reads one name for the platform, in its mail and in
+    /// the shell it sends them to. Method: the shell's page and web
+    /// manifest, as the cell serves them, name `PRODUCT`.
+    #[test]
+    fn the_mail_names_the_platform_as_the_shell_does() {
+        let page = include_str!("../../../cell/shell/index.html");
+        assert!(page.contains(&format!("<title>{PRODUCT}</title>")), "the shell's page is titled {PRODUCT}");
+        assert!(page.contains(&format!("id=\"brand\">{PRODUCT}</div>")), "the shell's brand is {PRODUCT}");
+        let manifest: Value = serde_json::from_str(include_str!("../../../cell/shell/manifest.webmanifest")).expect("the web manifest is JSON");
+        assert_eq!(manifest["name"], PRODUCT);
     }
 
     #[test]

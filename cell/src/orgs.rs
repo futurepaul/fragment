@@ -5,6 +5,7 @@
 //! (registry/orgs.rs) and pushes each seat's plan to its holder's ledger
 //! and computer; this module only checks who asks.
 
+use fragment_core::mail::PRODUCT;
 use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
@@ -183,13 +184,13 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
                 SeatKind::Seat => "a seat",
             };
             let text = format!(
-                "You are invited to try fragment: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/settings?trial={}\n\nYour code: {}\n",
+                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/settings?trial={}\n\nYour code: {}\n",
                 code.days,
                 cfg.platform(),
                 code.code,
                 code.code
             );
-            let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: "Try fragment".into(), text };
+            let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: format!("Try {PRODUCT}"), text };
             crate::mail::send(env, cfg, &mail).await?;
             ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to) }).await?;
             json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
@@ -225,8 +226,8 @@ async fn mail_seat(env: &Env, cfg: &Config, seat: &OrgMember, org: &str) -> bool
         Some(_) => "It is yours now",
         None => "Sign in with this email address to take it",
     };
-    let text = format!("{org} gave you {kind} on fragment.\n\n{held}: {}/\n", cfg.platform());
-    let mail = crate::mail::Mail { to: seat.email.clone(), subject: "You have a seat on fragment".into(), text };
+    let text = format!("{org} gave you {kind} on {PRODUCT}.\n\n{held}: {}/\n", cfg.platform());
+    let mail = crate::mail::Mail { to: seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };
     match crate::mail::send(env, cfg, &mail).await {
         Ok(_) => true,
         Err(e) => {
@@ -247,8 +248,8 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
         Some(_) => "It is yours now",
         None => "Sign in with this email address to take it",
     };
-    let text = format!("You have {kind} on fragment, in {}.\n\n{held}: {}/\n", comped.org.name, cfg.platform());
-    let mail = crate::mail::Mail { to: comped.seat.email.clone(), subject: "You have a seat on fragment".into(), text };
+    let text = format!("You have {kind} on {PRODUCT}, in {}.\n\n{held}: {}/\n", comped.org.name, cfg.platform());
+    let mail = crate::mail::Mail { to: comped.seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };
     match crate::mail::send(env, cfg, &mail).await {
         Ok(_) => true,
         Err(e) => {
