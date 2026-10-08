@@ -439,16 +439,16 @@ fn answers_are_the_transcripts() {
     assert_eq!((t.as_str(), call), ("scripted: no message_agent among my tools", None));
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] dm: maple: ping" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"status\": \"queued\"}" }], "tools": bots }));
     assert_eq!(t, "scripted: the tool said: {\"status\": \"queued\"}");
-    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "Message from 🤖 juniper (@juniper-paul): ping" }], "tools": bots }));
-    assert_eq!(t, "scripted: Message from 🤖 juniper (@juniper-paul): ping", "a teammate's message, answered");
-    let done = "[SYSTEM: Background process proc_1 completed]\nReply from @maple-paul:\n{\"reply\": \"scripted: Message from 🤖 juniper (@juniper-paul): ping\", \"status\": \"settled\"}";
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "Message from 🤖 juniper (@juniper--k3x9): ping" }], "tools": bots }));
+    assert_eq!(t, "scripted: Message from 🤖 juniper (@juniper--k3x9): ping", "a teammate's message, answered");
+    let done = "[SYSTEM: Background process proc_1 completed]\nReply from @maple--k3x9:\n{\"reply\": \"scripted: Message from 🤖 juniper (@juniper--k3x9): ping\", \"status\": \"settled\"}";
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": done }], "tools": bots }));
-    assert_eq!(t, "scripted: relayed: scripted: Message from 🤖 juniper (@juniper-paul): ping");
+    assert_eq!(t, "scripted: relayed: scripted: Message from 🤖 juniper (@juniper--k3x9): ping");
     // as the bridge hands a teammate's message to it in its own chat, and
     // Hermes' delivery prints its answer (JSON, the emoji escaped)
-    let done = "[SYSTEM: Background process proc_2 completed]\n{\"reply\": \"scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper-paul): ping\", \"status\": \"settled\"}";
+    let done = "[SYSTEM: Background process proc_2 completed]\n{\"reply\": \"scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper--k3x9): ping\", \"status\": \"settled\"}";
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": done }], "tools": bots }));
-    assert_eq!(t, "scripted: relayed: scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper-paul): ping");
+    assert_eq!(t, "scripted: relayed: scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper--k3x9): ping");
     // a note on a cut risky turn is context: the message after it is answered
     let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));

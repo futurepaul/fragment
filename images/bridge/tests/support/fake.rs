@@ -221,7 +221,12 @@ impl Fake {
     /// A chat `<label>-k3x9` with paul and `agents` (labels, in the order
     /// added: the first is the lead).
     pub fn chat(&self, label: &str, agents: &[&str]) -> String {
-        let name = format!("{label}--k3x9");
+        self.chat_named(&format!("{label}--k3x9"), agents)
+    }
+
+    /// A chat named `name` in full, with paul and `agents`, as `chat`.
+    pub fn chat_named(&self, name: &str, agents: &[&str]) -> String {
+        let name = name.to_string();
         self.with(|w| {
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
             f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });

@@ -786,20 +786,23 @@ fragment.club until cutover (decisions 34–35).
   script's temp file in the gateway's scratch, which then holds it to the
   work with the rest.
 
-## An agent's Bot Chat is found by its chat's name
+## An agent's Bot Chat is found by its chat's label
 
 - **Observed:** 2026-10-08, Bot Mode in our Hermes image
   (docs/computers.md, "Bot Mode in our Hermes image"). Which chat is an
-  agent's own, and so its Hermes Bot Chat, the image reads from names
-  alone: `<label>-chat` beside the agent's `<label>`, as the shell's
-  `makeAgent` makes it (`bots::bot_chat`; `fragment ask`'s `direct_label`
-  reads the same). Nothing on the platform says which chat is an agent's.
+  agent's own, and so its Hermes Bot Chat, the image finds by label: in
+  the agent's list for its owner, the chat its owner owns labelled
+  `<label>-chat` beside the agent's `<label>`, as the shell's `makeAgent`
+  makes it (`bots::bot_chat`; `fragment ask`'s `direct_label` finds the
+  same). A chat's name has a suffix of its own, so it is looked up at a
+  boot, as agents come, and every few seconds while one is missing.
+  Nothing on the platform says which chat is an agent's.
 - **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
-  rename of fragments (the identity work's `<label>--<suffix>`) that the
-  three places do not follow together leaves every agent with none.
+  person with two chats of that label (one made by hand) may get either.
 - **First proof:** a bot whose roster and `message_agent` never appear in
-  its own chat (no `botmode.titled` event for it).
+  its own chat (no `botmode.titled` event for it, or no
+  `botmode.chat_found`).
 - **Delete when:** the agent fragment names its own chat (its
   `agent.json`, written by whatever makes the two), and the image, the
   shell and the CLI read that.

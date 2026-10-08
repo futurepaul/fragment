@@ -1046,9 +1046,12 @@ actually makes a chat a Bot Chat"), so the image does both
   runs no agent's turns, and its `profile.yaml` says so ("this computer's
   gateway, not an agent: never message it").
 - An agent's Bot Chat is its own chat with its owner: the chat the shell
-  makes with it, `<label>-chat` beside its `<label>` (`bots::bot_chat`,
-  the one place the image names it; the shell's `makeAgent` and
-  `fragment ask`'s `direct_label` make and find the same). Hermes'
+  makes with it, labelled `<label>-chat` beside its `<label>`, its suffix
+  its own (`bots::bot_chat`, which finds it in the agent's list for its
+  owner: at a boot, as agents come, and every few seconds while one is
+  missing, since the shell makes the chat after it assigns the agent; the
+  shell's `makeAgent` and `fragment ask`'s `direct_label` make and find
+  the same). Hermes'
   gateway makes that chat's session at its first message, and builds a
   session's prompt once, at its first turn, keeping it with the turn's
   agent for the next ones; so the title has to be there before. The image's

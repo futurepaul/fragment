@@ -25,6 +25,7 @@ mod hermes;
 mod skills;
 mod sync;
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -792,10 +793,41 @@ fn spawn_keeper(home: &Path) -> Option<Child> {
 /// The bridge's screens file (each agent's own desktop), then its ready
 /// file (every agent whose profile is written): a screen is named before
 /// its agent runs, and goes with it.
-fn write_ready(agents: &[Agent], home: &Path) {
+fn write_ready(agents: &[Agent], home: &Path, chats: &BotChats) {
     write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(agents, home), None);
-    write_whole(Path::new(&format!("{RUN}/{}", bots::BOTS_FILE)), &bots::bots_file(agents, home), None);
+    write_bots(agents, home, chats);
     write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
+}
+
+/// The bots file (bots.rs), for the agents whose Bot Chat is found.
+fn write_bots(agents: &[Agent], home: &Path, chats: &BotChats) {
+    write_whole(Path::new(&format!("{RUN}/{}", bots::BOTS_FILE)), &bots::bots_file(agents, home, chats), None);
+}
+
+/// Each agent's Bot Chat as found (bots.rs, `bot_chat`), by its fragment.
+type BotChats = BTreeMap<String, String>;
+
+/// Looks for the Bot Chat of each agent that has none found yet, in its
+/// list for its owner: at a boot, as agents come, and on the agents'
+/// cadence while one is missing (the shell makes an agent's chat after it
+/// assigns the agent). Whether one was found. Bounded: one list a missing
+/// agent, and a computer runs at most `AGENTS_MAX` of them.
+async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bool {
+    let mut found = false;
+    let missing: Vec<&Agent> = agents.iter().filter(|a| !chats.contains_key(&a.fragment)).collect();
+    for a in missing {
+        match api.fragments_for(&a.fragment, &a.owner).await {
+            Ok(list) => {
+                if let Some(chat) = bots::bot_chat(&a.fragment, &list) {
+                    ev!("botmode.chat_found", { "agent": a.fragment, "chat": chat });
+                    chats.insert(a.fragment.clone(), chat);
+                    found = true;
+                }
+            }
+            Err(e) => ev!("botmode.chat_unread", { "agent": a.fragment, "error": e.to_string() }),
+        }
+    }
+    found
 }
 
 /// Hermes' own stop of `agent`'s desktop, which refuses while a person
@@ -879,7 +911,8 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// create` asks), and then the ready file names it, so the bridge hands it
 /// no turn before its profile is whole. A removed agent leaves the ready
 /// file, so the bridge stops at once; its profile waits for the next boot.
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String]) {
+#[allow(clippy::too_many_arguments)]
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String], chats: &mut BotChats) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
     ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
@@ -901,7 +934,8 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    write_ready(now, home);
+    find_bot_chats(api, &change.added, chats).await;
+    write_ready(now, home, chats);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }
 
@@ -1120,7 +1154,9 @@ async fn boot_main() {
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
-    write_ready(&agents, &home);
+    let mut chats = BotChats::new();
+    find_bot_chats(&api, &agents, &mut chats).await;
+    write_ready(&agents, &home, &chats);
     let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     let mut keeper = spawn_keeper(&home);
@@ -1230,9 +1266,13 @@ async fn boot_main() {
                         }
                         let change = agents::diff(&agents, &c.agents);
                         if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &model, &credential_env).await;
+                            follow_agents(&api, &change, &c.agents, &home, ids, &model, &credential_env, &mut chats).await;
                         }
                         agents = c.agents;
+                        // an agent's chat made after the agent: its Bot Chat now
+                        if agents.iter().any(|a| !chats.contains_key(&a.fragment)) && find_bot_chats(&api, &agents, &mut chats).await {
+                            write_bots(&agents, &home, &chats);
+                        }
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {
