@@ -444,6 +444,9 @@ pub struct Stream {
     /// not the connection stays open after it (the gateway's may, for
     /// minutes).
     done: bool,
+    /// Characters of reasoning read (GLM's `reasoning_content`): never
+    /// kept, only counted, so a reader can say the model is thinking.
+    thought: u64,
 }
 
 impl Stream {
@@ -508,6 +511,11 @@ impl Stream {
         self.done
     }
 
+    /// Characters of reasoning read so far (none of them kept).
+    pub fn thought(&self) -> u64 {
+        self.thought
+    }
+
     fn take_line(&mut self, line: &[u8], out: Option<&mut Vec<u8>>) {
         self.lines += 1;
         let rewritten = self.read_line(line);
@@ -529,8 +537,13 @@ impl Stream {
         if let Some(id) = chunk.get("id").filter(|id| !id.is_null()) {
             self.id = Some(id.clone());
         }
-        if let (Some(answer), Some(choice)) = (self.answer.as_mut(), chunk.get("choices").and_then(|c| c.get(0))) {
-            answer.take(choice);
+        if let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) {
+            let delta = &choice["delta"];
+            let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).unwrap_or("");
+            self.thought += reasoning.chars().count() as u64;
+            if let Some(answer) = self.answer.as_mut() {
+                answer.take(choice);
+            }
         }
         let ending = if text.ends_with("\r\n") { "\r\n" } else if text.ends_with('\n') { "\n" } else { "" };
         match (chunk.get("choices"), chunk.get("usage").cloned()) {
