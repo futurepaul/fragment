@@ -22,7 +22,9 @@
 //! text file (the mind's blob, named on `say`) is read whole into its turn,
 //! goes with the hand-off on `chat`, the stub names it, and its reply's
 //! file comes back on the report and is read into the next turn. `export`
-//! pages the raw log.
+//! pages the raw log. The person's apps (`apps`): their todo is listed and
+//! used as them, once though its step is tried twice; a shared mind lends
+//! none; a fork asking for the capability is refused at deploy.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,11 +160,13 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = s.ai.chats();
     let first = calls.iter().find(|c| c["messages"][1]["content"][1]["text"] == "hello mind, the garden has tomatoes and basil");
     s.ok(
-        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date, search and the web's tools",
+        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date, search, the web's tools and the apps'",
         first.is_some_and(|c| {
             c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You are Mind, an AI agent"))
                 && c["messages"][1]["content"][0]["text"] == "<chat>\n</chat>"
-                && c["tools"].as_array().is_some_and(|t| t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search", "web_search", "web_fetch", "research"])
+                && c["tools"].as_array().is_some_and(|t| {
+                    t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search", "web_search", "web_fetch", "research", "apps", "app_ops", "app_call"]
+                })
         }),
         format!("{first:?}"),
     );
@@ -248,6 +252,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         "web_search and research find pages on the internet (a keyed search, else DuckDuckGo, else Wikipedia)",
         "a local run calls nothing on the internet: the no-key search was tried by hand (docs/optchat.md, \"The web\")",
     );
+
+    // ---- the person's apps: a todo of theirs, used as them
+    if let Err(e) = apps(s, api, &owner, &mind, &npub) {
+        s.fail("the mind uses the person's apps", format!("{e:#}"));
+    }
 
     // ---- importing chats, into a mind of a person the CLI signs in as
     if let Err(e) = imports(s, api) {
@@ -416,6 +425,133 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
+/// A fragment with its own code that asks for the `owner` capability.
+const FORK_JSON: &[u8] = br#"{"capabilities":["owner"],"operations":{"look":{"kind":"job"}}}"#;
+const FORK_APP: &[u8] = b"import { DurableObject } from \"cloudflare:workers\";\n\
+export class App extends DurableObject {\n  async look(input, job) {\n    return await job.owner.fragments();\n  }\n}\n";
+
+/// The person's apps (docs/optchat.md, "The user's apps"): their todo,
+/// listed with its described operations (`apps`, `app_ops`) and used as
+/// them (`app_call`, `job.owner.call`), once though its step is tried
+/// twice (the todo's outbox write fails the first try: the call's id is
+/// the step's, so the todo's ledger replays it). Shared with someone else,
+/// the mind lends none; a fragment with its own code that asks for the
+/// capability is refused at deploy.
+fn apps(s: &mut Suite, api: &Api, owner: &Keys, mind: &str, npub: &str) -> Result<()> {
+    let todo = s.named(api, owner, "mtodo")?;
+    let r = api.create_with(owner, json!({ "name": todo, "template": "todo" }))?;
+    anyhow::ensure!(r.status == 200, "making the todo: {r}");
+    s.owned(&r.body, owner);
+    let owner_id = api.identity(owner)?;
+    // its code installed, and the person's list holds it (fed from the todo's outbox)
+    let ready = s.eventually(Duration::from_secs(30), || {
+        api.status(owner, &todo).is_ok_and(|r| r.body["code"]["operations"]["add"]["kind"] == "mutation")
+            && api.signed(owner, "GET", "/api/fragments", None).is_ok_and(|r| r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == todo.as_str())))
+    });
+    anyhow::ensure!(ready, "the todo is not installed and listed");
+    let say = |id: &str, thread: &str, text: String| api.signed(owner, "POST", &format!("/api/f/{mind}/channels/say"), Some(&json!({ "id": id, "body": { "text": padded(&text), "thread": thread } })));
+    // the turn's tool answered, and the model said so
+    let answered = |thread: &str| messages(api, owner, mind, thread).iter().any(|m| m["kind"] == "talk" && m["text"].as_str().is_some_and(|t| t.starts_with("the tool said: ")));
+    let echo = |thread: &str| messages(api, owner, mind, thread).iter().find(|m| m["kind"] == "echo").and_then(|m| m["text"].as_str().map(str::to_string)).unwrap_or_default();
+
+    // apps: the todo, its described operations a line each, not the mind itself
+    let listing = "t_a0a0a0a0a0a0a0a0";
+    anyhow::ensure!(say("ap1", listing, "what apps do I have [[call apps {}]]".into())?.status == 200, "saying ap1");
+    let listed = s.eventually(TURN, || answered(listing));
+    let text = echo(listing);
+    let flat = todo.replace('.', "--");
+    s.ok(
+        "apps lists the person's todo (as its owner, at its address) with its described operations, a line each, and not the mind",
+        listed
+            && text.lines().any(|l| l.starts_with(&format!("- {todo}:")) && l.contains("(app, owner) http") && l.contains(&format!("://{flat}")))
+            && text.contains("\n  add (mutation): Add a todo to the list. Answers its id.")
+            && text.contains("\n  list (query): The list:")
+            && !text.contains(mind),
+        &text,
+    );
+
+    // app_ops: an operation's input in full
+    let inputs = "t_a1a1a1a1a1a1a1a1";
+    anyhow::ensure!(say("ap2", inputs, format!("what does it take [[call app_ops {{\"fragment\": \"{todo}\"}}]]"))?.status == 200, "saying ap2");
+    let read = s.eventually(TURN, || answered(inputs));
+    let text = echo(inputs);
+    s.ok(
+        "app_ops shows each operation's input schema",
+        read && text.contains("add (mutation): Add a todo to the list. Answers its id.\n  input: {") && text.contains("\"required\":[\"text\"]"),
+        &text,
+    );
+
+    // app_call: add milk, as the person, its step tried twice
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": todo, "op": "fail-outbox", "times": 1 })))?;
+    s.ok("(the test fleet fails the todo's next outbox write: the call answers 500, and its step is tried again)", r.status == 200, &r);
+    let shopping = "t_a2a2a2a2a2a2a2a2";
+    let call = format!("add milk to my todo [[call app_call {{\"fragment\": \"{todo}\", \"op\": \"add\", \"input\": {{\"text\": \"milk\"}}}}]]");
+    anyhow::ensure!(say("ap3", shopping, call)?.status == 200, "saying ap3");
+    let added = s.eventually(TURN, || answered(shopping));
+    let text = echo(shopping);
+    let list = api.op(owner, &todo, "list", "mind-list", json!({}))?;
+    let milk = list.body["result"]["todos"].as_array().map_or(0, |l| l.iter().filter(|t| t["text"] == "milk").count());
+    s.ok(
+        "app_call adds milk to the todo, once, its echo naming the todo and where it is, then its result",
+        added && milk == 1 && text.starts_with(&format!("{todo} add at http")) && text.lines().nth(1) == Some("{\"id\":1}"),
+        json!({ "echo": text, "list": list.body }),
+    );
+    let events = api.signed(owner, "GET", &format!("/api/f/{todo}/events?tail=50"), None)?;
+    let events = events.body["events"].as_array().cloned().unwrap_or_default();
+    let called: Vec<&Value> = events.iter().filter(|e| e["kind"] == "fragment.called").collect();
+    s.ok(
+        "its first try failed after the commit, and its retry replayed it: the todo's events name the mind, as the person",
+        events.iter().any(|e| e["kind"] == "effects.delayed" && e["data"]["op"] == "add")
+            && called.len() == 1
+            && called[0]["data"]["replayed"] == true
+            && called[0]["data"]["op"] == "add"
+            && called[0]["data"]["fragment"] == mind
+            && called[0]["data"]["principal"] == owner_id.as_str()
+            && called[0]["data"]["key"] == npub,
+        json!(events),
+    );
+    let ops = records(api, owner, &todo, "ops");
+    let activity = records(api, owner, &todo, "activity");
+    s.ok(
+        "its ops record names the mind's key, and its record the person (call.principal)",
+        ops.iter().filter(|r| r["principal"] == npub).count() == 1
+            && activity.len() == 1
+            && activity[0]["body"]["by"] == owner_id.as_str()
+            && activity[0]["body"]["text"] == "milk",
+        json!({ "ops": ops, "activity": activity }),
+    );
+
+    // shared with someone else, the mind lends none
+    let other = api.person()?;
+    let other_id = api.identity(&other)?;
+    let r = api.signed(owner, "PUT", &format!("/api/f/{mind}/members/{other_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "sharing the mind: {r}");
+    let shared = "t_a3a3a3a3a3a3a3a3";
+    anyhow::ensure!(say("ap4", shared, "what apps do I have now [[call apps {}]]".into())?.status == 200, "saying ap4");
+    let refused = s.eventually(TURN, || answered(shared));
+    let text = echo(shared);
+    s.ok(
+        "a mind shared with someone else acts as its owner nowhere: apps says why",
+        refused && text.starts_with("Error: ") && text.contains("no one else can read or drive it") && !text.contains(&todo),
+        &text,
+    );
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{mind}/members/{other_id}"), None)?;
+    anyhow::ensure!(r.status == 200, "unsharing the mind: {r}");
+
+    // a fragment with its own code may not ask for the capability
+    let fork = s.named(api, owner, "mfork")?;
+    let c = s.create(api, owner, &fork)?;
+    s.commit(&c, &[("fragment.json", Some(FORK_JSON)), ("app.mjs", Some(FORK_APP))]);
+    let refused = s.deploy(&c);
+    let st = api.status(owner, &fork)?;
+    s.ok(
+        "a fragment with its own code that asks for the owner capability is refused at deploy, saying why",
+        st.body["code"]["error"].as_str().is_some_and(|e| e.contains(&refused[..12]) && e.contains("capabilities (owner)") && e.contains("blessed template")),
+        &st.body["code"],
+    );
     Ok(())
 }
 
