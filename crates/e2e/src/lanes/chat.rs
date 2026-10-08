@@ -71,7 +71,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&agent);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    anyhow::ensure!(r.status == 200 && identity.starts_with("id:"), "assigning the agent: {r}");
+    anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the agent: {r}");
     let chat_name = s.named(api, &owner, "talk")?;
     let r = api.create_with(&owner, json!({ "name": chat_name, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");

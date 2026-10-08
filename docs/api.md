@@ -110,7 +110,8 @@ Cloudflare's browsers.
 
 ## Principals and access
 
-A principal is an identity (`id:` + 32 hex: a person or an agent) or an
+A principal is an identity (a person or an agent, named by the npub of
+the key it was made with: docs/cloudflare-v1.md, decision 45) or an
 anonymous visitor (`anon:` + 32 hex, the hash of a random cookie on the
 fragment's origin). Grants, records, runs, and the ledger name
 principals. A request is signed by a key (64 hex inside, an npub in
@@ -163,7 +164,7 @@ acts through it: a mutation or a job needs a membership of their own
 `viewer` (an editor's channels, tokens, or secrets).
 
 An agent acts for whoever asked, capped (docs/cloudflare-v1.md, R17). A request
-signed by an agent may name an identity in `for=<id:…>` in its URL's
+signed by an agent may name an identity in `for=<npub>` in its URL's
 query (inside the signed URL, so the signature covers it): the request
 acts with the lower of the role that identity holds in the fragment (its
 membership, an agent of its own that is a member, or the visibility
@@ -209,17 +210,24 @@ fragment's outbox.
 
 ## Identities
 
-The registry (`cell/src/registry.rs`; finite.computer's BANKS stands
-behind the same routes later) holds identities, the public keys each has
-held, each agent's owner, and, from slice B, sign-in subjects. It holds
-no grant and no private key. A **key proof** is a NIP-98 event by a new
+The registry (`cell/src/registry.rs`: fragment's BANKS, docs/cloudflare-v1.md,
+decisions 45 to 50) holds identities, the public keys each has held,
+each agent's owner, and sign-in subjects with their verified emails. It
+holds no grant. An identity is named, for good, by the npub of the key
+it was made with: a person's is a key the registry makes at their first
+sign-in and keeps sealed for them (`person:<npub>`, under the host
+secret), the only private key it holds, which it never signs with yet;
+an agent's is the key it was registered with (an agent fragment's own
+key, which its fragment keeps). A retired key still names its identity,
+and a request may name an identity by its npub or by any active key of
+it. A **key proof** is a NIP-98 event by a new
 key for the same method and URL as the request that carries it, with
 `["p", <the signing key, 64 hex>]`: whoever sent the request also holds
 the new key and meant it for this signer.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
+| `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, named by the proof's key and holding it; again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
 | `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
@@ -299,7 +307,7 @@ Any other signer, or a browser's session, is 403; unsigned, 401.
 | `GET /api/people/{person}/wipe` | the deployment's operators | → `WipeReport` (`fragment_proto::wipe`): the dry run. It changes nothing |
 | `POST /api/people/{person}/wipe` | the same | `{confirm, steps?}` → `WipeReport`: the wipe, as far as one call goes (20 s, `fragment_core::wipe::CALL_BUDGET_MS`; `steps`: at most that many steps). `confirm` is the identity the dry run answered: anyone else is 409, nothing changed (so a username that changed hands between the two never wipes the wrong person); none is 400. Called again, it goes on where it stopped; on a person wiped, it finds what is left (nothing) |
 
-`{person}` is a username or an identity (`id:…`). An agent is 400 (it is
+`{person}` is a username or an identity (an npub). An agent is 400 (it is
 wiped with its owner); no one is 404 (a username a finished wipe freed
 names no one; its identity still answers, `wiped`).
 
@@ -405,10 +413,14 @@ the report (`{report, calls}` for `--yes`).
 
 ## Sign-in
 
-A person is keyed by their verified `(issuer, subject)`: the issuer is
+A verified `(issuer, subject)` signs a person in: the issuer is
 `workos:<client id>` (the environment), the subject WorkOS's user id. The
-email is an attribute, refreshed at each sign-in and never matched. The
-platform holds no key for a person; browsers hold sessions, each looked up
+first one makes the person, named by a key the registry makes for them
+(Identities, above). WorkOS must have verified the sign-in's email (403
+otherwise); it is kept lower case and refreshed at each sign-in, the
+latest shown, and it names at most one person: a sign-in whose email is
+another person's is refused (409), never merged into them. Browsers hold
+sessions, each looked up
 live in the registry on every request whose answer depends on who is
 asking (Principals and access, above; a 30-day lifetime; tokens are 32
 random bytes, the registry keeps their SHA-256).
@@ -668,7 +680,7 @@ and styles only inline and images only from the platform
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
-| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (an npub)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [...]}` without tokens |
 | `DELETE /api/f/{name}/invites/{id}` | owner, or their agent for them | → `{ok, revoked}` |
 | `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
@@ -967,7 +979,7 @@ it registers `./__sw.js`, reads the fragment's VAPID key from
 `./__push-key`, and stores the subscription at `./__push-sub` tagged with
 `who`); `fragment.push.unregister()` drops it (`./__push-unsub`, by its
 endpoint). Anyone who can see the fragment may subscribe (at most 10 000
-subscriptions); a `who` that is an identity (`id:…`) is that identity's
+subscriptions); a `who` that is an identity (an npub) is that identity's
 own, and from anyone else is 403, so what is pushed to a person's
 identity reaches their browsers alone (a chat's replies:
 docs/chat-records.md, Push). `call.push(who, payload)` in a mutation
@@ -1175,7 +1187,7 @@ credit first. What happened is always charged, past zero.
 | `POST /api/ledger/{person}/seat` | the same | `SetSeat {id, seat: active \| past_due \| canceled, seq}` → `{}`: a change older (by `seq`) than the last applied changes nothing |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}`: at most $1,000; read-only is decided afresh |
 
-`{person}` is a username, an identity (`id:…`), or `me`. Commands are
+`{person}` is a username, an identity (an npub), or `me`. Commands are
 idempotent by their `id`, kept on the ledger as `<kind>:<id>` (a grant's
 `g1` is not a plan's): the same id again changes nothing, the same id
 with another body is 409 `conflicting_body`, and a body that breaks a

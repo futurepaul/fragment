@@ -207,7 +207,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // "Add the managed skills" makes it): the agent still knows its platform
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    s.ok("its owner assigns the agent to it", r.status == 200 && identity.starts_with("id:"), &r);
+    s.ok("its owner assigns the agent to it", r.status == 200 && fragment_core::npub::is_identity(&identity), &r);
     let chat_name = s.named(api, &owner, "chat")?;
     let chat = s.create(api, &owner, &chat_name)?;
     s.commit(&chat, &[("fragment.json", Some(CHAT_JSON))]);
@@ -695,7 +695,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok(
         "a second agent is assigned to the awake computer while the lead's turn runs",
-        running && r.status == 200 && maple_id.starts_with("id:") && maple_id != identity && r.body["phase"] == "awake" && ended(&slow).is_none(),
+        running && r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity && r.body["phase"] == "awake" && ended(&slow).is_none(),
         json!({ "assigned": r.body, "slow": work_of(&records(api, &owner, &chat_name, "work"), &slow) }),
     );
     api.signed(&owner, "PUT", &format!("/api/f/{grove_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;

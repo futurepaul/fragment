@@ -217,7 +217,7 @@ export function mount(root) {
   const asking = new Set();
   let askTimer = 0;
   function want(principal) {
-    if (typeof principal !== "string" || !principal.startsWith("id:") || profiles.has(principal)) return;
+    if (typeof principal !== "string" || !principal.startsWith("npub1") || profiles.has(principal)) return;
     profiles.set(principal, null);
     asking.add(principal);
     if (!askTimer) askTimer = setTimeout(ask, 20);
@@ -249,7 +249,7 @@ export function mount(root) {
   }
   /// How a principal shows: `{agent, name, color?, picture?, initial?}`.
   function who(principal) {
-    if (typeof principal !== "string" || !principal.startsWith("id:")) return { agent: false, name: "a visitor", initial: "?" };
+    if (typeof principal !== "string" || !principal.startsWith("npub1")) return { agent: false, name: "a visitor", initial: "?" };
     want(principal);
     const p = profiles.get(principal);
     if (isAgent(principal)) {
@@ -257,8 +257,8 @@ export function mount(root) {
       const name = p?.title ?? r?.title ?? (p?.name ? capital(p.name) : r ? capital(r.name) : p?.username ? `${p.username}'s agent` : "Agent");
       return { agent: true, name, color: colorOf(principal) };
     }
-    const name = p?.username ?? (p ? `id:…${principal.slice(-6)}` : "…");
-    return { agent: false, name, picture: typeof p?.picture === "string" ? p.picture : null, initial: name.replace(/^id:…/, "").charAt(0).toUpperCase() || "?" };
+    const name = p?.username ?? (p ? `npub…${principal.slice(-6)}` : "…");
+    return { agent: false, name, picture: typeof p?.picture === "string" ? p.picture : null, initial: name.replace(/^npub…/, "").charAt(0).toUpperCase() || "?" };
   }
   /// The word that @mentions an agent: its name (its fragment's label).
   function handleOf(principal) {
@@ -921,7 +921,7 @@ export function mount(root) {
   // ---- the composer: one line that grows; Enter sends, Shift+Enter adds a line ----
   const canPost = () => !!state.me && atLeast(state.me.role, "viewer");
   // a file is one of the chat's blobs, which editors upload (the chat's people)
-  const canAttach = () => canPost() && atLeast(state.me.role, "editor") && state.me.principal.startsWith("id:");
+  const canAttach = () => canPost() && atLeast(state.me.role, "editor") && state.me.principal.startsWith("npub1");
   let attachments = []; // { file, name, size, type, uploading }
   let sending = false;
   let recording = null; // the voice memo being recorded (`startMemo`)
@@ -1171,7 +1171,7 @@ export function mount(root) {
     if (d?.fragment === "agents" && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
       state.roster = d.agents
-        .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("id:") && typeof a.name === "string" && HANDLE.test(a.name))
+        .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
         .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name) }));
       schedule();
@@ -1305,7 +1305,7 @@ export function mount(root) {
   // Someone signed in, in a chat with an agent: a turn starts on it soon
   // (the one it names, else the lead), unless that agent is busy.
   function expectTurn(record, to, text) {
-    if (!record || !state.me?.principal.startsWith("id:")) return;
+    if (!record || !state.me?.principal.startsWith("npub1")) return;
     const target = to[0] ?? chatAgents().find((a) => mentions(text).includes(handleOf(a))) ?? lead();
     if (!target) return;
     const turns = [...state.turns.values()];
@@ -1353,7 +1353,7 @@ export function mount(root) {
   // A browser keeps a framed chat from asking (a cross-origin frame may not
   // ask for notifications): it says so, and opens the chat in a tab ----
   const pushable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
-  const canNotify = () => pushable() && canPost() && state.me.principal.startsWith("id:");
+  const canNotify = () => pushable() && canPost() && state.me.principal.startsWith("npub1");
   const NOTIFY = {
     off: ["bell", "Notify me of replies while I'm away"],
     working: ["loader", "Turning notifications on…"],

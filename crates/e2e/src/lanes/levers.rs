@@ -108,7 +108,7 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
     if s.hosted() {
         scoped(s, api, &email, &identity)?;
     } else {
-        not_a_workos_person(s, api, &email, &identity)?;
+        not_a_workos_person(s, api, &email)?;
         paid_calls(s, api)?;
     }
     Ok(())
@@ -146,19 +146,23 @@ fn scoped(s: &mut Suite, api: &Api, email: &str, identity: &str) -> Result<()> {
     let made = api.create(&keys, &own)?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": own, "op": "alarm" })))?;
     s.ok("while one labelled e2e- is the e2e's own", made.status == 200 && r.status == 200, &r);
-    let stranger = format!("id:{}", "0".repeat(32));
+    let stranger = fragment_core::npub::identity_of(&"0".repeat(64));
     let theirs = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": stranger, "op": "totals" })))?;
     let mine = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "totals" })))?;
     s.ok("and a ledger lever reaches e2e people alone (403 for anyone else)", theirs.status == 403 && mine.status == 200, format!("{theirs} / {mine}"));
     Ok(())
 }
 
-/// Locally: an e2e person is never anyone a real sign-in reaches; the same
-/// email through WorkOS (the fake) is another person.
-fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str, identity: &str) -> Result<()> {
-    let through_workos = api.sign_in(email)?;
-    let them = who(api, &through_workos)?;
-    s.ok("the same email through WorkOS is someone else: an e2e person is under an issuer of their own", them["kind"] == "person" && them["id"] != identity, &them);
+/// Locally: an e2e person is never anyone a real sign-in reaches. The same
+/// email through WorkOS (the fake) is refused: an e2e person is under an
+/// issuer of their own, and an email names one person (decision 45).
+fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str) -> Result<()> {
+    let r = api.workos_callback(email)?;
+    s.ok(
+        "the same email through WorkOS reaches no one: it is the e2e person's, and an email names one person (409, on a page)",
+        r.status == 409 && r.header("content-type").starts_with("text/html") && String::from_utf8_lossy(&r.bytes).contains("another account"),
+        &r,
+    );
     Ok(())
 }
 

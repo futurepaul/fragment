@@ -88,7 +88,7 @@ const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === 
 // the sidebar's: what the person has not archived (search still finds the rest)
 const shown = (list) => list.filter((f) => !f.archived);
 // a frame of one of the person's fragments, signed in there by the platform
-// A path segment: the API's ids keep their ":" (`computer:…`, `id:…`) as
+// A path segment: the API's ids keep their ":" (`computer:…`) as
 // sent, since the router matches segments as they are, not decoded.
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const framed = (name, path = "/") => `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;

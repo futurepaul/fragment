@@ -95,7 +95,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let proof = bob_agent.proof("POST", &format!("{}/api/identities", api.base), bob.pubkey_hex(), now_s());
     let r = api.signed(&bob, "POST", "/api/identities", Some(&json!({ "kind": "agent", "proof": proof })))?;
     let bob_agent_id = r.body["id"].as_str().unwrap_or("").to_string();
-    s.ok("someone else, with an agent of theirs", r.status == 200 && bob_agent_id.starts_with("id:"), &r);
+    s.ok("someone else, with an agent of theirs", r.status == 200 && fragment_core::npub::is_identity(&bob_agent_id), &r);
     let shared = s.named(api, &bob, "shared")?;
     s.create(api, &bob, &shared)?;
 
@@ -113,7 +113,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&chat);
     api.signed(&paul, "PUT", &format!("/api/f/{chat_name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
     let woke = s.eventually(wake, || phase(api, &paul, &computer) == "awake");
-    s.ok("the person has a computer, awake, running their agent", woke && agent_id.starts_with("id:"), phase(api, &paul, &computer));
+    s.ok("the person has a computer, awake, running their agent", woke && fragment_core::npub::is_identity(&agent_id), phase(api, &paul, &computer));
     if scripted {
         // the stub's scripted runtime writes a file under its /data
         let said = api.signed(&paul, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "w1", "body": { "text": "write notes/keep.txt kept by the old person" } })))?;
@@ -355,7 +355,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let fresh_id = me.body["id"].as_str().unwrap_or("").to_string();
     s.ok(
         "the same sign-in is a new person, whom onboarding asks for a username",
-        approved.status == 200 && me.status == 200 && fresh_id.starts_with("id:") && fresh_id != paul_id && me.body["username"].is_null() && me.body["agents"].as_array().is_none_or(Vec::is_empty),
+        approved.status == 200 && me.status == 200 && fragment_core::npub::is_identity(&fresh_id) && fresh_id != paul_id && me.body["username"].is_null() && me.body["agents"].as_array().is_none_or(Vec::is_empty),
         &me,
     );
     let r = api.signed(&fresh, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })))?;
@@ -391,7 +391,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its files are the new person's only", soul.status == 200 && soul.text == "a new soul\n", &soul);
     let r = api.signed(&fresh, "PUT", &format!("/api/computers/{fresh_computer}/agents/{agent_name}"), Some(&json!({})))?;
     let fresh_agent = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    s.ok("a new agent", r.status == 200 && fresh_agent.starts_with("id:") && fresh_agent != agent_id, &r);
+    s.ok("a new agent", r.status == 200 && fragment_core::npub::is_identity(&fresh_agent) && fresh_agent != agent_id, &r);
     let made_chat = api.create(&fresh, &chat_name)?;
     s.owned(&made_chat.body, &fresh);
     s.commit(&made_chat.body, &[("fragment.json", Some(CHAT_JSON))]);

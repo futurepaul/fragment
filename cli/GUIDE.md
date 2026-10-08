@@ -27,7 +27,7 @@ whose ending the page and the terminal both show. On a machine without a
 browser, it prints the link to open anywhere you are signed in
 (`--no-wait` returns at once; run it again after approving). The host is
 https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
-host <url>` names another. The host knows which identity (`id:…`) each
+host <url>` names another. The host knows which identity (an npub) each
 key belongs to: memberships name you, not the key. `fragment keys
 rotate` replaces the key and keeps everything you have.
 
@@ -47,7 +47,7 @@ does what that needs when the computer sets:
   names the agent (`x-fragment-agent`) and carries no signature of its
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
-- `FRAGMENT_FOR=<id:…>`, optional: the person the agent acts for (its
+- `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
   owner), named as `for` on a fragment's routes and the fragment list,
   the routes that honor it. The agent then holds that person's role,
   never above it (and never above an editor): `fragment list` lists their
@@ -58,7 +58,7 @@ does what that needs when the computer sets:
   the default: an unsigned request means nothing anywhere else.
 
 ```
-FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:… fragment list
+FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=npub1… fragment list
 ```
 
 Our Hermes image sets all three in each agent's terminal. `fragment
@@ -457,8 +457,8 @@ fragment channel my-thing activity --follow                     # the backlog a 
 ```
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
-fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
-fragment members rm my-thing <id:… | npub>
+fragment members add my-thing <npub | name@domain> --role editor   # an identity, or any key of one
+fragment members rm my-thing <npub>
 fragment members leave my-thing
 fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)
 fragment join my-thing <token>                            # or join from a CLI

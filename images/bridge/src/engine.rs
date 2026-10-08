@@ -563,18 +563,19 @@ impl Engine {
             // Said before the agent joined: not for it.
             return;
         }
-        if record.principal == agent.identity || record.principal.starts_with("anon:") {
+        if record.principal.starts_with("anon:") {
             return;
         }
         match record.channel.as_str() {
-            records::CHAT => self.said(&agent, fragment, &record),
+            // the agent's own words are not for it
+            records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
             records::TASKS if fragment == agent.fragment => {
                 // Only the agent's own fragment (its cron, the platform's
-                // `joined`: neither is an identity) and its owner ask it
-                // anything here. Another agent, though it acts for the owner
-                // and may post here, starts no routine: it would start a
-                // turn no hop counts.
-                if record.principal != agent.owner && records::is_identity(&record.principal) {
+                // `joined`: by the fragment's key, whose npub is the agent's
+                // identity) and its owner ask it anything here. Another
+                // agent, though it acts for the owner and may post here,
+                // starts no routine: it would start a turn no hop counts.
+                if record.principal != agent.owner && record.principal != agent.identity {
                     crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "principal": record.principal, "why": "only the agent's owner, or its own fragment, asks it on tasks" });
                     return;
                 }

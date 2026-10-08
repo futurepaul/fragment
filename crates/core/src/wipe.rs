@@ -64,7 +64,7 @@ pub enum Refusal {
 impl Refusal {
     pub fn message(&self) -> String {
         match self {
-            Refusal::Malformed(what) => format!("{what:?} is neither a username nor an identity (id:…)"),
+            Refusal::Malformed(what) => format!("{what:?} is neither a username nor an identity (an npub)"),
             Refusal::NotAPerson => "that is an agent: an agent is wiped with its owner, so name the person".into(),
             Refusal::Unconfirmed => "a wipe names, in `confirm`, the identity its dry run answered".into(),
             Refusal::Mismatch { named, confirmed } => {
@@ -77,7 +77,7 @@ impl Refusal {
     }
 }
 
-/// Whom `text` names: `id:<32 hex>` an identity, else a username.
+/// Whom `text` names: an npub an identity, else a username.
 pub fn named(text: &str) -> Result<Named, Refusal> {
     if crate::npub::is_identity(text) {
         return Ok(Named::Identity(text.to_string()));
@@ -368,7 +368,7 @@ mod tests {
     use super::*;
 
     fn id(c: char) -> String {
-        format!("id:{}", c.to_string().repeat(32))
+        crate::npub::identity_of(&c.to_string().repeat(64))
     }
 
     /// Goal: an operator names a person by username or identity, and

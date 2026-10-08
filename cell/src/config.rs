@@ -94,8 +94,9 @@ pub struct Config {
     /// `guest`, the default and production's, or `seat` or
     /// `seat_always_on` (dev and the e2e: `seat`).
     pub default_plan: Plan,
-    /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
-    /// them) that grant credit and set plans, seats and overdrafts.
+    /// `FRAGMENT_OPERATORS`: keys and identities, as npubs or 64 hex
+    /// (`parse_list` reads each as 64 hex), that grant credit and set
+    /// plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
@@ -281,7 +282,7 @@ impl Config {
         match &self.operators {
             None => Ok(false),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
-            Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
+            Some(Ok(listed)) => Ok(listed.iter().any(|l| Some(l.as_str()) == key || fragment_core::npub::identity_of(l) == identity)),
         }
     }
 

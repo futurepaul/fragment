@@ -454,7 +454,7 @@ mod tests {
     /// the inputs the derivation refuses.
     #[test]
     fn a_repo_name_is_its_owners() {
-        let (paul, fresh) = (format!("id:{}", "a".repeat(32)), format!("id:{}", "b".repeat(32)));
+        let (paul, fresh) = (crate::npub::identity_of(&"a".repeat(64)), crate::npub::identity_of(&"b".repeat(64)));
         let first = repo_name("e2e--", "todo.paul", &paul).unwrap();
         assert!(first.starts_with("e2e--todo--paul--"), "{first}");
         assert_eq!(first.len(), "e2e--todo--paul--".len() + REPO_OWNER_HEX, "{first}");
@@ -469,7 +469,7 @@ mod tests {
         assert!(repo_name("", "todo.paul", &paul).unwrap().starts_with("todo--paul--"));
         assert_ne!(repo_name("", "notes.paul", &paul), repo_name("", "todo.paul", &paul));
         // not a fragment's name, or not an identity: no name
-        for (fragment, owner) in [("todo", paul.as_str()), ("Todo.paul", &paul), ("todo.paul", "id:short"), ("todo.paul", "npub1x")] {
+        for (fragment, owner) in [("todo", paul.as_str()), ("Todo.paul", &paul), ("todo.paul", "id:short"), ("todo.paul", "npub1x"), ("todo.paul", &"a".repeat(64))] {
             assert_eq!(repo_name("", fragment, owner), None, "{fragment} {owner}");
         }
     }

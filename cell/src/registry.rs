@@ -1,9 +1,11 @@
-//! The `Registry` cell: fragment's stand-in for finite.computer's BANKS
-//! (FIN-11; docs/finite-integration.md). One cell for the fleet holds every
-//! identity (a person or an agent), the public keys each has held, and the
-//! sign-in subjects that name a person (phase 4 slice B). It never holds a
-//! grant or a private key: fragments keep their members, and keys stay
-//! with whoever signs.
+//! The `Registry` cell: fragment's BANKS (docs/cloudflare-v1.md, decisions
+//! 45 to 50). One cell for the fleet holds every identity (a person or an
+//! agent, named by the npub of the key it was made with), the public keys
+//! each has held, and the sign-in subjects that name a person, with their
+//! verified emails. It never holds a grant: fragments keep their members.
+//! The only private key it holds is each person's own, which it makes at
+//! their first sign-in and keeps sealed for them (`person_keys`); every
+//! other key stays with whoever signs.
 //!
 //! It is asked live about every signed request whose answer depends on who
 //! is asking (`/resolve`, `/session`: the router on the control API, a
@@ -73,9 +75,12 @@ CREATE TABLE IF NOT EXISTS keys (
   key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
 CREATE INDEX IF NOT EXISTS keys_identity ON keys (identity);
 CREATE TABLE IF NOT EXISTS subjects (
-  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT,
-  PRIMARY KEY (issuer, subject));
+  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL,
+  signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
 CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
+CREATE INDEX IF NOT EXISTS subjects_email ON subjects (email);
+CREATE TABLE IF NOT EXISTS person_keys (
+  identity TEXT PRIMARY KEY, sealed TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
@@ -479,10 +484,10 @@ impl RegistryCell {
         })
     }
 
-    /// A new identity holding `key`, in one transaction (a DO turn without
-    /// an await between its writes).
+    /// A new identity holding `key`, named by it, in one transaction (a DO
+    /// turn without an await between its writes).
     fn make(&self, kind: IdentityKind, owner: Option<&str>, key: &str, by: &str) -> CellResult<Identity> {
-        let id = npub::identity(js::random_bytes::<16>());
+        let id = npub::identity_of(key);
         let now = js::now_ms();
         let owner_v = owner.map_or(SqlStorageValue::Null, |o| o.into());
         self.exec(
@@ -619,17 +624,21 @@ impl RegistryCell {
         self.view(&who, Some(true))
     }
 
+    /// Who an npub (or 64 hex) names: the identity it is, or else the one
+    /// holding it as an active key.
     fn lookup(&self, b: Lookup) -> CellResult<Identity> {
         let who = b.who;
-        let missing = || CellError::new(ErrorCode::NotFound, format!("{who} names no one on this fleet (they register with `fragment login`)"));
-        let found = match npub::parse_named(&who) {
-            Some(npub::Named::Identity(id)) => self.identity(&id)?.ok_or_else(missing)?,
-            Some(npub::Named::Key(key)) => match self.key_row(&key)? {
+        let missing = || CellError::new(ErrorCode::NotFound, format!("{who} names no one on this fleet (they sign in, or register with `fragment login`)"));
+        let Some(key) = npub::parse(&who) else {
+            return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")));
+        };
+        let found = match self.identity(&npub::identity_of(&key))? {
+            Some(identity) => identity,
+            None => match self.key_row(&key)? {
                 Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}"))?,
                 Some(_) => return Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
                 None => return Err(missing()),
             },
-            None => return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
         };
         // no one adds a person being wiped (or their agent) to a fragment
         if self.wiping(found.owner.as_deref().unwrap_or(&found.id))? {
@@ -673,7 +682,7 @@ impl RegistryCell {
                 Ok(json!({ "hold": ms }))
             }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
-            TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls)?)),
+            TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
         }

@@ -26,9 +26,10 @@ the wire contract in full.
    audit trail, the inbox, room messages, and chat transcripts are all
    channels. Presence stays ephemeral.
 4. **Membership is live cell state; every actor is an identity.** People
-   and agents are identities (`id:…`) holding keys, resolved live by the
-   registry on every signed request whose answer depends on who is asking
-   (a page everyone who may see it gets alike asks nothing). Grants,
+   and agents are identities (npubs: docs/cloudflare-v1.md, decision 45)
+   holding keys, resolved live by the registry on every signed request
+   whose answer depends on who is asking (a page everyone who may see it
+   gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
 5. **Agents are fragments a computer runs** (docs/cloudflare-v1.md,
@@ -249,7 +250,7 @@ Every change is checked against this table.
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
-| Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |

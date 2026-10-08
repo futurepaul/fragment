@@ -64,8 +64,8 @@ impl Call for Resolve {
     }
 }
 
-/// `POST /lookup`: whom an `id:`, an npub, or a 64-hex key names (an
-/// active key's holder).
+/// `POST /lookup`: whom an npub or a 64-hex key names (the identity it
+/// is, or an active key's holder).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Lookup {
     pub who: String,

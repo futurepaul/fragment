@@ -649,7 +649,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&agent);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    s.ok("its owner assigns the agent fragment to it", r.status == 200 && identity.starts_with("id:") && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
+    s.ok("its owner assigns the agent fragment to it", r.status == 200 && fragment_core::npub::is_identity(&identity) && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
     s.ok(
         "by default the agent may use every connection its owner has (decision 44)",
         r.body["agents"][0].get("connections").is_some_and(Value::is_null),
@@ -955,7 +955,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&maple);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{maple_name}"), Some(&json!({})))?;
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    s.ok("a second agent runs on the same computer", r.status == 200 && maple_id.starts_with("id:") && maple_id != identity, &r);
+    s.ok("a second agent runs on the same computer", r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
     // the stub's bridge reads its agents again every minute (the Hermes lane
     // proves the seconds of our Hermes image): a sleep and a wake follows the

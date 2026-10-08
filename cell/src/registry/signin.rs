@@ -1,5 +1,9 @@
-//! Sign-in (docs/api.md, Sign-in): people come from WorkOS, keyed by their
-//! verified `(issuer, subject)`, never by email; browsers hold sessions.
+//! Sign-in (docs/api.md, Sign-in): people come from WorkOS. A verified
+//! `(issuer, subject)` signs a person in; their first sign-in makes them,
+//! named by the npub of a key the registry makes and keeps sealed for them
+//! (docs/cloudflare-v1.md, decisions 45 and 46). Each sign-in's email is
+//! WorkOS-verified, and an email names at most one person: another
+//! person's is refused, never merged. Browsers hold sessions.
 //! A platform session lives on the platform origin; each fragment origin
 //! gets its own site session through a single-use redemption the platform
 //! mints (finite-sites ADR 0025), so one fragment's cookie means nothing on
@@ -106,6 +110,31 @@ struct Authenticated {
 struct WorkOsUser {
     id: String,
     email: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+}
+
+/// An email as the registry keeps it: trimmed and lower case, with an `@`
+/// inside, at most `EMAIL_MAX` bytes.
+fn email_of(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    let at = email.find('@')?;
+    (at > 0 && at + 1 < email.len() && email.len() <= EMAIL_MAX).then_some(email)
+}
+
+/// The key a new person is named by (`keys::person_keypair`): made before
+/// the sign-in's turn, since sealing it awaits, and dropped when the
+/// sign-in names someone already.
+pub(super) struct PersonKey {
+    pub pubkey: String,
+    pub sealed: String,
+}
+
+impl PersonKey {
+    pub(super) async fn make(env: &Env) -> CellResult<PersonKey> {
+        let (pubkey, sealed) = crate::keys::person_keypair(env).await?;
+        Ok(PersonKey { pubkey, sealed })
+    }
 }
 
 /// WorkOS's refusal, as far as it says why.
@@ -131,7 +160,7 @@ fn sid_of(access_token: &str) -> Option<String> {
 }
 
 /// A live session's row, with whether its parent is live, its identity
-/// with its username, and their first sign-in's email, all in one
+/// with its username, and their latest sign-in's email, all in one
 /// statement (`live_session`).
 #[derive(Deserialize)]
 struct SessionRow {
@@ -298,12 +327,12 @@ impl RegistryCell {
     /// The live session a token names: not revoked, not expired, for this
     /// fragment (`None`: a platform session), a frame's when `frame` says
     /// so and a top-level one otherwise, its parent live too. Answers the
-    /// session's hash, its identity, and their first sign-in's email.
+    /// session's hash, its identity, and their latest sign-in's email.
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
             "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, u.username, ",
-            "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY linked_at LIMIT 1) AS email FROM sessions s ",
+            "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY signed_in_at DESC LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
             "LEFT JOIN identities i ON i.id = s.identity ",
             username_join!(),
@@ -396,14 +425,18 @@ impl RegistryCell {
             .ok()
             .filter(|a| !a.user.id.is_empty())
             .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
+        let raw = signed_in.user.email.unwrap_or_default();
+        let Some(email) = email_of(&raw).filter(|_| signed_in.user.email_verified) else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("WorkOS has not verified the email {raw:?}: verify it there, then sign in again")));
+        };
+        let key = PersonKey::make(&self.env).await?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
-        let email = signed_in.user.email.unwrap_or_default();
         let sid = signed_in.access_token.as_deref().and_then(sid_of);
-        self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref())
+        self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)
     }
 
-    fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>) -> CellResult<Exchanged> {
-        if issuer.is_empty() || subject.is_empty() || email.len() > EMAIL_MAX {
+    fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>, key: PersonKey) -> CellResult<Exchanged> {
+        if issuer.is_empty() || subject.is_empty() {
             return Err(CellError::invalid("a sign-in names its issuer and subject"));
         }
         let login = self
@@ -412,16 +445,18 @@ impl RegistryCell {
                 vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
             )?
             .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
-        let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref())?;
+        let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref(), key)?;
         let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged { token, return_to: login.return_to })
     }
 
     /// The person a verified `(issuer, subject)` signs in as: the one it is
     /// already linked to, the signed-in person it is being linked to
-    /// (`link_to`), or a new person. Answers whether they are new.
-    fn person_for(&self, issuer: &str, subject: &str, email: &str, link_to: Option<&str>) -> CellResult<(String, bool)> {
+    /// (`link_to`), or a new person, named by `key`. Answers whether they
+    /// are new.
+    fn person_for(&self, issuer: &str, subject: &str, email: &str, link_to: Option<&str>, key: PersonKey) -> CellResult<(String, bool)> {
         assert!(!issuer.is_empty() && !subject.is_empty(), "a sign-in names its issuer and subject");
+        assert_eq!(email_of(email).as_deref(), Some(email), "a sign-in's email is checked and kept lower case");
         let now = SqlStorageValue::Integer(js::now_ms());
         let known = self
             .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![issuer.into(), subject.into()])?
@@ -432,6 +467,15 @@ impl RegistryCell {
             if self.wiping(id)? {
                 return Err(CellError::new(ErrorCode::Forbidden, "this account is being wiped: sign in again once that is done, as a new person"));
             }
+        }
+        // an email names at most one person: another person's is refused,
+        // never merged into them (a sign-in links to its person explicitly)
+        let others = self.rows::<HolderRow>(
+            "SELECT identity FROM subjects WHERE email = ? AND NOT (issuer = ? AND subject = ?) LIMIT 1",
+            vec![email.into(), issuer.into(), subject.into()],
+        )?;
+        if others.first().is_some_and(|o| Some(o.identity.as_str()) != link_to.or(known.as_deref())) {
+            return Err(conflict(format!("{email} is another account's here: sign in as that account")));
         }
         let made = link_to.is_none() && known.is_none();
         let id = match (link_to, known) {
@@ -445,20 +489,26 @@ impl RegistryCell {
                 to.to_string()
             }
             (None, Some(owner)) => owner,
+            // a new person, named by their own key, which the registry keeps
             (None, None) => {
-                let id = npub::identity(js::random_bytes::<16>());
+                let id = npub::identity_of(&key.pubkey);
                 self.exec(
                     "INSERT INTO identities (id, kind, owner, created_at) VALUES (?, 'person', NULL, ?)",
                     vec![id.as_str().into(), now.clone()],
                 )?;
+                self.exec(
+                    "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
+                    vec![key.pubkey.as_str().into(), id.as_str().into(), now.clone(), id.as_str().into()],
+                )?;
+                self.exec("INSERT INTO person_keys (identity, sealed) VALUES (?, ?)", vec![id.as_str().into(), key.sealed.as_str().into()])?;
                 id
             }
         };
-        // the email is an attribute, refreshed at each sign-in and never matched
+        // the email is refreshed at each sign-in: the latest is the one shown
         self.exec(
-            "INSERT INTO subjects (issuer, subject, identity, linked_at, email) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (issuer, subject) DO UPDATE SET email = excluded.email",
-            vec![issuer.into(), subject.into(), id.as_str().into(), now, email.into()],
+            "INSERT INTO subjects (issuer, subject, identity, linked_at, email, signed_in_at) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (issuer, subject) DO UPDATE SET email = excluded.email, signed_in_at = excluded.signed_in_at",
+            vec![issuer.into(), subject.into(), id.as_str().into(), now.clone(), email.into(), now],
         )?;
         Ok((id, made))
     }
@@ -467,7 +517,7 @@ impl RegistryCell {
     /// email is their subject under the e2e issuer, which no real sign-in
     /// has, so they are never a person WorkOS signs in; the first sign-in
     /// makes them. A platform session like any other.
-    pub(super) fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> CellResult<E2eSignedIn> {
+    pub(super) async fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> CellResult<E2eSignedIn> {
         assert!(self.cfg.test_hooks, "e2e people sign in only on a fleet with levers");
         if !levers::valid_e2e_email(email) {
             return Err(CellError::invalid(format!("an e2e person's email is <name>@{}", levers::E2E_EMAIL_DOMAIN)));
@@ -475,13 +525,14 @@ impl RegistryCell {
         if paid_calls > levers::E2E_PAID_CALLS_MAX {
             return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
         }
+        let key = PersonKey::make(&self.env).await?;
         // a branch's day is capped (people made, paid calls lent): counted
         // in the same turn as the sign-in, before anyone is made
         if self.cfg.levers_scoped {
             let known = self.row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![levers::E2E_ISSUER.into(), email.into()])?.is_some();
             self.count_e2e_day(!known, paid_calls)?;
         }
-        let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None)?;
+        let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None, key)?;
         let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(E2eSignedIn { token, identity, created })
     }

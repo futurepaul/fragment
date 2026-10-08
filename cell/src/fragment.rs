@@ -310,7 +310,7 @@ pub struct Caller {
 }
 
 impl Caller {
-    /// The caller's identity (`id:…`), when someone signed or has a session.
+    /// The caller's identity (an npub), when someone signed or has a session.
     pub fn principal(&self) -> Option<&str> {
         self.signed.as_ref().map(|s| s.id.as_str())
     }

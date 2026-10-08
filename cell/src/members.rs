@@ -8,7 +8,7 @@
 //! for, in the events, and the agent in members' `added_by` and invites'
 //! `created_by`, so its owner sees what it shared.
 //!
-//! Members are identities (`id:…`); a request may name one by a key, which
+//! Members are identities (npubs); a request may name one by a key, which
 //! the registry resolves to the identity holding it. An agent member's
 //! owner is recorded beside it: the owner reads what the agent reads
 //! (fragment.rs, `standing`). Kinds and owners never change once
@@ -353,10 +353,11 @@ impl FragmentCell {
         Ok(actor)
     }
 
-    /// The identity `who` (an `id:`, an npub, or 64 hex) names.
+    /// The identity `who` (an npub or 64 hex: an identity, or a key of
+    /// one) names.
     async fn named(&self, who: &str) -> CellResult<Identity> {
-        if npub::parse_named(who).is_none() {
-            return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key")));
+        if npub::parse(who).is_none() {
+            return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")));
         }
         crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: who.to_string() }).await
     }
@@ -472,13 +473,13 @@ impl FragmentCell {
     pub(crate) async fn remove_member(&self, caller: &Caller, who: &str) -> CellResult<Response> {
         self.name()?;
         let me = self.caller_id(caller)?.to_string();
-        // an identity is removed as it is (`me` is the caller); a key names
-        // the identity holding it
-        let target = match npub::parse_named(who) {
+        // a member is removed as it is (`me` is the caller), even one the
+        // registry no longer holds; a key names the identity holding it
+        let target = match npub::parse(who) {
             _ if who == "me" => me.clone(),
-            Some(npub::Named::Identity(id)) => id,
-            Some(npub::Named::Key(_)) => self.named(who).await?.id,
-            None => return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
+            Some(key) if self.member_role(&npub::identity_of(&key))?.is_some() => npub::identity_of(&key),
+            Some(_) => self.named(who).await?.id,
+            None => return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key"))),
         };
         let is_self = me == target;
         // leaving is any member's own; removing anyone else is sharing
@@ -530,7 +531,7 @@ impl FragmentCell {
         }
         if let Some(invitee) = &body.invitee {
             if !npub::is_identity(invitee) {
-                return Err(CellError::invalid(format!("invitee {invitee:?} is not an identity (id:…)")));
+                return Err(CellError::invalid(format!("invitee {invitee:?} is not an identity (an npub)")));
             }
             // the fragment's owner, not who asks: their agent may ask for them
             if self.must(MetaKey::Owner)? == *invitee {

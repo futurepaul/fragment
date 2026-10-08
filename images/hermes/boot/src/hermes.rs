@@ -666,7 +666,7 @@ mod tests {
     }
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] }
+        Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
     #[test]
@@ -763,7 +763,7 @@ mod tests {
             "its shell starts as Hermes' does, then reads its credentials: {p}"
         );
         let e = profile_env(&agent());
-        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper.paul\n") && e.contains("\nFRAGMENT_FOR=id:paul\n"), "{e}");
+        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper.paul\n") && e.contains("\nFRAGMENT_FOR=npub1paul\n"), "{e}");
         assert!(!e.contains("KEY") && !e.contains("TOKEN"), "no credential, and none held: {e}");
         let env = gateway_env("127.0.0.1:8650", "computer", &"s".repeat(32));
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
@@ -954,7 +954,7 @@ mod tests {
     #[should_panic(expected = "an agent's fragment and owner are names")]
     fn a_profile_env_of_no_names_is_a_bug() {
         let mut a = agent();
-        a.owner = "id:paul\nOPENAI_API_KEY=x".into();
+        a.owner = "npub1paul\nOPENAI_API_KEY=x".into();
         profile_env(&a);
     }
 

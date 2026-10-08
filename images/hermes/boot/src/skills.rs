@@ -438,10 +438,10 @@ mod tests {
 
     #[test]
     fn the_reader_is_an_agent_of_the_computers_owner() {
-        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("id:{f}"), name: f.into(), owner: o.into(), credentials: vec![] };
-        let agents = [a("x.skyler", "id:skyler"), a("juniper.paul", "id:paul")];
-        assert_eq!(reader(&agents, "id:paul").map(|r| r.fragment.as_str()), Some("juniper.paul"));
-        assert!(reader(&agents[..1], "id:paul").is_none());
+        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![] };
+        let agents = [a("x.skyler", "npub1skyler"), a("juniper.paul", "npub1paul")];
+        assert_eq!(reader(&agents, "npub1paul").map(|r| r.fragment.as_str()), Some("juniper.paul"));
+        assert!(reader(&agents[..1], "npub1paul").is_none());
     }
 
     /// Goal: an install against the files route writes the managed set, a
@@ -459,33 +459,33 @@ mod tests {
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));
 
-        let d = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.fetched, d.skills), (Some("skills.paul"), 2, 2));
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists() && !dir.join("fragment.json").exists());
-        let replay = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
+        let replay = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
         assert_eq!((replay.fetched, replay.removed), (0, 0), "settled");
         // a file gone from under the manifest is fetched again
         std::fs::remove_file(dir.join("grill-me/SKILL.md")).unwrap();
-        let repaired = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
+        let repaired = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
         assert_eq!(repaired.fetched, 1);
         assert!(dir.join("grill-me/SKILL.md").exists());
 
         // the release changes one skill and drops the other
         files.lock().unwrap().insert("skills/research/arxiv-finite/SKILL.md".into(), ("release:a2".into(), b"---\nname: arxiv-finite\n---\nnew\n".to_vec()));
         files.lock().unwrap().remove("skills/grill-me/SKILL.md");
-        let d = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
         assert_eq!((d.fetched, d.removed, d.skills), (1, 1, 1));
         assert!(std::fs::read_to_string(dir.join("research/arxiv-finite/SKILL.md")).unwrap().ends_with("new\n"));
         assert!(!dir.join("grill-me").exists(), "its directory goes with its last file");
 
         // the platform down: nothing installed changes
         *down.lock().unwrap() = true;
-        assert!(install(&api, &agent, "id:paul", &dir, &manifest).await.is_err());
+        assert!(install(&api, &agent, "npub1paul", &dir, &manifest).await.is_err());
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -598,7 +598,7 @@ mod tests {
         let listed = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), Arc::new(Mutex::new(false)), listed.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-platform-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));
@@ -613,7 +613,7 @@ mod tests {
         let settle = || settle_platform(&managed, &manifest, &platform, &view).unwrap();
 
         // no skills fragment: no managed skills, the platform's `fragment`
-        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (None, 0));
         assert!(settle(), "shown");
         let found = hermes_finds(&own, &external);
@@ -624,7 +624,7 @@ mod tests {
         *listed.lock().unwrap() = true;
         files.lock().unwrap().insert("skills/fragment/SKILL.md".into(), ("release:f".into(), b"---\nname: fragment\ndescription: The managed one.\n---\n".to_vec()));
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
-        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills.paul"), 2));
         // invalid: both beside each other in one rank, Hermes finds neither
         assert_eq!(hermes_finds(&own, &external).get("fragment"), None, "ambiguous");
@@ -637,7 +637,7 @@ mod tests {
 
         // the managed one gone: the platform's again, untouched
         files.lock().unwrap().remove("skills/fragment/SKILL.md");
-        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.removed, d.skills), (1, 1));
         assert!(settle());
         assert_eq!(hermes_finds(&own, &external).get("fragment"), Some(&view.join(PLATFORM_PATH)));
@@ -676,7 +676,7 @@ mod tests {
                     }
                     assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper.paul"), "as the agent");
                     let q = req.uri().query().unwrap_or("").to_string();
-                    assert!(q.split('&').any(|kv| kv == "for=id%3Apaul"), "acting for its owner: {q}");
+                    assert!(q.split('&').any(|kv| kv == "for=npub1paul"), "acting for its owner: {q}");
                     let skills = *listed.lock().unwrap();
                     match (req.method().clone(), req.uri().path()) {
                         (Method::GET, "/api/fragments") => {
