@@ -52,11 +52,15 @@
   // deployment's own endpoint's, which takes exactly
   // `fragment_core::stripe::EVENTS`. `portal` is the deployment's own
   // portal configuration, never the account's default (finite-mono's).
+  // `key_file` is the same key in a file of this machine's (as the DNS
+  // token is), for xtask's own calls: `cargo xtask stripe check|setup`,
+  // and a branch's own endpoint at each deploy (decision 58).
   // "stripe": {
   //   "key": "fragment-stripe-key",
   //   "webhook_secret": "fragment-stripe-webhook-secret",
   //   "portal": "bpc_...",
-  //   "tax": true
+  //   "tax": true,
+  //   "key_file": "~/.config/fragment/secrets/stripe-restricted-key"
   // },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with

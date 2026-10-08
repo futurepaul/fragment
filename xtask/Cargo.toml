@@ -10,6 +10,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fragment-core = { path = "../crates/core" }
+fragment-proto = { path = "../crates/proto" }
 fragment-devstack = { path = "../crates/devstack" }
 fragment-fakes = { path = "../crates/fakes" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

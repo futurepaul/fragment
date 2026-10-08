@@ -370,7 +370,9 @@ impl Fleet {
         }
         if let (Some((key, webhook)), Some(s)) = (&bound.stripe, &self.stripe) {
             values.push((key.as_str(), s.key.as_str()));
-            values.push((webhook.as_str(), s.webhook_secret.as_str()));
+            if let Some(w) = webhook {
+                values.push((w.as_str(), s.webhook_secret.as_str()));
+            }
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));

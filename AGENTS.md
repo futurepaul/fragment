@@ -226,6 +226,16 @@ prebuilt bundle is in the debt ledger).
   lacks. `set` and `gen` make the account's one store when there is none.
   No `rm`. `--local <state dir>` acts on wrangler's local store instead.
   Setting a remote secret is Paul's (or the coordinating session's).
+- `cargo xtask stripe check|setup --config <file> [--branch <name>]
+  [--webhook-secret-file <path>]`: the deployment's Stripe as
+  docs/billing.md wants it, on the account its config's `stripe.key_file`
+  names (xtask/src/stripe.rs): `check` reads its prices (by lookup key),
+  its own portal configuration and its webhook endpoint, and says what is
+  wrong; `setup` makes what is missing (an endpoint's signing secret to
+  the file, 0600, never printed, for `secret set`). Live mode is Paul's
+  to run. A branch deploy whose config names `stripe.key_file` makes the
+  branch's own endpoint each time and uploads its secret as a Worker
+  secret beside the test secret (decision 58).
 - `cargo xtask deploy --config <file> [--branch <name>]`: builds and
   deploys to Cloudflare from a deployment's config, kept outside the repo
   (`deploy/example.jsonc`; xtask/src/deploy.rs). It lists the store first

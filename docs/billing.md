@@ -496,7 +496,9 @@ The first run starts once a seat is held, so a guest's first run is
    API, the CLI (`fragment operator …`), `/admin`, and the audit log.
 9. **The shell's Billing page** (built 2026-10-08, branch
    `claude/shell-billing`; cell/shell/billing.js).
-10. **Go live** (Paul's):
+10. **Go live** (Paul's; its tooling built 2026-10-08, branch
+    `claude/stripe-xtask`: `xtask stripe check|setup`, and a branch's own
+    endpoint at each deploy):
     - live Products, Prices, portal and endpoint (`xtask stripe setup`);
     - the restricted key and signing secret (`secret set`);
     - `stripe check` green;

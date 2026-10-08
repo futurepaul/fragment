@@ -189,6 +189,13 @@ struct StripeDeploy {
     /// Stripe's automatic tax on a Checkout (decision 54; default true): off
     /// for an account with no tax settings, as a sandbox may be.
     tax: Option<bool>,
+    /// The account's restricted key's file, for xtask's own calls (`stripe
+    /// check|setup`, a branch's webhook endpoint): the deploying machine's,
+    /// as the DNS token is. A branch deployment with it gets an endpoint of
+    /// its own at each deploy, its secret a Worker secret (decision 58).
+    key_file: Option<PathBuf>,
+    /// The API's base (default https://api.stripe.com; tests: the fake).
+    api: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -199,15 +206,28 @@ struct WorkOs {
     api_key: String,
 }
 
+/// Whether a deploy makes the deployment's webhook endpoint itself: a
+/// branch's, when the config names the key xtask calls Stripe with
+/// (decision 58). Its secret is then a Worker secret, not the store's.
+fn makes_endpoint(d: &Deployment, branch: Option<&str>) -> bool {
+    branch.is_some() && d.stripe.as_ref().is_some_and(|s| s.key_file.is_some())
+}
+
 /// The store secrets the deployment's Workers are bound to, by name.
 fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
+    bound_for(d, None)
+}
+
+/// `bound`, for a deploy of `branch` (one that makes its endpoint binds no
+/// store secret for it).
+fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bound> {
     let (_, operator_keys) = catalog_of(d)?;
     Ok(devstack::store::Bound {
         host_secret: d.host_secret.clone(),
         host_secret_previous: d.host_secret_previous.clone(),
         codestorage_key: d.codestorage.private_key.clone(),
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
-        stripe: d.stripe.as_ref().map(|s| (s.key.clone(), s.webhook_secret.clone())),
+        stripe: d.stripe.as_ref().map(|s| (s.key.clone(), (!makes_endpoint(d, branch)).then(|| s.webhook_secret.clone()))),
         operator_keys,
     })
 }
@@ -225,7 +245,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     }
     if let Some((key, webhook)) = &b.stripe {
         named.push(("stripe.key".into(), key.as_str()));
-        named.push(("stripe.webhook_secret".into(), webhook.as_str()));
+        if let Some(w) = webhook {
+            named.push(("stripe.webhook_secret".into(), w.as_str()));
+        }
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -499,6 +521,64 @@ impl Drop for SecretFile {
     }
 }
 
+/// `cargo xtask stripe check|setup --config <file> [--branch <name>]
+/// [--webhook-secret-file <path>]` (xtask/src/stripe.rs).
+pub fn stripe(rest: &[String]) -> Result<()> {
+    let usage = || anyhow::anyhow!("usage: cargo xtask stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]");
+    let (verb, rest) = rest.split_first().ok_or_else(usage)?;
+    let (mut config, mut branch, mut secret_file) = (None, None, None);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
+            "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
+            "--webhook-secret-file" => secret_file = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
+            _ => return Err(usage()),
+        }
+    }
+    let d = load(&config.ok_or_else(usage)?)?;
+    let n = names(&d, branch.as_deref())?;
+    let st = d.stripe.as_ref().context("the config has no `stripe`: this deployment sells no seats")?;
+    let key_file = st.key_file.as_deref().context("stripe.key_file names the account's restricted key's file, for xtask's own calls")?;
+    let s = crate::stripe::Stripe::new(st.api.as_deref().unwrap_or("https://api.stripe.com"), &read_secret(key_file)?)?;
+    let platform = format!("https://{}", n.platform_host);
+    match verb.as_str() {
+        "check" => {
+            let wrong = crate::stripe::check(&s, &platform, st.portal.as_deref())?;
+            if wrong.is_empty() {
+                println!("stripe: {platform}'s prices, portal and webhook endpoint are as docs/billing.md wants them");
+                return Ok(());
+            }
+            for w in &wrong {
+                println!("  {w}");
+            }
+            bail!("stripe: {} thing(s) to fix", wrong.len())
+        }
+        "setup" => {
+            let made = crate::stripe::setup(&s, &platform, st.portal.as_deref(), secret_file.as_deref())?;
+            for p in &made.prices {
+                println!("made the price {p}");
+            }
+            if let Some(p) = &made.portal {
+                println!("made the portal configuration {p}: name it in the config's stripe.portal");
+            }
+            match (&made.endpoint, &secret_file) {
+                (Some((id, file)), _) => println!(
+                    "made the webhook endpoint {id} at {}: its signing secret is in {} (0600); store it: cargo xtask secret set {} --config <this config> --from-file {}",
+                    crate::stripe::endpoint_url(&platform),
+                    file.display(),
+                    st.webhook_secret,
+                    file.display()
+                ),
+                (None, None) if branch.is_none() => println!("no endpoint made: name --webhook-secret-file <path> for its signing secret"),
+                _ => {}
+            }
+            Ok(())
+        }
+        _ => Err(usage()),
+    }
+}
+
 pub fn deploy(rest: &[String]) -> Result<()> {
     let (config, branch) = args(rest)?;
     let d = load(&config)?;
@@ -510,7 +590,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
-    let bound = bound(&d)?;
+    let bound = bound_for(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
     // and every store secret the Worker is bound to is there (read-only)
     let store = preflight(&tools, &d, &config, &bound)?;
@@ -535,16 +615,36 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     }
     let mut deploy_cell = wrangler(&tools, &d.account_id)?;
     deploy_cell.arg("deploy").arg("-c").arg(&cell_config);
-    // a preview's levers (cell/src/levers.rs), a branch's alone (checked
-    // above), are the one Worker secret left
-    let test_secrets = match &test_secret {
-        Some(secret) => {
-            assert!(n.label_suffix.is_some(), "only a branch deployment takes a test secret");
-            let file = SecretFile::write(dir.join("cell-secrets.json"), &json!({ "FRAGMENT_TEST_SECRET": secret }))?;
+    // a branch's own Stripe webhook endpoint, made anew (decision 58): its
+    // secret is a Worker secret, as the test secret is
+    let webhook = match (makes_endpoint(&d, branch.as_deref()), &d.stripe) {
+        (true, Some(st)) => {
+            let key = read_secret(st.key_file.as_deref().expect("makes_endpoint checked it"))?;
+            let s = crate::stripe::Stripe::new(st.api.as_deref().unwrap_or("https://api.stripe.com"), &key)?;
+            let secret = crate::stripe::branch_endpoint(&s, &platform_url)?;
+            println!("stripe: made {}'s own webhook endpoint (its secret a Worker secret)", crate::stripe::endpoint_url(&platform_url));
+            Some(secret)
+        }
+        _ => None,
+    };
+    // a preview's levers (cell/src/levers.rs) and its Stripe endpoint's
+    // secret, a branch's alone (checked above), are the Worker secrets left
+    let mut worker_secrets = serde_json::Map::new();
+    if let Some(secret) = &test_secret {
+        assert!(n.label_suffix.is_some(), "only a branch deployment takes a test secret");
+        worker_secrets.insert("FRAGMENT_TEST_SECRET".into(), json!(secret));
+    }
+    if let Some(secret) = &webhook {
+        assert!(n.label_suffix.is_some(), "only a branch deployment makes its endpoint");
+        worker_secrets.insert("FRAGMENT_STRIPE_WEBHOOK".into(), json!(secret));
+    }
+    let test_secrets = match worker_secrets.is_empty() {
+        false => {
+            let file = SecretFile::write(dir.join("cell-secrets.json"), &Value::Object(worker_secrets))?;
             deploy_cell.arg("--secrets-file").arg(&file.0);
             Some(file)
         }
-        None => None,
+        true => None,
     };
     crate::run(&mut deploy_cell)?;
     drop(test_secrets);
@@ -562,7 +662,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
 /// checked-in one (`root`'s `cell/`), its store secrets bound by name in
 /// the store `store_id`. No value of a secret is in it.
 fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<Value> {
-    let bound = bound(d)?;
+    let bound = bound_for(d, n.label_suffix.as_deref())?;
     let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
     let mut cell = devstack::read_config(&root.join("cell"))?;
@@ -930,6 +1030,24 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["perplexity", "google-places", "xai", "elevenlabs"]);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// A deployment that sells seats binds Stripe's key and its endpoint's
+    /// secret from the store; a branch whose deploy makes its own endpoint
+    /// (it names the key's file) binds the key alone: its endpoint's secret
+    /// is a Worker secret (decision 58).
+    #[test]
+    fn a_branch_that_makes_its_endpoint_binds_no_store_secret_for_it() {
+        let mut d = deployment(None, None);
+        d.stripe = Some(StripeDeploy { key: "fragment-stripe-key".into(), webhook_secret: "fragment-stripe-webhook-secret".into(), portal: None, tax: None, key_file: None, api: None });
+        let named = |b: &devstack::store::Bound| named_secrets(b).into_iter().map(|(_, n)| n.to_string()).collect::<Vec<_>>();
+        assert!(named(&bound_for(&d, Some("p5")).unwrap()).contains(&"fragment-stripe-webhook-secret".to_string()), "no key file: the store's");
+        d.stripe.as_mut().unwrap().key_file = Some("/run/secrets/stripe".into());
+        let production = named(&bound_for(&d, None).unwrap());
+        let branch = named(&bound_for(&d, Some("p5")).unwrap());
+        assert!(production.contains(&"fragment-stripe-webhook-secret".to_string()) && production.contains(&"fragment-stripe-key".to_string()));
+        assert!(!branch.contains(&"fragment-stripe-webhook-secret".to_string()) && branch.contains(&"fragment-stripe-key".to_string()));
+        assert!(makes_endpoint(&d, Some("p5")) && !makes_endpoint(&d, None));
     }
 
     /// Every name a config gives a store secret is one: a path (the old
