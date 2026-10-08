@@ -115,9 +115,12 @@ pub fn browser(desk: Desk) -> Proxy {
     });
     let mut cmd = command("FRAGMENT_BROWSER_MCP", BROWSER_MCP);
     let cdp = format!("http://127.0.0.1:{}", desk::cdp_port(display));
-    // no image inline (the model reads none), no Playwright code echoed,
-    // its files (snapshots of each action, screenshots) in the work
-    for (k, v) in [("--cdp-endpoint", cdp.as_str()), ("--image-responses", "omit"), ("--codegen", "none"), ("--output-dir", "/data/work/browser"), ("--file-paths", "absolute")] {
+    // no image inline (the model reads none), no Playwright code echoed;
+    // its files (a snapshot of the page after each action, screenshots) in
+    // the desktop's directory, never /data: one a click, they would pile
+    // up in every save
+    let files = desk.dir.join("browser").display().to_string();
+    for (k, v) in [("--cdp-endpoint", cdp.as_str()), ("--image-responses", "omit"), ("--codegen", "none"), ("--output-dir", files.as_str()), ("--file-paths", "absolute")] {
         cmd.extend([k.to_string(), v.to_string()]);
     }
     Proxy { command: cmd, env: vec![("DISPLAY".into(), format!(":{display}"))], desk: Some(desk), extra: None, only: Some(&BROWSER_TOOLS), cut_note: BROWSER_CUT, defaults: &[], instructions: Some(BROWSER_INSTRUCTIONS) }

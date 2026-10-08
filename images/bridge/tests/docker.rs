@@ -404,6 +404,8 @@ async fn the_goose_desktop_and_its_tools() {
     eprintln!("bench: a form filled and submitted (type, click, snapshot, click) {} ms", t.elapsed().as_millis());
     let (result, _, _) = browser.tool("browser_snapshot", json!({}), Duration::from_secs(60));
     assert!(!err && (done.contains("Juniper Paul") || result.contains("Juniper Paul")), "httpbin echoes the form:\n{done}\n{result}");
+    let under_data = c.exec_out(&["sh", "-c", "find /data -path /data/bridge -prune -o -type f -print 2>/dev/null | head"]);
+    assert!(under_data.trim().is_empty(), "nothing of a desktop or its browser is under /data (saved): {under_data}");
 
     // the screen: the agent's own desktop, drawn
     let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
