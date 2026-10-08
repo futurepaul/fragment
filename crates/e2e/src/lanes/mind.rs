@@ -249,6 +249,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         "a local run calls nothing on the internet: the no-key search was tried by hand (docs/optchat.md, \"The web\")",
     );
 
+    // ---- importing chats, into a mind of a person the CLI signs in as
+    if let Err(e) = imports(s, api) {
+        s.fail("an import into a mind", format!("{e:#}"));
+    }
+
     // ---- hands: the stub agent, an editor of the mind
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let computer = r.body["computer"].as_str().unwrap_or("").to_string();
@@ -411,5 +416,130 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
+/// When the imported session began: 2025-03-01T12:00:00Z.
+const IMPORTED_T0: i64 = 1_740_830_400_000;
+
+/// A Claude Code session as its file holds it (synthetic): a person's words,
+/// a reply, a long message of theirs, a turn with a tool call before its
+/// final reply, and a thanks. Three long messages in a row: one batched call
+/// summarizes them.
+fn claude_code_session() -> String {
+    let s = "e2e-import-session";
+    let at = |sec: i64| format!("2025-03-01T12:{:02}:{:02}.000Z", sec / 60, sec % 60);
+    let user = |sec: i64, text: &str| json!({ "type": "user", "sessionId": s, "uuid": format!("u{sec}"), "timestamp": at(sec), "message": { "role": "user", "content": text } });
+    let said = |sec: i64, id: &str, content: Value| json!({ "type": "assistant", "sessionId": s, "uuid": format!("a{sec}"), "timestamp": at(sec), "message": { "id": id, "role": "assistant", "model": "claude", "content": content } });
+    let lines = [
+        json!({ "type": "custom-title", "sessionId": s, "customTitle": "Seed swap" }),
+        user(0, "we swap seeds with the neighbors in spring"),
+        said(60, "m1", json!([{ "type": "text", "text": padded("Seed swap notes: bring labels and envelopes.") }])),
+        user(120, &padded("the list: tomatoes, beans, squash, marigolds")),
+        said(180, "m2", json!([{ "type": "text", "text": "Saving it." }, { "type": "tool_use", "id": "t1", "name": "Write", "input": {} }])),
+        json!({ "type": "user", "sessionId": s, "uuid": "r1", "timestamp": at(200), "toolUseResult": {}, "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] } }),
+        said(240, "m3", json!([{ "type": "text", "text": padded("Saved the swap list: tomatoes, beans, squash, marigolds.") }])),
+        user(300, "thanks"),
+    ];
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
+/// `fragment mind import` and the mind's `import`: a person signed in with
+/// the CLI plays a Claude Code session into their mind. A dry run counts
+/// it; the import lands its words and final replies with their own times
+/// in a thread of its own, and starts the compactor, which summarizes
+/// three long messages in one batched call; a rerun sends nothing; a part
+/// ahead of what landed is refused, and one landed again changes nothing.
+fn imports(s: &mut Suite, api: &Api) -> Result<()> {
+    let home = s.dir("mind-import");
+    s.login(api, &home);
+    let keys = s.cli_keys(&home).ok_or_else(|| anyhow::anyhow!("the CLI logged in"))?;
+    let mind = s.named(api, &keys, "mind")?;
+    let r = api.create_with(&keys, json!({ "name": mind, "template": "mind", "visibility": "members" }))?;
+    anyhow::ensure!(r.status == 200, "making the CLI person's mind: {r}");
+    s.owned(&r.body, &keys);
+    s.eventually(Duration::from_secs(30), || api.status(&keys, &mind).is_ok_and(|r| r.body["code"]["operations"]["import"]["kind"] == "mutation"));
+    let file = s.dir("mind-import-files").join("e2e-import-session.jsonl");
+    std::fs::write(&file, claude_code_session())?;
+    let path = file.to_string_lossy().to_string();
+
+    let dry = s.cli_json(api, &home, &["mind", "import", &path, "--dry-run", "--json"])?;
+    s.ok(
+        "fragment mind import --dry-run counts a session's words and final replies, and the compactor's calls",
+        dry["conversations"] == 1
+            && dry["sources"][0]["source"] == "claude-code"
+            && dry["sources"][0]["user"] == 3
+            && dry["sources"][0]["assistant"] == 2
+            && dry["estimate"]["level0_calls"] == 3
+            && dry["estimate"]["level0_batches"] == 1,
+        &dry,
+    );
+    let sent = s.cli_json(api, &home, &["mind", "import", &path, "--mind", &mind, "--no-wait", "--json"])?;
+    s.ok("fragment mind import sends it", sent["conversations"] == 1 && sent["messages"] == 5, &sent);
+    let again = s.cli_json(api, &home, &["mind", "import", &path, "--mind", &mind, "--no-wait", "--json"])?;
+    s.ok("and a rerun sends nothing again", again["conversations"] == 0 && again["messages"] == 0, &again);
+
+    let threads = op(api, &keys, &mind, "threads", json!({}));
+    let thread = threads["threads"].as_array().and_then(|t| t.iter().find(|t| t["title"] == "Seed swap")).cloned().unwrap_or(Value::Null);
+    let id = thread["id"].as_str().unwrap_or("").to_string();
+    let read = op(api, &keys, &mind, "thread", json!({ "id": id }));
+    let msgs = read["messages"].as_array().cloned().unwrap_or_default();
+    let kinds: Vec<&str> = msgs.iter().filter_map(|m| m["kind"].as_str()).collect();
+    let ats: Vec<i64> = msgs.iter().filter_map(|m| m["at"].as_i64()).collect();
+    s.ok(
+        "the session is a thread of its own, titled as it was, its messages user and talk with their own times",
+        id.len() == 18
+            && id.starts_with("t_")
+            && thread["started"] == IMPORTED_T0
+            && thread["last"] == IMPORTED_T0 + 300_000
+            && kinds == ["user", "talk", "user", "talk", "user"]
+            && ats == [0, 60, 120, 240, 300].map(|sec| IMPORTED_T0 + sec * 1000),
+        json!({ "threads": threads, "thread": read }),
+    );
+    s.ok(
+        "the turn with a tool call keeps its final reply alone",
+        msgs.get(3).and_then(|m| m["text"].as_str()).is_some_and(|t| t.starts_with("Saved the swap list")) && !msgs.iter().any(|m| m["text"] == "Saving it."),
+        json!(msgs),
+    );
+    let published = logged(api, &keys, &mind, "import");
+    s.ok(
+        "an import publishes its progress on log, and no msg record for each message",
+        published.iter().any(|r| r["body"]["source"] == "claude-code" && r["body"]["n"] == 5 && r["body"]["thread"] == id.as_str()) && messages(api, &keys, &mind, &id).is_empty(),
+        json!(published),
+    );
+
+    let done = s.eventually(TURN, || {
+        let st = op(api, &keys, &mind, "status", json!({}));
+        st["T"] == 5 && st["unbuilt"] == 0 && st["ready"] == false
+    });
+    let status = op(api, &keys, &mind, "status", json!({}));
+    s.ok("the import starts the compactor, which summarizes every message", done && status["import"]["conversations"] == 1 && status["import"]["messages"] == 5, &status);
+    let batched = s.ai.chats().into_iter().find(|c| {
+        c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You write the memory of Mind"))
+            && c["messages"][1]["content"][1]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("Compress each of these 3 messages") && t.contains("--- 1 ---\ntalk: Seed swap notes") && t.contains("--- 3 ---\ntalk: Saved the swap list"))
+    });
+    let memory = op(api, &keys, &mind, "memory", json!({}));
+    let lines: Vec<&str> = memory["parts"].as_array().into_iter().flatten().filter_map(|p| p["text"].as_str()).collect();
+    s.ok(
+        "three long messages in a row are summarized in one call, a numbered line each",
+        batched.is_some() && memory["parts"].as_array().is_some_and(|p| p.iter().all(|x| x["built"] == true)) && lines.iter().any(|l| l.contains(fragment_fakes::workers_ai::BATCH_SAID)),
+        json!({ "memory": memory, "batched": batched.is_some() }),
+    );
+
+    let part = |from: i64| {
+        json!({ "source": "claude-code", "conversation": { "id": "e2e-import-session", "title": "Seed swap" }, "from": from,
+                "messages": [{ "role": "user", "text": "one more", "at": IMPORTED_T0 + 400_000 }] })
+    };
+    let ahead = api.op(&keys, &mind, "import", &format!("import-ahead-{}", crate::api::now_ms()), part(9))?;
+    s.ok("a part ahead of what landed is refused", ahead.status != 200 && ahead.to_string().contains("ahead"), &ahead);
+    let landed = op(api, &keys, &mind, "import", part(4));
+    let asked = op(api, &keys, &mind, "imported", json!({ "conversations": [{ "source": "claude-code", "id": "e2e-import-session" }, { "source": "codex", "id": "never" }] }));
+    s.ok(
+        "a part that landed already changes nothing, and imported says how much of each is in",
+        landed["appended"] == 0 && landed["landed"] == 5 && landed["thread"] == id.as_str() && asked["landed"] == json!([5, 0]),
+        json!({ "landed": landed, "imported": asked }),
+    );
     Ok(())
 }

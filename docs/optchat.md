@@ -91,13 +91,16 @@ Inspiration:
     "log":  { "read": "editor" },
     "chat": { "read": "editor", "post": "editor" },
     "work": { "read": "editor", "post": "editor" },
-    "sort": { "read": "editor" }
+    "sort": { "read": "editor" },
+    "compact": { "read": "editor" }
   },
   "triggers": [
     { "channel": "say",  "from": "person", "run": "heard" },
     { "channel": "chat", "from": "agent",  "run": "hands_said" },
-    { "channel": "sort", "run": "classify" }
-  ]
+    { "channel": "sort", "run": "classify" },
+    { "channel": "compact", "run": "pump" }
+  ],
+  "storage": { "maxBytes": 1073741824 }
 }
 ```
 
@@ -121,6 +124,10 @@ goose agent, an editor. The shell makes it `members` (private).
   exactly as an agent answers a person in a chat fragment.
 - **`sort`**: the app's alone. `topic_add` publishes `{topic}` there, and
   its trigger starts `classify`: a mutation starts no job.
+- **`compact`**: the app's alone. `import` publishes `{at}` there when no
+  pump is at work, and its trigger starts `pump` ("Importing chats").
+- **`storage`**: the mind declares the most an app may (1 GiB; docs/api.md,
+  Apps): a long imported history outgrows the platform's 16 MiB.
 
 ### The log, the tree, the view: OptChat's spec, in SQLite
 
@@ -134,6 +141,7 @@ persona(id TEXT PRIMARY KEY, name TEXT, emoji TEXT, instructions TEXT, hands INT
 task(id TEXT PRIMARY KEY, thread TEXT, i INTEGER, text TEXT, seq INTEGER, turn TEXT, state TEXT, report TEXT, steps TEXT, started INTEGER, ended INTEGER)  -- steps: '[]', unread (goose's are on work)
 kv(k TEXT PRIMARY KEY, v TEXT)                                 -- default persona, about-me, turn lock, queue
 log_fts USING fts5(text, content='log', content_rowid='i')    -- search
+import(source TEXT, conv TEXT, thread TEXT, n INTEGER, at INTEGER, PRIMARY KEY (source, conv))  -- an import landed conv's first n messages
 ```
 
 - `kind` is the spec's set: `user`, `talk`, `tool`, `echo`, `note`.
@@ -141,8 +149,9 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
   the compactor tags `work:`.
 - **The spec's constants hold:** NODE 512, VIEW 128 000, TRIES 5,
   CAP 30 000, and the cut-at-limit retry. JOBS is up to 8 nodes in one
-  pump step round. RETRY is on the next pump. A node a stubborn model
-  wrote past twice NODE is cut there.
+  pump step round, built in batched calls ("The compactor"). RETRY is on
+  the next pump. A node a stubborn model wrote past twice NODE is cut
+  there.
 - **Prompts:** COMPACT, MASTER, VIEW_DOC and the subagent prompt are
   verbatim from the spec, with "OptChat" replaced by "Mind".
   - MASTER's "Use subagents only when the user asks" becomes: check on
@@ -169,9 +178,13 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
   not matter. Its control flow follows only its steps' answers. A
   turn's view is the exception: a step's answer (`view {upto}`), so every
   call of the turn sees the same one.
-- **The 16 MiB cap is debt.** A message over 30 000 characters is
-  capped at logging, as the spec caps tool results, keeping head and
-  tail.
+- **The database's cap is debt.** The mind declares 1 GiB: the
+  platform's 16 MiB holds a few tens of thousands of messages, and an
+  imported history can be more. No meter counts it, and the folded memory
+  keeps every node's text on the instance (docs/technical-debt-ledger.md).
+  A message over
+  30 000 characters is capped at logging, as the spec caps tool results,
+  keeping head and tail.
 
 ### Turns (job `heard`, triggered by `say`)
 
@@ -188,12 +201,14 @@ The spec's §7, as a job:
    the newest run of messages still waiting. They go whole as block 2,
    as the spec renders the view before it logs them.
 3. **Settle:** while the view has an unbuilt part before `tail`, build it
-   inline, level 0 one at a time. It is normally a no-op, because the
-   background pump ran after the last turn. A node a pump holds (a lease
-   from `pump_plan`) is waited for, not built twice. A node that fails 3
-   times, 10 s apart, ends the turn with an error, its messages logged
-   and unanswered. A settle past its budget (96 steps) puts the messages
-   back first in line and hands them to a fresh run.
+   inline, level 0 in order, a batch at a time ("The compactor"), and
+   merges too while the view is over VIEW (a backlog an import left). It
+   is normally a no-op, because the background pump ran after the last
+   turn. A node a pump holds (a lease from `pump_plan`) is waited for,
+   not built twice. A level-0 node that fails 3 times, 10 s apart, ends
+   the turn with an error, its messages logged and unanswered. A settle
+   past its budget (96 steps) puts the messages back first in line and
+   hands them to a fresh run.
 4. Render the view (`view {upto: tail}`). Then loop, at most 40 model
    calls a turn:
    - Call `job.ai.text({model: "medium", messages, tools, draft:
@@ -324,17 +339,133 @@ reads are its steps, not the log's, as a subagent's are (spec 9).
 ### The compactor (job `pump`)
 
 Spec §4, as a job. Each round asks `pump_plan` (a query that writes
-its leases in `kv`) for up to 8 nodes that are ready (spec §4.1 rules
-1–3). It builds them with `job.ai.text({model: "cheap", …})` steps (the
-spec's two-block input, SCALE, the retry loop), one after another: a
-job's steps run one at a time (cell/platform.mjs), so JOBS is how many
-nodes a round takes, not how many calls run at once. A level-0 node is
-built alone in its round (a turn waits on level 0, and its next is ready
-only once it is built); merges wait for a round with none. Each result
-goes to `node_built`, a mutation where the first write wins, which
-refits the view. Rounds repeat until none is ready. A failed node is
-left for the next pump. Past 30 rounds or the run's budget with work
-left, a fresh `pump` takes the rest.
+its leases in `kv`) for the nodes that are ready (spec §4.1 rules 1–3):
+a level-0 batch and up to 8 merges. It builds them with
+`job.ai.text({model: "cheap", …})` steps (the spec's two-block input,
+SCALE, the retry loop): the level-0 batch, then the merges. One node
+alone is the spec's call exactly; two or more go in one call (below).
+Each result goes to `node_built` (one) or `nodes_built` (a batch),
+mutations where the first write wins, which refit the view. Rounds
+repeat until none is ready. A failed node is left for the next pump.
+Past 30 rounds or the run's budget with work left, a fresh `pump` takes
+the rest.
+
+**Batched calls (a deviation from the spec, 2026-10-07).** The spec runs
+JOBS calls at once, one node each. A job's steps run one at a time
+(cell/platform.mjs), so here each call would wait for the one before,
+and each sends the whole view (up to 128 KB) as its context: an imported
+history of thousands of messages took hours and two calls a message.
+So:
+- **Level 0:** a call builds `first`'s node (the one rule 3 makes ready)
+  and each later message not built whose line is over NODE, up to 8 in
+  all, at most 192 KiB of them, within 64 messages of `first`
+  (`M.batch`). The context is the view before the first of them, as the
+  spec's; the step is SCALE, then the messages in order, each whole
+  under `--- n ---`, a short one between them shown as the line it
+  already is (`--- a line already ---`), then "Answer with exactly k
+  lines … each starting with its number and `) `". A later message of a
+  batch sees the earlier ones whole instead of their lines.
+- **Merges:** up to 8 ready merges in one call, each its two lines under
+  `--- n ---`. The context is the view before the earliest end among
+  them, so no merge sees past its own stretch (a later one sees less
+  than the spec's context, its own lines given whole in the step).
+- **Ids in the output:** the spec keeps ids out of a compactor's input
+  because a model copies them into its line. A batch needs numbers to
+  match lines to nodes; they are stripped (`M.batchLines`), and the view's
+  lines still carry none.
+- **The size rules hold line by line:** a line over NODE is asked again
+  in the same conversation, cut where the limit falls, with any line
+  that did not come; after TRIES calls each line is its shortest try
+  (`M.batchTry`). A line that never came, or a call that failed, fails
+  its node alone. Free nodes stay free: never sent to a model.
+- **Merges alongside level 0:** a round builds its merges after its
+  level-0 batch (the spec's pump runs them alongside), and a turn's settle
+  builds merges while the view is over VIEW: with level 0 far behind
+  (an import), the view would otherwise grow past its budget, and every
+  call's context with it.
+
+### Importing chats (`import`, `fragment mind import`, the page's upload)
+
+Paul (2026-10-07): "chat upload … at least claude and codex and hermes
+sessions … import should simply 'play' the chats through the memory
+system so they get added just like any other messages". The spec's §10:
+old chats become messages, "the user's messages and the agent's final
+replies, without repeated pastes and tool noise", and the compactor
+builds the tree over them like any other.
+
+- **`import`**, a mutation (editor): one part of one conversation, its
+  messages `from` on, appended to the log in order as `user` and `talk`
+  with their **original times** (`at`), in a thread of the conversation
+  (made on its first part: `t_` and 16 hex of FNV-1a 64 over its source
+  and id, titled from its title or its first words, `started` its start,
+  the default persona's), publishing no `msg` records (one `{type:
+  "import", source, conversation, thread, n, total, T}` a part, and
+  `thread` when it is made). No turn starts: an import plays history and
+  asks the agent nothing. `kv`'s `import` table keeps how many messages of
+  each conversation landed: a part already in changes nothing (a retry,
+  a rerun), one ahead of them is refused (parts go in order), and one
+  that overlaps them appends only its new messages (a conversation that
+  grew). When no pump planned work in 3 minutes (and none was started in
+  the last minute), it publishes `{at}` on `compact`, whose trigger runs
+  `pump`.
+- **Deviations from the spec's import:** the spec imported keeping ids;
+  this log already has messages, so imported ones land after them (the
+  log stays append-only, and an import may interleave with live chat, a
+  thread's messages then not contiguous). Their times are their own, so
+  `date` answers when they were said, and `threads` lists them by when
+  they were last said, not when imported.
+- **`fragment mind import <paths…> [--from claude-code | claude-export |
+  codex | hermes | auto] [--since DATE] [--limit-conversations N]
+  [--dry-run [--show N]] [--mind <name>] [--no-wait]`** (cli/src/import.rs
+  reads, cli/src/mind.rs sends):
+  - **Formats:** Claude Code's sessions (`~/.claude/projects`; a
+    `subagents/` folder skipped; a forked or resumed session's copied
+    records are its original's, merged once); claude.ai's export
+    (`conversations.json`); Codex's rollouts (`~/.codex/sessions`; its
+    first format, its `response_item`s and `event_msg`s, and its turn
+    items; a subagent's or a guardian's rollout skipped); Hermes's
+    `hermes sessions export` lines (a compaction's continuation joined to
+    its session; rows undone, summaries, injected memory, skill scaffolds
+    and agent sessions dropped) and its older `session_<id>.json`
+    snapshots and `<id>.jsonl` transcripts. Its `state.db` is SQLite,
+    which the CLI does not read: it names it and says to export it.
+  - **What goes:** the person's words (no harness text: system reminders,
+    slash commands without arguments and their output, task
+    notifications, injected environment and AGENTS.md, a Codex Desktop
+    message's attached context above "My request for Codex") and each
+    turn's final reply (the agent's last text after its last tool call;
+    a turn the harness started, a subagent's report, keeps its reply and
+    not its words). Tool calls, results, reasoning and empty turns go; a
+    user message of 1 KiB or more repeating an earlier one (a paste) goes;
+    each message is capped at CAP as the mind caps it. Oldest
+    conversation first.
+  - **`--dry-run`** counts conversations, messages and bytes by source,
+    and estimates the compactor's work by simulating the tree (a free
+    node for a line within NODE, a free merge for two that fit; every
+    other a call): level-0 calls, alone and batched; merges; tokens (the
+    view as each call's context); cost at the cheap tier's prices in the
+    default price book, all context cached or none; and hours at ~8 s a
+    call. `--show N` prints the first N conversations a line a message.
+  - **An import** asks `imported` for each conversation, sends the rest
+    in parts (at most 64 messages and 192 KiB), then follows `status`
+    every 15 s until nothing is unbuilt or ready, calling `pump` when
+    none is at work (a pump chain ends at the platform's 16 hops); it
+    stops after 5 such starts with no progress. Ctrl-C and a rerun
+    resume.
+- **The page's upload** (`site/import.js`, `mountImport(container)`):
+  one `conversations.json` or one Claude Code or Codex `.jsonl`, parsed
+  in the page by the same rules, sent the same way, then the compactor
+  followed through `status`.
+- **While an import compacts**, a turn waits (`settling`): no call sees a
+  placeholder (spec §6), and the imported messages come before it. Its
+  settle builds alongside the pump; past its budget it hands on (a chain
+  of at most 16 runs), and the next message resumes it.
+- **The archive on the build box (2026-10-07, dry run):** Paul's Claude
+  Code and Codex sessions from his Mac and this box, 377 conversations,
+  15 437 messages, 12.2 MB: 6 839 messages over NODE (855 batched calls;
+  6 839 one a call), 12 029 merges needing a call (1 504 batched), about
+  135M tokens in (124M of them the view as context), $7.67 to $22.67 at
+  list price, about 6.6 hours.
 
 ### Topics (job `classify`)
 
@@ -410,7 +541,9 @@ membership, which only its owner and the agent hold. Operations with a
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
 | `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
-| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}]}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed |
+| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}], ready, pump: {at} \| null, view, nodes, import: {conversations, messages, last} \| null, now}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed; `ready`, whether the compactor has a node to build now; `pump`, when a pump last planned work (none: no pump at work); `view`, the view's bytes; `nodes`, the tree's built nodes; `import`, what imports landed |
+| `import` | mutation | `{source, conversation: {id, title?, started?}, from, total?, messages: [{role: user \| assistant, text, at}]}` (1 to 64) → `{thread, landed, appended, T}`: "Importing chats" |
+| `imported` | query | `{conversations: [{source, id}]}` (at most 200) → `{landed: [n]}`: how many of each conversation's messages are in |
 | `settings` | query | `{}` → `{about}` |
 | `topic_add` / `topic_remove` | mutation | `{name, description?}` / `{id}` |
 | `persona_set` / `persona_remove` / `persona_default` | mutation | `{id?, name, emoji, instructions, hands}` / `{id}` / `{id}` |
@@ -422,7 +555,7 @@ The internal mutations (editor, no description) are named here so the
 two halves agree: `hear`, `turn_begin`, `turn_touch`, `turn_end`,
 `logged` (log one step's messages; it touches the lock and answers
 whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
-`task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
+`nodes_built`, `task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
 `classify`, `topic_suggest` and `hands_said`.
 
 Seeded personas (a persona's instructions say what it is for; each
@@ -628,14 +761,16 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
 
 ## Not in the spike
 
-- Importing other providers' chats. `note` and an `import` job are the
-  door for it.
+- Importing ChatGPT's export, and reading Hermes's `state.db` directly
+  (the CLI has no SQLite: `hermes sessions export` first). Classifying
+  imported threads into topics: only a topic added later sorts them (its
+  newest 100 threads).
 - A remote HTTP MCP server with OAuth.
 - Prompt-cache breakpoints. Workers AI caches prefixes by itself, and
   the incremental fold keeps the prefix stable.
 - Mid-run injection of a new message between tool calls. A message
   sent mid-turn starts the next turn.
-- Moving the log out of the app's 16 MiB SQLite (to R2 or git).
+- Moving the log out of the app's SQLite (to R2 or git).
 - The web as a browser: `web_fetch` reads what a server sends, so a
   page its scripts draw reads as next to nothing, and a PDF is the
   computer's. Cloudflare's Browser Rendering is no step a job has

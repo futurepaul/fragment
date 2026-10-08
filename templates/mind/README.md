@@ -96,10 +96,16 @@ blocks a chain past 16).
 
 ## Debt and open problems
 
-- **The 16 MiB cap.** Everything lives in the app's SQLite, which holds
-  16 MiB (with FTS5 over the log): a few tens of thousands of messages.
-  Every logged message is capped at 30,000 characters, head and tail
-  kept. Moving the log out (R2, git) is not in the spike.
+- **The database.** Everything lives in the app's SQLite, which the mind
+  declares at 1 GiB (`storage.maxBytes`; the platform's 16 MiB holds a
+  few tens of thousands of messages, less than an imported history may
+  be). No meter counts it, and the instance keeps every node's text in
+  memory. Every logged message is capped at 30,000 characters, head and
+  tail kept. Moving the log out (R2, git) is not in the spike.
+- **An import's backlog holds turns** (docs/optchat.md, "Importing
+  chats"): no call sees a placeholder, so a turn after a long import
+  waits, settling, while the compactor (batched, 8 nodes a call) catches
+  up.
 - **`log` is never trimmed** (no post role): every message is a record
   there too, at most 48 KiB.
 - **Triggered runs pause past 120 an hour** (docs/api.md, Jobs): one
