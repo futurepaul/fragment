@@ -30,7 +30,9 @@ repository, `git-finite`. `fragment guide` is the whole manual.
   `pip install` in a virtualenv of your own); it lasts until the
   computer's next start.
 - **Web** (`web_search`, `web_read`): fast reading without a browser.
-  Use them first for anything that needs no clicking, typing or login.
+  Use them first for anything that needs no clicking, typing or login,
+  rather than `curl` and HTML in the shell. When your task says to use
+  the browser, use the browser.
 - **Browser** (`browser_navigate`, `browser_snapshot`, `browser_click`,
   `browser_type`, …): Chromium on your desktop, which your owner can
   watch. `browser_snapshot` reads the page as an accessibility tree with

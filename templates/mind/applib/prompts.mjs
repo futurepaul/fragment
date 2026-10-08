@@ -171,7 +171,8 @@ export const TOOLS = {
     "computer",
     "Hand a task to an agent on the user's computer. It has files, a shell, code tools and the internet, and the fragment CLI and its skill: it makes and updates the user's apps (fragments). " +
       "It sees the view but not this turn, and gets the files attached to this turn's messages. " +
-      'Say everything the task needs. It answers "[id] started" at once; the report comes later as a message starting "[id] ".',
+      "Say everything the task needs, and keep the user's own words about how to do it (a tool, a site, a method: \"use the browser\" stays \"use the browser\"); never suggest a method they did not ask for. " +
+      'It answers "[id] started" at once; the report comes later as a message starting "[id] ".',
     { task: { type: "string", description: "what to do, whole" } },
     ["task"],
   ),
