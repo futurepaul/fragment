@@ -1181,7 +1181,7 @@ function clientsSection(listed) {
       }
       await openSettings(false);
     };
-    row.append(el("span", "settings-key", c.client), el("span", "settings-value", `${reach}, since ${new Date(c.createdAt).toLocaleDateString()}`), end);
+    row.append(el("span", "settings-key", c.client), el("span", "settings-value", `${reach}, ${c.writes ? "reads and changes" : "reads only"}, since ${new Date(c.createdAt).toLocaleDateString()}`), end);
     s.append(row);
   }
   return s;

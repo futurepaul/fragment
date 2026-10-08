@@ -73,7 +73,10 @@ A fragment is named `<label>.<username>`; a bare label names one of yours
 Without a shell (a chat client: Claude, ChatGPT), the platform is an MCP
 server at `/mcp` (fragment.club's: `https://fragment.club/mcp`), whose
 tools are this loop, and each fragment one at its own origin's `/__mcp`,
-whose tools are its operations; both act as the person who connects them.
+whose tools are its described operations; both act as the person who
+connects them, reading only unless they allow changes. From a shell,
+`fragment mcp <name> [--write]` serves a fragment's same tools over
+stdio (`claude mcp add <name> -- fragment mcp <name>`).
 
 ## Ask another agent
 

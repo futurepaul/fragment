@@ -6,6 +6,8 @@
 //! here only as its SHA-256, the refresh token replaced at every use. A
 //! connection is a credential, as a session is: it names a person and
 //! grants nothing; the resource it reaches decides what they may do there.
+//! It only takes away: unless its person let it change things (`writes`,
+//! the consent page's choice), it only reads.
 //!
 //! Every table is bounded: registrations by `oauth::CLIENTS_MAX` (the
 //! oldest go, as pending sign-ins do), a person's codes and connections by
@@ -28,12 +30,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS oauth_codes (
   hash TEXT PRIMARY KEY, identity TEXT NOT NULL, client_id TEXT NOT NULL, client TEXT NOT NULL, redirect_uri TEXT NOT NULL,
-  challenge TEXT NOT NULL, resource TEXT NOT NULL, expires_at INTEGER NOT NULL);
+  challenge TEXT NOT NULL, resource TEXT NOT NULL, writes INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS oauth_codes_identity ON oauth_codes (identity, expires_at);
 CREATE INDEX IF NOT EXISTS oauth_codes_expires ON oauth_codes (expires_at);
 CREATE TABLE IF NOT EXISTS connections (
   id TEXT PRIMARY KEY, identity TEXT NOT NULL, client_id TEXT NOT NULL, client TEXT NOT NULL, resource TEXT NOT NULL,
-  access_hash TEXT NOT NULL UNIQUE, access_expires_at INTEGER NOT NULL, refresh_hash TEXT NOT NULL UNIQUE,
+  writes INTEGER NOT NULL, access_hash TEXT NOT NULL UNIQUE, access_expires_at INTEGER NOT NULL, refresh_hash TEXT NOT NULL UNIQUE,
   refresh_expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS connections_identity ON connections (identity, created_at);
 CREATE INDEX IF NOT EXISTS connections_expires ON connections (refresh_expires_at);
@@ -48,6 +50,7 @@ struct CodeRow {
     redirect_uri: String,
     challenge: String,
     resource: String,
+    writes: i64,
 }
 
 /// `connections`, as a refresh reads it.
@@ -113,7 +116,7 @@ impl RegistryCell {
         self.sweep_by(expires_at).await?;
         let code = fresh_token();
         self.exec(
-            "INSERT INTO oauth_codes (hash, identity, client_id, client, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO oauth_codes (hash, identity, client_id, client, redirect_uri, challenge, resource, writes, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 sha(&code).into(),
                 who.id.as_str().into(),
@@ -122,6 +125,7 @@ impl RegistryCell {
                 b.redirect_uri.as_str().into(),
                 b.challenge.as_str().into(),
                 b.resource.as_str().into(),
+                SqlStorageValue::Integer(b.writes.into()),
                 SqlStorageValue::Integer(expires_at),
             ],
         )?;
@@ -141,7 +145,7 @@ impl RegistryCell {
         match grant {
             Grant::Code { code, client_id, redirect_uri, verifier, resource } => {
                 let row = self.row::<CodeRow>(
-                    "DELETE FROM oauth_codes WHERE hash = ? AND expires_at > ? RETURNING identity, client_id, client, redirect_uri, challenge, resource",
+                    "DELETE FROM oauth_codes WHERE hash = ? AND expires_at > ? RETURNING identity, client_id, client, redirect_uri, challenge, resource, writes",
                     vec![sha(&code).into(), SqlStorageValue::Integer(now)],
                 )?;
                 let Some(row) = row else { return Ok(no(Error::InvalidGrant, "this code expired, was used, or was never issued")) };
@@ -161,14 +165,15 @@ impl RegistryCell {
                 self.sweep_by(refresh_expires_at).await?;
                 let (access, refresh) = (fresh_token(), fresh_token());
                 self.exec(
-                    "INSERT INTO connections (id, identity, client_id, client, resource, access_hash, access_expires_at, refresh_hash, refresh_expires_at, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO connections (id, identity, client_id, client, resource, writes, access_hash, access_expires_at, refresh_hash, refresh_expires_at, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     vec![
                         hex::encode(js::random_bytes::<8>()).into(),
                         who.id.as_str().into(),
                         row.client_id.as_str().into(),
                         row.client.as_str().into(),
                         row.resource.as_str().into(),
+                        SqlStorageValue::Integer(row.writes),
                         sha(&access).into(),
                         SqlStorageValue::Integer(now + oauth::ACCESS_TTL_MS),
                         sha(&refresh).into(),
@@ -218,7 +223,7 @@ impl RegistryCell {
     /// statement. Not live, or another resource's, is 401.
     pub(super) fn connected(&self, b: Connected) -> CellResult<LiveConnection> {
         const Q: &str = concat!(
-            "SELECT c.id, c.client, c.resource, c.identity, i.kind, i.owner, i.held, u.username FROM connections c ",
+            "SELECT c.id, c.client, c.resource, c.writes, c.identity, i.kind, i.owner, i.held, u.username FROM connections c ",
             "LEFT JOIN identities i ON i.id = c.identity ",
             username_join!(),
             " WHERE c.access_hash = ? AND c.access_expires_at > ?"
@@ -228,6 +233,7 @@ impl RegistryCell {
             id: String,
             client: String,
             resource: String,
+            writes: i64,
             identity: String,
             kind: Option<IdentityKind>,
             owner: Option<String>,
@@ -244,7 +250,7 @@ impl RegistryCell {
         }
         let identity = joined_identity(row.identity, row.kind, row.owner, row.username, row.held, "a connection")?;
         self.not_wiping(&identity)?;
-        Ok(LiveConnection { identity, connection: row.id, client: row.client })
+        Ok(LiveConnection { identity, connection: row.id, client: row.client, writes: row.writes != 0 })
     }
 
     /// The connection either of its tokens names ends, when `client_id` is
@@ -257,11 +263,33 @@ impl RegistryCell {
     /// The asker's connections, newest first (at most `CONNECTIONS_PER_PERSON_MAX`).
     pub(super) fn list_connections(&self, b: ListConnections) -> CellResult<Connections> {
         let who = self.by(&b.by)?;
-        let connections: Vec<Connection> = self.rows(
-            "SELECT id, client, client_id AS clientId, resource, created_at AS createdAt, refresh_expires_at AS expiresAt
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            client: String,
+            client_id: String,
+            resource: String,
+            writes: i64,
+            created_at: i64,
+            refresh_expires_at: i64,
+        }
+        let rows: Vec<Row> = self.rows(
+            "SELECT id, client, client_id, resource, writes, created_at, refresh_expires_at
              FROM connections WHERE identity = ? AND refresh_expires_at > ? ORDER BY created_at DESC, rowid DESC",
             vec![who.id.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
+        let connections: Vec<Connection> = rows
+            .into_iter()
+            .map(|r| Connection {
+                id: r.id,
+                client: r.client,
+                client_id: r.client_id,
+                resource: r.resource,
+                writes: r.writes != 0,
+                created_at: r.created_at,
+                expires_at: r.refresh_expires_at,
+            })
+            .collect();
         assert!(connections.len() as u64 <= oauth::CONNECTIONS_PER_PERSON_MAX, "a person's connections are bounded");
         Ok(Connections { connections })
     }

@@ -4,12 +4,21 @@
 //! the modern one (2026-07-28: no session, every request's version and
 //! client in its `_meta`, its method and name mirrored in headers, and
 //! `server/discover`), and the legacy one (2025-03-26 to 2025-11-25:
-//! `initialize` first, no session id minted). A fragment's operations are
-//! its tools: their arguments are `POST __op`'s body, `{id, input}`, so a
-//! mutation or a job is idempotent by the id its caller chooses.
+//! `initialize` first, no session id minted).
+//!
+//! A fragment's tools are its described operations, here for both of its
+//! MCP servers, so they agree: its own `__mcp` (cell/src/mcp.rs, for a
+//! connected client) and `fragment mcp` (cli/src/mcp.rs, over stdio). An
+//! operation is a tool when its `fragment.json` entry has a `description`
+//! (`served`): a query always, a mutation or a job only for a client its
+//! person let change things (a connection allowed changes, `--write`). A
+//! tool's arguments are the operation's input, and each call is a call of
+//! its own (a fresh operation id).
+
+use std::collections::BTreeMap;
 
 use base64::Engine;
-use fragment_proto::{limits, OpDecl, OpKind};
+use fragment_proto::{OpDecl, OpKind};
 
 pub mod verbs;
 use serde_json::{json, Value};
@@ -224,67 +233,97 @@ pub fn tools(era: Era, tools: Vec<Value>) -> Value {
     }
 }
 
-/// What a tool's `id` argument says to the model.
-const ID_DESCRIPTION: &str = "Your id for this call (letters, digits, and . _ : -): the same id again answers with the first call's result and runs nothing again; another input under it is refused.";
-
-/// An operation as a tool: its arguments are `__op`'s body, the input under
-/// `input` as the operation declares it, and, for a mutation or a job, the
-/// caller's `id`. A query only reads; a mutation or a job is idempotent by
-/// its id (an ephemeral mutation is not: its id is not kept), and a job
-/// may reach the world (`job.fetch`, AI steps).
-pub fn tool(name: &str, decl: &OpDecl) -> Value {
-    let mut properties = serde_json::Map::new();
-    let mut required = vec![];
-    if decl.kind != OpKind::Query {
-        let pattern = format!("^[A-Za-z0-9._:-]{{1,{}}}$", limits::OP_ID_MAX_BYTES);
-        properties.insert("id".into(), json!({ "type": "string", "pattern": pattern, "description": ID_DESCRIPTION }));
-        required.push("id");
-    }
-    match &decl.input {
-        Some(schema) => {
-            properties.insert("input".into(), schema.clone());
-            required.push("input");
-        }
+/// An operation's input schema as a tool's: an object's (a tool's
+/// arguments are one), `{"type": "object"}` when it declares none, and none
+/// when it declares another type (such an operation is no tool).
+pub fn input_schema(decl: &OpDecl) -> Option<Value> {
+    let Some(Value::Object(schema)) = &decl.input else {
+        return decl.input.is_none().then(|| json!({ "type": "object" }));
+    };
+    let mut schema = schema.clone();
+    match schema.get("type") {
         None => {
-            properties.insert("input".into(), json!({ "description": "The operation's input: it declares none, so any JSON." }));
+            schema.insert("type".into(), "object".into());
         }
+        Some(Value::String(t)) if t == "object" => {}
+        Some(_) => return None,
     }
+    Some(Value::Object(schema))
+}
+
+/// Whether an operation is a tool for a client that may change things
+/// (`writes`) or only read: it says what it does (its `description`), it
+/// takes an object, and it is a query unless the client may write.
+pub fn served(decl: &OpDecl, writes: bool) -> bool {
+    decl.description.is_some() && (decl.kind == OpKind::Query || writes) && input_schema(decl).is_some()
+}
+
+/// Why `op` is no tool for this client: the refusal of a call to it.
+pub fn not_served(op: &str, decl: &OpDecl, writes: bool) -> String {
+    assert!(!served(decl, writes), "{op} is a tool");
+    if decl.description.is_none() {
+        format!("{op} is no tool: an operation is one when its fragment.json entry has a description")
+    } else if input_schema(decl).is_none() {
+        format!("{op} is no tool: its input is no object, and a tool's arguments are one")
+    } else {
+        format!("{op} changes things, and this client may only read: its person connects it again and allows changes (fragment mcp: --write)")
+    }
+}
+
+/// An operation as a tool: its arguments are its input, its schema the
+/// operation's own. A query only reads; a mutation or a job changes
+/// things, each call once (a fresh operation id: no call replays
+/// another), and a job may reach the world (`job.fetch`, AI steps).
+pub fn tool(name: &str, decl: &OpDecl) -> Value {
+    let description = decl.description.as_deref().expect("a tool is a described operation (served)");
+    let schema = input_schema(decl).expect("a tool takes an object (served)");
     let annotations = match decl.kind {
         OpKind::Query => json!({ "readOnlyHint": true, "openWorldHint": false }),
-        OpKind::Mutation => json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": !decl.ephemeral, "openWorldHint": false }),
-        OpKind::Job => json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true }),
+        OpKind::Mutation => json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }),
+        OpKind::Job => json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }),
     };
-    let description = decl.description.clone().unwrap_or_else(|| format!("The {} {name} of this fragment's app.", decl.kind.as_str()));
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": { "type": "object", "properties": properties, "required": required, "additionalProperties": false },
-        "annotations": annotations,
-    })
+    json!({ "name": name, "description": description, "inputSchema": schema, "annotations": annotations })
 }
 
-/// A tool call's arguments, as `__op`'s body: its `id` (when the caller
-/// named one) and its `input`. Anything else is the caller's mistake.
-pub fn call_of(arguments: &Value) -> Result<(Option<String>, Value), String> {
-    let o = match arguments {
-        Value::Null => return Ok((None, Value::Null)),
-        Value::Object(o) => o,
-        _ => return Err("a tool's arguments are an object: {id, input}".into()),
-    };
-    if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "id" | "input")) {
-        return Err(format!("a tool takes id and input, not {k:?}"));
+/// The tools of these operations for a client that may change things
+/// (`writes`) or only read: each served one its caller may call
+/// (`may_call`: the caller's role there), in name order.
+pub fn tools_of(operations: &BTreeMap<String, OpDecl>, writes: bool, may_call: impl Fn(&OpDecl) -> bool) -> Vec<Value> {
+    operations.iter().filter(|(_, d)| served(d, writes) && may_call(d)).map(|(name, d)| tool(name, d)).collect()
+}
+
+/// What a fragment's MCP server tells its client of itself.
+pub fn instructions(fragment: &str, writes: bool) -> String {
+    let reach = if writes { "its queries read it, and its mutations and jobs change it, each call once" } else { "its queries alone: this client may only read it" };
+    format!(
+        "The operations of {fragment}, a fragment (a small web app with its own data), that say what they do, as tools: {reach}. A tool's arguments are its operation's input. Each call is made as the one who connected this server, with their role there."
+    )
+}
+
+/// A tool call's arguments: the operation's input, an object (none is `{}`).
+pub fn call_of(arguments: &Value) -> Result<Value, String> {
+    match arguments {
+        Value::Null => Ok(json!({})),
+        Value::Object(_) => Ok(arguments.clone()),
+        _ => Err("a tool's arguments are an object: its operation's input".into()),
     }
-    let id = match o.get("id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(id)) => Some(id.clone()),
-        Some(_) => return Err("id is a string".into()),
-    };
-    Ok((id, o.get("input").cloned().unwrap_or(Value::Null)))
 }
 
-/// A call's answer as a tool's result: what `__op` answers, structured,
-/// and as text for a client that reads only that.
+/// An operation's answer (`{result, replayed}`) as a tool's result: its
+/// result's `text` as it is when that is a string (a view an operation
+/// rendered for a model to read: a mind's view, zoom, date), else the
+/// result as JSON; and the whole answer, structured.
 pub fn called(answer: &Value) -> Value {
+    let text = match &answer["result"]["text"] {
+        Value::String(text) => text.clone(),
+        _ => answer["result"].to_string(),
+    };
+    json!({ "content": [{ "type": "text", "text": text }], "structuredContent": answer, "isError": false })
+}
+
+/// A route's answer as a tool's result (the platform's verbs): as JSON,
+/// and structured.
+pub fn answered(answer: &Value) -> Value {
     json!({ "content": [{ "type": "text", "text": answer.to_string() }], "structuredContent": answer, "isError": false })
 }
 
@@ -369,34 +408,69 @@ mod tests {
         assert!(matches!(step(&ping, Headers { method: Some("ping"), ..ok }, &s), Step::Done(Answer::Json(404, _))), "ping went in 2026-07-28");
     }
 
+    fn op(kind: OpKind, role: Role, input: Option<Value>, description: Option<&str>) -> OpDecl {
+        OpDecl { kind, role, input, ephemeral: false, description: description.map(str::to_string) }
+    }
+
+    /// Goal: one rule says which operations are tools, for both servers
+    /// (`__mcp` and `fragment mcp`). Method: described or not, each kind,
+    /// read-only and allowed changes, an input that is no object, and the
+    /// caller's role; each refusal says why.
     #[test]
-    fn an_operation_is_a_tool_whose_arguments_are_ops_body() {
-        let input = json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } });
-        let q = tool("list", &OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false, description: None });
-        assert_eq!(q["annotations"]["readOnlyHint"], true);
-        assert!(q["inputSchema"]["properties"].get("id").is_none() && q["inputSchema"]["required"] == json!([]), "a query takes no id");
-        let m = tool("add", &OpDecl { kind: OpKind::Mutation, role: Role::Editor, input: Some(input.clone()), ephemeral: false, description: Some("Adds one.".into()) });
-        assert_eq!(m["description"], "Adds one.");
-        assert_eq!((m["annotations"]["readOnlyHint"].clone(), m["annotations"]["idempotentHint"].clone()), (json!(false), json!(true)));
-        assert_eq!(m["inputSchema"]["required"], json!(["id", "input"]));
-        assert_eq!(m["inputSchema"]["properties"]["input"], input, "the operation's schema, as it is");
-        assert_eq!(m["inputSchema"]["additionalProperties"], false);
-        let e = tool("frame", &OpDecl { kind: OpKind::Mutation, role: Role::Editor, input: None, ephemeral: true, description: None });
-        assert_eq!(e["annotations"]["idempotentHint"], false, "an ephemeral mutation keeps no id");
-        let j = tool("digest", &OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
-        assert_eq!((j["annotations"]["idempotentHint"].clone(), j["annotations"]["openWorldHint"].clone()), (json!(true), json!(true)));
+    fn a_described_operation_is_a_tool_and_one_that_writes_needs_changes_allowed() {
+        let object = json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } });
+        let ops: BTreeMap<String, OpDecl> = [
+            ("list", op(OpKind::Query, Role::Viewer, None, Some("The list."))),
+            ("count", op(OpKind::Query, Role::Viewer, None, None)),
+            ("add", op(OpKind::Mutation, Role::Editor, Some(object.clone()), Some("Adds one."))),
+            ("digest", op(OpKind::Job, Role::Editor, None, Some("Sums it up."))),
+            ("shout", op(OpKind::Query, Role::Viewer, Some(json!({ "type": "string" })), Some("Takes a string."))),
+            ("secret", op(OpKind::Query, Role::Owner, None, Some("The owner's."))),
+        ]
+        .into_iter()
+        .map(|(n, d)| (n.to_string(), d))
+        .collect();
+        let names = |writes: bool, role: Role| -> Vec<String> { tools_of(&ops, writes, |d| d.role <= role).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect() };
+        assert_eq!(names(false, Role::Editor), ["list"], "read-only: the described queries that take an object");
+        assert_eq!(names(true, Role::Editor), ["add", "digest", "list"], "allowed changes: its described mutations and jobs too");
+        assert_eq!(names(true, Role::Viewer), ["list"], "the caller's role bounds them");
+        assert_eq!(names(false, Role::Owner), ["list", "secret"]);
+        assert!(not_served("count", &ops["count"], true).contains("description"));
+        assert!(not_served("add", &ops["add"], false).contains("may only read"));
+        assert!(not_served("shout", &ops["shout"], true).contains("no object"));
+        assert!(instructions("todo.paul", false).contains("may only read") && instructions("todo.paul", true).contains("change it"));
     }
 
     #[test]
-    fn a_calls_arguments_are_an_id_and_an_input() {
-        assert_eq!(call_of(&json!({ "id": "a1", "input": { "text": "x" } })), Ok((Some("a1".into()), json!({ "text": "x" }))));
-        assert_eq!(call_of(&Value::Null), Ok((None, Value::Null)));
-        assert_eq!(call_of(&json!({ "input": 3 })), Ok((None, json!(3))));
-        assert!(call_of(&json!({ "text": "x" })).is_err(), "the input goes under input");
-        assert!(call_of(&json!({ "id": 1 })).is_err());
+    fn an_operation_is_a_tool_whose_arguments_are_its_input() {
+        let input = json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } });
+        let q = tool("list", &op(OpKind::Query, Role::Viewer, None, Some("The list.")));
+        assert_eq!(q["annotations"]["readOnlyHint"], true);
+        assert_eq!(q["inputSchema"], json!({ "type": "object" }), "no input declared: any object");
+        let m = tool("add", &op(OpKind::Mutation, Role::Editor, Some(input.clone()), Some("Adds one.")));
+        assert_eq!(m["description"], "Adds one.");
+        assert_eq!((m["annotations"]["readOnlyHint"].clone(), m["annotations"]["idempotentHint"].clone()), (json!(false), json!(false)), "each call runs once");
+        assert_eq!(m["inputSchema"], input, "the operation's schema, as it is");
+        let typeless = tool("zoom", &op(OpKind::Query, Role::Viewer, Some(json!({ "properties": { "n": { "type": "integer" } } })), Some("z")));
+        assert_eq!(typeless["inputSchema"]["type"], "object", "a schema that names no type says it is an object's");
+        let j = tool("digest", &op(OpKind::Job, Role::Editor, None, Some("d")));
+        assert_eq!((j["annotations"]["readOnlyHint"].clone(), j["annotations"]["openWorldHint"].clone()), (json!(false), json!(true)));
+    }
+
+    #[test]
+    fn a_calls_arguments_are_its_input_and_its_result_reads_as_text() {
+        assert_eq!(call_of(&json!({ "text": "x" })), Ok(json!({ "text": "x" })));
+        assert_eq!(call_of(&Value::Null), Ok(json!({})), "none is the empty object");
         assert!(call_of(&json!([1])).is_err());
+        assert!(call_of(&json!(3)).is_err());
         let r = called(&json!({ "result": { "n": 1 }, "replayed": false }));
         assert_eq!((r["isError"].clone(), r["structuredContent"]["result"]["n"].clone()), (json!(false), json!(1)));
+        assert_eq!(r["content"][0]["text"], r#"{"n":1}"#, "the result as JSON");
+        let view = called(&json!({ "result": { "text": "<chat>\n0+1|user: hi\n</chat>", "bytes": 30 }, "replayed": false }));
+        assert_eq!(view["content"][0]["text"], "<chat>\n0+1|user: hi\n</chat>", "a rendered text as it is");
+        assert_eq!(view["structuredContent"]["result"]["bytes"], 30);
+        assert_eq!(called(&json!({ "result": { "text": 7 }, "replayed": false }))["content"][0]["text"], r#"{"text":7}"#, "a text that is no string is data");
+        assert_eq!(answered(&json!({ "fragments": [] }))["content"][0]["text"], r#"{"fragments":[]}"#);
         assert_eq!(refused("forbidden", "this needs the editor role")["content"][0]["text"], "forbidden: this needs the editor role");
     }
 }

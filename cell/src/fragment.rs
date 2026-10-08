@@ -37,7 +37,8 @@
 //!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
 //!   PUT    /api/channels/<channel>/draft  the channel's post role ({turn, text}: shown live, never stored)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
-//!   GET    /mcp/tools                     the operations the caller may call, as MCP tools (the router's, for `__mcp`)
+//!   GET    /mcp/tools                     the described operations the caller may call, as MCP tools (the router's, for `__mcp`)
+//!   POST   /mcp/tools/<operation>         a call of one of them, as /api/ops/<operation> (the router's, for `__mcp`)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
@@ -946,6 +947,12 @@ impl FragmentCell {
         if !matches!(segs.as_slice(), ["create" | "draft" | "claim"]) {
             self.draft_gate(&caller, &req.method(), &segs)?;
         }
+        // a connected client its person let only read changes nothing here
+        // (an operation's call decides by its kind: ops.rs `call_op`)
+        let reads = matches!(method, Method::Get | Method::Head) || matches!(segs.as_slice(), ["api", "ops", _] | ["mcp", "tools", _]);
+        if crate::ops::connected(&caller) && !crate::ops::writes(&caller) && !reads {
+            return Err(CellError::new(ErrorCode::Forbidden, "this connected client may only read: its person connects it again and allows changes"));
+        }
         let answered = match (req.method(), segs.as_slice()) {
             (Method::Post, ["create"]) => {
                 let body: CreateFragment = body_json(&mut req).await?;
@@ -1046,6 +1053,11 @@ impl FragmentCell {
             }
             // the router's own, for a connected client (cell/src/mcp.rs): never routed from outside
             (Method::Get, ["mcp", "tools"]) => self.mcp_tools(&caller),
+            (Method::Post, ["mcp", "tools", op]) => {
+                let body = body_json(&mut req).await?;
+                let op = op.to_string();
+                self.mcp_call(&caller, &op, body).await
+            }
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
                 self.put_blob(&caller, &sha, &req).await
@@ -1097,7 +1109,7 @@ impl FragmentCell {
     /// replays and queries saying nothing.
     fn noted_client(&self, caller: &Caller, method: &Method, path: &str, status: u16) {
         let Some((signed, through)) = caller.signed.as_ref().and_then(|s| s.through.as_ref().map(|t| (s, t))) else { return };
-        if matches!(method, Method::Get | Method::Head) || path.starts_with("/api/ops/") || !(200..300).contains(&status) {
+        if matches!(method, Method::Get | Method::Head) || path.starts_with("/api/ops/") || path.starts_with("/mcp/") || !(200..300).contains(&status) {
             return;
         }
         let principal = npub::display(&signed.id);

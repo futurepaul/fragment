@@ -341,8 +341,10 @@ fragment verify my-thing --dir .            # full-content audit
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
 - `description` (1 to 1024 characters) says what it does and answers,
-  for an agent: it makes the operation a tool of `fragment mcp` ("Use it
-  from another agent", below), and `fragment status` shows it.
+  for a model: it makes the operation a tool of the fragment's MCP
+  servers ("Use it from another agent", below), and `fragment status`
+  shows it. Describe each operation an agent should use; one without a
+  description is no tool.
 - `"ephemeral": true` on a mutation you call often with a "latest value":
   its calls keep no ledger row (a mutation's id is
   otherwise kept a week in your app's 16 MiB database), so the same id
@@ -506,43 +508,47 @@ fragment channel my-thing activity --follow                     # the backlog a 
 
 ## Use it from another agent
 
-`fragment mcp <name>` serves a fragment's operations to any agent that
-speaks MCP (Claude Code, goose, …) as tools, over stdio: each operation
-whose `fragment.json` entry has a `description` and that your role may
-call, with its input schema. Its queries always; with `--write`, its
-mutations and jobs too.
+A fragment is an MCP server: any agent that speaks MCP uses its
+operations as tools. Its tools are the operations whose `fragment.json`
+entry has a `description` and that its person's role may call: its
+queries always, and its mutations and jobs only when the person lets
+the agent change things. A tool's arguments are the operation's input
+(its `input` schema); each call is one of its own (a fresh id). A
+result with a string `text` (a view the operation rendered) answers as
+that text, any other as JSON, and a refusal is the tool's error, with
+the platform's message. There are two ways in, with the same tools:
+
+- **From a chat client** (Claude, ChatGPT) or any client that connects
+  over HTTP: the fragment's own `https://<label>--<username>.<its
+  domain>/__mcp`, added as a custom connector (in Claude: Settings,
+  Connectors, Add custom connector, that URL). It asks its person to
+  sign in and allow it, reading only unless they tick "Also let it
+  change things". What it does names the client in `fragment events`;
+  its person ends it in their settings, under Connected clients.
+- **From a shell** (Claude Code, goose, …): `fragment mcp <name>`, over
+  stdio, signed with this machine's key as every command is (`fragment
+  login` first); `--write` is the box.
 
 ```
-claude mcp add my-thing -- fragment mcp my-thing            # read-only: its described queries
+claude mcp add --transport http my-thing https://my-thing--paul.fragment.boats/__mcp   # over HTTP, signing in once
+claude mcp add my-thing -- fragment mcp my-thing            # over stdio, read-only: its described queries
 claude mcp add my-thing -- fragment mcp my-thing --write    # and its described mutations and jobs
 ```
 
-A tool's call is a `fragment call` with a fresh id, signed with this
-machine's key as every command is (`fragment login` first). A result
-with a string `text` (a view the operation rendered) answers as that
-text, any other as JSON, and a refusal is the tool's error, with the
-platform's message. The tools are read when the client connects and
-each time it lists them. Stdout carries the protocol alone: a failure
-to start goes to stderr, and `-v` logs each request there.
-
-On a computer it runs in the agent mode ("As an agent, on a computer"),
-as the agent, with no key: name the fragment in full.
+`fragment mcp` reads the tools when the client connects and each time
+it lists them. Stdout carries the protocol alone: a failure to start
+goes to stderr, and `-v` logs each request there. On a computer it runs
+in the agent mode ("As an agent, on a computer"), as the agent, with no
+key: name the fragment in full.
 
 ```
 FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragment mcp mind.paul
 ```
 
-From a chat client (Claude, ChatGPT) or any MCP client, a fragment is an
-MCP server at `https://<label>--<username>.<its domain>/__mcp`: added
-as a custom connector, it asks its person to sign in and allow it, then
-lists the operations they may call as tools. A tool's arguments are a
-call's, `{id, input}`: the input under `input`, and, for a mutation or a
-job, an id the client chooses (the same id again is a replay). What it
-does names the client in `fragment events`; its person ends it in their
-settings, under Connected clients. The platform itself is one too, at
-`https://<the platform>/mcp`: its tools are this loop (`list`, `create`,
-`status`, `files`, `read`, `write`, `deploy`, `members`, `share`,
-`visibility`, `call`, `events`), for a person who has only a chat.
+The platform itself is one too, at `https://<the platform>/mcp`: its
+tools are this loop (`list`, `create`, `status`, `files`, `read`,
+`write`, `deploy`, `members`, `share`, `visibility`, `call`, `events`;
+reading only, the six that read), for a person who has only a chat.
 
 ## People
 

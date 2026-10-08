@@ -14,10 +14,13 @@
 //! The token is asked of the registry on every request, for this
 //! resource only, so a token of another fragment's, or one ended a moment
 //! before, is 401. Cookies count for nothing here, and a page never calls
-//! it (an `Origin` is 403). `tools/list` asks the fragment which
-//! operations the person may call; `tools/call` is the fragment's
-//! `POST /api/ops/<op>`, as `fragment call` is: the role check, the
-//! schema check, the ledger, the public budget, all the fragment's.
+//! it (an `Origin` is 403). `tools/list` asks the fragment for its tools,
+//! the operations it describes that the person may call (queries; and
+//! mutations and jobs when its person let the client change things), the
+//! rule `fragment mcp` keeps too (`fragment_core::mcp::served`);
+//! `tools/call` is a call of one of them (`/mcp/tools/<op>`), checked as
+//! `POST /api/ops/<op>` is: the role check, the schema check, the ledger,
+//! the public budget, all the fragment's.
 
 use fragment_core::mcp::verbs::{self, Verb};
 use fragment_core::mcp::{self, Answer, Asked, Era, Step};
@@ -87,9 +90,13 @@ fn resource_metadata(req: &Request, cfg: &Config, resource: &str, name: &str) ->
 }
 
 /// A request a server will answer: who asks (the connection's person),
-/// and what (its era, its JSON-RPC id, and what it asks past the envelope).
+/// whether its person let it change things, the server as it answers that
+/// connection, and what it asks (its era, its JSON-RPC id, and what it
+/// asks past the envelope).
 struct Opened {
     signed: Signed,
+    writes: bool,
+    server: mcp::Server,
     era: Era,
     id: Value,
     asked: Asked,
@@ -98,8 +105,9 @@ struct Opened {
 /// The envelope of a request to the MCP server at `resource`: its method,
 /// no page's call, its bearer token (asked of the registry for this
 /// resource alone), and its JSON-RPC message, answered here when the
-/// envelope's own (`Err`: that answer).
-async fn opened(req: &mut Request, env: &Env, resource: &str, metadata: &str, server: &mcp::Server) -> CellResult<Result<Opened, Response>> {
+/// envelope's own (`Err`: that answer). `server` is the server as a
+/// connection that may change things (or only read) sees it.
+async fn opened(req: &mut Request, env: &Env, resource: &str, metadata: &str, server: impl FnOnce(bool) -> mcp::Server) -> CellResult<Result<Opened, Response>> {
     if req.method() != Method::Post {
         let mut resp = refused(405, "an MCP request is a POST (no stream is offered)")?;
         resp.headers_mut().set("allow", "POST")?;
@@ -123,12 +131,14 @@ async fn opened(req: &mut Request, env: &Env, resource: &str, metadata: &str, se
     let header = |k: &str| req.headers().get(k);
     let (version, method, named) = (header("mcp-protocol-version")?, header("mcp-method")?, header("mcp-name")?);
     let headers = mcp::Headers { protocol_version: version.as_deref(), method: method.as_deref(), name: named.as_deref() };
-    let (era, id, asked) = match mcp::step(&msg, headers, server) {
+    let server = server(live.writes);
+    let (era, id, asked) = match mcp::step(&msg, headers, &server) {
         Step::Done(answer) => return Ok(Err(answered(answer)?)),
         Step::Ask { era, id, asked } => (era, id, asked),
     };
-    let signed = Signed { through: Some(Through { connection: live.connection, client: live.client }), ..Signed::new(live.identity, None) };
-    Ok(Ok(Opened { signed, era, id, asked }))
+    let writes = live.writes;
+    let signed = Signed { through: Some(Through { connection: live.connection, client: live.client, writes }), ..Signed::new(live.identity, None) };
+    Ok(Ok(Opened { signed, writes, server, era, id, asked }))
 }
 
 /// A request to fragment `name`'s supervisor at `inner`, as the router
@@ -154,18 +164,19 @@ pub async fn fragment(mut req: Request, env: &Env, cfg: &Config, url: &Url, name
     if rest != "__mcp" {
         return resource_metadata(&req, cfg, &resource, name);
     }
-    let server = mcp::Server {
+    let server = |writes: bool| mcp::Server {
         name: "fragment".into(),
         title: name.to_string(),
         version: cfg.deploy_id.clone(),
-        instructions: format!(
-            "The operations of {name}, a fragment (a small web app at {origin}/), as tools, called as you: a query reads; a mutation or a job takes an id you choose, and the same id again answers with the first call's result and runs nothing again. What you do here names this client."
-        ),
+        instructions: format!("{} Its page is {origin}/. What you do here names this client.", mcp::instructions(name, writes)),
     };
-    let Opened { signed, era, id, asked } = match opened(&mut req, env, &resource, &format!("{origin}/{WELL_KNOWN_MCP}"), &server).await? {
+    let Opened { signed, server, era, id, asked, .. } = match opened(&mut req, env, &resource, &format!("{origin}/{WELL_KNOWN_MCP}"), server).await? {
         Ok(opened) => opened,
         Err(answered) => return Ok(answered),
     };
+    // the fragment decides which operations are this connection's tools
+    // (`fragment_core::mcp::served`, its writes on `through`), as
+    // `fragment mcp` does from status: ops.rs `mcp_tools`, `mcp_call`
     let answer = match asked {
         Asked::Tools => match ask(env, name, &signed, url, Method::Get, "/mcp/tools".into(), None).await? {
             (200, mut resp) => mcp::result(era, &id, mcp::tools(era, json_of(&mut resp).await["tools"].as_array().cloned().unwrap_or_default()), &server),
@@ -176,16 +187,15 @@ pub async fn fragment(mut req: Request, env: &Env, cfg: &Config, url: &Url, name
             }
         },
         Asked::Call { name: op, arguments } => {
-            let (op_id, input) = match mcp::call_of(&arguments) {
-                Ok(call) => call,
+            let input = match mcp::call_of(&arguments) {
+                Ok(input) => input,
                 Err(why) => return json_answer(200, &mcp::error(&id, mcp::INVALID_PARAMS, &why, None)),
             };
             if !fragment_proto::valid_op_name(&op) {
                 return json_answer(200, &mcp::error(&id, mcp::INVALID_PARAMS, &format!("Unknown tool: {op}"), None));
             }
-            // a query keeps no id, and a caller that names none gets a fresh one
-            let op_id = op_id.unwrap_or_else(fresh_id);
-            let (status, mut resp) = ask(env, name, &signed, url, Method::Post, format!("/api/ops/{op}"), Some(json!({ "id": op_id, "input": input }))).await?;
+            // each call is one of its own: a fresh id
+            let (status, mut resp) = ask(env, name, &signed, url, Method::Post, format!("/mcp/tools/{op}"), Some(json!({ "id": fresh_id(), "input": input }))).await?;
             let v = json_of(&mut resp).await;
             match status {
                 200 => mcp::result(era, &id, mcp::called(&v), &server),
@@ -217,12 +227,17 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
         instructions: "fragment publishes small stateful web apps with built-in multiplayer, each at its own link, as you. The loop: create one from a template, read its files, write site/index.html (its page), app.mjs and fragment.json (its operations), deploy, then check status (code.error says why code was refused) and events (what happened: believe it over memory), and call its operations. A fragment is <label>.<username>; a bare label is one of yours. share and visibility say who may open it.".into(),
     };
     let metadata = format!("{platform}/.well-known/oauth-protected-resource/mcp");
-    let Opened { signed, era, id, asked } = match opened(&mut req, env, &resource, &metadata, &server).await? {
+    let Opened { signed, writes, server, era, id, asked } = match opened(&mut req, env, &resource, &metadata, |_| server).await? {
         Ok(opened) => opened,
         Err(answered) => return Ok(answered),
     };
     let answer = match asked {
-        Asked::Tools => mcp::result(era, &id, mcp::tools(era, verbs::tools()), &server),
+        // a client its person let only read is offered the verbs that read
+        Asked::Tools => mcp::result(era, &id, mcp::tools(era, verbs::tools_for(writes)), &server),
+        Asked::Call { name: tool, .. } if !writes && !verbs::reads(&tool) && verbs::tools().iter().any(|t| t["name"] == tool.as_str()) => {
+            let why = format!("Unknown tool: {tool} changes things, and this client may only read: its person connects it again and allows changes");
+            mcp::error(&id, mcp::INVALID_PARAMS, &why, None)
+        }
         Asked::Call { name: tool, arguments } => match verbs::verb(&tool, &arguments) {
             Err(why) => mcp::error(&id, mcp::INVALID_PARAMS, &why, None),
             Ok(verb) => {
@@ -232,7 +247,9 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return Err(e),
                 };
                 match status {
-                    200 => mcp::result(era, &id, mcp::called(&v), &server),
+                    // an operation's answer reads as a fragment's server answers it
+                    200 if tool == "call" => mcp::result(era, &id, mcp::called(&v), &server),
+                    200 => mcp::result(era, &id, mcp::answered(&v), &server),
                     _ => failed(era, &id, status, &v, &server),
                 }
             }

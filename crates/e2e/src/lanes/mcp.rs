@@ -20,11 +20,13 @@ use crate::Suite;
 const REDIRECT: &str = "http://127.0.0.1:9/callback";
 
 /// A client, as one connects a person: its id, where it sends them back,
-/// and the PKCE verifier of the authorization under way.
+/// the PKCE verifier of the authorization under way, and whether its
+/// person lets it change things (the consent page's "also change things").
 struct Client {
     id: String,
     redirect: String,
     verifier: String,
+    writes: bool,
 }
 
 impl Client {
@@ -37,7 +39,12 @@ impl Client {
     }
 
     fn named(id: &str) -> Client {
-        Client { id: id.to_string(), redirect: REDIRECT.to_string(), verifier: fresh_verifier() }
+        Client { id: id.to_string(), redirect: REDIRECT.to_string(), verifier: fresh_verifier(), writes: true }
+    }
+
+    /// The same client, its person leaving "also change things" unticked.
+    fn reading(self) -> Client {
+        Client { writes: false, ..self }
     }
 
     /// The authorization request's path, for `resource`, with `state`.
@@ -55,7 +62,8 @@ impl Client {
     /// `resource`, with a form token as their page held one: the code
     /// sent back.
     fn code(&self, api: &Api, session: &str, resource: &str) -> Result<String> {
-        let r = answer(api, session, &self.authorize(resource, "s"), &purpose(&self.id, resource), "allow", &api.base)?;
+        let yes = if self.writes { "allow&writes=yes" } else { "allow" };
+        let r = answer(api, session, &self.authorize(resource, "s"), &purpose(&self.id, resource), yes, &api.base)?;
         anyhow::ensure!(r.status == 303, "the yes: {r}");
         sent_back(&r, "code").context("a code sent back")
     }
@@ -148,7 +156,91 @@ pub fn mcp(s: &mut Suite, api: &Api) -> Result<()> {
     authorization_server(s, api, &session, &keys, &email, &resource)?;
     fragment_server(s, api, &session, &keys, &name)?;
     platform_server(s, api, &session, &keys, &name)?;
+    mind_server(s, api)?;
     limits(s, api, &session, &keys, &resource)?;
+    Ok(())
+}
+
+/// Where claude.ai sends a person back once they connect a custom
+/// connector: the e2e's Claude registers it as Claude does (it is only
+/// read from `Location`).
+const CLAUDE_CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
+
+/// A person's mind (docs/optchat.md, "Connect another agent") connected as
+/// claude.ai connects a custom connector: from the 401 of its `__mcp`
+/// alone, through its metadata, the platform's, a registration, the
+/// person's yes (reading only, then also changing things) and the code
+/// exchanged; then its described operations as tools: view, zoom, date and
+/// search, and note once the person allows changes. The mind's other
+/// operations are none of its tools.
+fn mind_server(s: &mut Suite, api: &Api) -> Result<()> {
+    let (session, keys, _) = person(api)?;
+    let mind = s.named(api, &keys, "mind")?;
+    let r = api.create_with(&keys, json!({ "name": mind, "template": "mind", "visibility": "members", "title": "Mind" }))?;
+    anyhow::ensure!(r.status == 200, "making the mind: {r}");
+    s.owned(&r.body, &keys);
+    let installed = s.eventually(std::time::Duration::from_secs(30), || api.status(&keys, &mind).is_ok_and(|r| r.body["code"]["operations"]["view"]["description"].is_string()));
+    anyhow::ensure!(installed, "the mind's code installed");
+
+    // what a client knows: the URL a person pasted, and what it answers
+    let url = api.site_url(&mind, "__mcp");
+    let r = rpc(api, &mind, None, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "claude-ai", "version": "1" } }), false)?;
+    let challenge = r.header("www-authenticate");
+    let metadata_url = challenge.split("resource_metadata=\"").nth(1).and_then(|m| m.split('"').next()).unwrap_or_default().to_string();
+    s.ok("a mind's __mcp, asked with no token, names its metadata", r.status == 401 && !metadata_url.is_empty(), format!("{r} {challenge}"));
+    let prm = api.call(Call { method: "GET", url: metadata_url, ..Call::default() })?;
+    let issuer = prm.body["authorization_servers"][0].as_str().unwrap_or_default().to_string();
+    s.ok("its metadata names the mind's __mcp and the platform", prm.status == 200 && prm.body["resource"] == url.as_str() && issuer == api.base, &prm);
+    let asm = api.call(Call { method: "GET", url: format!("{issuer}/.well-known/oauth-authorization-server"), ..Call::default() })?;
+    let endpoint = |k: &str| asm.body[k].as_str().unwrap_or_default().strip_prefix(&api.base).unwrap_or_default().to_string();
+    let r = api.unsigned("POST", &endpoint("registration_endpoint"), Some(&json!({ "client_name": "Claude", "redirect_uris": [CLAUDE_CALLBACK] })))?;
+    s.ok("the platform's metadata leads to a registration, as Claude makes one", asm.status == 200 && r.status == 201, &r);
+    let claude = |writes: bool| Client { id: r.body["client_id"].as_str().unwrap_or_default().to_string(), redirect: CLAUDE_CALLBACK.into(), verifier: fresh_verifier(), writes };
+    let reader = claude(false);
+    let page = with_session(api, &reader.authorize(&url, "s"), &session)?;
+    s.ok(
+        "the person is asked to let Claude act on their mind, reading only unless they tick changes",
+        page.status == 200 && page.text.contains("Claude") && page.text.contains(mind.as_str()) && page.text.contains("claude.ai") && page.text.contains("name=\"writes\""),
+        &page,
+    );
+
+    // reading only (the box left unticked)
+    let tokens = reader.connect(api, &session, &url)?;
+    let token = tokens["access_token"].as_str().unwrap_or_default().to_string();
+    let r = rpc(api, &mind, Some(&token), "tools/list", json!({}), false)?;
+    let names = |r: &Reply| -> Vec<String> { r.body["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    s.ok("reading only, its tools are the mind's described queries: view, zoom, date, search", names(&r) == ["date", "search", "view", "zoom"], &r);
+    let r = call(api, &mind, &token, "view", json!({}))?;
+    s.ok("view answers the rendered memory, as text", r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("<chat>")), &r);
+    let r = call(api, &mind, &token, "note", json!({ "text": "not written" }))?;
+    s.ok("and note is no tool of a client that only reads (-32602)", r["error"]["code"] == -32602, &r);
+
+    // also changing things: note, and what it wrote found and opened
+    let writer = claude(true);
+    let tokens = writer.connect(api, &session, &url)?;
+    let token = tokens["access_token"].as_str().unwrap_or_default().to_string();
+    let r = rpc(api, &mind, Some(&token), "tools/list", json!({}), true)?;
+    s.ok("allowed changes, note is a tool too", names(&r) == ["date", "note", "search", "view", "zoom"], &r);
+    let r = call(api, &mind, &token, "note", json!({ "text": "Pablo's favorite color is teal." }))?;
+    let i = r["result"]["structuredContent"]["result"]["i"].as_i64();
+    s.ok("note adds to the memory", r["result"]["isError"] == false && i.is_some(), &r);
+    let i = i.unwrap_or(-1);
+    let r = call(api, &mind, &token, "search", json!({ "q": "teal" }))?;
+    let found = r["result"]["structuredContent"]["result"]["results"].as_array().is_some_and(|h| h.iter().any(|h| h["i"] == i && h["snippet"].as_str().is_some_and(|t| t.contains("teal"))));
+    s.ok("search finds it", found, &r);
+    let r = call(api, &mind, &token, "zoom", json!({ "id": i, "n": 1 }))?;
+    s.ok("zoom opens it whole, as text", r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.contains("Pablo's favorite color is teal.")), &r);
+    let r = call(api, &mind, &token, "date", json!({ "id": i }))?;
+    s.ok("date says when it was written", r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.len() == 24 && t.ends_with('Z')), &r);
+    let r = call(api, &mind, &token, "threads", json!({}))?;
+    s.ok(
+        "an operation it does not describe is no tool (-32602), saying so",
+        r["error"]["code"] == -32602 && r["error"]["message"].as_str().is_some_and(|m| m.contains("description")),
+        &r,
+    );
+    let events = api.signed(&keys, "GET", &format!("/api/f/{mind}/events?tail=20"), None)?;
+    let by_claude = events.body["events"].as_array().is_some_and(|e| e.iter().any(|e| e["kind"] == "client.called" && e["data"]["op"] == "note" && e["data"]["client"] == "Claude"));
+    s.ok("the mind's events name Claude for the note", by_claude, &events);
     Ok(())
 }
 
@@ -221,11 +313,12 @@ fn authorization_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, em
     // the question, and the answers
     let r = with_session(api, &path, session)?;
     s.ok(
-        "signed in, the person is asked, on a page no other may frame: the client's name, where it sends them back, and what it reaches",
+        "signed in, the person is asked, on a page no other may frame: the client's name, where it sends them back, what it reaches, and whether it may also change things",
         r.status == 200
             && r.text.contains("E2E Claude")
             && r.text.contains("127.0.0.1")
             && r.text.contains("a program on this computer")
+            && r.text.contains("name=\"writes\"")
             && super::signin::unframed(&r),
         &r,
     );
@@ -286,8 +379,8 @@ fn authorization_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, em
     let listed = r.body["connections"].as_array().cloned().unwrap_or_default();
     let mine = listed.iter().find(|c| c["clientId"] == client.id.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
-        "the person's list names the client and the resource it acts on",
-        r.status == 200 && mine["client"] == "E2E Claude" && mine["resource"] == resource && mine["expiresAt"].as_i64() > mine["createdAt"].as_i64(),
+        "the person's list names the client, the resource it acts on, and that it may change things there",
+        r.status == 200 && mine["client"] == "E2E Claude" && mine["resource"] == resource && mine["writes"] == true && mine["expiresAt"].as_i64() > mine["createdAt"].as_i64(),
         &r,
     );
     let (_, stranger, _) = person(api)?;
@@ -456,14 +549,20 @@ fn fragment_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, name: &
     let named = |n: &str| tools.iter().find(|t| t["name"] == n).cloned().unwrap_or(Value::Null);
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     s.ok(
-        "tools/list is the manifest's operations, by name: a query read-only, a mutation idempotent by the id it requires, each described",
+        "tools/list is the manifest's described operations, by name: a query read-only, a mutation's arguments its input, each described",
         names == ["add", "ingest", "list"]
             && named("list")["annotations"]["readOnlyHint"] == true
-            && named("add")["annotations"]["idempotentHint"] == true
-            && named("add")["inputSchema"]["required"] == json!(["id", "input"])
-            && named("add")["inputSchema"]["properties"]["input"]["required"] == json!(["text", "source"])
+            && named("add")["annotations"]["readOnlyHint"] == false
+            && named("add")["inputSchema"]["required"] == json!(["text", "source"])
             && named("add")["description"].as_str().is_some_and(|d| d.starts_with("Adds an item")),
         &r,
+    );
+    let status = api.status(keys, name)?;
+    let ops: std::collections::BTreeMap<String, fragment_proto::OpDecl> = serde_json::from_value(status.body["code"]["operations"].clone()).unwrap_or_default();
+    s.ok(
+        "they are the tools `fragment mcp --write` serves from its status: one rule, one shape",
+        tools == fragment_core::mcp::tools_of(&ops, true, |_| true),
+        json!({ "listed": tools, "status": status.body["code"]["operations"] }),
     );
 
     // the modern era: no handshake, its version and headers on each request
@@ -482,33 +581,57 @@ fn fragment_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, name: &
         ..Call::default()
     })?;
     s.ok("a modern request without its Mcp-Method header is 400 (header mismatch)", r.status == 400 && r.body["error"]["code"] == -32020, &r);
-    let r = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "from a client", "source": "e2e" } }))?;
+    let added = json!({ "text": "from a client", "source": "e2e" });
+    let r = call(api, name, &token, "add", added.clone())?;
     s.ok(
-        "tools/call on a mutation runs it through __op's path: its result, not replayed",
+        "tools/call on a mutation runs it through __op's path, its arguments the input: its result",
         r["result"]["isError"] == false && r["result"]["structuredContent"]["replayed"] == false && r["result"]["structuredContent"]["result"]["id"].is_i64() && r["result"]["resultType"] == "complete",
         &r,
     );
-    let again = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "from a client", "source": "e2e" } }))?;
-    s.ok("the same id again is a replay: the first result, nothing run", again["result"]["structuredContent"]["replayed"] == true && again["result"]["structuredContent"]["result"] == r["result"]["structuredContent"]["result"], &again);
-    let r = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "something else", "source": "e2e" } }))?;
-    s.ok("another input under it is the call's error, for the model to read", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("conflicting_body")), &r);
-    let r = call(api, name, &token, "add", json!({ "id": "m2", "input": { "text": 3, "source": "e2e" } }))?;
+    let again = call(api, name, &token, "add", added)?;
+    s.ok(
+        "each call is one of its own: the same arguments again run again",
+        again["result"]["structuredContent"]["replayed"] == false && again["result"]["structuredContent"]["result"]["id"] != r["result"]["structuredContent"]["result"]["id"],
+        &again,
+    );
+    let r = call(api, name, &token, "add", json!({ "text": 3, "source": "e2e" }))?;
     s.ok("an input its schema refuses is the call's error", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("invalid_request")), &r);
-    let r = call(api, name, &token, "list", json!({ "input": {} }))?;
+    let r = call(api, name, &token, "list", json!({}))?;
     let items = r["result"]["structuredContent"]["result"]["items"].as_array().cloned().unwrap_or_default();
-    s.ok("tools/call on a query reads what the mutation wrote", items.len() == 1 && items[0]["text"] == "from a client", &r);
+    s.ok("tools/call on a query reads what the mutations wrote", items.len() == 2 && items.iter().all(|i| i["text"] == "from a client"), &r);
     let r = call(api, name, &token, "nope", json!({}))?;
     s.ok("an operation it lacks is an unknown tool (-32602)", r["error"]["code"] == -32602, &r);
-    let r = call(api, name, &token, "add", json!({ "text": "x" }))?;
-    s.ok("arguments that are not {id, input} are invalid params (-32602)", r["error"]["code"] == -32602, &r);
+    let r = call(api, name, &token, "add", json!(["x"]))?;
+    s.ok("arguments that are no object are invalid params (-32602)", r["error"]["code"] == -32602, &r);
     let events = api.signed(keys, "GET", &format!("/api/f/{name}/events?tail=50"), None)?;
     let me = api.identity(keys)?;
     let called: Vec<&Value> = events.body["events"].as_array().map(|e| e.iter().filter(|e| e["kind"] == "client.called").collect()).unwrap_or_default();
     s.ok(
-        "events say which client acted, once for the mutation (its replay says nothing)",
-        called.len() == 1 && called[0]["data"]["client"] == "E2E Claude" && called[0]["data"]["op"] == "add" && called[0]["data"]["principal"] == me.as_str(),
+        "events say which client acted, once for each mutation it ran",
+        called.len() == 2 && called.iter().all(|c| c["data"]["client"] == "E2E Claude" && c["data"]["op"] == "add" && c["data"]["principal"] == me.as_str()),
         &events,
     );
+
+    // a connection its person let only read: the described queries alone
+    let reader = Client::register(api, "E2E Reader")?.reading();
+    let read_only = reader.connect(api, session, &resource)?;
+    let reading = read_only["access_token"].as_str().unwrap_or_default();
+    let r = rpc(api, name, Some(reading), "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } }), false)?;
+    s.ok("a read-only client is told it may only read", r.body["result"]["instructions"].as_str().is_some_and(|i| i.contains("may only read")), &r);
+    let r = rpc(api, name, Some(reading), "tools/list", json!({}), true)?;
+    let names: Vec<&str> = r.body["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+    s.ok("a read-only client lists the described queries alone", names == ["list"], &r);
+    let r = call(api, name, reading, "add", json!({ "text": "x", "source": "e2e" }))?;
+    s.ok(
+        "and a mutation is no tool of its: an unknown tool (-32602), saying it may only read",
+        r["error"]["code"] == -32602 && r["error"]["message"].as_str().is_some_and(|m| m.contains("may only read")),
+        &r,
+    );
+    let r = call(api, name, reading, "list", json!({}))?;
+    s.ok("its queries answer", r["result"]["structuredContent"]["result"]["items"].as_array().is_some_and(|i| i.len() == 2), &r);
+    let listed = api.signed(keys, "GET", "/api/oauth/connections", None)?;
+    let writes = |client: &Client| listed.body["connections"].as_array().and_then(|c| c.iter().find(|c| c["clientId"] == client.id.as_str()).map(|c| c["writes"].clone()));
+    s.ok("the person's list says which reads only and which may change things", writes(&reader) == Some(json!(false)) && writes(&client) == Some(json!(true)), &listed);
 
     // a viewer's connection: the tools they may call, and a refusal of the rest
     let (viewer_session, viewer, _) = person(api)?;
@@ -530,7 +653,7 @@ fn fragment_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, name: &
     let r = rpc(api, &other, Some(&token), "tools/list", json!({}), true)?;
     s.ok("a token for one fragment is refused at another (401, invalid_token)", r.status == 401 && r.header("www-authenticate").contains("invalid_token"), &r);
     let listed = api.signed(keys, "GET", "/api/oauth/connections", None)?;
-    let id = listed.body["connections"][0]["id"].as_str().unwrap_or_default().to_string();
+    let id = listed.body["connections"].as_array().and_then(|c| c.iter().find(|c| c["clientId"] == client.id.as_str())).map(|c| c["id"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
     api.signed(keys, "DELETE", &format!("/api/oauth/connections/{id}"), None)?;
     let r = rpc(api, name, Some(&token), "tools/list", json!({}), true)?;
     s.ok("an ended connection's access token is refused at once (401)", r.status == 401, &r);
@@ -631,6 +754,18 @@ fn platform_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, fragmen
         by("client.acted") >= 5 && by("client.called") == 1,
         format!("{} client.acted, {} client.called", by("client.acted"), by("client.called")),
     );
+
+    // a client its person let only read: the verbs that read
+    let reader = Client::register(api, "E2E Reader")?.reading();
+    let reading = reader.connect(api, session, &resource)?;
+    let reading = reading["access_token"].as_str().unwrap_or_default().to_string();
+    let r = platform_rpc(api, Some(&reading), "tools/list", json!({}))?;
+    let names: Vec<&str> = r.body["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+    s.ok("a read-only client is offered the verbs that read", names == ["list", "status", "files", "read", "members", "events"], &r);
+    let r = verb(api, &reading, "write", json!({ "name": name, "files": [{ "path": "site/x.txt", "text": "x" }], "key": "w2" }))?;
+    s.ok("and one that changes things is no tool of its (-32602)", r["error"]["code"] == -32602, &r);
+    let r = verb(api, &reading, "status", json!({ "name": name }))?;
+    s.ok("its reads answer", r["result"]["structuredContent"]["name"] == name.as_str(), &r);
 
     // what it may not do, and where its token is no good
     let (_, stranger, _) = person(api)?;

@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 
 use crate::npub;
 
-/// The templates a tool's `create` offers (the API's, less the blessed
-/// ones, which the shell makes).
-pub const TEMPLATES: [&str; 4] = ["blank", "todo", "inbox", "calories"];
+/// The templates a tool's `create` offers (the API's, cell/src/publish.rs
+/// `TEMPLATES`, less the blessed ones, which the shell makes).
+pub const TEMPLATES: [&str; 12] = ["blank", "todo", "inbox", "calories", "when", "wall", "board", "watch", "brief", "hook", "wiki", "split"];
 
 /// What a verb asks of the API, as the person.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +142,18 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str], ann
     })
 }
 
+/// Whether a tool only reads: all a client its person let only read is
+/// offered, and may call (`super::served`'s rule, for the platform's verbs).
+pub fn reads(tool: &str) -> bool {
+    matches!(tool, "list" | "status" | "files" | "read" | "members" | "events")
+}
+
+/// The platform's tools for a client that may change things (`writes`), or
+/// the ones that only read.
+pub fn tools_for(writes: bool) -> Vec<Value> {
+    tools().into_iter().filter(|t| writes || t["name"].as_str().is_some_and(reads)).collect()
+}
+
 /// The platform's tools, in a fixed order.
 pub fn tools() -> Vec<Value> {
     let read = json!({ "readOnlyHint": true, "openWorldHint": false });
@@ -151,7 +163,7 @@ pub fn tools() -> Vec<Value> {
         tool("list", "Your fragments, and your role on each: [{name, role, kind, title?}].", json!({}), &[], read.clone()),
         tool(
             "create",
-            "Makes a fragment of yours at <label>--<your username> on the fragments' domain, from a template (blank: a page; todo: a shared list; inbox: webhooks into a live feed; calories: a log a model reads). Answers its name and links.",
+            "Makes a fragment of yours at <label>--<your username> on the fragments' domain, from a template (blank: a page; todo: a shared list; inbox: webhooks into a live feed; calories: a log a model reads; when: a poll anyone with the link votes in; wall: a page anyone posts to; board: chores or tasks; watch: pages and prices checked hourly; brief: feeds summed up each morning; hook: a live board of webhooks; wiki: a team's pages in markdown; split: shared costs). Answers its name and links.",
             json!({
                 "label": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", "description": "Its label: lowercase letters, digits and single dashes." },
                 "template": { "type": "string", "enum": TEMPLATES },
@@ -233,6 +245,12 @@ mod tests {
         let read = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap()["annotations"]["readOnlyHint"] == true;
         assert!(read("list") && read("status") && read("files") && read("read") && read("members") && read("events"));
         assert!(!read("write") && !read("deploy") && !read("call") && !read("create"));
+        for name in &names {
+            assert_eq!(reads(name), read(name), "{name}: what a read-only client is offered is what says it only reads");
+        }
+        let offered: Vec<String> = tools_for(false).iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+        assert_eq!(offered, ["list", "status", "files", "read", "members", "events"]);
+        assert_eq!(tools_for(true), tools);
     }
 
     #[test]

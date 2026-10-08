@@ -9,7 +9,8 @@
 //!                            metadata document's URL as its id (CIMD), read
 //!                            here at each authorization
 //!   GET  /oauth/authorize    the person, signed in through WorkOS as the shell
-//!                            is, is asked: "Let X act as you on Y?"
+//!                            is, is asked: "Let X act as you on Y?" (it reads
+//!                            only, unless they tick "also change things")
 //!   POST /oauth/authorize    their answer (the page's form): a code, sent back
 //!   POST /oauth/token        a code (with PKCE) or a refresh token, for tokens
 //!   POST /oauth/revoke       the connection a token names ends (RFC 7009)
@@ -125,6 +126,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, segment
                 redirect_uri: a.redirect_uri.clone(),
                 challenge: a.asked.challenge.clone(),
                 resource: a.canonical.clone(),
+                // reading alone unless the person ticked "also change things"
+                writes: fields.get("writes").map(String::as_str) == Some("yes"),
             };
             let granted = ask_registry(env, &grant).await?;
             let iss = cfg.platform();
@@ -319,9 +322,15 @@ fn consent_page(session: &str, live: &calls::LiveSession, a: &Authorization, url
     let to = url::Url::parse(&a.redirect_uri).map_err(|e| CellError::host(format!("a checked redirect URI: {e}")))?;
     let host = esc(to.host_str().unwrap_or_default());
     let local = a.client.redirect_uris.iter().filter_map(|r| url::Url::parse(r).ok()).all(|r| oauth::loopback(&r));
-    let reach = match &a.resource {
-        Resource::Platform => "<b>your fragments</b>: making, reading, changing, deploying and sharing them, as you can".to_string(),
-        Resource::Fragment(name) => format!("<b>{}</b> (<code>{}</code>): calling its operations, as you can", esc(share::label(name)), esc(name)),
+    let (reach, changes) = match &a.resource {
+        Resource::Platform => (
+            "<b>your fragments</b>: listing them, and reading their status, files, members and events, as you can".to_string(),
+            "making, writing, deploying and sharing them, and calling their operations",
+        ),
+        Resource::Fragment(name) => (
+            format!("<b>{}</b> (<code>{}</code>): calling the operations it describes that read it, as you can", esc(share::label(name)), esc(name)),
+            "calling the ones that change it (its mutations and jobs)",
+        ),
     };
     let warning = if local {
         "<p class=\"flash error\">It sends you back to a program on this computer. Only allow it if you just asked one here to connect.</p>"
@@ -332,6 +341,7 @@ fn consent_page(session: &str, live: &calls::LiveSession, a: &Authorization, url
         "<p><b>{c}</b> wants to act as you, {you}, on {reach}. What it does there names it.</p>\
          <p class=\"hint\">It calls itself {c}, and sends you back to <b>{host}</b>.</p>{warning}\
          <form method=\"post\" action=\"/oauth/authorize?{q}\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
+         <p><label><input type=\"checkbox\" name=\"writes\" value=\"yes\"> Also let it change things: {changes}. Without this, it only reads.</label></p>\
          <footer><button class=\"quiet\" name=\"answer\" value=\"deny\" data-arm disabled>Don't allow</button>\
          <button name=\"answer\" value=\"allow\" data-arm disabled>Allow</button></footer></form>\
          <p class=\"hint\">You can end it any time in your settings, under Connected clients.</p>",

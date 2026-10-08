@@ -715,6 +715,8 @@ pub(crate) struct GrantCode {
     pub redirect_uri: String,
     pub challenge: String,
     pub resource: String,
+    /// The person let it change things there, not only read.
+    pub writes: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -777,6 +779,8 @@ pub(crate) struct LiveConnection {
     pub identity: Identity,
     pub connection: String,
     pub client: String,
+    /// Its person let it change things, not only read.
+    pub writes: bool,
 }
 
 impl Call for Connected {

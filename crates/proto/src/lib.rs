@@ -767,6 +767,8 @@ pub struct Connection {
     /// metadata document.
     pub client_id: String,
     pub resource: String,
+    /// Its person let it change things there; else it only reads.
+    pub writes: bool,
     pub created_at: i64,
     /// When it ends unless its client renews it (each refresh does).
     pub expires_at: i64,

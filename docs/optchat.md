@@ -65,7 +65,8 @@ Inspiration:
                             │               fresh ACP session per hand-off,
                             │               seeded with the mind's view
                             │
-                            └─ `fragment mcp mind` ─▶ any agent (Claude Code, goose, …)
+                            ├─ mind--<you>.<zone>/__mcp (OAuth) ─▶ claude.ai, ChatGPT, Claude Code, …
+                            └─ `fragment mcp mind` (stdio) ─▶ any agent with a shell (Claude Code, goose, …)
 ```
 
 - **The mind** is the one memory and the main agent. It is a blessed
@@ -75,9 +76,13 @@ Inspiration:
   takes hand-offs as turns through the bridge, and reports back. Each
   hand-off is a fresh goose session whose first message is the mind's
   view, so goose knows what the mind knows.
-- **The MCP server** is the CLI's `fragment mcp <fragment>`. It serves
-  any fragment's described operations as tools. Pointed at your mind,
-  it gives any agent the same view, zoom and search.
+- **The MCP servers** serve any fragment's described operations as
+  tools, by one rule (`fragment_core::mcp`): the fragment's own `__mcp`
+  over HTTP, for a client its person connects with OAuth (issue #232's
+  PRs #238 and #240, merged here), and the CLI's `fragment mcp
+  <fragment>` over stdio. Pointed at your mind, either gives any agent
+  the same view, zoom, date and search, and `note` when you let it
+  write ("Connect another agent", below).
 
 ## The mind template (`templates/mind`)
 
@@ -391,7 +396,8 @@ One screen at a time, and calm. Dark, warm, generous type.
    `POST /api/fragments {template: "mind", visibility: "members"}`.
 4. **Operation `description`** in `fragment.json`: an optional string of
    at most 1024 characters, shown in `status.code.operations`. It makes
-   the operation an MCP tool.
+   the operation an MCP tool. #240 (merged here) added the same field;
+   the two are one now (`OpDecl.description`, `code_ops.description`).
 5. **The shell's first run:**
    - it makes the agent (on the default image, goose), assigns it to
      the computer, makes `mind` (members) and adds the agent there as
@@ -470,20 +476,83 @@ One screen at a time, and calm. Dark, warm, generous type.
 - **`EXTENSIONS={}`** limits goose to `developer` and the session's
   ACP `mcpServers`.
 
-## The MCP server (`fragment mcp`)
+## The MCP servers (`__mcp` and `fragment mcp`)
 
-`fragment mcp <fragment> [--write]`: an MCP server over stdio (JSON-RPC,
-protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
-- **Tools:** the fragment's operations that have a `description`,
-  named as the operation, with its input schema. Queries are always
-  served; mutations and jobs only with `--write`.
-- **A call** is `POST /api/f/<f>/ops/<op>`. A person's call is signed
-  with their key, as every CLI call is. Inside a computer it goes to
-  `FRAGMENT_API` with `x-fragment-agent`.
-- **For Claude Code:** `claude mcp add mind -- fragment mcp mind`
-  (read-only) or `… --write`.
-- A remote HTTP MCP server for chat clients without a shell is issue
-  #232's, and later.
+A fragment has two MCP servers with the same tools, by one rule and one
+piece of code (`fragment_core::mcp`: `served`, `tool`, `tools_of`,
+`call_of`, `called`), each serving the tools to its kind of client:
+
+- **`<fragment origin>/__mcp`** (cell/src/mcp.rs; docs/api.md, A
+  fragment's MCP server), Streamable HTTP for a client its person
+  connects through the platform's OAuth 2.1 authorization server
+  (docs/api.md, Connected clients). Its token acts as the person, on
+  that fragment alone.
+- **`fragment mcp <fragment> [--write]`** (cli/src/mcp.rs), stdio for
+  an agent with a shell, signed with the CLI's key; inside a computer it
+  goes to `FRAGMENT_API` with `x-fragment-agent` (goose's `mind`
+  server).
+
+The rule:
+- **Tools:** the fragment's operations that have a `description` and
+  take an object, that the caller's role may call, named as the
+  operation. Queries always; mutations and jobs only when the person
+  allowed changes: the consent page's box "Also let it change things"
+  (a connection's `writes`), or `--write`. A client that only reads is
+  refused a mutation by the fragment too, whatever the route.
+- **Arguments** are the operation's input, its schema the operation's.
+  Each call is a call of its own (a fresh operation id).
+- **A result** whose `text` is a string (the mind's view, zoom and date)
+  answers as that text, anything else as JSON; over HTTP the whole
+  answer is `structuredContent` too. A refusal is the tool's error,
+  `<code>: <message>`; an operation that is no tool is -32602, saying
+  why.
+
+This is #240's `__mcp` and the spike's `fragment mcp` made one (#240
+listed every operation the person may call, its arguments `{id,
+input}`; the spike's flat arguments were kept, being the operation's own
+schema, as the mind's descriptions say `zoom(id, n)`: decision for
+Paul).
+
+### Connect another agent
+
+The mind's tools are `view`, `zoom`, `date` and `search`, and `note` when
+you let the agent write. On the preview, a person `paul`'s mind is
+`https://mind--paul--claude-optchat.finite.place/__mcp` (another
+deployment: `https://mind--<username>.<its fragments' domain>/__mcp`;
+`fragment status mind` prints its origin).
+
+- **claude.ai** (or Claude Desktop): Settings → Connectors → Add custom
+  connector. Name it "Mind", give it the URL above, and leave the
+  advanced settings' OAuth client empty (Claude registers itself, or
+  names its metadata document). Connect: a browser page at the platform
+  asks you to sign in if you are not, then "Connect Claude?", naming
+  your mind and sending you back to claude.ai. Tick "Also let it change
+  things" to let it `note`; leave it unticked to let it only read. Allow.
+  In a chat, turn the connector on (the tools menu): Claude can now read
+  your memory (`view`), open a line (`zoom`), date a message, search
+  every chat, and note something.
+- **Claude Code over HTTP:** `claude mcp add --transport http mind
+  https://mind--paul--claude-optchat.finite.place/__mcp`, then `/mcp` in
+  Claude Code, choose `mind`, Authenticate. The same page opens in your
+  browser; it warns that it sends you back to a program on this computer
+  (Claude Code's own `localhost` port), which is right here.
+- **Claude Code over stdio** (no OAuth: the CLI's own key): `fragment
+  host https://claude-optchat.finite.place && fragment login` once, then
+  `claude mcp add mind -- fragment mcp mind` (read-only) or `claude mcp
+  add mind -- fragment mcp mind --write`.
+- **Ending one:** the shell's settings, Connected clients, End (each
+  says whether it reads only or also changes things); a client's own
+  revocation ends it too. What a connected client wrote names it in the
+  mind's `events` (`client.called`, "note … through Claude").
+
+The local proof is the e2e's `mcp` section (crates/e2e/src/lanes/mcp.rs,
+`mind_server`): a mind made from the template, connected as claude.ai
+connects one, from its `__mcp`'s 401 alone (its metadata, the platform's,
+a registration with claude.ai's callback, the consent page, the code
+with PKCE), first reading only (`date`, `search`, `view`, `zoom`; `note`
+refused) and then allowed changes (`note`, then `search` finding it,
+`zoom` opening it whole, `date` dating it, `threads` no tool), and the
+mind's events naming Claude.
 
 ## Deploy
 
@@ -508,11 +577,26 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
   to half an hour, lends its person 60 paid calls, and prints each
   latency, the recall's zoom and search calls, and the paid calls made.
 
+## Merged from issue #232 (agent-friendly fragment)
+
+The spike carries #232's open draft PRs, so the fragment skill and its
+platform are the newest an agent gets: #233 (GUIDE's build discipline
+and Design), #235 (`/llms.txt`, `/llms-full.txt`), #236 (the
+`contributor` role, the share sheet's Use), #237 (the page's errors on
+status and in events), #238, #240 and #242 (OAuth for MCP clients, each
+fragment's `__mcp`, the platform's `/mcp`), #249 (drafts before an
+account), and the templates When, Wall, Board, Watch, Brief, Hook, Wiki
+and Split (#239, #241, #243 to #248). #234 (`__fragment.css`) comes with
+the UI's merge. None of them touches the mind, but #240's `__mcp` and
+the spike's `fragment mcp` are one rule now (above), and an unclaimed
+draft holds `ai.decide` steps as it holds every other AI step.
+
 ## Not in the spike
 
 - Importing other providers' chats. `note` and an `import` job are the
   door for it.
-- A remote HTTP MCP server with OAuth.
+- MCP Apps (the mind's page inline in a chat client): docs/api.md,
+  "Inline views (MCP Apps): not yet".
 - Prompt-cache breakpoints. Workers AI caches prefixes by itself, and
   the incremental fold keeps the prefix stable.
 - Mid-run injection of a new message between tool calls. A message

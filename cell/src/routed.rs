@@ -57,6 +57,9 @@ pub struct Through {
     pub connection: String,
     /// What its client calls itself.
     pub client: String,
+    /// Whether its person let it change things (the consent page's
+    /// choice): without, it only reads (docs/api.md, Connected clients).
+    pub writes: bool,
 }
 
 impl Signed {

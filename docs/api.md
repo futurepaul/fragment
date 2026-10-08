@@ -633,17 +633,21 @@ origin>/__mcp`) or the platform's (`<platform>/mcp`). It acts as the
 person themselves, with their role there and nothing more (decision for
 Paul; the alternative is an agent identity of theirs acting `for` them
 under the agent cap, R17), and what it does names its client. Its tokens
-are bound to its resource and reach no other.
+are bound to its resource and reach no other. It **only reads** unless
+its person let it change things too (the consent page's box, `writes`):
+a client that only reads is offered, and may call, only what reads (a
+fragment's described queries, the platform's verbs that read), and any
+write it asks of a fragment by another way is 403.
 
 | method & path (platform origin) | what |
 | --- | --- |
 | `GET /.well-known/oauth-authorization-server` | the metadata (RFC 8414): the platform's origin as `issuer`, the endpoints below, `code` with PKCE's `S256` only, public clients only (`none`), Client ID Metadata Documents, and `iss` in the answer (RFC 9207) |
 | `POST /oauth/register` | a client registers (RFC 7591): `{redirect_uris, client_name?, …}` → 201 `{client_id, client_name, redirect_uris, grant_types, response_types, token_endpoint_auth_method: "none"}`, a public client of the code grant whatever else it asked. A redirect URI is https, or http on this computer (`localhost`, `127.0.0.1`, `[::1]`), without a fragment; 1 to 8 of them, at most 512 bytes each; a name of at most 80 characters (none: its first redirect URI's host). The newest 100 000 registrations are kept (`oauth::CLIENTS_MAX`); one past them registers again |
-| `GET /oauth/authorize?response_type=code&client_id=&redirect_uri=&code_challenge=&code_challenge_method=S256&resource=&state=` | checked in order. The client: a registered one, or, when `client_id` is an https URL with a path, the metadata document there (CIMD), read now (at most 5 KiB in 5 s, no redirect followed, public addresses only), naming that URL as its `client_id`, its `client_name` and its `redirect_uris`; then `redirect_uri`, one of its own (exactly; on this computer, on any port: RFC 8252). A refusal of either is a page, never a redirect. Then the rest, refused back to the client (`error`, `error_description`, `state`, `iss`): `code` only, `S256` PKCE, and one `resource` (RFC 8707) naming an MCP server of the platform's (`invalid_target` otherwise). The whole query is at most 2031 bytes, so it survives a sign-in. Signed out: → sign in first (WorkOS, as the shell), and back. Signed in: a page asking "Connect X?", saying who it acts as, what it reaches, what the client calls itself and where it sends them back (a client sent back only to this computer is any program there, and the page says so), with Allow and Don't allow. `scope` is not read |
-| `POST /oauth/authorize?…` | that page's form (`form`, its token for this client on this resource; `answer`: `allow` or anything else): the same checks; a yes → 303 to `redirect_uri` with `code`, `state` and `iss`; a no → `error=access_denied`. Sharing's protections: the platform's `Origin` (403 otherwise), a form token, buttons that arm after 800 ms, no frame |
+| `GET /oauth/authorize?response_type=code&client_id=&redirect_uri=&code_challenge=&code_challenge_method=S256&resource=&state=` | checked in order. The client: a registered one, or, when `client_id` is an https URL with a path, the metadata document there (CIMD), read now (at most 5 KiB in 5 s, no redirect followed, public addresses only), naming that URL as its `client_id`, its `client_name` and its `redirect_uris`; then `redirect_uri`, one of its own (exactly; on this computer, on any port: RFC 8252). A refusal of either is a page, never a redirect. Then the rest, refused back to the client (`error`, `error_description`, `state`, `iss`): `code` only, `S256` PKCE, and one `resource` (RFC 8707) naming an MCP server of the platform's (`invalid_target` otherwise). The whole query is at most 2031 bytes, so it survives a sign-in. Signed out: → sign in first (WorkOS, as the shell), and back. Signed in: a page asking "Connect X?", saying who it acts as, what it reaches, what the client calls itself and where it sends them back (a client sent back only to this computer is any program there, and the page says so), a box (unticked) to also let it change things, and Allow and Don't allow. `scope` is not read |
+| `POST /oauth/authorize?…` | that page's form (`form`, its token for this client on this resource; `answer`: `allow` or anything else; `writes=yes` when the box is ticked): the same checks; a yes → 303 to `redirect_uri` with `code`, `state` and `iss`, the code's connection reading only unless `writes`; a no → `error=access_denied`. Sharing's protections: the platform's `Origin` (403 otherwise), a form token, buttons that arm after 800 ms, no frame |
 | `POST /oauth/token` | `application/x-www-form-urlencoded`, its `client_id` always: `grant_type=authorization_code` with `code`, `redirect_uri` (the one asked with) and `code_verifier`; or `grant_type=refresh_token` with `refresh_token`. A `resource`, when named, must be the connection's. → `{access_token, token_type: "Bearer", expires_in, refresh_token}` (`Cache-Control: no-store`). A code is spent as it is read, whatever its answer; a refresh token is replaced by the one it answers. Refusals are OAuth's (`{error, error_description}`, 400; `invalid_client` 401) |
 | `POST /oauth/revoke` | `token` (either) and `client_id`, as a form → 200 `{}`: the connection ends when the token is that client's; anything else changes nothing (RFC 7009) |
-| `GET /api/oauth/connections` | a person (signed, or the shell) → `{connections: [{id, client, clientId, resource, createdAt, expiresAt}]}` (proto's `Connections`), newest first |
+| `GET /api/oauth/connections` | a person (signed, or the shell) → `{connections: [{id, client, clientId, resource, writes, createdAt, expiresAt}]}` (proto's `Connections`), newest first; `writes`: its person let it change things |
 | `DELETE /api/oauth/connections/{id}` | its person → `{ok, ended}`: its tokens are refused from the next request; another's, or none, 404 |
 
 A code is good for 5 minutes, an access token for an hour, and a refresh
@@ -656,9 +660,12 @@ These endpoints answer no CORS: a client is a program or a server.
 
 ### A fragment's MCP server
 
-Each fragment serves its operations as MCP tools at its own origin
-(cell/src/mcp.rs; the protocol's envelope `fragment_core::mcp`), beside
-`__op`, for a client connected to it:
+Each fragment serves its described operations as MCP tools at its own
+origin (cell/src/mcp.rs; the protocol's envelope `fragment_core::mcp`),
+beside `__op`, for a client connected to it. The CLI serves the same
+tools over stdio, by the same rules and code (`fragment mcp <fragment>
+[--write]`: cli/GUIDE.md, "Use it from another agent"), signed as every
+CLI call is; `--write` is a connection's box.
 
 | method & path (a fragment's origin) | what |
 | --- | --- |
@@ -675,29 +682,32 @@ and mirrors it, its method and its tool's name in `MCP-Protocol-Version`,
 version, or the newest legacy one; no session is minted) and may `ping`;
 its notifications are 202. The methods: `tools/list` and `tools/call`.
 
-- **`tools/list`**: the operations of the live code the person may call
-  (their role, as `__op` decides it), by name, deterministic. Each tool's
-  arguments are `__op`'s body, `{id, input}`: `input` is the operation's
-  `input` schema as declared (required when it declares one), and `id`
-  (`^[A-Za-z0-9._:-]{1,128}$`) is required of a mutation and a job and
-  absent from a query. Annotations: a query `readOnlyHint`; a mutation
-  `idempotentHint` (by its id; an ephemeral one not); a job
-  `idempotentHint` and `openWorldHint`. Its description is the
-  operation's own (`description` in `fragment.json`), or says only its
-  kind. A modern answer may be kept a minute (`ttlMs`, `cacheScope:
-  "private"`).
-- **`tools/call`**: `POST /api/f/{name}/ops/{op}` as the person, with the
-  same checks (visibility, role, schema, the overdraft, the public
-  budget), ledger and replay: `structuredContent` is its answer,
-  `{result, replayed}`, and `content` the same as text. A call that names
-  no id gets a fresh one. A refusal the
-  model may act on (a role, a schema, a conflicting body, a budget) is
-  the result, `isError: true`, its text `<error code>: <message>`; an
-  operation the code lacks is -32602, and the platform's own failure
-  -32603.
+- **`tools/list`**: its tools (`fragment_core::mcp::served`): the
+  operations of the live code that have a `description` in
+  `fragment.json` and take an object, that the person may call (their
+  role, as `__op` decides it): its queries, and its mutations and jobs
+  only when the person let the client change things. By name,
+  deterministic. A tool's description is its operation's, and its
+  arguments are the operation's input: its `inputSchema` is the
+  operation's `input` (an object's; `{"type": "object"}` when it declares
+  none). Annotations: a query `readOnlyHint`; a mutation or a job
+  `destructiveHint`, not `idempotentHint` (each call is one of its own); a
+  job also `openWorldHint`. A modern answer may be kept a minute (`ttlMs`,
+  `cacheScope: "private"`).
+- **`tools/call`**: a call of one of its tools, as `POST
+  /api/f/{name}/ops/{op}` as the person with a fresh id: the same checks
+  (visibility, role, schema, the overdraft, the public budget) and
+  ledger. `structuredContent` is its answer, `{result, replayed}`;
+  `content` is its result's `text` when that is a string (a view an
+  operation rendered for a model: a mind's view, zoom, date), else the
+  result as JSON. A refusal the model may act on (a role, a schema, a
+  budget) is the result, `isError: true`, its text `<error code>:
+  <message>`; an operation that is no tool of this client (none, not
+  described, or one that writes for a client that only reads) is -32602,
+  saying why, and the platform's own failure -32603.
 - **What it does names the client**: each mutation or job a connected
   client runs (not its replays) appends `client.called` to `events`,
-  `{op, id, principal, client, connection}`, "add a1 by id:… through
+  `{op, id, principal, client, connection}`, "add mcp-… by id:… through
   Claude". Its records, runs and ledger name the person, as theirs. Any
   other write a client's request makes on a fragment (the platform's
   tools, below) appends `client.acted`, `{method, route, principal,
@@ -711,12 +721,14 @@ connected to it (resource `<platform>/mcp`; its metadata at
 `/.well-known/oauth-protected-resource`): the CLI's daily loop, each tool
 one route of the API above, asked as the person (cell/src/mcp.rs; the
 tools and their routes `fragment_core::mcp::verbs`). Its envelope, its
-eras, its refusals and its 401s are a fragment's server's (above).
+eras, its refusals and its 401s are a fragment's server's (above). A
+client that only reads is offered the verbs that read (`list`, `status`,
+`files`, `read`, `members`, `events`); another is -32602 to it.
 
 | tool | arguments | the API's route |
 | --- | --- | --- |
 | `list` | | `GET /api/fragments` |
-| `create` | `label`, `template?` (`blank`, `todo`, `inbox`, `calories`), `visibility?` | `POST /api/fragments` |
+| `create` | `label`, `template?` (the API's: `blank`, `todo`, `inbox`, `calories`, `when`, `wall`, `board`, `watch`, `brief`, `hook`, `wiki`, `split`), `visibility?` | `POST /api/fragments` |
 | `status` | `name` | `GET /api/f/{name}/status` |
 | `files` | `name` | `GET /api/f/{name}/files` |
 | `read` | `name`, `path` | `GET /api/f/{name}/file?path=` → `{path, text}`: text only, at most 1 MiB (anything else is refused, to be read with the CLI) |
@@ -922,7 +934,10 @@ the code the fragment's own.
   class's own; `fragment_proto::RESERVED_OP_NAMES`): a manifest naming one
   is refused at deploy.
 - `description` (optional, 1 to 1024 characters) says what it does, to a
-  model: its MCP tool's description (A fragment's MCP server, above).
+  model: `status.code.operations` shows it, and it makes the operation a
+  tool of the fragment's MCP servers, its `__mcp` and `fragment mcp`, its
+  description theirs (A fragment's MCP server, above). An operation
+  without one is no tool.
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any
@@ -944,9 +959,6 @@ the code the fragment's own.
   keep theirs; the number is not declarable yet.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
-- `description` (optional, 1 to 1024 characters) says what the operation
-  does, for an agent: `status.code.operations` shows it, and it makes
-  the operation a tool of `fragment mcp` (cli/GUIDE.md).
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
   *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
   <app channel>, "run": op}` (each new record; with `"from": "person" |

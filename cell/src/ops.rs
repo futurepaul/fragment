@@ -26,6 +26,18 @@ use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
 pub const JOB_ID_PREFIX: &str = "job:";
+
+/// Whether a connected client asks (an MCP client, as its person: docs/api.md,
+/// Connected clients).
+pub(crate) fn connected(caller: &Caller) -> bool {
+    caller.signed.as_ref().is_some_and(|s| s.through.is_some())
+}
+
+/// Whether a connected client's person let it change things (else it only
+/// reads; a caller that is no connected client is not one this limits).
+pub(crate) fn writes(caller: &Caller) -> bool {
+    caller.signed.as_ref().and_then(|s| s.through.as_ref()).is_some_and(|t| t.writes)
+}
 /// A browser posts to a channel at `__op/channels/<channel>` (`call_op`).
 const SITE_POST_PREFIX: &str = "channels/";
 /// How long the facet's ledger recognizes an id: a call with it within
@@ -210,22 +222,33 @@ impl FragmentCell {
     }
 
     /// `GET /mcp/tools`, the router's for a connected client (cell/src/mcp.rs):
-    /// the operations the caller may call, as MCP tools, by name. One it may
-    /// not call is left out; a fragment it may not see is refused.
+    /// its tools, by name: the operations this fragment describes that the
+    /// caller may call, its mutations and jobs only when its person let it
+    /// change things (`fragment_core::mcp::served`, the rule `fragment mcp`
+    /// keeps). A fragment it may not see is refused.
     pub(crate) fn mcp_tools(&self, caller: &Caller) -> CellResult<Response> {
         let facts = self.facts()?;
         let standing = self.standing(caller, false)?;
         decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
-        let tools: Vec<Value> = self
-            .operations()?
-            .iter()
-            .filter(|(_, d)| {
-                let purpose = if d.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
-                decide(facts.visibility, standing, purpose, d.role).is_ok()
-            })
-            .map(|(name, d)| fragment_core::mcp::tool(name, d))
-            .collect();
+        let tools = fragment_core::mcp::tools_of(&self.operations()?, writes(caller), |d| {
+            let purpose = if d.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
+            decide(facts.visibility, standing, purpose, d.role).is_ok()
+        });
         json_response(&json!({ "tools": tools }))
+    }
+
+    /// `POST /mcp/tools/<op>`, the router's for a connected client: a call of
+    /// one of its tools, which is `POST /api/ops/<op>` once the operation is
+    /// one (an operation that is none is `unknown_operation`, saying why).
+    pub(crate) async fn mcp_call(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
+        let facts = self.facts()?;
+        decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Public)?;
+        let decl = self.declared(op)?;
+        let writes = writes(caller);
+        if !fragment_core::mcp::served(&decl, writes) {
+            return Err(CellError::new(ErrorCode::UnknownOperation, fragment_core::mcp::not_served(op, &decl, writes)));
+        }
+        self.api_op(caller, op, body).await
     }
 
     /// Checks and runs one call from outside. `principal` is who the ledger
@@ -251,6 +274,11 @@ impl FragmentCell {
         // mutation or a job acts, which takes a membership of one's own
         let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
         let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        // a connected client its person let only read runs no mutation or
+        // job, by whichever server it asks (docs/api.md, Connected clients)
+        if decl.kind != OpKind::Query && connected(caller) && !writes(caller) {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{op} changes things, and this connected client may only read: its person connects it again and allows changes")));
+        }
         // a mutation or a job writes: past its owner's overdraft the fragment
         // takes none, and its queries still answer
         if decl.kind != OpKind::Query {
