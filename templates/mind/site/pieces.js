@@ -5,7 +5,7 @@
 // opens to its messages (`thread`), each without leaving the screen.
 
 import { F, S, blobUrl, filesOf, persona, putThread, titleOf } from "./store.js";
-import { WEB_TOOLS, ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, size, when } from "./ui.js";
+import { WEB_TOOLS, ago, cleanSummary, clock, firstLine, h, highlight, icon, isReportKind, markIn, md, parseTool, plural, reportOf, size, when } from "./ui.js";
 
 /// The widest `context` asks on either side (fragment.json).
 const CONTEXT_MAX = 50;
@@ -41,6 +41,7 @@ export function avatar(p, cls = "") {
 
 /// Who wrote a message, for a person.
 export function who(m) {
+  if (m.kind === "work") return "Computer";
   if (m.kind === "user") return reportOf(m.text) ? "Computer" : "You";
   if (m.kind === "talk") return persona(m.persona)?.name ?? "Mind";
   if (m.kind === "note") return "Note";
@@ -77,7 +78,7 @@ export function topicChip(id, p) {
 
 /// A row of a message near another (a search's context, a node's message).
 export function miniMessage(m, { focus = false, q = "" } = {}) {
-  const rep = m.kind === "user" ? reportOf(m.text) : null;
+  const rep = isReportKind(m) ? reportOf(m.text) : null;
   const p = persona(m.persona);
   const kind = rep ? "work" : m.kind;
   const body = m.kind === "tool" || m.kind === "echo" ? h("pre.mini-pre", { text: m.text.length > 1200 ? `${m.text.slice(0, 1200)}…` : m.text }) : md(rep ? rep.text : m.text);

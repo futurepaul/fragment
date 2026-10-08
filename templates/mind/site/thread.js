@@ -34,7 +34,7 @@ import {
   say,
   stop,
 } from "./store.js";
-import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconButton, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
+import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconButton, isReportKind, joined, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
 
 /// A message's longest text (the log caps at 30 000 characters).
 const TEXT_MAX = 30_000;
@@ -637,7 +637,7 @@ let heardTimer = 0;
 /// The thread's items, in order, for `reconcile`.
 function items(id) {
   const box = S.msgs.get(id);
-  const list = box ? [...box.byI.values()].sort((a, b) => a.i - b.i) : [];
+  const list = box ? joined([...box.byI.values()].sort((a, b) => a.i - b.i)) : [];
   const out = [];
   const thread = S.threads.get(id);
   let prevAt = null;
@@ -666,7 +666,7 @@ function items(id) {
   const isReport = (rep) => rep && (S.tasks.has(rep.task) || /[\d_-]/.test(rep.task));
   const reports = new Map();
   for (const m of list) {
-    const rep = m.kind === "user" ? reportOf(m.text) : null;
+    const rep = isReportKind(m) ? reportOf(m.text) : null;
     if (isReport(rep)) reports.set(rep.task, `r:${m.i}`);
   }
 
@@ -701,7 +701,7 @@ function items(id) {
       continue;
     }
     flush();
-    if (m.kind === "user") {
+    if (m.kind === "user" || m.kind === "work") {
       const rep = reportOf(m.text);
       if (isReport(rep)) {
         // the hand-off's report, where it came; the mind answers it next
@@ -775,7 +775,7 @@ function items(id) {
     if (label) out.push({ key: "working", sig: label, make: () => indicator(label) });
   } else {
     const last = list.at(-1);
-    const unanswered = (S.pending.get(id)?.some((x) => !x.failed) || last?.kind === "user") && !(turn && turn.at >= lastAt);
+    const unanswered = (S.pending.get(id)?.some((x) => !x.failed) || last?.kind === "user" || last?.kind === "work") && !(turn && turn.at >= lastAt);
     const fresh = Date.now() - lastAt < PENDING_MS;
     if (unanswered && fresh) {
       const elsewhere = S.status?.turn?.running && S.status.turn.thread && S.status.turn.thread !== id;

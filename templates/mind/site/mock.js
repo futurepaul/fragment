@@ -182,7 +182,7 @@ for (const def of sorted) {
       push("echo", `[${hd.id}] started`, (at += 800), id, def.p, hd.id);
       push("talk", hd.say, (at += 6000), id, def.p);
       if (!hd.live) {
-        const report = push("user", `[${hd.id}] ${hd.report}`, (at += 6 * MIN), id, def.p, hd.id);
+        const report = push("work", `[${hd.id}] ${hd.report}`, (at += 6 * MIN), id, def.p, hd.id);
         if (hd.files) report.attachments = hd.files.map(seedFile);
         push("talk", hd.after, (at += 20_000), id, def.p);
       }
@@ -710,7 +710,7 @@ async function hands(task, every) {
   task.ended = Date.now();
   publish("log", { type: "task", ...publicTask(task) });
   const th = threads.get(task.thread);
-  logged("user", `[${task.id}] ${plan.report}`, task.thread, th?.persona, task.id);
+  logged("work", `[${task.id}] ${plan.report}`, task.thread, th?.persona, task.id);
   queue.push({ thread: task.thread, text: "", persona: th?.persona, report: task });
   runTurn();
 }

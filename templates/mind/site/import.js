@@ -14,9 +14,11 @@
 import { F } from "./store.js";
 import { h, plural } from "./ui.js";
 
-// A message's most characters, as the mind caps one at logging (its CAP);
-// a part's messages and JSON, as `import` takes them (fragment.json).
-const CAP = 30_000;
+// A message's most bytes, as the CLI sends one (cli/src/import.rs
+// TEXT_MAX_BYTES: a part's input is at most 256 KiB; the mind logs a text
+// past its CAP as several messages in a row); a part's messages and JSON,
+// as `import` takes them (fragment.json).
+const TEXT_MAX_BYTES = 96 * 1024;
 const CAP_NOTE_ROOM = 80;
 const NODE = 512;
 const PART_MESSAGES = 64;
@@ -26,17 +28,22 @@ const ASK_MAX = 200;
 // A file larger than this is the CLI's to read (a browser holds it whole).
 const FILE_MAX_BYTES = 512 * 1024 * 1024;
 const POLL_MS = 5000;
+const KICK_MS = 60_000;
 
 const utf8 = (s) => new TextEncoder().encode(s).length;
 
-/// The mind's capText: at most CAP characters, head and tail kept.
-function capText(text) {
+/// At most TEXT_MAX_BYTES of a message, head and tail kept (half the room
+/// each, whole characters), as the CLI's cap_bytes.
+function capBytes(text) {
+  if (utf8(text) <= TEXT_MAX_BYTES) return text;
   const cps = Array.from(text);
-  if (cps.length <= CAP) return text;
-  const room = CAP - CAP_NOTE_ROOM;
-  const head = Math.ceil(room / 2);
-  const tail = room - head;
-  return `${cps.slice(0, head).join("")}\n\n[… ${cps.length - head - tail} characters cut here …]\n\n${cps.slice(cps.length - tail).join("")}`;
+  const size = (c) => (c.codePointAt(0) < 0x80 ? 1 : c.codePointAt(0) < 0x800 ? 2 : c.codePointAt(0) < 0x10000 ? 3 : 4);
+  const half = Math.floor((TEXT_MAX_BYTES - CAP_NOTE_ROOM) / 2);
+  let head = 0;
+  for (let b = 0; head < cps.length && b + size(cps[head]) <= half; head++) b += size(cps[head]);
+  let tail = cps.length;
+  for (let b = 0; tail > head && b + size(cps[tail - 1]) <= half; tail--) b += size(cps[tail - 1]);
+  return `${cps.slice(0, head).join("")}\n\n[… ${tail - head} characters cut here …]\n\n${cps.slice(tail).join("")}`;
 }
 
 /// Ms since the epoch: an ISO 8601 string (no zone: UTC), or seconds or ms.
@@ -308,7 +315,7 @@ export function prepare(convs) {
       pastes.add(words);
       return true;
     });
-    for (const m of c.messages) m.text = capText(m.text);
+    for (const m of c.messages) m.text = capBytes(m.text);
   }
   return convs.filter((c) => c.messages.some((m) => m.role === "user"));
 }
@@ -441,8 +448,11 @@ export function mountImport(container) {
     }
   });
 
-  // the compactor, until every message is summarized
+  // the compactor, until every message is summarized; started again when
+  // none is at work with work left (its pumps' chain ends at the
+  // platform's 16 hops), at most once a minute
   async function follow() {
+    let kicked = 0;
     while (container.isConnected) {
       let s;
       try {
@@ -457,6 +467,11 @@ export function mountImport(container) {
           return;
         }
         status.textContent = `Summarizing: ${(s.T - s.unbuilt).toLocaleString()} of ${plural(s.T, "message")}. You can close this; it goes on.`;
+        const quiet = !s.pumps && (!s.pump || s.now - s.pump.at > KICK_MS);
+        if (quiet && Date.now() - kicked > KICK_MS) {
+          kicked = Date.now();
+          F.call("pump", {}).catch(() => {});
+        }
       }
       await new Promise((r) => setTimeout(r, POLL_MS));
     }

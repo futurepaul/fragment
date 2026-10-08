@@ -105,7 +105,18 @@ const num = (v) => (Number.isFinite(v) ? v : null);
 
 function message(b) {
   if (!Number.isInteger(b.i)) return null;
-  return { i: b.i, kind: str(b.kind) || "user", text: str(b.text), at: num(b.at) ?? Date.now(), thread: str(b.thread) || null, persona: str(b.persona) || null, task: str(b.task) || null, attachments: filesOf(b.attachments) };
+  return {
+    i: b.i,
+    kind: str(b.kind) || "user",
+    text: str(b.text),
+    at: num(b.at) ?? Date.now(),
+    thread: str(b.thread) || null,
+    persona: str(b.persona) || null,
+    task: str(b.task) || null,
+    attachments: filesOf(b.attachments),
+    // it goes on from the message before (a long text is several in a row)
+    cont: b.cont === true,
+  };
 }
 
 /// A message's files, as its record or the `thread` query has them: each

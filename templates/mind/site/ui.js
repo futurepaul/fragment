@@ -223,10 +223,30 @@ export function viewLines(text) {
   return out;
 }
 
-/// A hand-off's report as the log holds it: a `user` message `[<task>] …`.
+/// A hand-off's report as the log holds it: a `work` message `[<task>] …`
+/// (before the mind followed UniiChat, a `user` one).
 export function reportOf(text) {
   const m = String(text ?? "").match(/^\[([A-Za-z0-9_:.-]{2,64})\] ([\s\S]*)$/);
   return m ? { task: m[1], text: m[2] } : null;
+}
+
+/// Whether a message may be a hand-off's report: `work`, or (logged before
+/// that kind was) a `user` message `[<task>] …`.
+export const isReportKind = (m) => m.kind === "work" || m.kind === "user";
+
+/// A thread's messages with each long text the log holds as several in a
+/// row (each piece after the first `cont`) joined back into one.
+export function joined(list) {
+  const out = [];
+  for (const m of list) {
+    const prev = out.at(-1);
+    if (m.cont && prev && prev.kind === m.kind && prev.i + prev.pieces === m.i) {
+      out[out.length - 1] = { ...prev, text: prev.text + m.text, pieces: prev.pieces + 1 };
+      continue;
+    }
+    out.push({ ...m, pieces: 1 });
+  }
+  return out;
 }
 
 /// `text` with the words of `q` marked.
