@@ -613,10 +613,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let file = &record["body"]["attachments"][0];
     let sha = file["sha256"].as_str().unwrap_or("");
     let bytes = if sha.len() == 64 { shell_site(s, api, &session, &mind, &format!("__blob/{sha}")).ok() } else { None };
+    // the message as the log has it (its msg record names the file) is a download in the thread
+    let chip = format!("[...document.querySelectorAll('.msg.you:not(.pending) a.file-chip')].some((a) => a.download === 'notes.txt' && a.getAttribute('href') === {})", js(&format!("./__blob/{sha}")));
+    let shown = posted && s.eventually(wait, || b.eval_in_frame(&page, &mind_host, &chip).ok() == Some(Value::Bool(true)));
     s.ok(
-        "a file dropped on the mind's composer goes with the message: uploaded as the mind's blob, named in say's attachments",
-        posted && file["type"] == "text/plain" && file["size"] == 10 && bytes.as_ref().is_some_and(|r| r.status == 200 && r.text == "hello mind"),
-        json!({ "fresh": fresh, "sent": sent, "record": record, "blob": bytes.map(|r| r.status) }),
+        "a file dropped on the mind's composer goes with the message: uploaded as the mind's blob, named in say's attachments, and a download in the thread",
+        posted && shown && file["type"] == "text/plain" && file["size"] == 10 && bytes.as_ref().is_some_and(|r| r.status == 200 && r.text == "hello mind"),
+        json!({ "fresh": fresh, "sent": sent, "shown": shown, "record": record, "blob": bytes.map(|r| r.status) }),
     );
     let _ = b.screenshot(&page, &shots.join("desktop-mind-file.png"));
     // the first agent's direct chat, made as the shell's new agent makes
