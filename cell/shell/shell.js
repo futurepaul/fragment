@@ -1,8 +1,9 @@
 // The shell: the platform's one page (docs/cloudflare-v1.md, decisions
-// 6–12). Its sidebar is the person's fragments by kind: their chats (a
+// 6–12). Its sidebar is the person's fragments by kind: their mind (its
+// personas, screens and recent threads: docs/optchat.md), their chats (a
 // direct chat with one agent, in its colour, or a group of several, their
-// colours stacked) and their apps, less the ones they archived. The open
-// chat fills the middle column and apps open as windows in the viewer;
+// colours stacked) and their apps, less the ones they archived. The mind
+// or the open chat fills the middle column and apps open as windows in the viewer;
 // each is a frame of the fragment's own origin, signed in there by the
 // platform's frame mint (`/auth/frame`), for this page only. This page
 // holds no key: it calls the API with the person's platform session
@@ -30,6 +31,13 @@ const ICON = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
+  // the mind's (its page's icons.js, Lucide)
+  compose: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
+  layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
+  gear: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // Skyler's agent palette: a plain colored circle, no eyes
@@ -81,6 +89,9 @@ const byName = (name) => state.fragments.find((f) => f.name === name);
 const labelOf = (name) => name.split(".")[0];
 const titleOf = (name) => byName(name)?.title || labelOf(name);
 const own = (f) => f.role === "owner";
+// the person's own mind (docs/optchat.md), if they have one: the middle column's home
+const mindOf = () => state.fragments.find((f) => f.kind === "mind" && own(f)) ?? null;
+const isMind = (name) => !!name && name === mindOf()?.name;
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
@@ -168,7 +179,13 @@ $("toggle-left").onclick = () => layout.toggle("left");
 $("toggle-right").onclick = () => layout.toggle("right");
 $("scrim").onclick = () => { layout.hide("left"); layout.hide("right"); };
 addEventListener("keydown", (e) => {
-  if (!(e.metaKey || e.ctrlKey) || e.code !== "KeyB") return;
+  if (!(e.metaKey || e.ctrlKey)) return;
+  // ⌘K is the mind's Search, as it is in its frame
+  if (e.code === "KeyK" && mindOf()) {
+    e.preventDefault();
+    return toMind({ go: "#/search" });
+  }
+  if (e.code !== "KeyB") return;
   e.preventDefault();
   layout.toggle(e.altKey ? "right" : "left");
 });
@@ -442,13 +459,16 @@ function renderHeading() {
   $("page-title").hidden = !state.page;
   $("page-title").textContent = state.page ?? "";
   if (!open) return;
-  const who = identity(state.current);
+  // the mind's heading is what its page shows: a thread's title, or the screen's
+  const who = isMind(state.current) ? { title: mind.said?.title || titleOf(state.current) } : identity(state.current);
   $("chat-title").textContent = who.title;
-  $("agent-mark").replaceChildren(mark(state.current, "small"));
+  $("agent-mark").replaceChildren(isMind(state.current) ? face(mind.said?.face) : mark(state.current, "small"));
   const frame = state.frames.get(state.current);
   if (frame) frame.title = who.title;
 }
 function renderChats() {
+  // with a mind, chats with agents are a section only for those who have one
+  $("agents").hidden = !!mindOf() && !chats().length;
   const list = shown(chats());
   patch($("chats"), list.length ? list.map((f) => {
     const who = identity(f.name);
@@ -466,6 +486,7 @@ function renderChats() {
 }
 $("agent-heading").onclick = () => {
   const name = state.current;
+  if (isMind(name)) return mindMenu();
   const group = isGroup(name);
   const agent = agentOfChat(name);
   // a group's agents each have a profile; a direct chat's agent has one
@@ -488,9 +509,10 @@ function agentOfChat(name) {
   return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.fragment ?? null;
 }
 
+// A chat, or the person's mind (its page in the shell's embedding, `?embed=shell`).
 function openChat(name, push = true) {
   if (!byName(name)) return;
-  if (push) at(APPS);
+  if (push) at(HOME);
   state.page = null;
   $("settings-page").hidden = true;
   $("frames").hidden = false;
@@ -498,13 +520,15 @@ function openChat(name, push = true) {
   store.set(CURRENT, name);
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name), titleOf(name), name);
+    const frame = frameOf(framed(name, isMind(name) ? "/?embed=shell" : "/"), titleOf(name), name);
     $("frames").append(frame);
     state.frames.set(name, frame);
   }
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
+  renderMind();
+  mirror();
   prewake();
 }
 
@@ -596,10 +620,11 @@ function renderApps() {
     return row;
   }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]);
 }
-function openApp(name) {
+function openApp(name, path = "/") {
   const f = byName(name);
   if (!f) return;
-  const frame = frameOf(framed(name), titleOf(name), name);
+  if (viewer.keys.includes(`app:${name}`) && path !== "/") viewer.close(`app:${name}`);
+  const frame = frameOf(framed(name, path), titleOf(name), name);
   const status = el("span", "pane-sharing");
   status.append(...badges(f));
   show({
@@ -656,6 +681,165 @@ async function openScreen() {
   }
 }
 
+// ---- the person's mind: the middle column's home (docs/optchat.md) ----
+// Its page, framed with `?embed=shell`, leaves its rail to this sidebar
+// and its header to the topbar. It tells this page what it shows whenever
+// that changes (`{fragment: "mind", state}`: its personas and the default,
+// its recent threads as one-line summaries, its screen, title and route),
+// and this page asks it (`{fragment: "mind", go | new | sheet | panel}`) to
+// open a screen, a new chat with a persona, a sheet (a persona's, its
+// settings) or its panel. It may ask for the computer's screen (`screen`)
+// or one of the person's fragments a link names (`app`). Each side takes
+// a message only from the other: this page from the mind's frame at the
+// mind's origin, the mind from the page around it.
+const mind = { said: null, want: null, asks: [] };
+// the recent threads the sidebar shows (Search finds the rest, as does Everything)
+const RECENT_SHOWN = 8;
+const MIND_LINKS = [
+  { route: "#/new", screen: "new", icon: "compose", text: "New chat" },
+  { route: "#/search", screen: "search", icon: "search", text: "Search", meta: () => (navigator.platform?.startsWith("Mac") ? "⌘K" : "Ctrl K") },
+  { route: "#/topics", screen: "topics", icon: "hash", text: "Topics", meta: (s) => (s.topics == null ? "" : String(s.topics)) },
+  { route: "#/memory", screen: "memory", icon: "layers", text: "Memory", meta: (s) => s.memory ?? "" },
+];
+// a persona's face: its emoji in a disc
+function face(emoji, cls = "") {
+  const f = el("span", `persona-face ${cls}`.trim(), emoji || "🌿");
+  f.setAttribute("aria-hidden", "true");
+  return f;
+}
+async function tellMind(ask) {
+  const name = mindOf()?.name;
+  const frame = name && state.frames.get(name);
+  // asked before its page has said anything: asked once it has
+  if (!frame || !mind.said) return mind.asks.push(ask);
+  try {
+    frame.contentWindow?.postMessage({ fragment: "mind", ...ask }, await originOf(name));
+  } catch {}
+}
+// the mind in the middle column, then asked
+function toMind(ask) {
+  const m = mindOf();
+  if (!m) return;
+  openChat(m.name);
+  if (ask) tellMind(ask);
+  leaveSidebar();
+}
+addEventListener("message", async (event) => {
+  const d = event.data;
+  const name = mindOf()?.name;
+  if (d?.fragment !== "mind" || !name) return;
+  const frame = state.frames.get(name);
+  if (!frame || event.source !== frame.contentWindow) return;
+  try {
+    if (event.origin !== (await originOf(name))) return;
+  } catch {
+    return;
+  }
+  if (d.state && typeof d.state === "object") {
+    const first = !mind.said;
+    mind.said = d.state;
+    if (first) {
+      if (mind.want && mind.want !== d.state.route) mind.asks.unshift({ go: mind.want });
+      mind.want = null;
+      for (const ask of mind.asks.splice(0)) tellMind(ask);
+    }
+    renderMind();
+    if (isMind(state.current)) {
+      renderHeading();
+      mirror();
+    }
+  }
+  if (d.screen === true) openScreen();
+  if (typeof d.app === "string") openLink(d.app);
+});
+// A link in the mind's words: one of the person's fragments opens here (a
+// chat in the middle, an app in the viewer); anything else in a tab.
+async function openLink(href) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return;
+  }
+  const [label, user] = url.hostname.split(".")[0].split("--");
+  const name = `${label}.${user}`;
+  const f = user && byName(name);
+  if (f && !isMind(name) && (await originOf(name).catch(() => null)) === url.origin) {
+    if (isChat(name)) openChat(name);
+    else openApp(name, `${url.pathname}${url.search}${url.hash}`);
+    return;
+  }
+  window.open(url.href, "_blank", "noopener");
+}
+function renderMind() {
+  const m = mindOf();
+  $("mind-nav").hidden = !m;
+  $("new-agent-top").title = m ? "New chat" : "New agent";
+  if (!m) return;
+  const s = mind.said ?? {};
+  const here = isMind(state.current) && !state.page;
+  const chosen = s.chosen ?? s.default;
+  patch($("personas"), (s.personas ?? []).map((p) => {
+    const row = el("div", `row persona-row${here && s.screen === "new" && p.id === chosen ? " active" : ""}`);
+    row.dataset.key = `persona:${p.id}`;
+    const pick = el("button", "persona-pick");
+    pick.type = "button";
+    pick.title = `New chat with ${p.name}`;
+    pick.append(face(p.emoji), el("span", "label", p.name));
+    if (p.id === s.default) pick.append(el("span", "meta", "default"));
+    if (p.hands) {
+      const hands = el("span", "hands");
+      hands.innerHTML = svg("screen");
+      hands.title = "Can use your computer";
+      pick.append(hands);
+    }
+    pick.onclick = () => toMind({ new: p.id });
+    const edit = el("button", "icon-button small persona-edit");
+    edit.type = "button";
+    edit.title = `Edit ${p.name}`;
+    edit.setAttribute("aria-label", `Edit ${p.name}`);
+    edit.innerHTML = svg("rename");
+    edit.onclick = () => toMind({ sheet: "persona", id: p.id });
+    row.append(pick, edit);
+    return row;
+  }));
+  patch($("mind-links"), MIND_LINKS.map((l) => {
+    // New chat is an action: on its screen, the persona it starts with is the row lit
+    const on = here && l.screen !== "new" && (s.screen === l.screen || (l.screen === "topics" && s.screen === "topic"));
+    const row = el("button", `row mind-link${on ? " active" : ""}`);
+    row.type = "button";
+    row.dataset.key = `mind:${l.screen}`;
+    row.innerHTML = svg(l.icon);
+    row.append(el("span", "label", l.text));
+    const meta = l.meta?.(s);
+    if (meta) row.append(el("span", "meta", meta));
+    // New chat starts with the default persona; the persona rows start with theirs
+    row.onclick = () => toMind(l.screen === "new" ? { new: null } : { go: l.route });
+    return row;
+  }));
+  const recent = Array.isArray(s.recent) ? s.recent.slice(0, RECENT_SHOWN) : [];
+  $("recent-label").hidden = !recent.length;
+  patch($("recent"), recent.map((t) => {
+    const row = el("button", `row recent-row${here && s.route === `#/t/${t.id}` ? " active" : ""}`);
+    row.type = "button";
+    row.dataset.key = `thread:${t.id}`;
+    row.title = t.title || t.line || "";
+    row.append(face(t.face, "small"), el("span", "label", t.line || "A chat"));
+    if (t.busy) row.append(el("span", "pulse"));
+    else if (t.when) row.append(el("span", "meta", t.when));
+    row.onclick = () => toMind({ go: `#/t/${t.id}` });
+    return row;
+  }));
+}
+function mindMenu() {
+  openMenu($("agent-heading"), [
+    ...(mind.said?.screen === "thread" ? [{ icon: "panel", text: "What it did here", onClick: () => tellMind({ panel: "toggle" }) }] : []),
+    ...(state.computer ? [{ icon: "screen", text: "Its computer's screen", onClick: () => openScreen() }] : []),
+    { icon: "gear", text: "Mind settings", onClick: () => tellMind({ sheet: "settings" }) },
+  ]);
+}
+$("new-persona").onclick = () => toMind({ sheet: "persona" });
+
 // ---- making an agent: its fragment, its computer, its chat (decision 10, 16) ----
 const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "agent";
 function freeLabel(base) {
@@ -702,7 +886,8 @@ function newAgent() {
   prewake();
 }
 $("new-agent").onclick = newAgent;
-$("new-agent-top").onclick = newAgent;
+// at the topbar's edge (the sidebar closed): a new chat with the mind, or a new agent without one
+$("new-agent-top").onclick = () => (mindOf() ? toMind({ new: null }) : newAgent());
 $("new-agent-cancel").onclick = () => dialog.close();
 $("new-agent-form").onsubmit = async (e) => {
   e.preventDefault();
@@ -862,7 +1047,7 @@ $("add-app").onclick = () => { showCatalog(); leaveSidebar(); };
 const isChat = (name) => byName(name)?.kind === "chat";
 function openFound(name) {
   $("search-dialog").close();
-  if (isChat(name)) openChat(name); else openApp(name);
+  if (isChat(name) || isMind(name)) openChat(name); else openApp(name);
   leaveSidebar();
 }
 function foundRow(name, preview, extra) {
@@ -990,19 +1175,21 @@ $("update-go").onclick = async () => {
   }
 };
 
-// ---- where the page is: `/` the person's mind (`openMind`) once they
-// have one, `/?apps` its chats and apps, `/settings` its settings; each
-// view says so in the address, so a reload or a link stays put ----
+// ---- where the page is: `/` the open chat or the person's mind (its
+// screen in the hash, `/#/t/<thread>`), `/settings` its settings; each
+// view says so in the address, so a reload or a link stays put (`/?apps`,
+// where the mind's own page links, is `/`) ----
 const SETTINGS = "/settings";
-const APPS = "/?apps";
-const atApps = () => new URLSearchParams(location.search).has("apps");
+const HOME = "/";
 function at(path) {
   if (location.pathname + location.search !== path) history.pushState(null, "", path);
 }
-// The person's own mind (docs/optchat.md), if they have one.
-const mindOf = () => state.fragments.find((f) => f.kind === "mind" && own(f)) ?? null;
-// The mind full-screen, on its own origin, signed in there by the platform.
-const openMind = (name) => location.replace(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent("/")}`);
+// the mind's screen in the address while it is open, and none otherwise
+function mirror() {
+  const route = isMind(state.current) && !state.page ? (mind.said?.route ?? mind.want ?? "") : "";
+  const hash = route.startsWith("#/") ? route : "";
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
 addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
@@ -1422,8 +1609,9 @@ function chooseUsername() {
 // The first run (Paul, 2026-10-03; docs/optchat.md): no question asked.
 // The person's default agent is made on their computer (the deployment's
 // default image), and their mind beside it, private, the agent an editor
-// there (its hands); then the mind opens. The mind answers by itself, so
-// nothing waits for the computer, which wakes meanwhile.
+// there (its hands); then the shell opens with the mind in its middle
+// column. The mind answers by itself, so nothing waits for the computer,
+// which wakes meanwhile.
 const firstSoul = (name, username) => `You are ${name}, ${username}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
 // Each step reuses what an earlier try made: a retry picks up where it
 // stopped. Answers the mind's name.
@@ -1476,9 +1664,9 @@ function creatingAgent() {
   retry.onclick = () => creatingAgent();
   firstRun(el("h1", null, "Setting you up…"), list, error, retry);
   (async () => {
-    const mind = await defaultAgent(step);
+    const made = await defaultAgent(step);
     items.get(current).className = "done";
-    openMind(mind);
+    await start(made);
   })().catch((err) => {
     if (current) items.get(current).className = "failed";
     error.textContent = err.message;
@@ -1505,6 +1693,7 @@ async function load(changed = false) {
   state.defaultImage = computers.defaultImage ?? null;
   state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   renderChats();
+  renderMind();
   renderApps();
   renderHeading();
   renderUpdate();
@@ -1566,17 +1755,16 @@ async function start(open) {
   state.me = me;
   if (!me.username) return chooseUsername();
   await load();
-  // at home, the person's mind, made first if they have none; settings
-  // and `/?apps` (the mind's page links to it) open as asked
+  // at home with no mind yet, the first run makes it (and their agent)
   const settings = !open && location.pathname === SETTINGS;
-  if (!open && !settings && !atApps()) {
-    const mind = mindOf();
-    return mind ? openMind(mind.name) : creatingAgent();
-  }
+  if (!open && !settings && !mindOf()) return creatingAgent();
   watchList();
   $("first-run").hidden = true;
   $("layout").hidden = false;
-  const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
+  // the mind's screen the address names (a reload, a link) opens it there
+  const route = location.hash.startsWith("#/") ? location.hash : null;
+  if (route && mindOf()) mind.want = route;
+  const pick = open ?? (route && mindOf() ? mindOf().name : null) ?? (byName(state.current) ? state.current : (mindOf() ?? shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else notice("No chats yet", "Make an agent to start.");
