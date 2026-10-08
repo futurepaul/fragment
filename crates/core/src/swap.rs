@@ -453,18 +453,18 @@ mod tests {
     /// reads back as that agent among the computer's.
     #[test]
     fn a_tag_names_its_agent() {
-        let agents = vec!["juniper.paul".to_string(), "maple.paul".to_string()];
-        let t = key().tag(COMPUTER, "juniper.paul", "google");
+        let agents = vec!["juniper--k3x9".to_string(), "maple--k3x9".to_string()];
+        let t = key().tag(COMPUTER, "juniper--k3x9", "google");
         assert_eq!(t.len(), TAG_HEX);
-        assert_eq!(t, key().tag(COMPUTER, "juniper.paul", "google"), "deterministic: a placeholder is stable across reads and restarts");
-        assert!(key().verifies(COMPUTER, "juniper.paul", "google", &t));
-        assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &t), Some("juniper.paul"));
-        let m = key().tag(COMPUTER, "maple.paul", "google");
+        assert_eq!(t, key().tag(COMPUTER, "juniper--k3x9", "google"), "deterministic: a placeholder is stable across reads and restarts");
+        assert!(key().verifies(COMPUTER, "juniper--k3x9", "google", &t));
+        assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &t), Some("juniper--k3x9"));
+        let m = key().tag(COMPUTER, "maple--k3x9", "google");
         assert_ne!(m, t);
-        assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &m), Some("maple.paul"), "each agent's own");
-        let p = ph(Kind::Operator, "perplexity", "juniper.paul");
+        assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &m), Some("maple--k3x9"), "each agent's own");
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         assert!(p.text().starts_with("fck_perplexity_") && p.text().len() == "fck_perplexity_".len() + TAG_HEX);
-        assert!(ph(Kind::Connection, "google", "juniper.paul").text().starts_with("fcx_google_"));
+        assert!(ph(Kind::Connection, "google", "juniper--k3x9").text().starts_with("fcx_google_"));
         assert_eq!(format!("{:?}", key()), "TagKey(…)", "the key is never printed");
     }
 
@@ -472,16 +472,16 @@ mod tests {
     /// provider's, and one under another host secret verify as no agent.
     #[test]
     fn a_forged_or_anothers_tag_names_no_agent() {
-        let agents = vec!["juniper.paul".to_string()];
+        let agents = vec!["juniper--k3x9".to_string()];
         let forged = "0".repeat(TAG_HEX);
         assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &forged), None);
-        let elsewhere = key().tag("computer:ffffffffffffffffffffffff", "juniper.paul", "google");
+        let elsewhere = key().tag("computer:ffffffffffffffffffffffff", "juniper--k3x9", "google");
         assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &elsewhere), None, "the same agent name on another computer");
         let skyler = key().tag(COMPUTER, "juniper.skyler", "google");
         assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &skyler), None, "an agent not on this computer");
-        let other = key().tag(COMPUTER, "juniper.paul", "perplexity");
+        let other = key().tag(COMPUTER, "juniper--k3x9", "perplexity");
         assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &other), None, "another provider's tag");
-        let rekeyed = TagKey::derive("another host secret of thirty-two bytes, for tests").tag(COMPUTER, "juniper.paul", "google");
+        let rekeyed = TagKey::derive("another host secret of thirty-two bytes, for tests").tag(COMPUTER, "juniper--k3x9", "google");
         assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", &rekeyed), None);
         for bad in ["", "zz", &"A".repeat(TAG_HEX), &"0".repeat(TAG_HEX - 2)] {
             assert_eq!(agent_of(&[key()], COMPUTER, &agents, "google", bad), None, "{bad}");
@@ -492,13 +492,13 @@ mod tests {
     /// verifies; a rotation keeps the previous secret's tags until it ends.
     #[test]
     fn removing_an_agent_revokes_its_tags() {
-        let t = key().tag(COMPUTER, "juniper.paul", "google");
-        let before = vec!["juniper.paul".to_string(), "maple.paul".to_string()];
-        let after = vec!["maple.paul".to_string()];
-        assert_eq!(agent_of(&[key()], COMPUTER, &before, "google", &t), Some("juniper.paul"));
+        let t = key().tag(COMPUTER, "juniper--k3x9", "google");
+        let before = vec!["juniper--k3x9".to_string(), "maple--k3x9".to_string()];
+        let after = vec!["maple--k3x9".to_string()];
+        assert_eq!(agent_of(&[key()], COMPUTER, &before, "google", &t), Some("juniper--k3x9"));
         assert_eq!(agent_of(&[key()], COMPUTER, &after, "google", &t), None);
         let next = TagKey::derive("the next host secret, thirty-two bytes or more");
-        assert_eq!(agent_of(&[next.clone(), key()], COMPUTER, &before, "google", &t), Some("juniper.paul"), "during a rotation");
+        assert_eq!(agent_of(&[next.clone(), key()], COMPUTER, &before, "google", &t), Some("juniper--k3x9"), "during a rotation");
         assert_eq!(agent_of(&[next], COMPUTER, &before, "google", &t), None, "after it");
     }
 
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn a_header_placement() {
         let c = catalog();
-        let p = ph(Kind::Operator, "perplexity", "juniper.paul");
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &format!("Bearer {}", p.text())), ("accept", "application/json")]);
         let plan = Plan::of(&headers, None, "/search", &c, "api.perplexity.ai").unwrap();
         assert_eq!(plan.wanted, vec![p.clone()]);
@@ -517,7 +517,7 @@ mod tests {
         let bare = h(&[("authorization", &p.text())]);
         let out = Plan::of(&bare, None, "/", &c, "api.perplexity.ai").unwrap().apply(&bare, None, &c, &secrets(&[(&p, "pplx-real")]));
         assert_eq!(out.headers, h(&[("authorization", "Bearer pplx-real")]), "the format is the catalog's");
-        let gp = ph(Kind::Operator, "google-places", "juniper.paul");
+        let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
         let headers = h(&[("x-goog-api-key", &gp.text())]);
         let out = Plan::of(&headers, None, "/v1/places:searchText", &c, "places.googleapis.com").unwrap().apply(&headers, None, &c, &secrets(&[(&gp, "AIzaReal")]));
         assert_eq!(out.headers, h(&[("x-goog-api-key", "AIzaReal")]));
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn a_header_placement_refused() {
         let c = catalog();
-        let p = ph(Kind::Operator, "perplexity", "juniper.paul");
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let plan = |headers: Vec<(String, String)>, host: &str| Plan::of(&headers, None, "/", &c, host);
         let short = &p.text()[..p.text().len() - 1];
         let long = format!("{}0", p.text());
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn a_query_placement() {
         let c = catalog();
-        let gp = ph(Kind::Operator, "google-places", "juniper.paul");
+        let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
         let q = format!("input=caf%C3%A9+near+me&key={}&fields=name", gp.text());
         let plan = Plan::of(&[], Some(&q), "/maps/api/place", &c, "places.googleapis.com").unwrap();
         let out = plan.apply(&[], Some(&q), &c, &secrets(&[(&gp, "AIza/real+key")]));
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn a_basic_placement() {
         let c = catalog();
-        let mail = ph(Kind::Own, "mail", "juniper.paul");
+        let mail = ph(Kind::Own, "mail", "juniper--k3x9");
         let enc = |s: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(s));
         let headers = h(&[("authorization", &enc(&format!("api:{}", mail.text())))]);
         let plan = Plan::of(&headers, None, "/v3/send", &c, "api.mail.test").unwrap();
@@ -614,8 +614,8 @@ mod tests {
     #[test]
     fn a_swap_replayed_is_the_same_swap() {
         let c = catalog();
-        let gp = ph(Kind::Operator, "google-places", "juniper.paul");
-        let mail = ph(Kind::Own, "mail", "juniper.paul");
+        let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
+        let mail = ph(Kind::Own, "mail", "juniper--k3x9");
         let headers = h(&[("x-goog-api-key", &gp.text())]);
         let q = format!("key={}", gp.text());
         let s = secrets(&[(&gp, "AIzaReal")]);
@@ -651,7 +651,7 @@ mod tests {
     #[should_panic(expected = "every wanted placeholder is resolved")]
     fn applying_an_unresolved_placeholder_is_a_bug() {
         let c = catalog();
-        let p = ph(Kind::Operator, "perplexity", "juniper.paul");
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &p.text())]);
         Plan::of(&headers, None, "/", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &BTreeMap::new());
     }
@@ -660,7 +660,7 @@ mod tests {
     #[should_panic(expected = "a credential is a printable token")]
     fn a_secret_with_a_line_break_is_a_bug() {
         let c = catalog();
-        let p = ph(Kind::Operator, "perplexity", "juniper.paul");
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &p.text())]);
         Plan::of(&headers, None, "/", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &secrets(&[(&p, "a\r\nx-evil: 1")]));
     }

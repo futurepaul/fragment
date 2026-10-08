@@ -505,9 +505,9 @@ mod tests {
     /// named) and a header's agent; and its memo, a WAV that says them.
     #[test]
     fn transcribe_reads_its_key_and_header() {
-        assert_eq!(transcribe_words("hello from a memo", "juniper.paul"), ("hello from a memo", "agent:juniper.paul".to_string(), None));
-        assert_eq!(transcribe_words("hi as agent:willow.paul", "juniper.paul"), ("hi", "agent:willow.paul".to_string(), None));
-        assert_eq!(transcribe_words("hi as agent:willow.paul header juniper.paul", "juniper.paul"), ("hi", "agent:willow.paul".to_string(), Some("juniper.paul")));
+        assert_eq!(transcribe_words("hello from a memo", "juniper--k3x9"), ("hello from a memo", "agent:juniper--k3x9".to_string(), None));
+        assert_eq!(transcribe_words("hi as agent:willow--k3x9", "juniper--k3x9"), ("hi", "agent:willow--k3x9".to_string(), None));
+        assert_eq!(transcribe_words("hi as agent:willow--k3x9 header juniper--k3x9", "juniper--k3x9"), ("hi", "agent:willow--k3x9".to_string(), Some("juniper--k3x9")));
         let m = memo("hi!");
         assert_eq!((&m[..4], &m[8..16]), (&b"RIFF"[..], &b"WAVEfmt "[..]));
         assert_eq!(u32::from_le_bytes(m[4..8].try_into().unwrap()) as usize, m.len() - 8, "its RIFF size is its bytes after the size");

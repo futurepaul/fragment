@@ -102,12 +102,11 @@ const colorOf = (id) => {
   for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
   return COLORS[h % COLORS.length];
 };
-// The identity of the agent a fragment is (`maple.ann`), or of a direct
-// chat's (`maple-chat.ann`, made beside it), while its row names no agents.
+// The identity of the agent a fragment is (`maple--k3x9`), or of a direct
+// chat's (`maple-chat--p2m4`, labeled for it), while its row names no agents.
 const agentOf = (name) => {
-  const [label, ...rest] = name.split(".");
-  const agent = [label.replace(/-chat$/, ""), ...rest].join(".");
-  return [...state.agents.values()].find((a) => a.fragment === agent)?.identity ?? null;
+  const direct = labelOf(name).match(/^(.+)-chat$/)?.[1];
+  return [...state.agents.values()].find((a) => a.fragment === name || labelOf(a.fragment) === direct)?.identity ?? null;
 };
 // A chat's agents, the lead first, as its row names them; a direct chat's
 // agent while it names none.

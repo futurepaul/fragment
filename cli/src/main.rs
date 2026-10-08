@@ -269,7 +269,7 @@ enum Cmd {
     /// and the question's record. Its answer comes in that chat; --wait
     /// prints it
     Ask {
-        /// The agent: its label or fragment (`fred`, `fred.paul`), or its identity
+        /// The agent: its label or fragment (`fred`, `fred--k3x9`), or its identity
         agent: String,
         /// What to ask it
         text: String,

@@ -363,7 +363,7 @@ fn a_memo_is_transcribed_as_the_route_would() {
         b.extend(b"\r\n--xx--\r\n");
         b
     };
-    let key = Some("Bearer agent:juniper.paul".to_string());
+    let key = Some("Bearer agent:juniper--k3x9".to_string());
     let (fields, r) = transcription("multipart/form-data; boundary=xx", &form(&[("model", "whisper"), ("response_format", "json")]), &None, &key);
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!((fields["model"].clone(), fields["language"].clone(), fields["audio_bytes"].clone()), (json!("whisper"), Value::Null, json!(memo.len())));

@@ -420,7 +420,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
     // the backlog a rollback sent the cursor back over: six of juniper's turns
     let mut ran = vec![];
     for seq in 1..=(limits::NOTE_FORGOTTEN_MAX as u64 + 2) {
-        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
         ran.extend(theirs(&mut e, s));
     }
     assert_eq!(ran.len(), limits::NOTE_FORGOTTEN_MAX + 2);

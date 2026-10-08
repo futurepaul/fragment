@@ -116,7 +116,7 @@ impl Code {
             Code::AuthFailed => "run `fragment login`, or point at another host with --host / `fragment host <url>`",
             Code::Forbidden => "the message says why: your identity lacks a role here (ask the owner to add you: `fragment members add <name> <your email>`), or your plan does not allow it (a guest makes no fragments: `fragment ledger` shows your plan)",
             Code::NotFound => "check the fragment's name with `fragment list`, and a call's operation with `fragment status <name>` (code.operations)",
-            Code::NameTaken => "it exists already, as the message says: choose another name (a fragment's or a username), or remove the existing fragment with `fragment rm <name>`; a key someone holds, or one revoked, cannot be added again",
+            Code::NameTaken => "it exists already, as the message says: choose another name, or remove the existing fragment with `fragment rm <name>`; a key someone holds, or one revoked, cannot be added again",
             Code::Conflict => "re-sync (`fragment sync`) and reapply your change",
             Code::ConflictingBody => "that operation id already ran with another input: use a new --id for a new action (the same id and input replay)",
             Code::TooLarge => "see the limit in the message; files of 1 MiB and up sync as blobs",
