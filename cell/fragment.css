@@ -1,0 +1,32 @@
+/* The platform's stylesheet (./__fragment.css), for a page that links it:
+   the platform adds it to no page, since a fragment's page is its
+   author's. Theme variables, light and dark, and a few base styles; a
+   page's own rules after the link override any of it. The variables'
+   names hold across releases (docs/api.md, Serving). */
+:root {
+  color-scheme: light dark;
+  --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #2f5d50; --danger: #b3261e;
+  --font: ui-sans-serif, system-ui, sans-serif;
+  --font-display: Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-sm: .85rem; --text-lg: 1.25rem; --text-xl: 1.6rem;
+  --radius: .5rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #7fb5a3; --danger: #f2b8b5; }
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--font); }
+main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+h1, h2, h3 { margin: 0 0 .5rem; font-family: var(--font-display); font-weight: 600; line-height: 1.2; }
+h1 { font-size: var(--text-xl); }
+h2 { font-size: var(--text-lg); }
+small { color: var(--muted); font-size: var(--text-sm); }
+a { color: var(--accent); }
+code { font: .9em var(--font-mono); }
+img, video { max-width: 100%; height: auto; }
+input, textarea, select, button { font: inherit; color: inherit; }
+input, textarea, select { padding: .6rem .75rem; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; }
+button { padding: .6rem 1rem; border: 0; border-radius: var(--radius); background: var(--accent); color: var(--bg); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

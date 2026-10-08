@@ -1276,6 +1276,7 @@ API answers on the platform's host):
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
+| `__fragment.css` | the platform's stylesheet (below), for a page that links it |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture, name?, fragment?}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment` and its label as its `name`, which `@mentions` it); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
@@ -1284,8 +1285,9 @@ API answers on the platform's host):
 
 A site file carries an `ETag` that names its bytes: the last commit that
 changed it, or, for a page given Open Graph tags, a weak tag that also
-names the live commit (its `fragment.json`). `__fragment.js`, `__sw.js`,
-`__files.js`, and `__files.css` carry a hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
+names the live commit (its `fragment.json`). `__fragment.js`,
+`__fragment.css`, `__sw.js`, `__files.js`, and `__files.css` carry a
+hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
 tag answers 304 without reading the file.
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
@@ -1383,6 +1385,16 @@ half times a backoff that doubles from 1 to 30 seconds), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
 or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 `{code, reason}`.
+
+The stylesheet (`<link rel="stylesheet" href="./__fragment.css">`,
+`cell/fragment.css`) is for a page that links it: the platform adds it
+to no page. It holds theme variables, light and dark by
+`prefers-color-scheme` (`--bg`, `--fg`, `--muted`, `--line`, `--accent`,
+`--danger`; `--font`, `--font-display`, `--font-mono`; `--text-sm`,
+`--text-lg`, `--text-xl`; `--radius`), and base styles for the body,
+`main`, headings, `small`, links, `code`, media, form controls, buttons
+(the accent), and the focus ring. The variables' names hold across
+releases; their values, and the base styles, may change with one.
 
 CLI: `fragment call <name> <op> --input '{...}' | @file | - [--id ID]`
 (a file, or stdin, for an input over the 128 KiB one argument holds on
