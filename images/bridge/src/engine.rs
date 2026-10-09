@@ -67,6 +67,11 @@
 //! - Only a turn's asker stops it; only an agent's owner answers its
 //!   prompts, the first answer wins, and an unanswered prompt expires
 //!   (decision 42).
+//! - Only an agent's owner commands its runtime, and only with its menu
+//!   (`MenuItem`), each carried as the menu says (`How`): a turn of its
+//!   own, the chat's turns stopped, a message, or said beside the running
+//!   turn (`Command::Aside`, no turn). The menu is posted in a chat as the
+//!   agent first runs there in a life.
 //! - A turn that asks its asker something in words (`Asked`) takes their
 //!   next message in the chat as its answer (`Tell`), never as a turn
 //!   behind it. It is a running turn of this life: a restart ends it as
@@ -686,9 +691,6 @@ impl Engine {
             How::Steer | How::Aside if has_args => {
                 let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                 let turn = running.filter(|_| item.how == How::Steer);
-                if let Some(t) = turn.as_ref().and_then(|t| self.state.turns.get_mut(t)) {
-                    t.last_ms = self.now;
-                }
                 crate::ev!("command.aside", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "turn": turn });
                 self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), turn, id, by: record.principal.clone(), by_name: asker_name, text }));
             }

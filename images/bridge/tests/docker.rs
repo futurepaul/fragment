@@ -2574,6 +2574,25 @@ async fn bots_message_each_other() {
     }
     asked(&fake, &jchat, &c, "dm: maple: ping after a restart", |w, turn| reply(w, &jchat, turn).is_some()).await;
     within(&fake, &jchat, &c, 180_000, "juniper to say maple's answer after a restart", |w| w.bodies(&jchat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("relayed:") && t.contains("ping after a restart")))).await;
+
+    // `/new` in her Bot Chat (its owner's command, docs/chat-records.md): a
+    // new session under the chat's own key, which the hook titles `Bot
+    // Chat` as its first turn starts, so that turn has the roster again
+    let titled = c.logs().matches("\"botmode.titled\"").count();
+    let fresh = fake.say(&jchat, &person("paul"), json!({ "kind": "command", "command": "new" }));
+    let tnew = fragment_bridge::records::turn_id("juniper--k3x9", &jchat, "chat", fresh["seq"].as_u64().unwrap());
+    within(&fake, &jchat, &c, 120_000, "/new's end", |w| w.bodies(&jchat, "work", "turn.end").iter().any(|e| e["turn"] == tnew)).await;
+    eprintln!("bots: /new said {:?}", fake.with(|w| reply(w, &jchat, &tnew)));
+    asked(&fake, &jchat, &c, "a fresh start, juniper", |w, turn| reply(w, &jchat, turn).is_some()).await;
+    let kept = bot_chat_of(&c, "juniper--k3x9");
+    eprintln!("bots: juniper's Bot Chat after /new: {kept}");
+    assert_eq!(kept["key"], "agent:juniper--k3x9:relay:group:juniper-chat--h6j7/juniper--k3x9", "still her own chat's session: {kept}");
+    let texts = kept["texts"].to_string();
+    assert!(texts.contains("a fresh start, juniper") && !texts.contains("ping from juniper"), "the title is the new session's, which holds none of the chat before: {kept}");
+    assert_eq!(c.logs().matches("\"botmode.titled\"").count(), titled + 1, "titled again as its first turn started");
+    let first = calls_of(&model, "juniper--k3x9", "a fresh start, juniper").into_iter().next().expect("the first turn after /new");
+    assert!(first.body["messages"][0]["content"].to_string().contains("## Messaging other agents"), "and that turn has the roster");
+    assert!(!first.body["messages"].to_string().contains("ping from juniper"), "a new session: none of the chat before");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an
