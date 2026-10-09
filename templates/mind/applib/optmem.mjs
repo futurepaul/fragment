@@ -24,6 +24,13 @@
 // unbuilt (a parent joins a view only once built); an unbuilt line counts
 // no bytes, and no call ever sees one (§4: a view stops at the first).
 //
+// Imported messages (`mem.imp`; docs/optchat.md, "Where we differ from the
+// gist", 16) are transparent while not summarized: a view shows a stretch
+// of them, from its first unbuilt line to its last, as one marker line
+// (`imported`) and goes on past it, and a turn waits only for the others
+// (`firstUnbuilt` with `live`). Merges are the gist's: binary, of built
+// halves only.
+//
 // What the compactor may build is tracked as it happens, never found by a
 // scan of the tree (§7.13): each message not free is `ready` when it is
 // logged, and a merge when its second child is built. app.mjs keeps them in
@@ -46,6 +53,10 @@ export const CAP = 30_000;
 // page and its notes stay within CAP as the turn's echo.
 export const ZOOM_PAGE = 24_000;
 export const PLACEHOLDER = "(not summarized yet: zoom it)";
+/// The line a view shows for imported messages a to b (inclusive) not
+/// summarized yet: one for the whole stretch, never an `id+n|` line.
+export const imported = (a, b) =>
+  a === b ? `(message ${a}: imported, not summarized yet; zoom(${a}, 1) gives it whole)` : `(messages ${a}–${b}: imported chats, not summarized yet; zoom(id, 1) gives one whole)`;
 // §4: "the ruler is 512 dashes".
 export const RULER = "-".repeat(NODE);
 
@@ -145,9 +156,33 @@ function newView(tag, high, low) {
   return { tag, high, low, lines: [], bytes: 0, shrink: false };
 }
 
-/// An empty memory: no messages, no nodes, empty views.
+/// An empty memory: no messages, no nodes, empty views, nothing imported
+/// (`imp`: the imported messages as ranges [s, e), ascending, apart).
 export function newMem() {
-  return { T: 0, text: [[]], size: [[]], v: newView("v", VIEW_HIGH, VIEW_LOW), c: newView("c", CVIEW_HIGH, CVIEW_LOW), journal: [] };
+  return { T: 0, text: [[]], size: [[]], v: newView("v", VIEW_HIGH, VIEW_LOW), c: newView("c", CVIEW_HIGH, CVIEW_LOW), imp: [], journal: [] };
+}
+
+/// The range of imported messages [s, e) that holds message i, or null.
+export function importOf(mem, i) {
+  let lo = 0;
+  let hi = mem.imp.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = mem.imp[mid];
+    if (i < r[0]) hi = mid - 1;
+    else if (i >= r[1]) lo = mid + 1;
+    else return r;
+  }
+  return null;
+}
+
+export const isImported = (mem, i) => importOf(mem, i) !== null;
+
+function markImported(mem, i) {
+  const r = mem.imp[mem.imp.length - 1];
+  assert(!r || r[1] <= i, "imported messages are marked in order");
+  if (r && r[1] === i) r[1] = i + 1;
+  else mem.imp.push([i, i + 1]);
 }
 
 function note(mem, entry) {
@@ -323,6 +358,8 @@ function shrink(mem, v, target) {
   v.lines = r.lines;
   v.bytes = r.size;
   for (const m of r.merges) {
+    // so no merged line holds an unbuilt part, an import's or any other
+    assert(isBuilt(mem, m.l, m.s / 2 ** m.l), `the merged line ${m.s}+${2 ** m.l} is built`);
     note(mem, ["line", v.tag, m.s, m.l]);
     note(mem, ["drop", v.tag, m.drop]);
   }
@@ -373,10 +410,12 @@ export function fit(mem) {
 /// A new message, its line `kind: text` (with its files): its line
 /// appended to both views, its node built at once when the line fits NODE
 /// (§2) or else ready for the compactor, and the views fitted (§3.2: a new
-/// message is when the chat's view merges). Answers the message's id.
-export function append(mem, line) {
+/// message is when the chat's view merges). `fromImport`: an import's.
+/// Answers the message's id.
+export function append(mem, line, fromImport = false) {
   assert(typeof line === "string", "a message's line is text");
   const i = mem.T++;
+  if (fromImport) markImported(mem, i);
   addLine(mem, mem.v, { l: 0, i });
   addLine(mem, mem.c, { l: 0, i });
   if (utf8(line) <= NODE) made(mem, 0, i, line);
@@ -399,9 +438,10 @@ export function setNode(mem, l, i, text) {
 }
 
 /// The first message whose chat-view line is unbuilt, or T: every message
-/// before it is summarized.
-export function firstUnbuilt(mem) {
-  for (const p of mem.v.lines) if (!isBuilt(mem, p.l, p.i)) return startOf(p);
+/// before it is summarized; with `live`, the first not imported (a turn
+/// waits for no import).
+export function firstUnbuilt(mem, live = false) {
+  for (const p of mem.v.lines) if (!isBuilt(mem, p.l, p.i) && !(live && isImported(mem, startOf(p)))) return startOf(p);
   return mem.T;
 }
 
@@ -422,13 +462,24 @@ function viewOf(mem, v, rows) {
   v.bytes = v.lines.reduce((b, p) => b + lineBytes(mem, p), 0);
 }
 
+// The imported messages marked from their ids (an iterable of ids or {i},
+// ascending), each in the log.
+function importAll(mem, ids) {
+  for (const x of ids) {
+    const i = typeof x === "object" && x !== null ? x.i : x;
+    assert(Number.isSafeInteger(i) && i >= 0 && i < mem.T, `imported message ${i} is in the log`);
+    markImported(mem, i);
+  }
+}
+
 /// A memory as it was saved: T messages, the nodes built (any iterable of
-/// {l, i, text}), each view's lines ({s, l}, by start) and whether its
-/// sawtooth is merging.
-export function load({ T, nodes, v, c, vshrink = false, cshrink = false }) {
+/// {l, i, text}), each view's lines ({s, l}, by start), whether its
+/// sawtooth is merging, and the imported messages (ids, ascending).
+export function load({ T, nodes, v, c, vshrink = false, cshrink = false, imported = [] }) {
   assert(Number.isSafeInteger(T) && T >= 0, "T is a count");
   const mem = newMem();
   mem.T = T;
+  importAll(mem, imported);
   for (const n of nodes) {
     assert(Number.isSafeInteger(n.l) && n.l >= 0 && Number.isSafeInteger(n.i) && n.i >= 0, "a node's place is two counts");
     assert((n.i + 1) * 2 ** n.l <= T, `node ${nameOf(n.l, n.i)} covers messages past the log's ${T}`);
@@ -443,14 +494,16 @@ export function load({ T, nodes, v, c, vshrink = false, cshrink = false }) {
 
 /// A memory that was never saved (a mind made before the views were):
 /// built once from its log as it stands (T messages, the nodes built, and
-/// `line(i)` for a message's `kind: text`), its messages appended in order
+/// `line(i)` for a message's `kind: text`; `imported`, as `load`'s), its messages appended in order
 /// and its views fitted as they would have grown; then every node ready
 /// now, found by one scan of the tree, the free ones built. Answers the
 /// memory, whose journal holds the nodes it built and the nodes ready; its
 /// views are for the caller to save whole.
-export function fold(T, nodes, line) {
+export function fold(T, nodes, line, imported = []) {
   assert(Number.isSafeInteger(T) && T >= 0, "T is a count");
   const mem = newMem();
+  mem.T = T;
+  importAll(mem, imported);
   mem.journal = null;
   for (const n of nodes) {
     assert((n.i + 1) * 2 ** n.l <= T, `node ${nameOf(n.l, n.i)} covers messages past the log's ${T}`);
@@ -485,24 +538,43 @@ export function fold(T, nodes, line) {
 // them (§3): `<chat>`, a line `id+n|text` per node with newlines as spaces,
 // stopping at the first unbuilt one (§4: no call sees a placeholder or
 // half a message). `settled` says none was left out for being unbuilt.
+// An import not summarized yet is passed instead (docs/optchat.md, "Where
+// we differ from the gist", 16): in a stretch of imported messages, its
+// lines from its first unbuilt one to its last are one marker line
+// (`imported`), and the view goes on after it.
 function renderLines(mem, lines, end) {
   const out = [];
   let settled = true;
-  for (const p of lines) {
+  for (let k = 0; k < lines.length; k++) {
+    const p = lines[k];
     const s = startOf(p);
     if (s >= end || s + 2 ** p.l > end) break;
-    if (!isBuilt(mem, p.l, p.i)) {
+    if (isBuilt(mem, p.l, p.i)) {
+      out.push(`${s}+${2 ** p.l}|${flat(mem.text[p.l][p.i])}`);
+      continue;
+    }
+    assert(p.l === 0, `the unbuilt line ${s}+${2 ** p.l} is a message's`);
+    const r = importOf(mem, s);
+    if (r === null) {
       settled = false;
       break;
     }
-    out.push(`${s}+${2 ** p.l}|${flat(mem.text[p.l][p.i])}`);
+    // the stretch's last unbuilt line, of those within it that end by `end`
+    let last = k;
+    for (let j = k + 1; j < lines.length; j++) {
+      const q = lines[j];
+      if (startOf(q) + 2 ** q.l > Math.min(end, r[1])) break;
+      if (!isBuilt(mem, q.l, q.i)) last = j;
+    }
+    out.push(imported(s, startOf(lines[last])));
+    k = last;
   }
   const text = `<chat>\n${out.map((l) => `${l}\n`).join("")}</chat>`;
   return { text, bytes: utf8(text), parts: out.length, settled };
 }
 
 /// The chat's view as a turn sees it (§3): the lines before `upto` (all by
-/// default), up to the first not built.
+/// default), up to the first not built that is not an import's.
 export function render(mem, upto = mem.T) {
   return renderLines(mem, mem.v.lines, upto);
 }
@@ -561,8 +633,9 @@ export function covering(mem, a, b) {
 // ---- compactions (§4) ----
 
 /// What one compaction sees after the system prompt: the compaction view
-/// up to the node, built lines only (its message's line excluded; for a
-/// merge, the lines up to its last message), and its task, verbatim from
+/// up to the node, built lines only and an import not summarized yet as
+/// its marker (its message's line excluded; for a merge, the lines up to
+/// its last message), and its task, verbatim from
 /// §4 (`line(i)` is message i's `kind: text`, whole).
 export function compaction(mem, l, i, line) {
   assert((i + 1) * 2 ** l <= mem.T && !isBuilt(mem, l, i), `${nameOf(l, i)} is a node to build`);
