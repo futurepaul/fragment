@@ -98,7 +98,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 @media (max-width: 760px) { .agent-heading { max-width: calc(100% - 16px); } }
 
 /* ---- the column ---- */
-.scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; overflow-anchor: none; }
+.scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+.history, .latest-wrap { overflow-anchor: none; }
+.history { text-align: center; padding-top: 12px; }
+.history:has(button[hidden]) { display: none; }
+.history button { font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
+.history button:disabled { cursor: wait; }
+#history-error { display: block; color: var(--text-secondary); font-size: 12px; }
+.latest-wrap { position: relative; z-index: 2; height: 0; display: flex; justify-content: center; }
+#latest { position: absolute; bottom: 12px; padding: 9px 15px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 3px 12px #0002; font: inherit; font-size: 13px; cursor: pointer; }
 .column { width: min(760px, calc(100vw - 16px)); margin: 0 0 0 max(8px, calc((100vw - 760px) / 2)); padding: 16px 17px 32px; }
 .msg { margin: 20px 0; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -135,11 +143,21 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .msg.notice .why { color: var(--text-secondary); }
 
 /* markdown */
-.md p, .md ul, .md ol, .md pre, .md blockquote, .md .md-table { margin: 0 0 .75rem; }
+.md p, .md ul, .md ol, .md pre, .md-code, .md blockquote, .md .md-table { margin: 0 0 .75rem; }
 .md > :last-child { margin-bottom: 0; }
 .md ul, .md ol { padding-left: 1.35rem; }
 .md li::marker { color: color-mix(in srgb, var(--text-primary), transparent 38%); }
-.md h3, .md h4, .md h5, .md h6 { font-size: 1em; font-weight: 700; margin: 1rem 0 .4rem; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-size: 1em; font-weight: 700; margin: 1rem 0 .4rem; }
+.md h1 { font-size: 1.35em; }
+.md h2 { font-size: 1.15em; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
+.md li > ul, .md li > ol { margin-top: .35rem; margin-bottom: 0; }
+.md-task { list-style: none; }
+.md-task input { margin-left: -1.25rem; accent-color: var(--chat-agent-color); }
+.md-code { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.md-code-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 12px; background: var(--surface-muted); font: 12px var(--font-mono); color: var(--text-secondary); }
+.md-code-copy { font: inherit; border: 0; background: none; color: inherit; cursor: pointer; }
+.md .md-code pre { border: 0; border-radius: 0; margin: 0; }
 .md a { color: var(--accent-blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-blue), transparent 45%); text-underline-offset: 3px; }
 /* "Open" after a link to another fragment's page: beside the chat, in the shell's viewer (chat.js `openBeside`) */
 .md .open-beside { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 6px; padding: 1px 8px 1px 6px; vertical-align: 1px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-subtle); color: var(--text-primary); font: 600 12px/18px var(--font-sans); cursor: pointer; }
@@ -176,6 +194,17 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .attachment-audio { display: flex; align-items: center; gap: 8px; width: min(320px, 100%); min-width: 0; padding: 4px 6px 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); color: var(--text-tertiary); }
 .attachment-audio svg { width: 14px; height: 14px; }
 .attachment-audio audio { display: block; flex: 1; min-width: 0; height: 32px; }
+.attachment { min-width: 0; max-width: 100%; width: fit-content; }
+.attachment-video, .attachment-pdf { width: 440px; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface-muted); }
+.attachment-video video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 360px; object-fit: contain; }
+.attachment-pdf { display: block; height: 420px; }
+.attachment-actions { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 6px 2px; }
+.attachment-actions a, .attachment-actions button { color: var(--text-secondary); }
+.attachment-actions .attachment-name { flex: 1; }
+.attachment-actions button { border: 0; background: none; font: inherit; padding: 0; cursor: pointer; }
+.attachment-actions a:hover, .attachment-actions button:hover { color: var(--text-primary); }
+.message-error { display: flex; align-items: baseline; gap: 10px; max-width: 100%; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.message-retry { border: 0; background: none; color: var(--accent-blue); font: inherit; padding: 2px; }
 
 /* a turn's steps */
 details.tools { margin: 18px 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); overflow: hidden; }

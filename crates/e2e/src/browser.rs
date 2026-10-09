@@ -365,6 +365,13 @@ impl Browser {
         Ok(())
     }
 
+    /// Changes reachability while keeping the page's origin and identity.
+    pub fn offline(&mut self, page: &Page, offline: bool) -> Result<()> {
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.emulateNetworkConditions", json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }), Some(&page.session))?;
+        Ok(())
+    }
+
     /// A cookie the browser holds for `url`, as if a response had set it.
     pub fn set_cookie(&mut self, url: &str, name: &str, value: &str) -> Result<()> {
         let mut params = json!({ "cookies": [cookie(url, name, value)] });

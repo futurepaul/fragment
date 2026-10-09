@@ -224,6 +224,17 @@ impl FragmentCell {
                 }
             }
             json_response(&answer)?
+        } else if let Some(channel) = path.strip_prefix("__channel/") {
+            if req.method() != Method::Get {
+                return Err(CellError::invalid("read a channel with GET"));
+            }
+            if !fragment_proto::valid_channel_name(channel) {
+                return Err(CellError::invalid("invalid channel name"));
+            }
+            let read = self.channel_read_role(channel)?;
+            self.reader(&mut facts, caller, link, read).await?;
+            let (after, before, limit) = crate::channels::page_query(&url)?;
+            json_response(&self.channel_page(channel, after, before, limit)?)?
         } else if path == "__members" {
             // who is in it, for a page (a chat's agents, its lead the first
             // added): viewers and up, as the API's list

@@ -1,141 +1,214 @@
-// Markdown to DOM with textContent only (never innerHTML), so an agent's
-// text can add no markup or script to the page: paragraphs, headings,
-// lists (task lists too), quotes, fenced code, inline code, bold, italic,
-// links (http and https only), bare URLs, pipe tables, and images from this
-// fragment's own files (`__file?path=`) or blobs (`__blob/<sha256>`).
+// Agent markdown to DOM: textContent only, no raw HTML. Covers the GFM
+// agents write without a dependency. Nesting is bounded even in drafts.
+import { copy, feedback } from "./response-actions.js";
 
+const DEPTH_MAX = 32;
+const LIST_ITEM = /^( *)([-*+]|\d+[.)])\s+(.*)$/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const RULE = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
-const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
-
-export function renderMarkdown(text) {
+export function renderMarkdown(text, depth = 0) {
   const root = document.createDocumentFragment();
-  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  if (depth >= DEPTH_MAX) { root.append(el("p", null, String(text))); return root; }
+  const lines = String(text || "").replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   let i = 0;
-  // bounded: each pass consumes at least one line
+  // Each pass consumes at least one line, bounded by the record's text.
   while (i < lines.length) {
     const line = lines[i];
-    if (/^```/.test(line)) {
+    if (!line.trim()) { i++; continue; }
+    const fence = line.match(FENCE);
+    if (fence) {
       const code = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
-      i++;
-      const pre = el("pre");
-      pre.append(el("code", null, code.join("\n")));
-      root.append(pre);
+      while (i < lines.length) {
+        const close = lines[i].match(FENCE);
+        if (close && close[1][0] === fence[1][0] && close[1].length >= fence[1].length && !close[2].trim()) { i++; break; }
+        code.push(lines[i++]);
+      }
+      root.append(codeBlock(code.join("\n"), fence[2].trim().match(/^[\w+#.-]{1,40}/)?.[0] ?? ""));
       continue;
     }
-    if (!line.trim()) {
-      i++;
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.*)$/);
     if (heading) {
-      root.append(inline(el(`h${Math.min(heading[1].length + 2, 6)}`), heading[2]));
+      root.append(inline(el(`h${heading[1].length}`), heading[2].replace(/\s+#+\s*$/, ""), depth));
       i++;
       continue;
     }
-    if (/^\s*>/.test(line)) {
+    if (RULE.test(line)) { root.append(el("hr")); i++; continue; }
+    if (/^ {0,3}>/.test(line)) {
       const quote = [];
-      while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*>\s?/, ""));
-      const bq = el("blockquote");
-      bq.append(renderMarkdown(quote.join("\n")));
-      root.append(bq);
+      while (i < lines.length && /^ {0,3}>/.test(lines[i])) quote.push(lines[i++].replace(/^ {0,3}> ?/, ""));
+      const node = el("blockquote");
+      node.append(renderMarkdown(quote.join("\n"), depth + 1));
+      root.append(node);
       continue;
     }
-    if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1] || "")) {
+    if (isTable(lines, i)) {
+      const header = cells(line), alignment = cells(lines[i + 1]);
+      i += 2;
       const rows = [];
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
-      root.append(table(rows));
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) rows.push(cells(lines[i++]));
+      root.append(table(header, alignment, rows, depth));
       continue;
     }
-    const listMatch = line.match(LIST_ITEM);
-    if (listMatch) {
-      const list = el(/\d/.test(listMatch[1]) ? "ol" : "ul");
-      while (i < lines.length && LIST_ITEM.test(lines[i])) {
-        const item = lines[i++].replace(LIST_ITEM, "");
+    const item = line.match(LIST_ITEM);
+    if (item) {
+      const ordered = /^\d/.test(item[2]), indent = item[1].length;
+      const list = el(ordered ? "ol" : "ul");
+      if (ordered) list.start = Number.parseInt(item[2], 10);
+      while (i < lines.length) {
+        const match = lines[i].match(LIST_ITEM);
+        if (!match || match[1].length !== indent || /^\d/.test(match[2]) !== ordered) break;
+        const contentIndent = lines[i].length - match[3].length;
+        const content = [match[3]];
+        i++;
+        while (i < lines.length) {
+          if (!lines[i].trim()) {
+            const next = lines[i + 1];
+            if (next && next.match(/^ */)[0].length > indent) { content.push(""); i++; continue; }
+            break;
+          }
+          const spaces = lines[i].match(/^ */)[0].length;
+          if (spaces <= indent) break;
+          content.push(lines[i++].slice(Math.min(spaces, contentIndent)));
+        }
         const li = el("li");
-        const task = item.match(/^\[([ xX])\]\s+(.*)$/);
+        const task = content[0].match(/^\[([ xX])\]\s+(.*)$/);
         if (task) {
           const box = el("input");
           Object.assign(box, { type: "checkbox", checked: task[1] !== " ", disabled: true });
+          box.setAttribute("aria-label", task[1] === " " ? "Incomplete task" : "Completed task");
+          li.className = "md-task";
           li.append(box, " ");
-          inline(li, task[2]);
-        } else inline(li, item);
+          content[0] = task[2];
+        }
+        const rendered = renderMarkdown(content.join("\n"), depth + 1);
+        // Tight lists keep the first paragraph inline with their marker.
+        if (rendered.firstChild?.nodeName === "P") {
+          const first = rendered.firstChild;
+          li.append(...first.childNodes);
+          first.remove();
+        }
+        li.append(rendered);
         list.append(li);
       }
       root.append(list);
       continue;
     }
-    const para = [];
-    while (i < lines.length && lines[i].trim() && !/^(```|#{1,6}\s|\s*>|\s*([-*+]|\d+[.)])\s+)/.test(lines[i])) para.push(lines[i++]);
-    root.append(inline(el("p"), para.join("\n")));
+    const paragraph = [lines[i++]];
+    while (i < lines.length && lines[i].trim() && !FENCE.test(lines[i]) && !RULE.test(lines[i]) && !/^ {0,3}(#{1,6}\s|>)/.test(lines[i]) && !LIST_ITEM.test(lines[i]) && !isTable(lines, i)) paragraph.push(lines[i++]);
+    root.append(inline(el("p"), paragraph.join("\n"), depth));
   }
   return root;
 }
 
-function table(rows) {
-  const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-  const wrap = el("div", "md-table");
-  const t = el("table");
-  const head = el("tr");
-  for (const c of cells(rows[0])) head.append(inline(el("th"), c));
-  t.append(head);
-  for (const row of rows.slice(2)) {
-    const tr = el("tr");
-    for (const c of cells(row)) tr.append(inline(el("td"), c));
-    t.append(tr);
-  }
-  wrap.append(t);
+function codeBlock(text, language) {
+  const wrap = el("div", "md-code"), header = el("div", "md-code-head");
+  const button = el("button", "md-code-copy", "Copy");
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy code");
+  button.onclick = () => feedback(button, () => copy(text));
+  header.append(el("span", "md-language", language || "Code"), button);
+  const pre = el("pre"), code = el("code", null, text);
+  if (language) code.dataset.language = language;
+  pre.append(code);
+  wrap.append(header, pre);
   return wrap;
 }
 
-// Inline spans: `code`, **bold**, *italic* or _italic_, an image of this
-// fragment's own, [text](url), and bare URLs.
-const INLINE =
-  /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(!\[([^\]]*)\]\(((?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+// Escaped pipes and pipes in code spans are cell text, not delimiters.
+function cells(row) {
+  row = row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+  const result = [];
+  let part = "", ticks = 0;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i];
+    if (ch === "\\" && row[i + 1] === "|") { part += "|"; i++; }
+    else if (ch === "`") {
+      let count = 1;
+      while (row[i + 1] === "`") { count++; i++; }
+      ticks = ticks === count ? 0 : ticks || count;
+      part += "`".repeat(count);
+    } else if (ch === "|" && !ticks) { result.push(part.trim()); part = ""; }
+    else part += ch;
+  }
+  result.push(part.trim());
+  return result;
+}
+function isTable(lines, i) {
+  if (!lines[i]?.includes("|") || !lines[i + 1]) return false;
+  const separators = cells(lines[i + 1]);
+  return separators.length === cells(lines[i]).length && separators.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+function table(header, alignment, rows, depth) {
+  const wrap = el("div", "md-table");
+  wrap.tabIndex = 0;
+  wrap.setAttribute("role", "region");
+  wrap.setAttribute("aria-label", "Table");
+  const node = el("table");
+  const makeRow = (row, tag) => {
+    const tr = el("tr");
+    for (let i = 0; i < header.length; i++) {
+      const cell = inline(el(tag), row[i] ?? "", depth);
+      if (alignment[i].endsWith(":")) cell.style.textAlign = alignment[i].startsWith(":") ? "center" : "right";
+      tr.append(cell);
+    }
+    return tr;
+  };
+  const head = el("thead"), body = el("tbody");
+  head.append(makeRow(header, "th"));
+  for (const row of rows) body.append(makeRow(row, "td"));
+  node.append(head, body);
+  wrap.append(node);
+  return wrap;
+}
 
-/// Appends `text`'s inline spans to `parent`; returns `parent`.
-export function inline(parent, text) {
+const INLINE = /(?<escape>\\[\\`*{}\[\]()#+.!_>~|\-])|(?<code>(?<ticks>`+)([^`]|(?!\k<ticks>)`)+\k<ticks>)|(?<strong>\*\*[^*]+\*\*|__[^_]+__)|(?<strike>~~[^~]+~~)|(?<em>\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(?<image>!\[(?<alt>[^\]]*)\]\((?<src>(?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(?<link>\[(?<label>[^\]]+)\]\((?<href>https?:\/\/[^)\s]+|mailto:[^)\s]+)\))|<(?<auto>https?:\/\/[^<>\s]+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})>|(?<html><[^>\n]*>)|(?<url>https?:\/\/[^\s<>()]+[^\s<>().,;:!?'\"])|(?<email>\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b)/g;
+
+export function inline(parent, text, depth = 0) {
+  text = String(text);
+  if (depth >= DEPTH_MAX) { appendText(parent, text); return parent; }
   let last = 0;
-  for (const m of text.matchAll(INLINE)) {
-    if (m.index > last) appendText(parent, text.slice(last, m.index));
-    const [whole] = m;
-    if (m[1]) parent.append(el("code", null, whole.slice(1, -1)));
-    else if (m[2]) parent.append(inline(el("strong"), whole.slice(2, -2)));
-    else if (m[3]) parent.append(inline(el("em"), whole.slice(1, -1)));
-    else if (m[4]) parent.append(image(m[6], m[5]));
-    else if (m[7]) parent.append(link(m[8], whole.slice(1, whole.indexOf("]("))));
-    else parent.append(link(whole, whole));
-    last = m.index + whole.length;
+  for (const match of text.matchAll(INLINE)) {
+    if (match.index > last) appendText(parent, text.slice(last, match.index));
+    const g = match.groups;
+    if (g.escape) parent.append(g.escape.slice(1));
+    else if (g.code) parent.append(el("code", null, g.code.slice(g.ticks.length, -g.ticks.length).replace(/\n/g, " ")));
+    else if (g.strong) parent.append(inline(el("strong"), g.strong.slice(2, -2), depth + 1));
+    else if (g.strike) parent.append(inline(el("del"), g.strike.slice(2, -2), depth + 1));
+    else if (g.em) parent.append(inline(el("em"), g.em.slice(1, -1), depth + 1));
+    else if (g.image) parent.append(image(g.src, g.alt));
+    else if (g.link) parent.append(link(g.href, g.label));
+    else if (g.html) parent.append(g.html);
+    else {
+      const label = g.auto ?? g.url ?? g.email;
+      parent.append(link(/^https?:/.test(label) ? label : `mailto:${label}`, label));
+    }
+    last = match.index + match[0].length;
   }
   if (last < text.length) appendText(parent, text.slice(last));
   return parent;
 }
-
 function appendText(parent, text) {
   text.split("\n").forEach((part, n) => {
     if (n) parent.append(el("br"));
     parent.append(part);
   });
 }
-
 export function image(src, alt) {
   const a = link(src, "");
   a.className = "shot-link";
   const img = el("img", "shot");
-  img.src = src;
-  img.alt = alt;
-  img.loading = "lazy";
+  Object.assign(img, { src, alt, loading: "lazy" });
   a.append(img);
   return a;
 }
-
 export function link(href, label) {
   const a = el("a", null, label);
   a.href = href;

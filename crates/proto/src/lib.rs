@@ -1157,7 +1157,8 @@ pub struct Posted {
 pub const POST_KIND: &str = "message";
 
 /// `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):
-/// a page of records after `after`, and the cursor after the page.
+/// A page in ascending seq order. `next` is its last seq for a forward
+/// read, its first seq for a backwards read, or the input cursor if empty.
 // no PartialEq: a record's body is raw JSON text (compare the JSON instead)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPage {

@@ -38,6 +38,24 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Both channel doors use the same cursors. Backwards reads never accept
+/// `after` too: silently choosing one could skip a page of history.
+pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)> {
+    let get = |key: &str| url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned());
+    let after = get("after");
+    let before = get("before");
+    if after.is_some() && before.is_some() {
+        return Err(CellError::invalid("choose after or before, not both"));
+    }
+    let cursor = |value: String| -> CellResult<i64> {
+        value.parse::<i64>().ok().filter(|n| *n >= 0).ok_or_else(|| CellError::invalid("a channel cursor must be a nonnegative integer"))
+    };
+    let after = after.map(cursor).transpose()?.unwrap_or(0);
+    let before = before.map(cursor).transpose()?;
+    let limit = get("limit").map(|v| v.parse::<usize>().map_err(|_| CellError::invalid("limit must be an integer"))).transpose()?.unwrap_or(limits::CHANNEL_PAGE);
+    Ok((after, before, limit))
+}
+
 use fragment_core::access::Purpose;
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
@@ -476,17 +494,39 @@ impl FragmentCell {
         json_response(&json!({ "channels": out }))
     }
 
-    /// `GET /api/f/<name>/channels/<channel>?after=&limit=`
-    pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, limit: usize) -> CellResult<Response> {
+    /// A bounded page before an exclusive cursor, returned in display order.
+    pub(crate) fn read_channel_before(&self, channel: &str, before: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
+        let rows: Vec<RecordRow> = self.typed(
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+            vec![channel.into(), SqlStorageValue::Integer(before), SqlStorageValue::Integer(limit.clamp(1, limits::CHANNEL_PAGE) as i64)],
+        )?;
+        let mut records: Vec<ChannelRecord> = rows.into_iter().map(RecordRow::record).collect::<CellResult<_>>()?;
+        records.reverse();
+        Ok(records)
+    }
+
+    /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
+    pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.require(caller, false, Role::Public)?;
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
         let read = self.channel_read_role(channel)?;
         self.require(caller, false, read)?;
-        let records = self.read_channel(channel, after, limit)?;
-        let next = records.last().map_or(after, |r| r.seq);
-        json_response(&ChannelPage { channel: channel.to_string(), records, next })
+        json_response(&self.channel_page(channel, after, before, limit)?)
+    }
+
+    pub(crate) fn channel_page(&self, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<ChannelPage> {
+        let (records, next) = if let Some(before) = before {
+            let records = self.read_channel_before(channel, before, limit)?;
+            let next = records.first().map_or(before, |r| r.seq);
+            (records, next)
+        } else {
+            let records = self.read_channel(channel, after, limit)?;
+            let next = records.last().map_or(after, |r| r.seq);
+            (records, next)
+        };
+        Ok(ChannelPage { channel: channel.to_string(), records, next })
     }
 
     /// Waits for, then holds, one ledger id.

@@ -78,8 +78,47 @@ export function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
 /// returns that record and appends nothing (another body under it throws,
 /// 409). A post spends a public call when the page holds only the public
 /// role, as a call does.
-export function post(channel, body, { id = crypto.randomUUID() } = {}) {
-  return request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
+export async function post(channel, body, { id = crypto.randomUUID() } = {}) {
+  reportPost({ channel, id, body, status: "posting" });
+  try {
+    const record = await request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
+    reportPost({ channel, id, body, status: "posted", record });
+    return record;
+  } catch (error) {
+    reportPost({ channel, id, body, status: "failed", error });
+    throw error;
+  }
+}
+
+const postHandlers = new Set();
+function reportPost(event) {
+  // An observer's rendering error must never turn a successful write into
+  // a failed post, or prevent the caller seeing the transport's error.
+  for (const handler of postHandlers) {
+    try { handler(event); } catch (error) { console.error(error); }
+  }
+}
+
+/// Observes this page's posts: {channel, id, body, status, record?, error?}.
+/// Retry with the same body and id to replay a write whose answer was lost.
+export function observePosts(handler) {
+  postHandlers.add(handler);
+  return () => postHandlers.delete(handler);
+}
+
+/// Reads one page without changing a live subscription's cursor. With
+/// `before`, the nearest older records come in ascending seq order; pass
+/// the returned `next` as `before` for the next older page. Otherwise read
+/// forward after `after` (default 0). A page holds at most 1000 records.
+export async function read(channel, { after, before, limit = 1000 } = {}) {
+  if (after !== undefined && before !== undefined) throw new TypeError("choose after or before, not both");
+  const url = new URL(`__channel/${encodeURIComponent(channel)}`, base);
+  url.searchParams.set(before !== undefined ? "before" : "after", before ?? after ?? 0);
+  url.searchParams.set("limit", limit);
+  const response = await fetch(url, { credentials: "same-origin" });
+  const page = await response.json();
+  if (!response.ok) throw new FragmentError(response.status, page);
+  return page;
 }
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -193,6 +232,7 @@ function connect() {
         s.last = null;
         // not live yet: the next page, from the cursor
         if (m.more) send(subscribeFrame(m.channel, s));
+        else for (const h of s.ready) h({ next: s.after });
       }
     } else if (m.type === "draft") {
       const s = subs.get(m.channel);
@@ -283,19 +323,21 @@ export function live(op, input, onResult, onError) {
 /// hears the channel's drafts while it is live: `{principal, turn, text,
 /// at}`, each the whole text so far (`text: null` once its writer stopped);
 /// the record its writer then posts with the same `turn` replaces it.
-export function subscribe(channel, onRecord, { after = 0, last = null, onDraft = null } = {}) {
+export function subscribe(channel, onRecord, { after = 0, last = null, onDraft = null, onReady = null } = {}) {
   let s = subs.get(channel);
   if (!s) {
-    s = { after, last, handlers: new Set(), drafts: new Set() };
+    s = { after, last, handlers: new Set(), drafts: new Set(), ready: new Set() };
     subs.set(channel, s);
     send(subscribeFrame(channel, s));
   }
   s.handlers.add(onRecord);
   if (onDraft) s.drafts.add(onDraft);
+  if (onReady) s.ready.add(onReady);
   connect();
   return () => {
     s.handlers.delete(onRecord);
     if (onDraft) s.drafts.delete(onDraft);
+    if (onReady) s.ready.delete(onReady);
     if (s.handlers.size === 0) {
       subs.delete(channel);
       send({ type: "unsubscribe", channel });

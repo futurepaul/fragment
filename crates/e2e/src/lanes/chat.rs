@@ -41,6 +41,9 @@ use fragment_nip98::Keys;
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
+#[path = "chat_polish.rs"]
+mod polish;
+
 /// A start of the stub and its bridge's first follow (as the computers lane's).
 const WAKE: Duration = Duration::from_secs(90);
 /// A turn of the scripted agent, once awake, as a page sees it.
@@ -352,7 +355,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a reply's file: a chip that downloads it
     say(&mut chrome, "draw me something")?;
-    let chip = "[...document.querySelectorAll('.msg.agent a.attachment-chip')].find((a) => a.textContent.includes('drawing.txt'))";
+    let chip = "[...document.querySelectorAll('.msg.agent a.attachment-name')].find((a) => a.textContent.includes('drawing.txt'))";
     s.ok("a reply's file shows as a chip", shows(&mut chrome, &page, chip), "");
     // no chip is no text: a FAIL below, the checks after it still made
     let drawing = chrome.eval(&page, &format!("(() => {{ const a = {chip}; return a ? fetch(a.getAttribute('href')).then((r) => r.text()) : null; }})()"))?;
@@ -476,6 +479,15 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "visibility": looked, "received": s.push.received(&owner_push), "last": last["output"] }),
     );
 
+    // Native sharing is absent in headless Chrome; only the clipboard
+    // boundary is captured so the actual reply button and fallback run.
+    chrome.eval(&page, "(() => { Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }); window.__copied = null; navigator.clipboard.writeText = async (text) => { window.__copied = text; }; const b = document.querySelector('.msg.agent .share'); window.__shareText = b.closest('.msg').querySelector('.md').textContent; b.click(); return true; })()")?;
+    s.ok("sharing a reply falls back to copying its words in headless Chrome", shows(&mut chrome, &page, "typeof window.__copied === 'string' && window.__copied.length > 0 && document.querySelector('.msg.agent .share').getAttribute('aria-label') === 'Copied'"), chrome.eval(&page, "window.__copied")?);
+    let cancelled = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { window.__copied = null; Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new DOMException('Cancelled', 'AbortError'); } }); const result = await a.share({text: 'cancelled', title: 'Chat'}); return result === null && window.__copied === null; })")?;
+    s.ok("cancelling a native share sheet is quiet and copies nothing", cancelled == true, "");
+    let failed = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new Error('Unavailable'); } }); const result = await a.share({text: 'fallback', title: 'Chat'}); delete navigator.share; return result === 'Copied' && window.__copied === 'fallback'; })")?;
+    s.ok("a failed native share falls back to copy too", failed == true, "");
+
     // away from the chat (its page closed), a reply reaches each of its people once
     chrome.close(page)?;
     let member_push = s.name("chat-member-push");
@@ -512,6 +524,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &by_hand,
     );
 
+    polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())

@@ -44,6 +44,8 @@
 import * as fragment from "./__fragment.js";
 import { svg } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
+import { renderAttachments as renderMessageAttachments } from "./media.js";
+import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 
 // A message's text and files (docs/chat-records.md).
@@ -54,9 +56,9 @@ const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // for their turns (each turn writes two records or more there).
 const CHAT_LAST = 400;
 const WORK_LAST = 1000;
-// After a message of one's own, a working line shows until the agent's
-// turn starts (or this long passes: an agent may not be listening).
-const PENDING_MS = 15000;
+// After a message of one's own, wait for the agent's turn. Past this long
+// the line says plainly that no reply has started; a wake can be slow.
+const PENDING_MS = 90000;
 // Typing shows to others until this long after the last keystroke.
 const TYPING_MS = 4000;
 // A draft no word came for in this long is let go (its writer went away).
@@ -87,9 +89,7 @@ const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const SUGGESTIONS = ["Build something", "Explore an idea", "Make a plan"];
 const SHA256 = /^[0-9a-f]{64}$/;
-// The images `__blob` serves as themselves (passive media), shown inline.
-const SHOWN_IMAGE = /^image\/(png|jpeg|webp|gif)$/;
-// The audio it serves as itself, shown as a player (a voice memo).
+// The recorder validates its finished clip against the cell's audio types.
 const SHOWN_AUDIO = /^audio\/(webm|ogg|mp4|mpeg|wav)$/;
 // A voice memo: the recorder's audio, asked for in this order (Chrome and
 // Firefox record Opus, Safari AAC), at a voice's bitrate, for at most this
@@ -196,7 +196,8 @@ export function mount(root) {
   root.classList.add("fragment-chat");
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
-    <div class="scroll" id="scroll"><div class="column" id="messages"></div></div>
+    <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
+    <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
     <div class="composer-wrap">
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
       <div class="here" id="here" hidden></div>
@@ -240,13 +241,84 @@ export function mount(root) {
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
+    failed: new Map(), // post id -> the message and its transport error
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
   };
+  fragment.observePosts(({ channel, id, body, status, record, error }) => {
+    if (channel !== "chat" || !body || body.kind && body.kind !== "message") return;
+    if (status === "failed") {
+      state.failed.set(id, { id, body, seq: `failed:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal, text: body.text ?? "", to: Array.isArray(body.to) ? body.to : [], replyTo: Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null, attachments: attachmentsOf(body), error: error.message, retrying: false });
+    } else if (status === "posting") {
+      const message = state.failed.get(id);
+      if (message) message.retrying = true;
+    } else {
+      const retried = state.failed.delete(id);
+      onChat(record);
+      if (retried) {
+        $("banner").hidden = true;
+        expectTurn(record, body.to ?? [], body.text ?? "");
+      }
+    }
+    schedule();
+  });
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
-  // a record's arrival: ties of `at` across the two channels keep it
-  let arrivals = 0;
+  // Each channel's seq keeps history ordered even when a page arrives
+  // backwards and several records have the same timestamp.
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, anchor: null };
+  const workSeen = new Set();
+  const workLatest = new Map(); // each progress field's newest seq
+  function remember(channel, record) {
+    const first = history.first[channel];
+    history.first[channel] = first === null ? record.seq : Math.min(first, record.seq);
+    if (channel === "work") history.workAt = Math.min(history.workAt, record.at);
+  }
+
+  async function historyReady() {
+    if (history.first.chat === null) return;
+    try {
+      const page = await fragment.read("chat", { before: history.first.chat, limit: 1 });
+      $("earlier").hidden = !page.records.length;
+    } catch {
+      // A failed availability check must still let the reader try.
+      $("earlier").hidden = false;
+    }
+  }
+  async function earlierWork() {
+    const oldest = Math.min(...state.chat.map((m) => m.at));
+    // Both postable channels retain at most 10,000 records. Include every
+    // work record tied at the boundary time before considering it caught up.
+    for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
+      const page = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
+      for (const record of page.records) onWork(record);
+      history.workDone = page.records.length < WORK_LAST;
+    }
+  }
+  $("earlier").onclick = async () => {
+    if (history.loading) return;
+    history.anchor = visibleAnchor();
+    history.loading = true;
+    const button = $("earlier");
+    button.disabled = true;
+    button.textContent = "Loading earlier messages…";
+    $("history-error").textContent = "";
+    stuck = false;
+    try {
+      const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
+      for (const record of page.records) onChat(record, true);
+      button.hidden = page.records.length < CHAT_LAST;
+      await earlierWork();
+    } catch (err) {
+      button.hidden = false;
+      $("history-error").textContent = `Could not load earlier messages: ${err.message}. Try again.`;
+    } finally {
+      history.loading = false;
+      button.disabled = false;
+      button.textContent = "Load earlier messages";
+      schedule();
+    }
+  };
 
   // ---- who: names and pictures from the fragment (`__people`), asked in
   // batches; an agent by its name, a person by email ----
@@ -391,14 +463,15 @@ export function mount(root) {
   // a turn waiting on a person: its open card says so, not a working line
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
 
-  function onChat(record) {
+  function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
     state.seen.add(record.seq);
+    remember("chat", record);
     let body = record.body;
     // a bare string is a message with that text
     if (typeof body === "string") body = { text: body };
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
-    const n = ++arrivals;
+    const n = record.seq;
     if (body.kind === "prompt_response") {
       // the first answer wins (the agent closes the card with it)
       if (typeof body.prompt === "string" && !state.answers.has(body.prompt)) state.answers.set(body.prompt, { option: body.option, by: record.principal });
@@ -409,6 +482,8 @@ export function mount(root) {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
       state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null });
+      if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
+      latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
       return schedule();
     }
@@ -417,6 +492,8 @@ export function mount(root) {
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
     state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo });
+    if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
+    latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
       const t = turnOf(turn);
       if (t.agent === null || t.agent === record.principal) touch(t, record.at, n);
@@ -429,10 +506,16 @@ export function mount(root) {
   }
 
   function onWork(record) {
+    if (workSeen.has(record.seq)) return;
+    workSeen.add(record.seq);
+    remember("work", record);
     const b = record.body;
     if (b?.kind === "commands") return onMenu(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
-    const n = ++arrivals;
+    const field = `${b.turn}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
+    if ((workLatest.get(field) ?? 0) > record.seq) return;
+    workLatest.set(field, record.seq);
+    const n = record.seq;
     const t = turnOf(b.turn);
     t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
     touch(t, record.at, n);
@@ -516,8 +599,8 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: "working", t });
     }
-    if (state.pending && now - state.pending.since > PENDING_MS) state.pending = null;
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
+    for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
     items.sort((a, b) => a.at - b.at || a.n - b.n);
     const out = [];
     for (const it of items) {
@@ -570,6 +653,7 @@ export function mount(root) {
 
   function render() {
     const col = $("messages");
+    const { node: anchor, top } = history.anchor ?? (!stuck ? visibleAnchor() : {});
     const used = new Set();
     const shown = [];
     for (const it of timeline()) {
@@ -593,6 +677,9 @@ export function mount(root) {
     renderChrome();
     renderHere();
     if (stuck) toEnd();
+    else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+    if (!history.loading) history.anchor = null;
+    showLatest();
   }
 
   // The chat's color (its lead's), its name, Stop, and the placeholder.
@@ -631,7 +718,7 @@ export function mount(root) {
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -640,7 +727,7 @@ export function mount(root) {
   /// one that is not asking them something (its last word before the
   /// message a reply of its own: the message is likely its answer).
   function queued(m) {
-    if (m.command) return false;
+    if (m.command || m.error) return false;
     const turns = [...state.turns.values()];
     if (turns.some((t) => t.cause?.channel === "chat" && t.cause?.seq === m.seq)) return false;
     const named = chatAgents().filter((a) => mentions(m.text).includes(handleOf(a)));
@@ -648,8 +735,10 @@ export function mount(root) {
     return turns.some((t) => {
       if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
       if (t.asker !== m.principal) return true;
-      const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.n < m.n).map((r) => r.n));
-      const did = Math.max(-1, ...[...t.steps.values(), ...t.prompts.values()].filter((s) => s.n < m.n).map((s) => s.n));
+      // Chat and work have independent sequence cursors. Compare their
+      // times so loading older work cannot change whether a reply waits.
+      const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.seq < m.seq).map((r) => r.at));
+      const did = Math.max(-1, ...[...t.steps.values(), ...t.prompts.values()].filter((s) => s.at <= m.at).map((s) => s.at));
       return !(said >= 0 && said > did);
     });
   }
@@ -717,7 +806,7 @@ export function mount(root) {
       wrap.append(bubble);
     }
     const actions = el("div", "actions");
-    if (canPost()) actions.append(replyButton(m));
+    if (canPost() && !m.error) actions.append(replyButton(m));
     if (waits) {
       // its agent answers it after the turn it is in now
       const label = el("span", "queued");
@@ -727,6 +816,19 @@ export function mount(root) {
     }
     actions.append(el("span", "time", time(m.at)));
     wrap.append(actions);
+    if (m.error) {
+      const error = el("div", "message-error");
+      error.setAttribute("role", "status");
+      const retry = el("button", "message-retry", m.retrying ? "Retrying…" : "Retry");
+      retry.type = "button";
+      retry.disabled = m.retrying;
+      retry.onclick = async () => {
+        try { await fragment.post("chat", m.body, { id: m.id }); }
+        catch { /* the post observer updates this message's error */ }
+      };
+      error.append(el("span", null, `Could not post: ${m.error}`), retry);
+      wrap.append(error);
+    }
     return wrap;
   }
 
@@ -743,13 +845,22 @@ export function mount(root) {
     const copy = el("button", "icon-button copy");
     copy.type = "button";
     copy.title = "Copy";
+    copy.setAttribute("aria-label", "Copy reply");
     copy.innerHTML = svg("copy");
     copy.onclick = () => copyText(m.text, copy);
+    const shareButton = el("button", "icon-button share");
+    shareButton.type = "button";
+    shareButton.title = "Share reply";
+    shareButton.setAttribute("aria-label", "Share reply");
+    shareButton.innerHTML = svg("share");
+    shareButton.onclick = () => feedback(shareButton, () => share({ text: m.text, title: document.title }));
     if (canPost()) actions.append(replyButton(m));
-    actions.append(copy, el("span", "time", time(m.at)));
+    actions.append(copy, shareButton, el("span", "time", time(m.at)));
     wrap.append(actions);
     return wrap;
   }
+
+  const attachmentsNode = renderMessageAttachments;
 
   // A link to another fragment's page (an app an agent made) gets "Open":
   // the shell that frames the chat opens it beside the chat, in its viewer
@@ -767,47 +878,6 @@ export function mount(root) {
       open.onclick = () => window.parent.postMessage({ fragment: "open", url: a.href }, "*");
       a.after(open);
     }
-  }
-
-  // Files: an image the fragment serves as one shows, audio (a voice memo)
-  // plays; anything else is a chip that downloads it.
-  function attachmentsNode(list) {
-    const files = el("div", "message-attachments");
-    for (const a of list) {
-      const href = `./__blob/${a.sha256}`;
-      if (SHOWN_AUDIO.test(essence(a.type))) {
-        const memo = el("div", "attachment-audio");
-        memo.title = a.name || "a voice memo";
-        memo.innerHTML = svg("mic");
-        const audio = el("audio");
-        audio.controls = true;
-        audio.preload = "metadata";
-        audio.src = href;
-        audio.setAttribute("aria-label", a.name || "a voice memo");
-        memo.append(audio);
-        files.append(memo);
-      } else if (SHOWN_IMAGE.test(a.type)) {
-        const link = el("a", "attachment-image");
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.title = a.name;
-        const img = el("img");
-        img.src = href;
-        img.alt = a.name || "an image";
-        img.loading = "lazy";
-        link.append(img);
-        files.append(link);
-      } else {
-        const chip = el("a", "attachment-chip");
-        chip.href = href;
-        chip.download = a.name || a.sha256.slice(0, 12);
-        chip.innerHTML = svg("file");
-        chip.append(el("span", "attachment-name", a.name || "a file"), el("span", "attachment-size", size(a.size)));
-        files.append(chip);
-      }
-    }
-    return files;
   }
 
   // A turn's steps, one card: open while it works ("Working"), folded once
@@ -989,7 +1059,17 @@ export function mount(root) {
   function workingNode(t) {
     const agent = t ? t.agent : state.pending?.target;
     const forWhom = t?.asker && t.asker !== state.me?.principal ? ` for ${who(t.asker).name}` : "";
-    const said = `${agent ? who(agent).name : "The agent"} is working${forWhom}`;
+    const name = agent ? who(agent).name : "The agent";
+    const phase = inRoster(agent)?.phase;
+    const present = state.here.some((p) => p.principal === agent);
+    const starting = phase === "starting" || phase === "asleep";
+    const late = !t && !starting && state.pending && Date.now() - state.pending.since >= PENDING_MS;
+    const said = t ? `${name} is working${forWhom}`
+      : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
+      : late ? `${name} has not started a reply yet.`
+      : starting ? `${name} is starting up…`
+      : phase === "sleeping" ? `${name}'s computer is going to sleep…`
+      : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.id : "pending"}`;
     return [
       key,
@@ -998,7 +1078,8 @@ export function mount(root) {
         const hint = el("span", "hint");
         const dots = el("span", "dots");
         dots.append(el("i"), el("i"), el("i"));
-        hint.append(dots, said);
+        if (!late && phase !== "wont_wake") hint.append(dots);
+        hint.append(said);
         line.append(hint);
         return line;
       }),
@@ -1104,16 +1185,39 @@ export function mount(root) {
   // loads) moves nothing back, so it never does ----
   let stuck = true;
   let lastTop = 0;
+  let caughtUp = false;
+  let latestSeq = 0;
+  let newMessages = 0;
+  function visibleAnchor() {
+    const top = $("scroll").getBoundingClientRect().top;
+    const node = [...$("messages").children].find((item) => item.getBoundingClientRect().bottom > top);
+    return { node, top: node?.getBoundingClientRect().top };
+  }
+  // A reader who moves while an older page is in flight chooses a new
+  // position. Automatic scroll events from restoring the anchor do not.
+  for (const event of ["wheel", "touchmove", "keydown"]) $("scroll").addEventListener(event, () => { history.anchor = null; }, { passive: true });
+  function showLatest() {
+    $("latest").hidden = stuck;
+    $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+  }
   const toEnd = () => {
     const s = $("scroll");
     s.scrollTop = s.scrollHeight;
     lastTop = s.scrollTop;
+    newMessages = 0;
+    showLatest();
+  };
+  $("latest").onclick = () => {
+    stuck = true;
+    toEnd();
   };
   $("scroll").addEventListener("scroll", () => {
     const s = $("scroll");
     if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
     lastTop = s.scrollTop;
+    if (stuck) newMessages = 0;
+    showLatest();
   });
 
   // ---- the composer's edge: a subtle glow that follows the cursor near it ----
@@ -1484,7 +1588,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name) }));
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
       schedule();
       if (picking) updateMentions();
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
@@ -1769,7 +1873,7 @@ export function mount(root) {
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft });
+  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); } });
   readMembers();
   fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
@@ -1780,7 +1884,11 @@ export function mount(root) {
     state.me = hello;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
-    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST });
+    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
+      history.workReady = true;
+      try { await earlierWork(); }
+      catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
+    } });
     const note = $("note");
     note.replaceChildren();
     if (!canPost()) {

@@ -1624,21 +1624,21 @@ fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
     let closed = b.until(page, &format!("!{pane}"), wait);
     let link = api.site_url(app, "?from=chat");
-    let said = format!("Here it is: {link} and the platform: {}/settings", api.base);
+    let said = format!("Here it is: {link}, or [open the app]({link}) and the platform: {}/settings", api.base);
     let sent = say_in(s, b, page, &host, &said);
     let answered = s.eventually(agent_wait, || replies(api, me.session, &host, &ids[0], &link) == 1);
     let offers = format!(
         "(() => {{ const m = [...document.querySelectorAll('.msg.agent')].filter((m) => m.innerText.includes({l})).pop(); if (!m) return null; \
-         return [...m.querySelectorAll('.md a')].map((a) => ({{ href: a.href, open: a.nextElementSibling?.classList.contains('open-beside') ?? false }})); }})()",
+         return [...m.querySelectorAll('.md a')].filter((a) => ['http:', 'https:'].includes(a.protocol)).map((a) => ({{ href: a.href, open: a.nextElementSibling?.classList.contains('open-beside') ?? false }})); }})()",
         l = js(&link)
     );
     let mut links = Value::Null;
     let _ = s.eventually(wait, || {
         links = b.eval_in_frame(page, &host, &offers).unwrap_or(Value::Null);
-        links.as_array().is_some_and(|l| l.len() == 2)
+        links.as_array().is_some_and(|l| l.len() == 3)
     });
-    let want = json!([{ "href": link, "open": true }, { "href": format!("{}/settings", api.base), "open": false }]);
-    s.ok("a link in an agent's reply to another fragment's page is offered Open; one to the platform is not", closed && sent && answered && links == want, json!({ "links": links, "want": want }));
+    let want = json!([{ "href": link, "open": true }, { "href": link, "open": true }, { "href": format!("{}/settings", api.base), "open": false }]);
+    s.ok("autolinks and markdown links in an agent's reply are offered Open for fragment pages; the platform is not", closed && sent && answered && links == want, json!({ "links": links, "want": want }));
     let _ = b.screenshot(page, &shots.join("desktop-open-offered.png"));
     let clicked = b.eval_in_frame(
         page,
