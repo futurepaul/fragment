@@ -29,7 +29,7 @@ fragment guide             # the whole manual: read it before your first app
 ```
 
 - What you make is your owner's: `fragment create garden` makes
-  `garden-<suffix>` (the platform adds the suffix), owned by them, with
+  `garden--<suffix>` (the platform adds the suffix), owned by them, with
   you as its editor. A bare label in any command names the one of your
   owner's with it (`fragment status garden`).
 - Its hosting and its AI bill your owner, as do your own model calls.
@@ -43,8 +43,8 @@ an aesthetic direction the human has not seen or approved.
 For a new app or substantial redesign:
 
 1. Infer a credible initial direction from the prompt and existing brand context.
-   When using `impeccable-finite`, form its compact direction card and carry that
-   premise into the draft. Ask a question first only when the answer is truly blocking.
+   Use Hermes' design skills for art direction when useful. Ask a question first
+   only when the answer is truly blocking.
 2. Build the smallest coherent draft that makes the direction tangible. Prefer a
    strong above-the-fold experience plus one representative section or state over
    a complete but generic site.
@@ -150,7 +150,7 @@ before you share it: a page is not validated because its files deployed.
 For rich apps, use Playwright (`references/shared/12-playwright-interactive.md`)
 or your browser tools. A `link` fragment opens with its share link (`fragment
 open garden`); a `members` fragment needs a signed-in member, so check it
-while it is `link` and close it after if it must stay private.
+in your signed-in browser. Do not widen visibility just to run QA.
 
 ## Share it
 
@@ -181,25 +181,23 @@ fragment invite list garden                            # emails no one signs in 
   while your owner holds you below them: the platform refuses it (403).
   Ask your owner to do it.
 
-## Routing to the design references
+## Design and platform references
 
-Choose one route, then load the matching references.
+Hermes' `popular-web-designs` and `design-md` skills cover design research
+and visual systems. Use them when useful; this skill supplies the Fragment
+publishing and state contract. For a design audit, Hermes' hub offers
+`impeccable` as an optional skill.
 
-- Informational / marketing / editorial:
-  Read `references/shared/01-design-tokens.md`, `references/shared/02-typography.md`, `references/shared/04-layout.md`, `references/shared/05-taste.md`, `references/shared/08-standards.md`, `references/shared/09-technical.md`, and `references/informational/informational.md`.
-- Dashboard / data-heavy app:
-  Read `references/shared/01-design-tokens.md`, `references/shared/02-typography.md`, `references/shared/04-layout.md`, `references/shared/05-taste.md`, `references/shared/08-standards.md`, `references/shared/09-technical.md`, `references/shared/10-charts-and-dataviz.md`, `references/shared/12-playwright-interactive.md`, `references/shared/19-backend.md`, and `references/shared/20-llm-api.md` when applicable.
-- Browser game / immersive interactive:
-  Read `references/shared/01-design-tokens.md`, `references/shared/02-typography.md`, `references/shared/03-motion.md`, `references/shared/08-standards.md`, `references/shared/09-technical.md`, `references/shared/12-playwright-interactive.md`, plus `references/game/game.md` and companions as needed.
+Read only the platform reference the task needs:
 
-If the main problem is art direction, visual quality, hierarchy, polish, or "make
-this feel designed," read the sibling `impeccable-finite` skill first, then return
-here for implementation.
+- `references/shared/09-technical.md`: the Fragment build and publish loop.
+- `references/shared/12-playwright-interactive.md`: browser QA on this computer.
+- `references/shared/19-backend.md`: operations, SQLite, channels and jobs.
+- `references/shared/20-llm-api.md`: metered AI steps and outbound fetches.
 
 ### Fragment overrides
 
-The design references were adapted from a broader web skill. On fragment,
-these rules win over anything they say:
+When using generic web skills, keep Fragment's platform contract:
 
 - Publish with `fragment deploy`, never `deploy_website`, a port, or a
   tunnel; do not edit DNS, proxies or networking.

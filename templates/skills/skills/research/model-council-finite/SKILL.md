@@ -1,12 +1,12 @@
 ---
 name: model-council-finite
-description: Use when the user explicitly asks for a council, panel, jury, debate, or multiple frontier models to weigh an important decision, plan, research question, code direction, or strategy.
+description: Use when the user explicitly asks for a council, panel, jury, debate, or multiple opinions from Fragment's model tiers to weigh an important decision, plan, research question, code direction, or strategy.
 ---
 
 # Model Council
 
 Use this skill only when the user explicitly asks for a model council, a debate
-between frontier models, or multiple independent model opinions. This skill is
+between Fragment model tiers, or multiple independent model opinions. This skill is
 intentionally expensive compared with a normal answer.
 
 ## Workflow

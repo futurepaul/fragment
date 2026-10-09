@@ -1,17 +1,25 @@
 ---
 name: music-generation-finite
-description: Generate songs, jingles, loops, and instrumental music with FAL MiniMax or ElevenLabs, through the operator's music keys
-version: 1.0.0
+description: "Execute direct ElevenLabs Music v2.5 or FAL MiniMax Music requests with operator credentials. Use Hermes songwriting-and-ai-music for composition and general music planning."
+version: 1.1.0
 metadata:
   hermes:
     tags: [audio, music, fal, minimax, elevenlabs, generation, finite]
     related_skills: []
 ---
 
+## Deployment prerequisites
+
+Needs operator `ELEVENLABS_API_KEY` or `FAL_KEY`; a deployment may have neither (FAL is not in the default catalog). Check for an available credential before any request and state plainly when generation is unavailable. Do not try empty keys or repeatedly call a missing provider. Platform placeholders work only through the supported provider intercept; they are not portable secrets. These REST examples use curl/jq or Python standard library, not an SDK package.
+
+Current ElevenLabs official skill recommends `music_v2_5`; select it explicitly instead of the older API default. [Provider contract](https://github.com/elevenlabs/skills/blob/main/music/references/api_reference.md). General lyrics/songwriting belongs to Hermes' `songwriting-and-ai-music`; load this skill for direct provider execution after choosing a service.
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
+
 # Music Generation
 
-Use this skill when the user asks to create music, a song, a jingle, a theme,
-a loop, a backing track, or an instrumental bed.
+Use this skill for direct ElevenLabs or FAL generation with an available operator credential.
 
 Do not use text-to-speech for music requests. Use a music generation model and
 save the generated audio in the current project or a clear output directory.
@@ -81,6 +89,9 @@ Write compact singable lyrics here.
 Repeat the hook clearly here.
 """.strip()
 
+if not os.environ.get("FAL_KEY"):
+    raise SystemExit("Operator FAL credential unavailable; generation cannot run on this deployment")
+
 request = urllib.request.Request(
     "https://fal.run/fal-ai/minimax-music/v2.5",
     data=json.dumps({
@@ -116,6 +127,7 @@ Endpoint:
 Quick instrumental generation:
 
 ```bash
+: "${ELEVENLABS_API_KEY:?Operator ElevenLabs credential unavailable}"
 prompt='A short upbeat instrumental jingle for an AI agent workshop, warm synths, no vocals'
 length_ms=15000
 output='elevenlabs-music.mp3'
@@ -127,7 +139,7 @@ curl -fsS -X POST "https://api.elevenlabs.io/v1/music" \
   --data "$(jq -cn \
     --arg prompt "$prompt" \
     --argjson length_ms "$length_ms" \
-    '{prompt: $prompt, music_length_ms: $length_ms, force_instrumental: true}')" \
+    '{model_id: "music_v2_5", prompt: $prompt, music_length_ms: $length_ms, force_instrumental: true}')" \
   -o "$output"
 
 file "$output"

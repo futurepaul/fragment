@@ -1066,7 +1066,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
     s.ok(
         &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && want.len() == 41 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        listed && want.len() == 12 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
         json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
     );
     // an agent's own skill, from its fragment, shows beside it

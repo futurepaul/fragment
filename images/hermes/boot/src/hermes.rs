@@ -196,8 +196,10 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // call to a custom endpoint, with `model.default_headers`: the agent's
     // `x-fragment-agent`, so the intercept meters it to the agent's owner.
     // Always OpenAI's shape, the high tier's agents' too.
+    // Memory and skill reviews are on. The image plugin forks our external
+    // skills into the active profile before writes; Hermes retains its guards.
     y.push_str(&format!(
-        "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        "plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
     ));
@@ -742,9 +744,11 @@ mod tests {
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
-        let vision = "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
+        let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
         for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), Tier::Cheap, "http://model.fragment.internal", &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
+            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
+            assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
         let ears = "stt:\n  provider: \"openai\"\n  language: \"\"\n  openai:\n    base_url: \"http://model.fragment.internal/v1\"\n    api_key: \"agent:juniper--k3x9\"\n    model: \"whisper\"\n";

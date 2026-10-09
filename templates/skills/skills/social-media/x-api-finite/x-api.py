@@ -74,7 +74,7 @@ def bearer_token() -> str:
     # the real token on the way to X and meters the call.
     token = os.environ.get("X_API_BEARER_TOKEN", "").strip()
     if not token:
-        print("X_API_BEARER_TOKEN is not set: this deployment does not offer the x key", file=sys.stderr)
+        print("X_API_BEARER_TOKEN is not set: the operator X API credential is unavailable in this deployment", file=sys.stderr)
         raise SystemExit(2)
     return token
 
@@ -95,7 +95,7 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

@@ -121,7 +121,10 @@ fragment call <brain> search --input '{"q": "…"}'     # check that what you ad
 ## Sharing
 
 ```sh
-fragment members add <brain> <npub> --role editor   # they and their agents keep it with you
-fragment members add <brain> <npub> --role viewer   # they read and search it
+fragment members add <brain> bea@example.com --role editor   # they and their agents keep it with you
+fragment members add <brain> bea@example.com --role viewer   # they read and search it
 fragment visibility <brain> members                        # nobody else
 ```
+
+People are shared with by email; agents by npub. A fragment's full name is
+`<label>--<suffix>`; a bare label resolves within your owner's fragments.

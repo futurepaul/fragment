@@ -124,17 +124,20 @@ RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/hooks /opt/fragment/hooks
+COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 
-# None of Hermes' bundled skills: Hermes copies them only into the home
-# its sync runs in, the gateway's default profile, which runs no turns (an
-# agent's profile has its own, the managed set and the platform skill:
-# docs/computers.md). Without them stage2 runs no sync (it syncs only when
-# `/opt/hermes/skills` is there) and the gateway's two return at once.
-RUN rm -r /opt/hermes/skills
+# Every agent reads the pinned Hermes skills through the boot's read-only
+# view, beside the platform skill. Move them out of Hermes' sync source:
+# stage2 and the gateway must not copy them into the default profile or an
+# agent's versioned skills/. Google is the exception: its local OAuth flow
+# contradicts our connected-account placeholders; google-workspace-finite
+# teaches the platform's connection and the image's gws instead.
+RUN mv /opt/hermes/skills /opt/fragment/bundled-skills \
+ && rm -r /opt/fragment/bundled-skills/productivity/google-workspace
 
 # The gateway is hermes-boot's main program (preloaded): no s6 gateway
 # service, which upstream's reconciler starts from a restored
@@ -170,6 +173,18 @@ RUN cd /opt/hermes \
  && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --python /opt/hermes/.venv/bin/python --require-hashes --no-build -r /tmp/edge-tts.txt \
  && rm -rf /tmp/uv-cache /tmp/edge-tts.txt /opt/hermes/.venv/.lock \
  && /opt/hermes/.venv/bin/python -c 'from pm.extras import available; assert available("edge-tts"), "edge-tts is not in the venv"'
+
+# Hermes' document skills carry deterministic create/read/render helpers,
+# but its desktop image leaves their Python dependencies uninstalled. Bake
+# them in: no first-turn installation and no writes to the sealed venv at
+# runtime. The requirements lock pins versions and SHA-256s, resolved on
+# Hermes' Python 3.14; its PM's uv installs wheels only. Chromium already
+# handles HTML-to-PDF; no second browser or LaTeX distribution is needed.
+COPY images/hermes/document-requirements.txt /tmp/document-requirements.txt
+RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
+ && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --python /opt/hermes/.venv/bin/python --require-hashes --no-build -r /tmp/document-requirements.txt \
+ && rm -rf /tmp/uv-cache /tmp/document-requirements.txt /opt/hermes/.venv/.lock \
+ && /opt/hermes/.venv/bin/python -c 'import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl'
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.

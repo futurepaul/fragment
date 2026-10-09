@@ -70,8 +70,8 @@ NOSTR_JSON_ONLY=true nostr-agent-interface cli list-tools --json
 Do not put secrets such as `privateKey` or `authPrivateKey` in argv when stdin is available. Prefer:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","content":"hello nostr"}' \
-  | nostr-agent-interface cli postNote --stdin --json
+# Operator-provisioned input JSON fields: privateKey, content
+nostr-agent-interface cli postNote --stdin --json < /path/to/operator-provided-input.json
 ```
 
 In user-facing summaries, describe the action and result without echoing raw private keys unless the user explicitly asked to see them.

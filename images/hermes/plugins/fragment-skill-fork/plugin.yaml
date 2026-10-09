@@ -1,0 +1,4 @@
+name: fragment-skill-fork
+version: 1.0.0
+description: Fork read-only Fragment skills into the active profile before skill_manage writes.
+provides_hooks: [pre_tool_call]

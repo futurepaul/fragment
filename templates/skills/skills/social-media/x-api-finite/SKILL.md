@@ -1,7 +1,14 @@
 ---
 name: x-api-finite
-description: Direct X API v2 access for exact tweet lookup, recent search, conversation inspection, and user profile fetches when the human pastes an x.com status URL or browser access is brittle.
+description: "Read exact X API v2 post data, recent-search results and profiles with the operator application bearer token and bundled Python helper. Use xurl for user OAuth or posting."
 ---
+
+## Deployment prerequisites
+
+Requires the operator's `X_API_BEARER_TOKEN` and an X API plan with access to the requested endpoint. This deployment may not offer that credential: check it is set, then say plainly when unavailable; do not keep retrying or hunt for keys. Only Python's standard library is required; no pip package or CLI is installed. Hermes' bundled `xurl` owns user OAuth and write actions. This helper is read-only application-bearer access. [Current recent-search contract](https://docs.x.com/x-api/posts/search-recent-posts).
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
 
 # X API
 

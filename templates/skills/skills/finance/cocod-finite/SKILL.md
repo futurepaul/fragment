@@ -1,6 +1,6 @@
 ---
 name: cocod-finite
-description: A Cashu ecash wallet CLI for Bitcoin and Lightning payments. Use when managing Cashu tokens, sending/receiving payments via Lightning (bolt11) or ecash, handling HTTP 402 X-Cashu payment requests, or viewing wallet history.
+description: "Operate the cocod Cashu wallet: ecash tokens, Lightning payments and NUT-24 HTTP 402 payment requests. Requires an initialized operator-provisioned wallet; no exchange trading."
 compatibility: Requires cocod CLI to be installed. Supports Cashu ecash protocol, Lightning Network payments, and NUT-24 HTTP 402 X-Cashu flows.
 metadata:
   project: cocod
@@ -12,6 +12,15 @@ metadata:
     - bitcoin
     - lightning
 ---
+
+## Deployment prerequisites
+
+Needs Bun and an initialized, funded wallet. The deployment may have neither wallet material nor an operator credential. Say plainly when wallet initialization/unlock or funds are missing; never hunt for keys or substitute Fragment credential placeholders for local signing material. Cashu itself requires no shared operator API key. `--help` and `--version` work before wallet setup.
+
+As checked on 2026-10-09, npm latest is **cocod 0.0.16** (published 2026-03-29). Upstream main calls its private, unpublished workspace package 0.0.17; that is not an installable upgrade. Keep the compatible published pin. [Upstream](https://github.com/cashubtc/coco).
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
 
 # Cocod - Cashu Wallet CLI
 
@@ -27,7 +36,7 @@ When acting as an AGENT with this skill:
 - Prefer preview/inspection commands before execution whenever available. For example, run `cocod x-cashu parse <request>` to inspect costs and requirements before `cocod x-cashu handle <request>`.
 - Treat `~/.cocod` as sensitive. Never log, print, or expose its contents (including config, mnemonic material, wallet state, sockets, and pid files) unless the user explicitly requests a specific safe subset.
 - Always surface issues and errors encountered while using the CLI or this skill. Do not hide failures behind partial success messaging.
-- Do not manually work around CLI issues, missing behavior, or unexpected command failures without explicit user permission.
+- Explain CLI failures and use the installed release's `--help` to check command syntax.
 
 ## What is Cashu?
 
@@ -37,7 +46,7 @@ Cashu is a Chaumian ecash protocol that lets you hold and transfer Bitcoin-backe
 
 ```bash
 # Install cocod CLI
-bun install -g cocod
+bun install -g cocod@0.0.16
 ```
 
 ## Version Compatibility

@@ -63,6 +63,17 @@ skill for anything Google. If it is unset, Google is not connected: ask
 your owner to connect it, and it reaches you within seconds.
 `PERPLEXITY_API_KEY`, `XAI_API_KEY` and the others work the same way.
 
+## Documents
+
+Load Hermes' `pdf`, `docx`, `powerpoint` or `xlsx` skill for that file type.
+Their helpers and Python libraries are installed. For a quick PDF report,
+write a JSON spec for the `pdf` skill's `scripts/pdf_create.py`; for a
+designed report, write HTML/CSS and print it with
+`/opt/fragment/bin/chromium --headless --no-pdf-header-footer --print-to-pdf=<absolute-path> file://<absolute-html-path>`.
+Use the `pdf` skill's `scripts/pdf_page_image.py` to render every page and
+inspect the images before sending the PDF. Deliver a local file with
+`MEDIA:<absolute-path>` in your reply.
+
 ## Your desktop
 
 You have a desktop of your own, with a browser on it: each agent on this
