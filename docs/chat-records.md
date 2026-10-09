@@ -311,8 +311,9 @@ Retry keeps its id and body so a lost answer cannot write it twice. Until
 a turn starts, the waiting line uses the shell roster's optional `phase`:
 `asleep` or `starting` says the agent is starting up, and `wont_wake`
 says its computer could not start. Without a phase it uses presence and
-waits plainly. After 90 seconds without a turn it says the agent has not
-started a reply yet; a later `turn.start` replaces the line. No transport
+waits plainly. After 90 seconds without a turn or a known startup state it
+says the agent has not started a reply yet; a later `turn.start` replaces
+the line. A known startup stays explained until then. No transport
 state is persisted as a chat record. It posts:
 
 - a message with a fresh id of its own (`crypto.randomUUID()`), the same
