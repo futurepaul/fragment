@@ -212,6 +212,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     // `code: <python>`: Hermes' execute_code runs that line
     let code = last_user.lines().find_map(|l| l.split_once("code: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
+    // `clarify: <question> | <choice> | …`: Hermes' clarify asks it, with those choices
+    let clarify = last_user.lines().find_map(|l| l.split_once("clarify: ").map(|(_, q)| q.split('|').map(|p| p.trim().to_string()).collect::<Vec<_>>())).filter(|q| !q[0].is_empty());
     // `dm: <teammate>: <message>`: Bot Mode's message_agent sends it
     let dm = last_user.lines().find_map(|l| l.split_once("dm: ").and_then(|(_, rest)| rest.split_once(": ")).map(|(t, m)| (t.trim().to_string(), m.trim().to_string()))).filter(|(t, m)| !t.is_empty() && !m.is_empty());
     // a teammate's message asking to be messaged back: its handle
@@ -226,7 +228,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -294,6 +296,10 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         } else {
             ("scripted: no write_file among my tools".into(), None)
         };
+    }
+    if let Some(q) = clarify {
+        let args = json!({ "questions": [{ "question": q[0], "choices": q[1..] }] });
+        return if offered("clarify") { (String::new(), Some(call("clarify", args))) } else { ("scripted: no clarify among my tools".into(), None) };
     }
     if let Some(code) = code {
         let args = json!({ "code": code });

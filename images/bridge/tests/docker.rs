@@ -1616,6 +1616,36 @@ async fn a_tools_temp_files_are_its_work() {
     });
 }
 
+/// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
+/// doesn't work very well"): real Hermes' clarify with choices is a card
+/// showing its question, its "Other" answered in words; answered so on the
+/// card, the words reach the clarify as its answer (the bridge sends them
+/// right after the answer, and Hermes waits on words as it takes it), and
+/// the turn's one reply quotes them: nothing asks "Type your answer:".
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn other_answered_in_words_on_its_card() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: Which color? | red | blue" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let card = |w: &support::fake::World| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == turn);
+    within(&fake, &chat, &c, 120_000, "the clarify's card", |w| card(w).is_some()).await;
+    let p = fake.with(|w| card(w).unwrap());
+    let words: Vec<(String, bool)> = p["options"].as_array().unwrap().iter().map(|o| (o["id"].as_str().unwrap_or("").to_string(), o["words"] == true)).collect();
+    assert_eq!(p["text"], "Which color?", "{p}");
+    assert_eq!(words, vec![("c0".to_string(), false), ("c1".to_string(), false), ("other".to_string(), true)], "{p}");
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other", "text": "purple" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.len() == 1 && replies[0].contains("purple"), "its one reply quotes the words, nothing asks for them: {replies:?}");
+        let closed = w.bodies(&chat, "work", "turn.prompt.closed").into_iter().find(|x| x["turn"] == turn).unwrap();
+        assert_eq!((&closed["option"], &closed["text"]), (&json!("other"), &json!("purple")), "{closed}");
+        let end = w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn).unwrap();
+        assert_eq!(end["outcome"], "idle", "{end}");
+    });
+}
+
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
 // 1hr window and now it's not responding to chats") ----
 

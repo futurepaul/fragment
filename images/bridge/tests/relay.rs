@@ -173,6 +173,55 @@ async fn an_approval_through_the_relay() {
     bridge.stop().await;
 }
 
+/// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
+/// doesn't work very well"): Hermes' clarify with choices is a card that
+/// shows its question, whose "Other" is answered in words on the card: they
+/// go to Hermes right after the answer, in the chat, as its clarify's
+/// answer; Hermes' `✏️ Type your answer:` shows nothing and asks nothing;
+/// the card's close says the words, and the turn's one reply follows. Then
+/// "Other" answered with no words (an older page) still asks for them,
+/// and the asker's next message answers.
+#[tokio::test]
+async fn other_answered_in_words_through_the_relay() {
+    let (fake, bridge, hermes, _dir) = setup("relay-other", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
+    assert_eq!(p["text"], "Which color?", "the question, without its glyph");
+    assert_eq!(p["options"], json!([{ "id": "c0", "label": "red" }, { "id": "c1", "label": "blue" }, { "id": "other", "label": "✏️ Other (type answer)", "words": true }]));
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other", "text": "purple" }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let said: Vec<String> = replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str()).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, vec!["echo: [paul] clarify a color (chose: purple)"], "its one reply, and no 'Type your answer:'");
+        let closed = &work_of(w, &chat, &turn, "turn.prompt.closed")[0];
+        assert_eq!((&closed["option"], &closed["text"]), (&json!("other"), &json!("purple")), "{closed}");
+    });
+    hermes.with(|s| {
+        let at = s.heard.iter().position(|e| e["prompt_response"]["option_id"] == "other").expect("the answer");
+        assert_eq!(s.heard[at + 1]["text"], "purple", "the words right after it, in its chat: {:?}", s.heard);
+        assert_eq!(s.heard[at + 1]["source"]["chat_id"], s.heard[at]["source"]["chat_id"]);
+    });
+
+    // "Other" with no words: Hermes asks for them, and the next message answers
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify again" }));
+    let again = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the second card", |w| !work_of(w, &chat, &again, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &again, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "Hermes' ask for words", |w| replies(w, &chat).iter().any(|r| r["turn"] == again.as_str() && r["text"] == "Type your answer:")).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "green" }));
+    fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let said: Vec<String> = replies(w, &chat).iter().filter(|r| r["turn"] == again.as_str()).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, vec!["Type your answer:", "echo: [paul] clarify again (chose: green)"]);
+    });
+    bridge.stop().await;
+}
+
 /// Goal: Stop is `interrupt_inbound` to Hermes; its turn ends stopped with
 /// no reply, and the chat's draft is stopped.
 #[tokio::test]

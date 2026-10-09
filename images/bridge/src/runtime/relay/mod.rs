@@ -141,6 +141,10 @@ struct Inflight {
     stopped: bool,
     /// It asked its asker something to answer in words, not yet told.
     asking: bool,
+    /// A clarify's "Other" was answered in words on its card, which went to
+    /// Hermes with the answer: its `✏️ Type your answer:` that follows asks
+    /// nothing.
+    worded: bool,
     /// The reply part last emitted, while the engine holds it open (no
     /// step, part, prompt or end since): its message id, part and text.
     /// Hermes ends a draft segment at every tool boundary with a `send`
@@ -413,17 +417,25 @@ impl Loop {
                     self.emit(Event::End { turn, outcome: Outcome::Stopped }).await;
                 }
             }
-            Command::Answer { turn, prompt, option, seq, by } => {
+            Command::Answer { turn, prompt, option, seq, by, words } => {
                 // An expiry needs no word to Hermes: its own approval
                 // timeout (the image sets it to the bridge's prompt TTL)
                 // fails the command closed.
-                let (Some(option), Some(f)) = (option, self.inflight.get(&turn)) else { return };
+                let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
                 let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
+                // "Other" answered in words: Hermes takes the answer (and
+                // waits on words) before it reads the next inbound, the
+                // words, as its clarify's answer; its ask for them shows
+                // nothing
+                f.worded = words.is_some();
                 let _ = self.send(frame.clone());
                 self.answers.push(PendingAnswer { buffer, frame });
+                if let Some(words) = words {
+                    self.tell(&turn, seq, &by, "owner", &words);
+                }
             }
             Command::Forget { turn } => self.forget(&turn),
             Command::Tell { turn, seq, by, by_name, text } => self.tell(&turn, seq, &by, &by_name, &text),
@@ -480,7 +492,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, open_reply: None, drafting: None, narration: None, taken: Vec::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -604,7 +616,12 @@ impl Loop {
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                if let Some(question) = wire::question(&text) {
+                if f.worded && text.trim_start().starts_with("✏️") {
+                    // "Other"'s ask for words, which went with its answer
+                    f.worded = false;
+                    f.take_message(id.clone());
+                    crate::ev!("relay.worded", { "turn": turn });
+                } else if let Some(question) = wire::question(&text) {
                     // asked in words: the question shows as the agent's,
                     // and the asker's next message is its answer
                     let part = f.next_part;

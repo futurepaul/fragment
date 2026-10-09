@@ -396,6 +396,16 @@ get_chat_info`.
   asker's next message goes back at once as an inbound in the same chat
   (`Tell`), not queued as a turn behind this one (which would wait out
   Hermes' clarify timeout, an hour).
+- A clarify with choices is a `prompt` of `prompt_kind: "clarify"`
+  (`❓ <question>`, its options `c0`… and `other`): its card shows the
+  question without the glyph, and its "Other" is answered in words on
+  the card (`words`: docs/chat-records.md), so typing an answer is one
+  step, as replying is (Paul on p5, 2026-10-09). The words go to Hermes
+  right after the answer, as an inbound in the same chat: Hermes sets the
+  clarify to wait on words as it takes the answer, before it reads the
+  next inbound, which its clarify intercept takes as the answer; its
+  `✏️ Type your answer:` that follows shows nothing and asks nothing. An
+  "Other" answered with no words (an older page) asks for them as above.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
   waiting on words never sees it, so a Stop while the turn asks is
   followed by the words "Stop.", which let the wait go.

@@ -138,7 +138,8 @@ pub enum Command {
     Stop { turn: String },
     /// A prompt's answer (`option`), or its expiry (`None`): only ever once
     /// per prompt. `seq` is the answering record's (a fresh message id).
-    Answer { turn: String, prompt: String, option: Option<String>, seq: u64, by: String },
+    /// `words`: what was typed for an option answered in words.
+    Answer { turn: String, prompt: String, option: Option<String>, seq: u64, by: String, words: Option<String> },
     /// The bridge ended the turn itself (it went quiet too long, or its
     /// agent left): forget it.
     Forget { turn: String },

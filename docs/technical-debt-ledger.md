@@ -607,7 +607,11 @@ fragment.club until cutover (decisions 34–35).
   or cancels one the bridge did not stop, leaves it running until the
   idle bound (15 minutes, then an error); one that stops reacting does
   so for every turn (loudly: the Docker rung's turns never end). Hermes'
-  clarify questions are read by their glyphs (`❓`, `✏️`) the same way.
+  clarify questions are read by their glyphs (`❓`, `✏️`) the same way,
+  and a clarify card's "Other" by its positional id (`other`): one Hermes
+  renames leaves "Other" a button again, answered as before (asked for
+  in words after), and `docker.rs`'s `other_answered_in_words_on_its_card`
+  fails.
 - **First proof:** a turn that ends "the agent stopped answering" though
   Hermes answered,
   or a reply posted under a `said` turn rather than its message's.
