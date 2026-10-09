@@ -21,11 +21,12 @@
 use fragment_core::access::Purpose;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
-use fragment_templates::blessed;
+use fragment_templates::{blessed, File};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
 
+use crate::assets;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
@@ -398,7 +399,7 @@ impl FragmentCell {
                 // beneath them, its blessed template's data (decision 40)
                 let release: Vec<(String, u64)> = {
                     let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).collect();
-                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.bytes.len() as u64)).collect()
+                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.size)).collect()
                 };
                 sizes.extend(release);
                 let files: Vec<Value> = sizes.into_iter().map(|(path, size)| json!({ "path": path, "size": size })).collect();
@@ -416,7 +417,7 @@ impl FragmentCell {
                         Some(row) => ("main", row),
                         // beneath both, its blessed template's data (decision 40)
                         None => match self.release_file(&p)? {
-                            Some(d) => return Self::release_response(d, head),
+                            Some(d) => return self.release_response(d, head).await,
                             None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
                         },
                     },
@@ -438,8 +439,8 @@ impl FragmentCell {
         if let Some(installed) = self.meta(MetaKey::Blessed)? {
             let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
             for candidate in site::site_candidates(path) {
-                if let Some(bytes) = blessed::site_file(t, &candidate) {
-                    return self.blessed_page(req, caller, facts, &candidate, bytes, release, public).await;
+                if let Some(file) = blessed::site_file(t, &candidate) {
+                    return self.blessed_page(req, caller, facts, file, release, public).await;
                 }
             }
         }
@@ -506,9 +507,10 @@ impl FragmentCell {
 
 impl FragmentCell {
     /// A file of a blessed template's site, from the release: a page gets
-    /// the fragment's own Open Graph tags, as a site's page does.
-    #[allow(clippy::too_many_arguments)]
-    async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, path: &str, bytes: &'static [u8], release: &str, public: bool) -> CellResult<Response> {
+    /// the fragment's own Open Graph tags, as a site's page does. A 304 and
+    /// a HEAD are answered from the release's index, before any read.
+    async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, file: &'static File, release: &str, public: bool) -> CellResult<Response> {
+        let path = file.path;
         let mime = site::mime_for_path(path);
         let cache = site::cache_control(path, public);
         let page = mime.starts_with("text/html");
@@ -530,15 +532,16 @@ impl FragmentCell {
         h.set("etag", &etag)?;
         h.set("x-fragment-ref", live)?;
         if req.method() == Method::Head {
-            h.set("content-length", &bytes.len().to_string())?;
+            h.set("content-length", &file.size.to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
         if let Some(meta) = og {
-            let html = String::from_utf8_lossy(bytes);
+            let bytes = assets::read(&self.env, file).await?;
+            let html = String::from_utf8_lossy(&bytes);
             let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, &facts.name));
             return Ok(Response::from_html(site::inject_og(&html, &facts.name, &meta, &image))?.with_headers(h));
         }
-        Ok(Response::from_bytes(bytes.to_vec())?.with_headers(h))
+        assets::body(&self.env, file, h).await
     }
 }
 

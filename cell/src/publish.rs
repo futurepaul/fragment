@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{ErrorCode, Role};
-use fragment_templates::{blessed, Template, BLANK, CALORIES, INBOX, TODO};
+use fragment_templates::{blessed, Template, CATALOG};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -16,12 +16,6 @@ use crate::files::{content_of, FileWrite, Wrote};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 
-/// The templates a fragment can start from, the simplest first (a create
-/// that names none of them lists them in this order). `notes` stays with
-/// the CLI (`fragment new --template notes`): at 3 MiB it would double the
-/// cell.
-pub(crate) const TEMPLATES: [(&str, Template); 4] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES)];
-
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
 /// What one `POST /api/files` may write in all: an editor's write (an
@@ -29,8 +23,10 @@ const DEPLOY_ATTEMPTS: usize = 5;
 /// bigger files go through the CLI as blobs.
 const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn template(name: &str) -> Option<Template> {
-    TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+/// A template a fragment can start from (`fragment_templates::CATALOG`):
+/// its files are copied into the fragment's repo.
+pub(crate) fn template(name: &str) -> Option<&'static Template> {
+    CATALOG.into_iter().find(|t| t.name == name)
 }
 
 /// The template's fragment.json with the fragment's own name in it, and
@@ -55,10 +51,12 @@ fn stamp(bytes: &[u8], name: &str, title: Option<&str>) -> Vec<u8> {
     }
 }
 
-/// A template's files as the fragment `name` holds them: its fragment.json
-/// stamped with that name and title.
-fn stamped(t: Template, name: &str, title: Option<&str>) -> Vec<FileWrite> {
-    t.iter().map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name, title) } else { bytes.to_vec() }) }).collect()
+/// A template's files as the fragment `name` holds them, read from the
+/// release: its fragment.json stamped with that name and title.
+async fn stamped(env: &Env, t: &'static Template, name: &str, title: Option<&str>) -> CellResult<Vec<FileWrite>> {
+    let files: Vec<&'static fragment_templates::File> = t.files.iter().collect();
+    let read = crate::assets::read_all(env, &files).await?;
+    Ok(files.iter().zip(read).map(|(f, bytes)| FileWrite { path: f.path.to_string(), bytes: Some(if f.path == "fragment.json" { stamp(&bytes, name, title) } else { bytes }) }).collect())
 }
 
 impl FragmentCell {
@@ -79,7 +77,7 @@ impl FragmentCell {
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
         let title = self.meta(MetaKey::TemplateTitle)?;
         let files = match (template(&which), blessed::template(&which)) {
-            (Some(t), _) => stamped(t, &name, title.as_deref()),
+            (Some(t), _) => stamped(&self.env, t, &name, title.as_deref()).await?,
             // a blessed template is named, not copied: the release serves it
             (None, Some(_)) => {
                 let mut manifest = json!({ "template": which });

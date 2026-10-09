@@ -21,4 +21,4 @@ fragment-nip98 = { path = "../nip98", features = ["sign"] }
 fragment-devstack = { path = "../devstack" }
 fragment-fakes = { path = "../fakes" }
 # the release's blessed templates, to compare what fragments on them serve
-fragment-templates = { path = "../templates" }
+fragment-templates = { path = "../templates", features = ["embed"] }

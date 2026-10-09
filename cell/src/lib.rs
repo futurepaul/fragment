@@ -28,6 +28,7 @@
 //! to the platform.
 
 mod ai;
+mod assets;
 mod auth;
 mod billing;
 mod blobs;
@@ -109,11 +110,10 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 
 /// The agent docs on the platform's origin, for an agent with no CLI yet
 /// (llmstxt.org): `fragment skill`'s text and `fragment guide`'s, the same
-/// files, so they cannot drift.
-const LLMS_TXT: &str = include_str!("../../cli/SKILL.md");
-const LLMS_FULL_TXT: &str = include_str!("../../cli/GUIDE.md");
-const LLMS_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_TXT.as_bytes());
-const LLMS_FULL_TXT_HASH: u64 = fragment_core::site::content_hash(LLMS_FULL_TXT.as_bytes());
+/// files (cli/SKILL.md, cli/GUIDE.md), so they cannot drift: the release's,
+/// read from its Static Assets (assets.rs).
+const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
+const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
@@ -997,14 +997,14 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         return levers::route(req, env, cfg, &lever).await;
     }
     match (req.method(), segments.as_slice()) {
-        (Method::Get | Method::Head, ["__shell", file @ ..]) => match shell::asset(&req, &file.join("/"))? {
+        (Method::Get | Method::Head, ["__shell", file @ ..]) => match shell::asset(&req, env, &file.join("/")).await? {
             Some(resp) => Ok(resp),
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings
-        (Method::Get, [""] | ["settings"]) => Ok(shell::page(&req, cfg, &url)?),
-        (Method::Get, ["admin"]) => Ok(shell::admin_page()?),
+        (Method::Get, [""] | ["settings"]) => shell::page(env, cfg, &url).await,
+        (Method::Get, ["admin"]) => shell::admin_page(env).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
@@ -1013,8 +1013,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
-        (Method::Get | Method::Head, ["llms.txt"]) => serve::compiled_in(&req, LLMS_TXT, LLMS_TXT_HASH, "text/plain; charset=utf-8"),
-        (Method::Get | Method::Head, ["llms-full.txt"]) => serve::compiled_in(&req, LLMS_FULL_TXT, LLMS_FULL_TXT_HASH, "text/plain; charset=utf-8"),
+        (Method::Get | Method::Head, ["llms.txt"]) => assets::serve(&req, env, LLMS_TXT, "text/plain; charset=utf-8").await,
+        (Method::Get | Method::Head, ["llms-full.txt"]) => assets::serve(&req, env, LLMS_FULL_TXT, "text/plain; charset=utf-8").await,
         (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
