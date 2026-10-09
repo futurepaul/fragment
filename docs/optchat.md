@@ -1343,7 +1343,7 @@ are the platform's.
   - the bridge (`BRIDGE_RUNTIME=goose`, built for musl);
   - the fragment CLI;
   - goose, built in a stage of its own from `futurepaul/goose` at a pinned
-    rev of `fragment/optmem`;
+    rev of `fragment/main` (upstream main, on its state-machine loop);
   - git, curl, jq, python3, ripgrep, Node 24.21.0;
   - a desktop per agent (`images/goose/desktop`, `fragment-desktop`):
     Xvnc (TigerVNC, on a Unix socket only), the matchbox window manager,
@@ -1370,7 +1370,11 @@ are the platform's.
     before it).
   - **Exactly one `Reply` per turn:** the words after the last tool
     call, or `(ended: <outcome>: <why>)` when there are none. That one
-    reply is the hand-off's report. Stop is `session/cancel`.
+    reply is the hand-off's report. Stop is `session/cancel`: goose's
+    state machine drops the running step at once (a shell command it ran
+    is killed), answers its open tool calls as interrupted in its own
+    session, and the prompt answers `cancelled` (16 ms in the bridge's
+    real-goose test, a `sleep 41` running).
   - Fresh context per turn: no session is ever loaded again. goose's
     state lives in `/tmp/goose/<agent>`, outside `/data` and its saves.
 - **Model:** goose's OpenAI provider, pointed at `FRAGMENT_MODEL`, model
@@ -1378,9 +1382,17 @@ are the platform's.
   `OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`.
   Compaction is off (`GOOSE_AUTO_COMPACT_THRESHOLD=0`,
   `GOOSE_NO_COMPACTION=1`), and `GOOSE_STABLE_SYSTEM_PROMPT=1` keeps the
-  system prompt fixed.
+  system prompt fixed: the same bytes in every call of every session (the
+  docker and real-goose tests compare them).
+- **goose's `<turn-context>` stays on** (the fork's `GOOSE_NO_TURN_CONTEXT`
+  is not set on the computer): it is the only clock goose is given, since
+  a mind's `view` is its `<chat>` alone, without the mind's per-turn
+  block. It comes after the view and the task in the first message
+  (`<current-time>` to the minute, `<working-directory>`), so the prefix
+  before it still caches.
 - **Extensions:** goose's `developer` and `skills` builtins
-  (`EXTENSIONS={}` drops the rest), plus four MCP servers a session:
+  (`EXTENSIONS={}` drops the rest; goose's state machine offers
+  `load_skill` itself), plus four MCP servers a session:
   - `mind`: `fragment mcp <mind>` (read-only: view, zoom, date, search);
   - `browser`: Playwright MCP 0.0.83 (18 of its tools) on the agent's
     visible Chromium, reading pages as accessibility snapshots;
@@ -1412,17 +1424,33 @@ are the platform's.
 `futurepaul/goose`:
 - `main` follows upstream `aaif-goose/goose`. It was fast-forwarded to
   `9560429f` on 2026-10-07.
-- `fragment/optmem` is `4cfb2d7d`: upstream's v1.53.0 plus two
-  switches. It is built with `cargo build --release -p goose-cli --bin
-  goose --no-default-features --features portable-default` on
-  `rust:1-trixie`, which takes about 150 s and makes a 126 MB binary.
+- `fragment/main` is `a29b6aa9`, the computers' goose (and the rev the
+  mind's goose pins: docs/optchat-goose.md): upstream main at `3bd85200`
+  (2026-10-09, the state-machine loop alone since #12760) plus five
+  commits, each to drop once upstream has its own. It is built with
+  `cargo build --release -p goose-cli --bin goose --no-default-features
+  --features portable-default` on `rust:1-trixie`, and says `1.54.0`.
+  - **The optional catalog** (upstream's #12659, open, cherry-picked onto
+    main, its two commits): the 4.4 MB model catalog behind
+    `goose-provider-types`' default-on `bundled-catalog` feature, which
+    `goose` turns on. `goose-agent` and `goose-provider-types` check for
+    wasm32 without it (and without zstd's C).
   - `GOOSE_NO_COMPACTION=1`: a session never compacts or summarizes
-    itself. When the model reports an overflow, the turn ends and says
-    why, instead of rewriting the hand-off goose was given.
+    itself. The state machine runs no compaction operation (as for a
+    provider that manages its own context): none ahead of an inference,
+    none at an overflow (the provider's error is the turn's last words,
+    then `end_turn`), no `/compact`, no tool-pair summaries.
   - `GOOSE_STABLE_SYSTEM_PROMPT=1`: the system prompt never changes
-    within a session. Without it, the hints of a subdirectory a tool
+    within a session. Without it, the hints of a subdirectory a tool call
     touches (`AGENTS.md`, `.goosehints`) join the prompt mid-turn and
-    break the cache.
+    break the cache; `{{current_date_time}}` renders empty in an override
+    template.
+  - `GOOSE_NO_TURN_CONTEXT=1`: goose adds no `<turn-context>` message
+    before an inference and no section about it to its system prompt. For
+    the mind's goose, whose per-turn block says the time; the computer
+    leaves it unset (above).
+- `fragment/optmem` (`4cfb2d7d`: upstream's v1.53.0 and the first two
+  switches, on the legacy loop) stays as it was.
 - **What upstream already had:**
   - per-session instructions, through ACP
     `_goose/unstable/session/system-prompt/set` (`mode: append`);
