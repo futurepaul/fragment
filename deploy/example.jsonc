@@ -72,6 +72,11 @@
   // GLM-5.3 Flash unless named here; it must be one the price book prices
   // (fragment_core::price), or the deploy is refused.
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
+  // The model a tier's call is made on once more when its own fails before
+  // answering (not reached, 429 or a 5xx), settled at its prices. DeepSeek
+  // V4 Flash unless named here; one the price book prices, or the deploy is
+  // refused. `vision` has no fallback.
+  // "fallback_model": "@cf/deepseek-ai/deepseek-v4-flash-0731",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
   // Where a person whose computer will not start gets help: an https page
@@ -134,6 +139,9 @@
   // --branch deploy only: a deployment of its own is refused. A file, not
   // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
-  // Raise with every change to a key's price, or ledgers keep their book.
-  "price_book_version": 1
+  // The book's version is the higher of this and the code's own
+  // (fragment_core::price::DEFAULT_BOOK_VERSION, 3 since DeepSeek V4 Flash
+  // was priced): raise it past both with every change to a key's price, or
+  // ledgers keep their book.
+  "price_book_version": 3
 }

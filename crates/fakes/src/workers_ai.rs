@@ -45,7 +45,11 @@
 //! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
-//! report (`set_usage`), and a stream cut before its usage (`break_next`).
+//! report (`set_usage`), a stream cut before its usage (`break_next`), and
+//! models that are down (`down`): each call to one answers as Workers AI
+//! answered every call to GLM-5.3 Flash for five minutes on 2026-10-09, a
+//! 502 "could not route request to AI model" (its internal code 4002),
+//! until the test brings it up again.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -142,6 +146,18 @@ struct State {
     answers: u64,
     /// Calls answer `transcript_reply`, in pieces.
     transcripts: bool,
+    /// Models every call to which answers `unroutable`.
+    down: Vec<String>,
+}
+
+/// Workers AI's answer when it cannot reach a model (as the binding passed
+/// it through to an agent on 2026-10-09; `requestId` its own each time).
+fn unroutable(n: usize) -> Response {
+    let id = format!("00000000-0000-4000-8000-{n:012}");
+    Response::json(
+        502,
+        &json!({ "name": "AiError", "internalCode": 4002, "httpCode": 502, "message": format!("AiError: AiError: could not route request to AI model ({id})"), "description": "could not route request to AI model", "requestId": id }),
+    )
 }
 
 /// The images a chat's messages carry (`image_url` parts' URLs), or why a
@@ -536,6 +552,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if let Some(Some(status)) = s.failures.pop_front() {
         return problem(status, "a failure the test asked for");
     }
+    if s.down.contains(&model) {
+        return unroutable(s.calls.len());
+    }
     s.answers += 1;
     let log_id = format!("01FAKE{:020}", s.answers);
     if model == IMAGE_MODEL {
@@ -667,6 +686,13 @@ impl WorkersAi {
         self.state().failures.extend(std::iter::repeat_n(None, n));
     }
 
+
+    /// These models are down: every call to one answers Workers AI's 502
+    /// "could not route request to AI model" until it is brought up again
+    /// (`down(&[])`).
+    pub fn down(&self, models: &[&str]) {
+        self.state().down = models.iter().map(|m| m.to_string()).collect();
+    }
 
     /// Calls answer from their transcript (`transcript_reply`), in pieces
     /// (`true`), or echo their last message.
@@ -818,6 +844,26 @@ mod tests {
         let calls = ai.calls();
         assert_eq!(calls.len(), 2, "each call recorded, the refused one too");
         assert!(calls[1].model == flash && calls[1].body["messages"][0]["content"][1]["image_url"]["url"] == png_url().as_str());
+    }
+
+    /// Goal: a model that is down answers every call as Workers AI did
+    /// when it could not reach GLM-5.3 Flash (a 502, internal code 4002),
+    /// while other models answer; brought up, it answers again. Method:
+    /// calls to two models, with one down, then none.
+    #[test]
+    fn a_model_that_is_down_cannot_be_routed_to() {
+        let ai = WorkersAi::start(0).unwrap();
+        let (flash, deepseek) = ("@cf/zai-org/glm-5.3-flash", "@cf/deepseek-ai/deepseek-v4-flash-0731");
+        let ask = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        let post = |model: &str| crate::http::post(&format!("{}/run/{model}", ai.url), &[("content-type", "application/json")], ask.to_string().as_bytes()).unwrap();
+        ai.down(&[flash]);
+        assert_eq!((post(flash), post(flash), post(deepseek)), (502, 502, 200));
+        let answer = unroutable(7);
+        let body: Value = serde_json::from_slice(&answer.body).unwrap();
+        assert_eq!((answer.status, body["internalCode"].clone(), body["description"].clone()), (502, json!(4002), json!("could not route request to AI model")));
+        ai.down(&[]);
+        assert_eq!(post(flash), 200, "up again");
+        assert_eq!(ai.calls().len(), 4, "each call recorded, the failed ones too");
     }
 
     /// Goal: what a model says of an image tells which image it was:

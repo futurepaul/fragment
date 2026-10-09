@@ -507,7 +507,10 @@ expires within 30 days. The container application is the deployment's
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model through AI Gateway, streams its answer back, and
-  settles the final usage (lesson 7).
+  settles the final usage (lesson 7). A call whose model fails before
+  answering (not reached, 429, or a 5xx) is made once more on the
+  deployment's fallback model, DeepSeek V4 Flash unless its config names
+  another (docs/api.md, Models): the guest sees only the answer.
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.

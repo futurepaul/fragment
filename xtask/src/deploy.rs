@@ -81,6 +81,11 @@ struct Deployment {
     /// GLM-5.3 Flash unless named; one the price book does not price is
     /// refused (`fragment_core::models::vision_model`).
     vision_model: Option<String>,
+    /// The model a tier's call is made on once more when its own fails
+    /// before answering (`FRAGMENT_FALLBACK_MODEL`; cell/src/models.rs):
+    /// DeepSeek V4 Flash unless named; one the price book does not price is
+    /// refused (`fragment_core::models::fallback_model`).
+    fallback_model: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
     /// Where a person whose computer will not start gets help
@@ -446,11 +451,15 @@ pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
 
 /// What the cell would refuse at its first request, refused before a
 /// deploy: the provider catalog, a default image it has, its store
-/// secrets' names, and a vision model the price book prices.
+/// secrets' names, and vision and fallback models the price book prices.
 fn checked(d: Deployment) -> Result<Deployment> {
     check_names(&bound(&d)?)?;
+    let book = fragment_core::price::PriceBook::defaults();
     if let Some(m) = &d.vision_model {
-        fragment_core::models::vision_model(Some(m), &fragment_core::price::PriceBook::defaults()).map_err(|e| anyhow::anyhow!("vision_model: {e}"))?;
+        fragment_core::models::vision_model(Some(m), &book).map_err(|e| anyhow::anyhow!("vision_model: {e}"))?;
+    }
+    if let Some(m) = &d.fallback_model {
+        fragment_core::models::fallback_model(Some(m), &book).map_err(|e| anyhow::anyhow!("fallback_model: {e}"))?;
     }
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
@@ -756,6 +765,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     if let Some(m) = &d.vision_model {
         v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
     }
+    if let Some(m) = &d.fallback_model {
+        v.insert("FRAGMENT_FALLBACK_MODEL".into(), json!(m.trim()));
+    }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
         if let Some(ms) = computers.unsaved_max_ms {
@@ -877,6 +889,7 @@ mod tests {
             operators: vec![],
             ai_gateway: None,
             vision_model: None,
+            fallback_model: None,
             default_plan: None,
             support_url: None,
             mail_from: None,
@@ -1217,21 +1230,26 @@ mod tests {
         }
     }
 
-    /// The vision model is one the price book prices, refused before a
-    /// deploy otherwise (the cell would refuse it at its first request);
-    /// named, it is the cell's `FRAGMENT_VISION_MODEL`, and unnamed the
-    /// cell's default (GLM-5.3 Flash).
+    /// The vision and fallback models are ones the price book prices,
+    /// refused before a deploy otherwise (the cell would refuse them at its
+    /// first request); named, each is the cell's variable
+    /// (`FRAGMENT_VISION_MODEL`, `FRAGMENT_FALLBACK_MODEL`), and unnamed the
+    /// cell's default (GLM-5.3 Flash; DeepSeek V4 Flash).
     #[test]
-    fn a_vision_model_the_book_does_not_price_is_refused() {
-        let with = |m: Option<&str>| {
+    fn a_vision_or_fallback_model_the_book_does_not_price_is_refused() {
+        let with = |vision: Option<&str>, fallback: Option<&str>| {
             let mut d = deployment(None, None);
-            d.vision_model = m.map(str::to_string);
+            d.vision_model = vision.map(str::to_string);
+            d.fallback_model = fallback.map(str::to_string);
             d
         };
-        let refused = checked(with(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"))).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains("vision_model: the vision model \"@cf/deepseek-ai/deepseek-v4-flash-0731\" is not in the price book"), "{refused}");
-        assert!(checked(with(Some("@cf/zai-org/glm-5.3-flash"))).is_ok());
-        assert!(checked(with(None)).is_ok());
+        let unpriced = "@cf/meta/llama-4-scout-17b-16e-instruct";
+        let refused = checked(with(Some(unpriced), None)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains(&format!("vision_model: the vision model {unpriced:?} is not in the price book")), "{refused}");
+        let refused = checked(with(None, Some(unpriced))).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains(&format!("fallback_model: the fallback model {unpriced:?} is not in the price book")), "{refused}");
+        assert!(checked(with(Some("@cf/zai-org/glm-5.3-flash"), Some("@cf/deepseek-ai/deepseek-v4-flash-0731"))).is_ok());
+        assert!(checked(with(None, None)).is_ok());
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         let rendered = |v: &Value, test: &str| {
@@ -1245,6 +1263,13 @@ mod tests {
         v["vision_model"] = json!("@cf/meta/llama-4-scout-17b-16e-instruct");
         let refused = load(&config_file("vision-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("is not in the price book"), "{refused}");
+        v["vision_model"] = Value::Null;
+        assert!(rendered(&v, "fallback-none").get("FRAGMENT_FALLBACK_MODEL").is_none(), "unnamed: the cell's default");
+        v["fallback_model"] = json!("@cf/zai-org/glm-5.3");
+        assert_eq!(rendered(&v, "fallback-named")["FRAGMENT_FALLBACK_MODEL"], "@cf/zai-org/glm-5.3");
+        v["fallback_model"] = json!("anthropic/claude-haiku-4.5");
+        let refused = load(&config_file("fallback-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("fallback_model: the fallback model"), "{refused}");
     }
 
     /// The support link a person whose computer will not start is shown:

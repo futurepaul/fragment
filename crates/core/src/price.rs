@@ -246,20 +246,32 @@ pub struct PriceBook {
 
 // The default book, at list price on 2026-10-02, each with its source.
 
-/// The tiers' models (decision 23). Sources: Workers AI's catalog
-/// (`GET /ai/models/search`, `properties.price`) for both GLMs, and the AI
-/// model catalog page for Opus 5.5, Anthropic's list price passed through
-/// Unified Billing (spike S4; the gateway's own `cost` matched these on
-/// every call). GLM has no cache writes: its write price is its input
-/// price, so a write it reported would never be free.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 3] = [
+/// The tiers' models (decision 23) and the route's fallback model
+/// (`fragment_core::models::FALLBACK_MODEL_DEFAULT`). Sources: Workers AI's
+/// catalog (`GET /ai/models/search`, `properties.price`) for both GLMs and
+/// DeepSeek V4 Flash (read 2026-10-09; its neurons on two calls that day
+/// matched these to the micro-dollar), and the AI model catalog page for
+/// Opus 5.5, Anthropic's list price passed through Unified Billing (spike
+/// S4; the gateway's own `cost` matched these on every call). Workers AI's
+/// models have no cache writes: a write price is the input price, so a
+/// write one reported would never be free.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
+    // $0.44 in, $0.014 cached, $1.32 out (the fallback model)
+    ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
 ];
+/// The default book's version. A ledger takes a book only when its version
+/// is newer than the one it charges with (docs/ledger.md), so every change
+/// to the defaults raises it: 3 since DeepSeek V4 Flash was priced
+/// (2026-10-09), past the 2 that finite.place's preview configs already
+/// carried. A deployment's `price_book_version` raises it further (its
+/// operator keys' prices); the book is the higher of the two.
+pub const DEFAULT_BOOK_VERSION: u32 = 3;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -414,12 +426,12 @@ pub struct Priced {
 }
 
 impl PriceBook {
-    /// The default book (version 1): the consts above, the default fee
-    /// and margin, and no operator keys (decision 37 names services, not
-    /// prices; the operator adds each key with its price).
+    /// The default book (`DEFAULT_BOOK_VERSION`): the consts above, the
+    /// default fee and margin, and no operator keys (decision 37 names
+    /// services, not prices; the operator adds each key with its price).
     pub fn defaults() -> PriceBook {
         PriceBook {
-            version: 1,
+            version: DEFAULT_BOOK_VERSION,
             margin_bp: MARGIN_BP_DEFAULT,
             credits_fee_bp: CREDITS_FEE_BP_DEFAULT,
             models: DEFAULT_MODELS.iter().map(|(model, price)| ModelPrice { model: model.to_string(), price: *price }).collect(),
@@ -569,14 +581,16 @@ mod tests {
     const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
     const GLM: &str = "@cf/zai-org/glm-5.3";
     const OPUS: &str = "anthropic/claude-opus-5.5";
+    const DEEPSEEK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 
-    /// Goal: the default book is one a ledger accepts, and its version is
-    /// the first. Method: validate it.
+    /// Goal: the default book is one a ledger accepts, at the version its
+    /// last change raised it to. Method: validate it.
     #[test]
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 1);
+        assert_eq!(book.version, 3);
+        assert_eq!(book.models.len(), 4);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 
@@ -611,7 +625,7 @@ mod tests {
     /// of the tokens.
     #[test]
     fn neurons_and_tokens_agree_on_the_spikes_calls() {
-        let calls: [(&str, u64, u64, u64, f64); 17] = [
+        let calls: [(&str, u64, u64, u64, f64); 19] = [
             (FLASH, 187, 0, 12, 3.0954543352127075),
             (FLASH, 218, 0, 15, 3.654545336961746),
             (FLASH, 187, 0, 12, 3.095454216003418),
@@ -629,6 +643,9 @@ mod tests {
             (GLM, 122_016, 0, 3, 15_530.508593767881),
             (GLM, 257_908, 50_432, 3, 34_017.87968751788),
             (FLASH, 23, 0, 15, 0.9954546093940735),
+            // DeepSeek V4 Flash, 2026-10-09 (the fallback model's price)
+            (DEEPSEEK, 302, 0, 82, 21.920000076293945),
+            (DEEPSEEK, 100, 0, 64, 11.680000305175781),
         ];
         let book = PriceBook::defaults();
         for (model, input, cached, output, neurons) in calls {
