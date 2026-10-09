@@ -1,0 +1,19 @@
+{
+  "title": "Fragment: demo readiness",
+  "author": "Skills audit, 2026-10-08",
+  "page_size": "A4",
+  "elements": [
+    {"type": "heading", "text": "Fragment: demo readiness", "level": 1},
+    {"type": "paragraph", "text": "08 October 2026 • Prepared for Paul Miller"},
+    {"type": "heading", "text": "A computer of your own", "level": 2},
+    {"type": "paragraph", "text": "Stateful multiplayer apps, published from a conversation. Each agent works on its owner's computer and keeps its work across sleeps."},
+    {"type": "table", "rows": [["Measure", "Result"], ["Managed skills before audit", "41"], ["Fragment workflows retained", "6"], ["Generic copies removed", "35"]]},
+    {"type": "heading", "text": "What changed", "level": 2},
+    {"type": "paragraph", "text": "Hermes supplies document creation and code workflows. Fragment supplies apps, git, brains, connected Google access, image steps, and model tiers."},
+    {"type": "pagebreak"},
+    {"type": "heading", "text": "The next review", "level": 1},
+    {"type": "paragraph", "text": "Check every PDF page as an image before delivering it. Validate page order, readable text, table wrapping, and the intended visual hierarchy."},
+    {"type": "table", "rows": [["Path", "Use"], ["JSON + Hermes pdf_create.py", "Quick structured reports"], ["HTML + Chromium print-to-PDF", "Designed reports with CSS"]]},
+    {"type": "paragraph", "text": "This is synthetic audit data, not a production benchmark. No model calls were made."}
+  ]
+}
