@@ -18,7 +18,7 @@
 //! A call that its model fails before answering anything (it is not
 //! reached, or it answers 429 or a 5xx) is made once more, the same, on the
 //! deployment's fallback model (`Tries`; Paul, 2026-10-08: "we def need
-//! fallback models"), GLM-5.3 Flash unless it names another. Not a race:
+//! fallback models"), DeepSeek V4 Flash unless it names another. Not a race:
 //! the second call is made only after the first has failed. An answer that
 //! began is final, and the fallback's failure is the call's.
 //!
@@ -40,13 +40,15 @@ use crate::price::{PriceBook, Usage};
 pub const GLM_FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 pub const DEEPSEEK_FLASH: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 /// The tiers' models (decision 23). The cheap tier, every agent's
-/// default, is DeepSeek V4 Flash since 2026-10-09 (Paul, on a Hermes
-/// agent's long writes measured that night: about 84 output tokens a
-/// second to GLM-5.3 Flash's 30, a whole turn about 2.3 times as fast),
-/// GLM-5.3 Flash its fallback (`FALLBACK_MODEL_DEFAULT`). Both take the
-/// route's requests as they are (tools, `reasoning_effort` `low` and
-/// `high`, `max_tokens` up to `MAX_TOKENS`; checked 2026-10-09).
-pub const CHEAP_MODEL: &str = DEEPSEEK_FLASH;
+/// default, is GLM-5.3 Flash, DeepSeek V4 Flash its fallback
+/// (`FALLBACK_MODEL_DEFAULT`; Paul, 2026-10-09: "GLM default, DeepSeek
+/// fallback", after DeepSeek, the default for a few hours, was short of
+/// capacity on Workers AI: first bytes of 11 to 61 s, a 429 "Capacity
+/// temporarily exceeded", a 160 s hang ending in a 500, while GLM's were
+/// 3 to 5 s). Both take the route's requests as they are (tools,
+/// `reasoning_effort` `low` and `high`, `max_tokens` up to `MAX_TOKENS`;
+/// checked 2026-10-09).
+pub const CHEAP_MODEL: &str = GLM_FLASH;
 pub const MEDIUM_MODEL: &str = "@cf/zai-org/glm-5.3";
 /// The route's name for the deployment's vision model.
 pub const VISION: &str = "vision";
@@ -54,18 +56,18 @@ pub const VISION: &str = "vision";
 /// (`FRAGMENT_VISION_MODEL`; Paul, 2026-10-05): GLM-5.3 Flash, "Vision:
 /// Yes" in Workers AI's catalog
 /// (developers.cloudflare.com/workers-ai/models/glm-5.3-flash/, read
-/// 2026-10-05), already priced. Neither DeepSeek V4 Flash, the cheap
-/// tier's, nor GLM-5.3, the medium tier's, takes images. DeepSeek Flash's
+/// 2026-10-05), already priced, and the cheap tier's. Neither DeepSeek V4
+/// Flash, the fallback, nor GLM-5.3, the medium tier's, takes images. DeepSeek Flash's
 /// vision build (`deepseek-flash`) is only on DeepSeek's own API, and
 /// reaching it would take our own key (decision 23: no BYOK).
 pub const VISION_MODEL_DEFAULT: &str = GLM_FLASH;
 /// The fallback model unless the deployment names another
-/// (`FRAGMENT_FALLBACK_MODEL`; Paul, 2026-10-08 and 10-09): GLM-5.3 Flash,
-/// on Workers AI, a model of its own beside the cheap tier's DeepSeek (its
-/// own replicas, and its own rate limit, 50 calls a minute per account on
-/// Unified Billing). The route's `vision` has no fallback: its model is
-/// this one.
-pub const FALLBACK_MODEL_DEFAULT: &str = GLM_FLASH;
+/// (`FRAGMENT_FALLBACK_MODEL`; Paul, 2026-10-08 and 10-09): DeepSeek V4
+/// Flash, on Workers AI, a model of its own beside the cheap tier's GLM
+/// (its own replicas, and its own rate limit, 50 calls a minute per account
+/// on Unified Billing). It reads no images, so the route's `vision` has no
+/// fallback.
+pub const FALLBACK_MODEL_DEFAULT: &str = DEEPSEEK_FLASH;
 /// The largest image Hermes sends for its vision call after a size
 /// refusal: it shrinks one to this many bytes of base64 data URL and tries
 /// again once (its `tools/vision_tools.py`, `_RESIZE_TARGET_BYTES`, which
@@ -590,7 +592,7 @@ mod tests {
         let book = PriceBook::defaults();
         assert_eq!(vision_model(None, &book).as_deref(), Ok(GLM_FLASH));
         assert_eq!(VISION_MODEL_DEFAULT, "@cf/zai-org/glm-5.3-flash");
-        assert_ne!(VISION_MODEL_DEFAULT, CHEAP_MODEL, "the cheap tier's model reads no images");
+        assert_ne!(VISION_MODEL_DEFAULT, FALLBACK_MODEL_DEFAULT, "the fallback reads no images");
         assert_eq!(vision_model(Some(MEDIUM_MODEL), &book).as_deref(), Ok(MEDIUM_MODEL));
         assert_eq!(vision_model(Some(" @cf/zai-org/glm-5.3-flash "), &book).as_deref(), Ok(GLM_FLASH));
         let unpriced = vision_model(Some("@cf/meta/llama-4-scout-17b-16e-instruct"), &book).unwrap_err();
@@ -625,7 +627,7 @@ mod tests {
     /// Method: every tier name, and names that are not.
     #[test]
     fn tiers_pick_models() {
-        assert_eq!(model_of(Tier::Cheap).unwrap().model, "@cf/deepseek-ai/deepseek-v4-flash-0731", "DeepSeek V4 Flash since 2026-10-09");
+        assert_eq!(model_of(Tier::Cheap).unwrap().model, "@cf/zai-org/glm-5.3-flash", "GLM-5.3 Flash, DeepSeek its fallback (Paul, 2026-10-09)");
         assert_eq!(model_of(Tier::Cheap).unwrap().model, CHEAP_MODEL);
         assert_eq!(model_of(Tier::Medium).unwrap().model, MEDIUM_MODEL);
         assert_eq!(model_of(Tier::High), Err(Refusal::HighOff));
@@ -790,7 +792,7 @@ mod tests {
 
     const FALLBACK: &str = FALLBACK_MODEL_DEFAULT;
 
-    /// Goal: the deployment's fallback model is GLM-5.3 Flash unless it
+    /// Goal: the deployment's fallback model is DeepSeek V4 Flash unless it
     /// names another, another model than the cheap tier's, priced at Workers
     /// AI's list price; one the book does not price is refused, as a vision
     /// model is. Method: the default, a priced model named, and unpriced
@@ -798,15 +800,15 @@ mod tests {
     #[test]
     fn the_fallback_model_is_one_the_book_prices() {
         let book = PriceBook::defaults();
-        assert_eq!(fallback_model(None, &book).as_deref(), Ok("@cf/zai-org/glm-5.3-flash"));
+        assert_eq!(fallback_model(None, &book).as_deref(), Ok("@cf/deepseek-ai/deepseek-v4-flash-0731"));
         assert_ne!(FALLBACK, CHEAP_MODEL, "a fallback is another model");
         assert_eq!(fallback_model(Some(" @cf/zai-org/glm-5.3 "), &book).as_deref(), Ok(MEDIUM_MODEL));
         let unpriced = fallback_model(Some("anthropic/claude-haiku-4.5"), &book).unwrap_err();
         assert!(unpriced.contains("the fallback model \"anthropic/claude-haiku-4.5\" is not in the price book") && unpriced.contains(FALLBACK), "{unpriced}");
         assert!(fallback_model(Some(""), &book).is_err());
-        // both priced already: the cheap tier's DeepSeek, its GLM fallback
+        // both priced already: the cheap tier's GLM, its DeepSeek fallback
         let p = |model: &str| book.models.iter().find(|m| m.model == model).unwrap().price;
-        let (d, g) = (p(CHEAP_MODEL), p(FALLBACK));
+        let (d, g) = (p(FALLBACK), p(CHEAP_MODEL));
         assert_eq!((d.input, d.cached_input, d.cache_write, d.output), (440_000, 14_000, 440_000, 1_320_000));
         assert_eq!((g.input, g.cached_input, g.cache_write, g.output), (150_000, 30_000, 150_000, 500_000));
     }
@@ -887,11 +889,11 @@ mod tests {
         let used = usage_of(t.model(), &json!({ "prompt_tokens": 30_000, "completion_tokens": 400, "prompt_tokens_details": { "cached_tokens": 0 } })).unwrap();
         assert_eq!(used, Usage::Tokens { model: FALLBACK.into(), input: 30_000, cached_input: 0, cache_write: 0, output: 400 });
         let (held, used) = (book.price(&held).unwrap(), book.price(&used).unwrap());
-        // 30,000 in and 400 out at $0.15 and $0.50 a million: $0.0047
-        assert_eq!(used.list, 4_700);
-        // the cheap tier's hold (DeepSeek's prices) covers its fallback's (GLM-5.3 Flash's) worst case too
-        let fallback_worst = Usage::Tokens { model: FALLBACK.into(), input: 120_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) };
-        assert!(book.price(&fallback_worst).unwrap().charge <= held.charge);
+        // 30,000 in and 400 out at $0.44 and $1.32 a million: $0.013728
+        assert_eq!(used.list, 13_728);
         assert!(used.charge < held.charge, "{used:?} within {held:?}");
+        // the dearer fallback's worst case is past the cheap tier's hold: a call that large is charged in full, past it
+        let fallback_worst = Usage::Tokens { model: FALLBACK.into(), input: 120_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) };
+        assert!(book.price(&fallback_worst).unwrap().charge > held.charge);
     }
 }

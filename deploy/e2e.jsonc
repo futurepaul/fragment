@@ -25,8 +25,8 @@
     "client_id": "fragment-workos-client-id",
     "api_key": "fragment-workos-api-key"
   },
-  // Models through this gateway: the cheap tier's DeepSeek V4 Flash, its
-  // fallback GLM-5.3 Flash, and GLM-5.3 Flash for vision, each the cell's
+  // Models through this gateway: the cheap tier's GLM-5.3 Flash, its
+  // fallback DeepSeek V4 Flash, and GLM-5.3 Flash for vision, each the cell's
   // default (no `fallback_model` or `vision_model` here)
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",
