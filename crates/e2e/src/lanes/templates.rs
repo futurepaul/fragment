@@ -27,7 +27,7 @@ pub(super) fn email_of(keys: &Keys) -> String {
 }
 
 pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("templates", &[]) {
+    if !s.section("templates", &[crate::Need::Chrome]) {
         return Ok(());
     }
     let (owner, owner_session) = person(api)?;
@@ -69,6 +69,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let blank = s.named(api, &owner, "tblank")?;
     let r = api.create_with(&owner, json!({ "name": blank, "template": "blank" }))?;
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
+    template_pages(s, api, &todo, &todo_cookie, &blank, &blank_cookie)?;
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         let r = api.signed(&owner, "PUT", &format!("/api/f/{blank}/members/{}", npub_of(k)), Some(&json!({ "role": role })))?;
         anyhow::ensure!(r.status == 200, "adding a {role}: {r}");
@@ -145,6 +146,83 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 /// create's, 2026-10-05): the local fake answers that create this slowly,
 /// so its seed and the alarm's meet as they do there.
 const CODE_STORAGE_LATENCY_MS: u64 = 100;
+
+/// The starter pages as a person sees them, in a narrow pane and on a
+/// desktop, with the system's light and dark schemes. Keep the shots in
+/// the run's scratch for visual review.
+fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank: &str, blank_cookie: &str) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for the starter pages (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let shots = s.dir("template-pages");
+    for (label, name, cookie) in [("blank", blank, blank_cookie), ("todo", todo, todo_cookie)] {
+        let origin = api.site_origin(name);
+        b.set_cookie(&origin, "fragview", cookie.strip_prefix("fragview=").unwrap_or(cookie))?;
+        let page = b.open(&api.site_url(name, ""))?;
+        anyhow::ensure!(b.until(&page, "document.querySelector('main')", std::time::Duration::from_secs(15)), "{label} did not load");
+        let headers = b.eval(&page, "document.querySelectorAll('header, h1').length")?;
+        s.ok(&format!("{label} starts with its content, without a page-title header"), headers == 0, &headers);
+        if label == "todo" {
+            anyhow::ensure!(b.until(&page, "document.getElementById('here').textContent === 'just you here'", std::time::Duration::from_secs(15)), "todo did not connect");
+            b.eval(&page, "(async () => { const f = await import('./__fragment.js'); await f.call('add', {text: 'Review the first draft'}); await f.call('add', {text: 'Share it with Bea'}); })()")?;
+            anyhow::ensure!(b.until(&page, "document.querySelectorAll('#todos li').length === 2", std::time::Duration::from_secs(15)), "todo did not update live");
+        }
+        for (width, view) in [(380, "pane"), (1280, "desktop")] {
+            b.viewport(&page, width, 800, false)?;
+            for scheme in ["light", "dark"] {
+                b.color_scheme(&page, scheme)?;
+                b.eval(&page, "document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))")?;
+                let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth")?;
+                s.ok(&format!("{label} fits the {view} in {scheme}"), fits == true, &fits);
+                b.screenshot(&page, &shots.join(format!("{label}-{view}-{scheme}.png")))?;
+            }
+        }
+        if label == "blank" {
+            stylesheet(s, &mut b, &page)?;
+        }
+        b.close(page)?;
+    }
+    println!("      (starter screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// Author CSS keeps control even when declared before the platform link;
+/// the page's explicit theme wins over the system, and native controls
+/// and hidden content keep their behavior.
+fn stylesheet(s: &mut Suite, b: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    b.eval(page, r#"(() => {
+      const style = document.createElement('style');
+      style.textContent = 'button { border-radius: 3px; padding: 7px; }';
+      document.head.prepend(style);
+      const box = document.createElement('div');
+      box.innerHTML = '<button>Action</button><input type="checkbox"><input type="radio"><p hidden>Hidden</p>';
+      document.querySelector('main').append(box);
+      window.controls = box;
+    })()"#)?;
+    let controls = b.eval(page, r#"(() => {
+      const css = e => getComputedStyle(e);
+      return {
+        radius: css(controls.querySelector('button')).borderRadius,
+        padding: css(controls.querySelector('button')).padding,
+        checkbox: css(controls.querySelector('[type=checkbox]')).appearance,
+        radio: css(controls.querySelector('[type=radio]')).appearance,
+        hidden: css(controls.querySelector('[hidden]')).display
+      };
+    })()"#)?;
+    s.ok("author rules before the link override button defaults", controls["radius"] == "3px" && controls["padding"] == "7px", &controls);
+    s.ok("checkboxes and radios keep native appearance; hidden content stays hidden", controls["checkbox"] == "auto" && controls["radio"] == "auto" && controls["hidden"] == "none", &controls);
+    b.color_scheme(page, "light")?;
+    let light = b.eval(page, "getComputedStyle(document.body).backgroundColor")?;
+    let dark = b.eval(page, "document.documentElement.dataset.theme = 'dark'; getComputedStyle(document.body).backgroundColor")?;
+    b.color_scheme(page, "dark")?;
+    let chosen_light = b.eval(page, "document.documentElement.dataset.theme = 'light'; getComputedStyle(document.body).backgroundColor")?;
+    s.ok("an explicit page theme wins over the system in both directions", light != dark && chosen_light == light, format!("light {light}, dark {dark}, chosen light {chosen_light}"));
+    b.eval(page, "delete document.documentElement.dataset.theme; document.documentElement.style.colorScheme = 'light'; getComputedStyle(document.body).backgroundColor")?;
+    let css_light = b.eval(page, "getComputedStyle(document.body).backgroundColor")?;
+    s.ok("a page can also choose its scheme with CSS", css_light == light, &css_light);
+    Ok(())
+}
 
 /// How many of the fragment's newest 200 events are of `kind`.
 fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
