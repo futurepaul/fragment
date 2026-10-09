@@ -77,6 +77,8 @@ const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const SUGGESTIONS = ["Build something", "Explore an idea", "Make a plan"];
 const SHA256 = /^[0-9a-f]{64}$/;
+// The recorder validates its finished clip against the cell's audio types.
+const SHOWN_AUDIO = /^audio\/(webm|ogg|mp4|mpeg|wav)$/;
 // A voice memo: the recorder's audio, asked for in this order (Chrome and
 // Firefox record Opus, Safari AAC), at a voice's bitrate, for at most this
 // long (it stops itself, and is sent), named by its type.
