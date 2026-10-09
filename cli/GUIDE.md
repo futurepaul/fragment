@@ -380,11 +380,16 @@ A page imports the browser library from its own fragment:
 ```
 
 `<link rel="stylesheet" href="./__fragment.css">` gives a page the
-platform's theme: warm neutrals and one accent, light and dark, as
-variables (`--bg`, `--fg`, `--muted`, `--line`, `--accent`, `--danger`,
-`--font`, `--radius`), and plain base styles for text, forms and
-buttons. Your rules after it override any of it; a page that doesn't
-link it gets none of it.
+platform's look, the shell's: Funnel Sans, warm greys and one blue,
+light and dark, as variables (`--bg`, `--fg`, `--muted`, `--faint`,
+`--line`, `--line-strong`, `--surface`, `--soft`, `--accent`,
+`--on-accent`, `--success`, `--danger`, `--font`, `--font-display`,
+`--font-mono`, `--text-sm`, `--text-lg`, `--text-xl`, `--radius`),
+and base styles for text, forms and pill buttons. Your rules override
+the base styles, which have zero specificity. The system chooses light
+or dark; a page can choose with `color-scheme` on `:root` or
+`data-theme="light"` / `"dark"` on `<html>`. A page that doesn't link
+it gets none of it.
 
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
@@ -402,14 +407,19 @@ A page should look made for its job, by someone who cared.
 - **Design for the job.** Put what the person came for first: who owes
   whom, the vote so far, today's chores. A list with an add button is
   rarely it.
+- **Apps default to no header.** No title bar, banner, hero, or
+  page-title heading unless the person asks for one. The shell already
+  frames the app with its title: start with useful content. Design for
+  a narrow pane (about 380 px). A heading names content (a poll's
+  question) or a section, rather than repeating the app's name.
 - **Mobile first.** Links get opened on phones: one column, thumb-sized
   targets, nothing that needs a hover. Then widen.
-- **Warm neutrals** for the page (an off-white, warm greys, a warm
-  near-black in the dark), and **one accent color**, used sparingly: the
-  main action, the current state.
-- **A real type hierarchy:** a title clearly larger than the body, muted
-  small text for what matters less, sizes from a short scale. Spacing
-  from a scale too, with more space between groups than within them.
+- **The platform's look:** link `./__fragment.css` and build on its
+  variables. Warm greys and **one accent color**, used sparingly (a
+  link, the current state); the main action a solid pill.
+- **A quiet type hierarchy:** muted small text for what matters less,
+  sizes from a short scale. Spacing from a scale too, with more space
+  between groups than within them.
 - **None of:** gradients, glow, decorative emoji, heavy shadows.
 
 ## The inbox (webhooks in)

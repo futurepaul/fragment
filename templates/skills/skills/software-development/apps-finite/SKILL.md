@@ -37,6 +37,12 @@ fragment guide             # the whole manual: read it before your first app
 
 ## Fast first reveal
 
+Apps default to no header: the shell already frames the app with its
+title. Start with the person's task, and add a title bar, banner, hero,
+or page-title heading only when they ask for one. Content and section
+headings are fine. Link `./__fragment.css` for the platform's defaults
+when useful (see Design standards below).
+
 Optimize for a fast, useful first reveal. Do not spend a long hidden turn polishing
 an aesthetic direction the human has not seen or approved.
 
@@ -145,7 +151,8 @@ fragment rollback garden                  # live back to the deploy before
 
 ## Check it in a real browser
 
-Open the live link in a browser and check it at desktop and phone widths
+Open the live link in a browser and check it at desktop, narrow pane
+(about 380 px), and phone widths, in light and dark, with keyboard access
 before you share it: a page is not validated because its files deployed.
 For rich apps, use Playwright
 or your browser tools. A `link` fragment opens with its share link (`fragment
@@ -208,9 +215,19 @@ When using generic web skills, keep Fragment's platform contract:
 
 ## Design standards
 
+- Apps default to no header: no title bar, banner, hero, or page-title
+  heading unless the human asks for one. The shell already frames the
+  app with its title. Start with useful content; headings may name
+  content or sections.
+- Link `./__fragment.css` for the platform's look: Funnel Sans, warm
+  greys, one blue accent, light and dark, and solid pill buttons. Build
+  on its variables (`--bg`, `--fg`, `--surface`, `--soft`, `--muted`,
+  `--line`, `--accent`, `--font`, `--radius`) and override its base styles
+  as the job needs. It is optional and never injected into a page.
 - Avoid interchangeable AI-looking layouts.
-- Use expressive typography and intentional spacing.
-- Create visual rhythm with real imagery, diagrams, or illustration.
+- Use a quiet type hierarchy and intentional spacing: more space between
+  groups than within them. Design for narrow panes and phones first.
+- Use real imagery, diagrams, or illustration when they help the job.
 - Make dashboards feel like products, not admin templates.
 - Treat screenshots as product review, not just bug checks, and use them to
   align with the human early.
