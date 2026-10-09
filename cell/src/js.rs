@@ -595,9 +595,15 @@ impl Laps {
     /// The wait since the last lap (or the start), added to `step`'s.
     pub fn lap(&mut self, step: &'static str) {
         let now = now_ms();
-        let waited = now - self.last + self.waits.get(step).and_then(serde_json::Value::as_i64).unwrap_or(0);
-        self.waits.insert(step.to_string(), waited.into());
+        self.took(step, now - self.last);
         self.last = now;
+    }
+
+    /// A wait measured apart (steps that ran side by side), added to
+    /// `step`'s. A clock set back reads as no wait.
+    pub fn took(&mut self, step: &'static str, ms: i64) {
+        let waited = ms.max(0) + self.waits.get(step).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        self.waits.insert(step.to_string(), waited.into());
     }
 
     /// One line (lesson 14): `fields`, then `event`, `at` (when the work

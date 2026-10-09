@@ -94,12 +94,12 @@ impl FragmentCell {
 
     /// Accepts a push to every subscription tagged `who` (`*`: all), once
     /// per `key` (a mutation's effect or a job's step): written to the
-    /// delivery outbox, then sent (deliveries.rs). Answers how many
-    /// subscriptions it goes to.
-    pub(crate) async fn send_push(&self, key: &str, who: &str, payload: &Value) -> CellResult<usize> {
+    /// delivery outbox, then sent after the answer (deliveries.rs). Answers
+    /// how many subscriptions it goes to.
+    pub(crate) fn send_push(&self, key: &str, who: &str, payload: &Value) -> CellResult<usize> {
         let n = self.outbox_push(key, who, payload)?;
         if n > 0 {
-            self.drain_deliveries().await;
+            self.later();
         }
         Ok(n)
     }

@@ -3,16 +3,23 @@
 //! subscribers, and web push. Each is first written to the
 //! fragment's delivery outbox (`delivery_outbox`), in the same turn as
 //! what caused it: the record, or the push effect as it is accepted. The
-//! outbox is drained right away and again from the alarm: each delivery is
-//! built whole (a push is encrypted and signed for its browser) and put on
-//! the `fragment-deliveries` queue, and its row goes once the queue has it,
-//! so a failure between the record and the queue delays a delivery but
-//! never loses it. Receivers see a delivery at least once. The consumer
-//! here, a stateless isolate, sends it. A push service that answers 404 or
-//! 410 has dropped the subscription, so the fragment drops it too; a 429,
-//! 5xx, or network failure is retried with a delay that grows with the
-//! message's age; one that runs out of retries lands on the dead-letter
-//! queue and in the fragment's event log.
+//! outbox is drained just after the answer (fragment.rs `later`) and again
+//! from the alarm: each delivery is built whole (a push is encrypted and
+//! signed for its browser) and put on the `fragment-deliveries` queue, and
+//! its row goes once the queue has it, so a failure between the record and
+//! the queue delays a delivery but never loses it. Receivers see a
+//! delivery at least once. The consumer here, a stateless isolate, sends
+//! it. A push service that answers 404 or 410 has dropped the
+//! subscription, so the fragment drops it too; a 429, 5xx, or network
+//! failure is retried with a delay that grows with the message's age; one
+//! that runs out of retries lands on the dead-letter queue and in the
+//! fragment's event log.
+//!
+//! A computer's wake subscription (`computer:<id>`) is a wake, not a
+//! request: the drain asks the computer itself (its guest reads the record:
+//! runs_on.rs), never through the queue, and its row goes once the computer
+//! answers. The outbox is its retry: a wake that fails for now waits as a
+//! row the queue did not take waits.
 
 use std::time::Duration;
 
@@ -66,6 +73,36 @@ struct PendingPush {
     payload: String,
     after: i64,
     upto: i64,
+}
+
+/// What a computer's wake subscription names in place of a URL (runs_on.rs).
+const WAKE_PREFIX: &str = "computer:";
+
+/// The wake of `computer` that outbox row `id` holds, for record `seq` of `channel`.
+struct Wake {
+    id: i64,
+    attempts: i64,
+    computer: String,
+    channel: String,
+    seq: i64,
+}
+
+/// How a wake went.
+enum Woken {
+    Up,
+    /// For good: it won't wake, its owner cannot pay, or it is gone.
+    Refused(String),
+    /// For now: the outbox tries it again.
+    Later(String),
+}
+
+/// What one drain sent.
+#[derive(Default)]
+pub(crate) struct Drained {
+    /// Deliveries the queue took.
+    pub queued: usize,
+    /// Computers that answered their wake.
+    pub woken: usize,
 }
 
 /// What a delivery carries: a record to a channel subscriber, or a web
@@ -141,31 +178,37 @@ impl FragmentCell {
     }
 
     /// Sends the outbox's due rows: each delivery built whole and queued,
-    /// its row gone once the queue has it. A row the queue did not take
-    /// waits, doubling, and is tried again from the alarm; after
-    /// `OUTBOX_ATTEMPTS_MAX` tries it is dropped, with a `delivery.failed`
-    /// event (never silently).
-    pub(crate) async fn drain_deliveries(&self) {
+    /// its row gone once the queue has it, and each computer's wake asked
+    /// of it, its row gone once the computer answers. A row the queue did
+    /// not take, or a wake that failed for now, waits, doubling, and is
+    /// tried again from the alarm; after `OUTBOX_ATTEMPTS_MAX` tries it is
+    /// dropped, with a `delivery.failed` event (never silently). Answers
+    /// what it sent.
+    pub(crate) async fn drain_deliveries(&self) -> Drained {
         let now = js::now_ms();
+        let mut drained = Drained::default();
         // claim the due rows in one statement: another drain skips them
         let Ok(mut rows) = self.rows(
             "UPDATE delivery_outbox SET next_at = ? WHERE id IN (SELECT id FROM delivery_outbox WHERE next_at <= ? ORDER BY id LIMIT ?) RETURNING *",
             vec![SqlStorageValue::Integer(now + CLAIM_MS), SqlStorageValue::Integer(now), SqlStorageValue::Integer(DRAIN_ROWS)],
         ) else {
-            return;
+            return drained;
         };
         if rows.is_empty() {
-            return;
+            return drained;
         }
         rows.sort_by_key(|r| r["id"].as_i64());
-        let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return };
+        let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return drained };
         let mut failed = false;
-        // records go a queue batch at a time; each push goes on its own
+        // records go a queue batch at a time; each push goes on its own;
+        // each wake goes to its computer
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
+        let mut wakes: Vec<Wake> = vec![];
         for row in &rows {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
+                    Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => wakes.push(Wake { id, attempts, computer: d.url, channel, seq }),
                     Ok(Some(d)) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
                     Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
@@ -173,24 +216,67 @@ impl FragmentCell {
                 Pending::Push(push) => self.drain_push(&mut failed, id, attempts, push, &fragment, &incarnation).await,
             }
         }
-        let mut chunks = singles.chunks(QUEUE_BATCH);
-        for chunk in chunks.by_ref() {
-            let deliveries: Vec<Delivery> = chunk.iter().map(|(_, _, d)| d.clone()).collect();
-            match self.enqueue(&deliveries).await {
-                Ok(()) => chunk.iter().for_each(|(id, ..)| self.outbox_done(*id)),
-                Err(e) => {
-                    chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, &e.message));
-                    break;
+        // the wakes go out beside the queue's sends, each on its own: a
+        // computer that takes its time starting holds up nothing else
+        let woken = futures_util::future::join_all(wakes.iter().map(|w| self.wake(w, &fragment)));
+        let sent = async {
+            let mut chunks = singles.chunks(QUEUE_BATCH);
+            for chunk in chunks.by_ref() {
+                let deliveries: Vec<Delivery> = chunk.iter().map(|(_, _, d)| d.clone()).collect();
+                match self.enqueue(&deliveries).await {
+                    Ok(()) => {
+                        chunk.iter().for_each(|(id, ..)| self.outbox_done(*id));
+                        drained.queued += chunk.len();
+                    }
+                    Err(e) => {
+                        chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, &e.message));
+                        break;
+                    }
                 }
             }
-        }
-        // after a failure the rest wait too: the queue is refusing
-        for chunk in chunks {
-            chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, "an earlier batch was refused"));
+            // after a failure the rest wait too: the queue is refusing
+            for chunk in chunks {
+                chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, "an earlier batch was refused"));
+            }
+        };
+        let (woken, ()) = futures_util::future::join(woken, sent).await;
+        for (w, woken) in wakes.iter().zip(woken) {
+            match woken {
+                Woken::Up => {
+                    self.outbox_done(w.id);
+                    drained.woken += 1;
+                }
+                Woken::Refused(why) => {
+                    self.outbox_done(w.id);
+                    self.event("delivery.failed", &format!("a computer's wake: {why}"), json!({ "kind": DeliveryKind::Record.as_str(), "status": 0 }));
+                }
+                Woken::Later(why) => self.outbox_failed(&mut failed, w.id, w.attempts, &why),
+            }
         }
         if failed || rows.len() as i64 == DRAIN_ROWS {
             let _ = self.schedule().await;
         }
+        drained
+    }
+
+    /// Wakes the computer a wake subscription names, for record `seq` of
+    /// `channel` (its guest reads the record itself), and says how it went
+    /// in one line.
+    async fn wake(&self, w: &Wake, fragment: &str) -> Woken {
+        let laps = js::Laps::start();
+        let woken = match crate::computer::ask(&self.env, &w.computer, "computer/wake", &json!({ "why": "record" })).await {
+            Ok(_) => Woken::Up,
+            // one that won't wake, or whose owner cannot pay, is not worth retrying
+            Err(e) if matches!(e.code, ErrorCode::WontWake | ErrorCode::BudgetUsedUp | ErrorCode::NotFound) => Woken::Refused(e.message),
+            Err(e) => Woken::Later(e.message),
+        };
+        let (outcome, why) = match &woken {
+            Woken::Up => ("up", None),
+            Woken::Refused(why) => ("refused", Some(why)),
+            Woken::Later(why) => ("later", Some(why)),
+        };
+        laps.log("delivery.wake", json!({ "computer": w.computer, "fragment": fragment, "channel": w.channel, "seq": w.seq, "attempts": w.attempts, "outcome": outcome, "why": why }));
+        woken
     }
 
     /// One push row: its subscriptions a batch at a time, the cursor
@@ -311,24 +397,8 @@ async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &
 }
 
 /// Sends one delivery: `Ok(None)` done, `Ok(Some(why))` worth retrying.
-/// A computer's wake subscription (`computer:<id>`) is a wake, not a POST:
-/// its guest reads the record itself (runs_on.rs).
 async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     use base64::Engine;
-    if let Some(hex) = d.url.strip_prefix("computer:") {
-        let computer = format!("computer:{hex}");
-        let record: serde_json::Value = base64::engine::general_purpose::STANDARD.decode(&d.body).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        console_log!("{}", serde_json::json!({ "wake": computer, "fragment": d.fragment, "channel": record["channel"], "seq": record["record"]["seq"] }));
-        return Ok(match crate::computer::ask(env, &computer, "computer/wake", &serde_json::json!({ "why": "record" })).await {
-            Ok(_) => None,
-            // one that won't wake, or whose owner cannot pay, is not worth retrying
-            Err(e) if matches!(e.code, ErrorCode::WontWake | ErrorCode::BudgetUsedUp | ErrorCode::NotFound) => {
-                report(env, d, Outcome::Failed, 0, &e.message).await?;
-                None
-            }
-            Err(e) => Some(e.message),
-        });
-    }
     let body = base64::engine::general_purpose::STANDARD.decode(&d.body).unwrap_or_default();
     let headers = Headers::new();
     for (k, v) in &d.headers {

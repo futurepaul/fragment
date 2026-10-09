@@ -272,29 +272,22 @@ impl FragmentCell {
     /// outbox in the same step as its append, before anything that can
     /// fail (a record found already appended has them). Then the runs its
     /// channel's triggers start, each once per record (`fire_channel`), so
-    /// a try after a failure here starts only what did not start; then the
-    /// outbox is drained, whatever the triggers did. Answers the runs.
+    /// a try after a failure here starts only what did not start. Sending
+    /// the deliveries and starting the runs' Workflows come after the
+    /// answer, whatever the triggers did (`later`): a message logged for
+    /// search is sent from the alarm, armed then too, so a post waits on
+    /// no person's list. Answers the runs.
     pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32, laps: &mut js::Laps) -> CellResult<Vec<i64>> {
         // A retry finds the record appended; its deliveries are written
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
-        let queued = if appended || !self.outboxed(record)? { self.outbox_record(record)? } else { false };
-        laps.lap("outbox");
-        // a message logged for search is sent from the alarm, so a post
-        // waits on no person's list; an alarm not armed now is armed by the
-        // next thing that arms it (the cursor stays due), never failing the post
-        if self.search_woke.replace(false) {
-            if let Err(e) = self.schedule().await {
-                console_error!("record {}#{}: the alarm was not armed for search ({:?}): {}", record.channel, record.seq, e.code, e.message);
-            }
+        if appended || !self.outboxed(record)? {
+            self.outbox_record(record)?;
         }
-        laps.lap("search");
+        laps.lap("outbox");
         let fired = self.fire_channel(record, depth).await;
         laps.lap("fire");
-        if queued {
-            self.drain_deliveries().await;
-        }
-        laps.lap("drain");
+        self.later();
         fired
     }
 
@@ -375,8 +368,6 @@ impl FragmentCell {
         // be forgotten, and it would start them twice.
         if appended || js::now_ms() - record.at < retry_horizon_ms() {
             self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut laps).await?;
-            self.launch_queued().await;
-            laps.lap("launch");
         }
         laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
@@ -593,7 +584,7 @@ impl FragmentCell {
                     writes.push(crate::files::FileWrite { path, bytes });
                     Ok(())
                 }
-                Effect::Push { who, payload } => self.send_push(&format!("{key}:{i}"), &who, &payload).await.map(|_| ()),
+                Effect::Push { who, payload } => self.send_push(&format!("{key}:{i}"), &who, &payload).map(|_| ()),
             };
             if let Err(e) = done {
                 return self.after_failure(p, e).await;

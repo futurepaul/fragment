@@ -914,6 +914,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         !awake.is_empty() && awake.iter().all(|e| e["entry"]["row"]["usage"]["ms"].as_u64().is_some_and(|ms| ms > 0) && e["entry"]["charge"].as_i64().is_some_and(|c| c > 0)),
         json!(awake),
     );
+    // its wake goes from the chat's outbox to the computer itself, never
+    // through the delivery queue: with every queue send of the chat's
+    // failing, the record wakes it all the same
+    let fail_queue = |times: u32| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": chat_name, "op": "fail-deliveries", "times": times })));
+    let r = fail_queue(1000)?;
+    s.ok("(the test fleet fails every queue send of the chat's)", r.status == 200, &r);
     let t0 = std::time::Instant::now();
     say(3, "are you there")?;
     replies_so_far += 1;
@@ -921,10 +927,11 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (woken and answered in {:.1?})", t0.elapsed());
     let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
     s.ok(
-        "a record on the chat wakes it, and it answers",
+        "a record on the chat wakes it past a delivery queue that takes nothing, and it answers",
         woke && replies.last().is_some_and(|r| if scripted { echoed(r, "are you there") } else { said_something(r) }),
         json!(replies),
     );
+    fail_queue(0)?;
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("awake again", r.body["phase"] == "awake", &r);
     // its answer came after every turn its restore read again: the runs

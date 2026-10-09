@@ -524,7 +524,7 @@ impl FragmentCell {
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
         // the file triggers' runs, and the alarm for newly installed schedules
-        self.launch_queued().await;
+        self.later();
         for (which, moved) in &out {
             // a move of live wants its preview card, which the alarm shoots (card.rs)
             if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {

@@ -452,7 +452,9 @@ expires within 30 days. The container application is the deployment's
     amended; docs/bridge.md, "A card keeps its computer awake").
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
-  computer on each new record; the agent must be a member who may read
+  computer on each new record (the fragment asks the computer itself just
+  after the record's write answers, its delivery outbox the retry: never
+  the delivery queue, docs/api.md); the agent must be a member who may read
   the channel. Only a computer's egress can ask for one. Nothing is
   pushed into the guest: on waking, the guest reads each channel after its last sequence number
   (`GET …/channels/{channel}?after=`) and follows it live on `__live`.

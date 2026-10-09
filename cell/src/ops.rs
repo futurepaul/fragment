@@ -248,7 +248,7 @@ impl FragmentCell {
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
         let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
-        self.launch_queued().await;
+        self.later();
         Ok(result)
     }
 
