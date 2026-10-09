@@ -653,6 +653,23 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
     s.ai.fail_next(&[400]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
     s.ok("a refusal of the request (400) is the call's: the fallback is not asked", r.status == 400 && tried(s, calls) == [CHEAP], json!({ "status": r.status, "tried": tried(s, calls) }));
+    // a runtime's own switch when its model stalls (Hermes' `fallback_providers`): the route's `fallback`
+    let named = |stream: bool| json!({ "model": "fallback", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
+    let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&named(false)))?;
+    let priced = charge(&tokens(FALLBACK, 30, 0, 10));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| e["entry"]["end"]["charge"] == priced && e["entry"]["end"]["basis"] == "usage"));
+    s.ok(
+        "`fallback` names the deployment's fallback model (a runtime's switch when its model stalls), and is settled at its prices",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == [FALLBACK] && settled,
+        json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
+    );
+    s.ai.down(&[FALLBACK]);
+    let calls = s.ai.calls().len();
+    let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&named(false)))?;
+    s.ai.down(&[]);
+    s.ok("and has no fallback of its own: its model's 502 is the call's, after one try", r.status == 502 && tried(s, calls) == [FALLBACK], json!({ "status": r.status, "tried": tried(s, calls) }));
     Ok(())
 }
 

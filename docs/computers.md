@@ -512,6 +512,21 @@ expires within 30 days. The container application is the deployment's
   deployment's fallback model, DeepSeek V4 Flash (behind the cheap tier's
   GLM-5.3 Flash) unless its config names another (docs/api.md,
   Models): the guest sees only the answer.
+- A call that answers nothing (no first byte, a stream that stalls) is
+  the runtime's own to give up on. Our Hermes image's text-tier profiles
+  (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a
+  time-based fallback "only if time-based fallback is built into
+  hermes"): its stale detector kills a call that streams nothing for 20 s
+  (`providers.custom.models.<tier>.stale_timeout_seconds`, that model's
+  alone: `vision`, whose answers come whole and slower, keeps Hermes'
+  default), tries it once more (`HERMES_STREAM_RETRIES=1`, the gateway's
+  environment), then, its one retry spent (`agent.api_max_retries: 1`),
+  switches to its `fallback_providers`: the route's `fallback` (the
+  deployment's fallback model, its key `agent:<name>` naming the agent),
+  about 40 s after the stall began. The next turn starts on its tier
+  again (Hermes' `restore_primary_runtime`). An owner's own model and the
+  high tier have none. The Docker lane stalls the scripted model to prove
+  it (images/bridge/tests/docker.rs).
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.

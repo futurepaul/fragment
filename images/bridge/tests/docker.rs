@@ -655,6 +655,64 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     (fake, model, chat, c)
 }
 
+/// Goal (Paul, 2026-10-09: a time-based fallback "only if time-based
+/// fallback is built into hermes"): a tier agent whose model stalls, its
+/// call streaming nothing, switches to the route's `fallback` by Hermes'
+/// own mechanism, as the image configures it (hermes-boot's
+/// `STALE_TIMEOUT_S`, `STREAM_RETRIES`, `api_max_retries` and
+/// `fallback_providers`): its stale detector gives up on the call after
+/// 20 s, tries it once more, then switches; the fallback's call names the
+/// agent; and its next turn is on its tier again. Method: the scripted
+/// model holds every tier call about `stall` for `STALL_S` (past the stale
+/// timeout) and answers `fallback`'s at once.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_stalled_model_falls_back_to_the_routes_fallback() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let calls = || model.calls.lock().unwrap().clone();
+    let mentions = |call: &support::model::Call, words: &str| call.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| m["content"].to_string().contains(words));
+    let answered = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn);
+    let before = calls().len();
+    let asked = Instant::now();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "stall, then answer" }));
+    let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let replied = tokio::time::timeout(Duration::from_secs(240), fake.until(600_000, "the stalled turn's reply", |w| answered(w, &t).is_some()));
+    if replied.await.is_err() {
+        let tried: Vec<String> = calls()[before..].iter().map(|c| format!("{} stream={}", c.model, c.stream)).collect();
+        panic!("no reply to a stalled turn; the model was asked {tried:?}; the container said:\n{}", c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    let took = asked.elapsed();
+    let made: Vec<support::model::Call> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "stall, then answer")).cloned().collect();
+    let fell = made.iter().position(|c| c.model == "fallback");
+    eprintln!("hermes: a stalled turn's reply in {} ms; its calls: {:?}", took.as_millis(), made.iter().map(|c| format!("{} stream={}", c.model, c.stream)).collect::<Vec<_>>());
+    let fell = fell.unwrap_or_else(|| panic!("the turn never asked the route's fallback: {:?}", made.iter().map(|c| &c.model).collect::<Vec<_>>()));
+    let stalled = made[..fell].iter().filter(|c| c.model == "cheap").count();
+    assert!(stalled >= 2, "its tier was asked, and asked once more, before the fallback: {stalled} tries");
+    let fallback = &made[fell];
+    assert!(
+        fallback.agent.as_deref() == Some("juniper--k3x9") || fallback.authorization.as_deref() == Some("Bearer agent:juniper--k3x9"),
+        "the fallback's call names its agent, by header or key: {:?} {:?}",
+        fallback.agent,
+        fallback.authorization
+    );
+    assert!(took >= Duration::from_secs(38) && took < Duration::from_secs(150), "about two stale timeouts of 20 s, then the fallback's answer: {took:?}");
+    fake.with(|w| {
+        let reply = answered(w, &t).unwrap();
+        let text = reply["text"].as_str().unwrap_or("");
+        assert!(text.starts_with("scripted:") && text.contains("stall, then answer"), "the fallback's answer is the reply: {reply}");
+    });
+    fake.until(30_000, "the stalled turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+
+    // the next turn starts on its tier again
+    let before = calls().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "and now?" }));
+    let t2 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(120_000, "the next turn's reply", |w| answered(w, &t2).is_some()).await;
+    let next: Vec<String> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "and now?")).map(|c| c.model.clone()).collect();
+    assert_eq!(next.first().map(String::as_str), Some("cheap"), "the next turn is on its tier: {next:?}");
+    assert!(!next.iter().any(|m| m == "fallback"), "and needs no fallback: {next:?}");
+}
+
 /// A turn whose tool writes a SQLite database of its own for about six
 /// seconds (a commit every few ms), while Hermes writes its own.
 const WRITING: &str = "run: python3 -c \"import sqlite3,time;c=sqlite3.connect('tool.db');c.execute('pragma journal_mode=wal');c.execute('create table if not exists t(x)');[(c.execute('insert into t values(randomblob(8000))'),c.commit(),time.sleep(0.01)) for _ in range(500)];print('wrote')\"";

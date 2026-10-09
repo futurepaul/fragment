@@ -3,11 +3,14 @@
 //! makes the calls and meters them on the payer's ledger.
 //!
 //! A call names a tier, never a model: the tier picks the model and caps
-//! what one call may write. The route takes one name besides the tiers,
-//! `vision` (`Named`): the deployment's vision model (`vision_model`), for
+//! what one call may write. The route takes two names besides the tiers
+//! (`Named`): `vision`, the deployment's vision model (`vision_model`), for
 //! an agent runtime's calls about an image (Hermes' auxiliary vision, which
-//! reads its `computer_use` screenshots). It is no tier: an agent, a job's
-//! step or a manifest names none but the tiers. What the platform sends is the client's
+//! reads its `computer_use` screenshots); and `fallback`, the deployment's
+//! fallback model (`fallback_model`), for a runtime's own switch when its
+//! model stalls (Hermes' `fallback_providers`, after its stale detector
+//! gives up on a call that streams nothing). Neither is a tier: an agent, a
+//! job's step or a manifest names none but the tiers. What the platform sends is the client's
 //! OpenAI-shaped chat completion with only these changes (`bound`): no
 //! `model` (the tier's is the call's), `max_tokens` at most the tier's cap,
 //! `reasoning_effort` clamped to `low` or `high` (GLM takes a missing or
@@ -52,6 +55,8 @@ pub const CHEAP_MODEL: &str = GLM_FLASH;
 pub const MEDIUM_MODEL: &str = "@cf/zai-org/glm-5.3";
 /// The route's name for the deployment's vision model.
 pub const VISION: &str = "vision";
+/// The route's name for the deployment's fallback model.
+pub const FALLBACK: &str = "fallback";
 /// The vision model unless the deployment names another
 /// (`FRAGMENT_VISION_MODEL`; Paul, 2026-10-05): GLM-5.3 Flash, "Vision:
 /// Yes" in Workers AI's catalog
@@ -101,11 +106,13 @@ pub struct Capped {
     pub max_tokens: u32,
 }
 
-/// What a call to the route names as its `model`: a tier, or `vision`.
+/// What a call to the route names as its `model`: a tier, `vision`, or
+/// `fallback`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Named {
     Tier(Tier),
     Vision,
+    Fallback,
 }
 
 impl Named {
@@ -113,6 +120,7 @@ impl Named {
         match self {
             Named::Tier(t) => t.as_str(),
             Named::Vision => VISION,
+            Named::Fallback => FALLBACK,
         }
     }
 }
@@ -167,21 +175,23 @@ pub fn tier_named(name: Option<&str>) -> Result<Tier, Refusal> {
     }
 }
 
-/// What a call to the model route names: `vision`, or a tier
+/// What a call to the model route names: `vision`, `fallback`, or a tier
 /// (`tier_named`).
 pub fn route_named(name: Option<&str>) -> Result<Named, Refusal> {
     match name {
         Some(VISION) => Ok(Named::Vision),
+        Some(FALLBACK) => Ok(Named::Fallback),
         other => tier_named(other).map(Named::Tier),
     }
 }
 
 /// The model a route call runs, and its cap: its tier's, or the
-/// deployment's vision model (`vision_model`'s) at the tiers' cap.
-pub fn capped(named: Named, vision_model: &'static str) -> Result<Capped, Refusal> {
+/// deployment's vision or fallback model at the tiers' cap.
+pub fn capped(named: Named, vision_model: &'static str, fallback_model: &'static str) -> Result<Capped, Refusal> {
     match named {
         Named::Tier(t) => model_of(t),
         Named::Vision => Ok(Capped { model: vision_model, max_tokens: MAX_TOKENS }),
+        Named::Fallback => Ok(Capped { model: fallback_model, max_tokens: MAX_TOKENS }),
     }
 }
 
@@ -545,17 +555,34 @@ mod tests {
         assert_eq!(route_named(None), Ok(Named::Tier(fragment_proto::DEFAULT_TIER)), "none named: the default tier");
         assert_eq!(route_named(Some("Vision")), Err(Refusal::UnknownTier));
         assert_eq!(route_named(Some(CHEAP_MODEL)), Err(Refusal::UnknownTier), "a model id is never a name");
-        assert_eq!(route_named(Some("high")).and_then(|n| capped(n, CHEAP_MODEL)), Err(Refusal::HighOff));
+        assert_eq!(route_named(Some("high")).and_then(|n| capped(n, CHEAP_MODEL, FALLBACK_MODEL_DEFAULT)), Err(Refusal::HighOff));
         assert_eq!(tier_named(Some("vision")), Err(Refusal::UnknownTier), "vision is no tier");
         assert_eq!(Tier::parse("vision"), None);
         assert_eq!((Named::Vision.as_str(), Named::Tier(Tier::Cheap).as_str()), ("vision", "cheap"));
-        let v = capped(Named::Vision, "@cf/example/seeing").unwrap();
+        let v = capped(Named::Vision, "@cf/example/seeing", "@cf/example/other").unwrap();
         assert_eq!(v, Capped { model: "@cf/example/seeing", max_tokens: MAX_TOKENS });
-        assert_eq!(capped(Named::Tier(Tier::Medium), "@cf/example/seeing").unwrap().model, MEDIUM_MODEL, "a tier's call is the tier's");
+        assert_eq!(capped(Named::Tier(Tier::Medium), "@cf/example/seeing", "@cf/example/other").unwrap().model, MEDIUM_MODEL, "a tier's call is the tier's");
         // an image part reaches the model as it came
         let image = json!([{ "type": "text", "text": "what is on the screen?" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }]);
         let b = bound(v, json!({ "model": "vision", "messages": [{ "role": "user", "content": image }] }), false).unwrap();
         assert_eq!((b.model, b.input["messages"][0]["content"].clone(), b.input.get("model")), ("@cf/example/seeing", image, None));
+    }
+
+    /// Goal: the route's `fallback` runs the deployment's fallback model, at
+    /// the tiers' cap, for a runtime's own switch when its model stalls
+    /// (Hermes' `fallback_providers`), and is no tier. Method: the route's
+    /// names, the tiers' names, and the model each is capped to.
+    #[test]
+    fn fallback_is_the_routes_and_no_tier() {
+        assert_eq!(route_named(Some("fallback")), Ok(Named::Fallback));
+        assert_eq!(Named::Fallback.as_str(), "fallback");
+        assert_eq!(route_named(Some("Fallback")), Err(Refusal::UnknownTier));
+        assert_eq!(route_named(Some(FALLBACK_MODEL_DEFAULT)), Err(Refusal::UnknownTier), "a model id is never a name");
+        assert_eq!(tier_named(Some("fallback")), Err(Refusal::UnknownTier), "fallback is no tier: no agent, step or manifest names it");
+        assert_eq!(Tier::parse("fallback"), None);
+        let f = capped(Named::Fallback, VISION_MODEL_DEFAULT, FALLBACK_MODEL_DEFAULT).unwrap();
+        assert_eq!(f, Capped { model: "@cf/deepseek-ai/deepseek-v4-flash-0731", max_tokens: MAX_TOKENS });
+        assert_eq!(capped(Named::Fallback, VISION_MODEL_DEFAULT, MEDIUM_MODEL).unwrap().model, MEDIUM_MODEL, "the deployment's, whatever it names");
     }
 
     /// Goal: one rule names the agent a guest's model call is for, chat and

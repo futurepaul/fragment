@@ -31,7 +31,11 @@
 //!   asked;
 //! - of a message with channel context before it (`[Recent channel
 //!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
-//!   turn), only the message after `[New message]` is acted on.
+//!   turn), only the message after `[New message]` is acted on;
+//! - a last user message saying `stall` is held `STALL_S` before any of
+//!   its answer is sent (a model that streams nothing, as Workers AI's
+//!   DeepSeek did on 2026-10-09), on any model but the route's `fallback`,
+//!   which answers it at once.
 //!
 //! It records each request's `model` and `x-fragment-agent` (a screenshot's
 //! description comes as the route's `vision`: Hermes' auxiliary vision).
@@ -155,6 +159,17 @@ impl Model {
         tokio::spawn(net::serve(listener, handler, rx));
         Model { addr, calls, _stop: stop }
     }
+}
+
+/// How long `stall` holds a call: well past the image's stale timeout
+/// (hermes-boot's `STALE_TIMEOUT_S`, 20 s), so Hermes gives up on it first.
+pub const STALL_S: u64 = 120;
+
+/// Whether a call stalls: its last user message says `stall`, and it is
+/// not to the route's `fallback`.
+fn stalls(body: &Value) -> bool {
+    let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
+    last_user.contains("stall") && body["model"] != "fallback"
 }
 
 /// What `write: <path>` has Hermes' write_file put there.
@@ -338,6 +353,10 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
+    }
+    if stalls(&v) {
+        // nothing at all, not even the answer's head, until the stall is over
+        tokio::time::sleep(std::time::Duration::from_secs(STALL_S)).await;
     }
     let (text, tool) = answer(&v);
     let model = v["model"].as_str().unwrap_or("cheap").to_string();
