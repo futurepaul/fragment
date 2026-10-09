@@ -50,6 +50,8 @@ pub enum Step {
     },
     #[serde(rename = "ai.text")]
     AiText(AiText),
+    #[serde(rename = "ai.decide")]
+    AiDecide(crate::decide::Decide),
     #[serde(rename = "ai.image")]
     AiImage(AiImage),
     /// `job.ai.video`: refused, whatever it asks, until videos run on
@@ -188,6 +190,7 @@ impl Step {
             Step::FilesWrite(_) => "files.write",
             Step::FilesRemove { .. } => "files.remove",
             Step::AiText(_) => "ai.text",
+            Step::AiDecide(_) => "ai.decide",
             Step::AiImage(_) => "ai.image",
             Step::AiVideo {} => "ai.video",
             Step::Members {} => "members",
@@ -246,6 +249,7 @@ mod tests {
             ("files.write", json!({ "path": "log.txt", "text": "a\n", "expect": null })),
             ("files.remove", json!({ "path": "log.txt" })),
             ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
+            ("ai.decide", json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is this a snack?" } } })),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
             ("ai.video", json!({})),
             ("members", json!({})),
@@ -257,7 +261,7 @@ mod tests {
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 16, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 17, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);

@@ -23,6 +23,10 @@ export class App extends DurableObject {
     return await job.ai.text({ model: "medium", prompt: text, reasoning_effort: "high" });
   }
 
+  async decide(input, job) {
+    return await job.ai.decide(input);
+  }
+
   // the high tier is off (decision 23): the step says so
   async summarize_high({ text }, job) {
     return await job.ai.text({ model: "high", prompt: text });

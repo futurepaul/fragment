@@ -16,11 +16,43 @@ async draw({ prompt }, job) {
   await job.ai.image({ prompt, path: "images/cover.jpg", steps: 4 });
   return { path: "images/cover.jpg" };
 }
+
+async categorize({ item }, job) {
+  const out = await job.ai.decide({
+    input: item,
+    questions: {
+      aisle: {
+        type: "choice",
+        instructions: "Choose the aisle for the finished product.",
+        options: {
+          snacks: "Chips, crackers and popcorn",
+          produce: "Fresh fruit and vegetables",
+          grocery: "Shelf-stable foods, including nut butter",
+          frozen: "Frozen foods, including ice cream",
+          other: "Other items",
+        },
+      },
+    },
+  });
+  return { aisle: out.answers.aisle.choice };
+}
 ```
 
 - Text runs on a tier: `cheap` (the default) or `medium`. GLM can spend a
   small `max_tokens` thinking: `reasoning_effort` is `low` unless you ask
   for `high`.
+- Use `ai.decide` when you need a category, route or gate. It returns
+  typed answers from Clef-flash: `choice` with `options: {id: description}`,
+  `predicate` with `.probability` of true, or `score` with ordered
+  `levels: [description, ...]` and a weighted zero-based `.score`.
+  Choice and score return full `probabilities` and the provider's
+  `confidence`. Input is text or JSON; 1–64 questions, 2–255 choices or
+  2–10 levels, and at most 16 KiB for the encoded model request. All
+  instructions and descriptions are nonempty strings. No model selector
+  or media yet. Billed for input tokens only; no generated-label parsing.
+  Typed answers can still be wrong. Prefer saved exact-item corrections
+  before inference; keep a correction UI and tune any review threshold
+  against labeled examples rather than trusting confidence alone.
 - An image is a JPEG written to a path ending in `.jpg` or `.jpeg`, served
   from the fragment like any file. There is no image editing, no masks and
   no reference images: text to image only.

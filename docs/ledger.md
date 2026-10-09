@@ -84,7 +84,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; Clef-flash (decision steps) $0.038 input, no output charge | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/) (2026-10-09) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -101,8 +101,8 @@ calls. The defaults are consts in `price.rs`, each with its source. The
 operator's book comes from the deploy's configuration and is versioned:
 a ledger takes only a newer version, and a hold keeps the price it was
 held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 4 since
-Hermes' tool keys were priced, after 3 for DeepSeek V4 Flash), so a change
+`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 5 since
+Clef-flash was priced, after 4 for Hermes' tool keys and 3 for DeepSeek V4 Flash), so a change
 to the defaults reaches every ledger at its next call.
 
 A model call that fell back (docs/api.md, Models) keeps its one hold,
@@ -276,6 +276,15 @@ mark sends the same batch again, which answers as before.
   reserved a 1024×1024 image's. The payer is the fragment's owner,
   `capped` when the run's principal is neither the owner nor an agent of
   theirs.
+  A decision (`job.ai.decide`, Clef-flash) reserves 24,576 input tokens
+  per question (the full model window), then settles its reported
+  `usage.input_tokens`, including the questions, with no output charge.
+  Missing or malformed usage is charged the reservation. A malformed
+  paid answer is kept as a rejection before settlement, so a retry or
+  replay reuses it, including after a restart. At the default book,
+  300 input tokens cost 18 micro-dollars (ceil($0.038/M × 300 × 1.05 ×
+  1.5)); three questions reserve 4,413 micro-dollars, releasing what was
+  unused on settlement.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
 - **Operator keys** (decision 37): reserved and settled the same way as

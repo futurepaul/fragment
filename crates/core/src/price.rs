@@ -255,7 +255,7 @@ pub struct PriceBook {
 /// S4; the gateway's own `cost` matched these on every call). Workers AI's
 /// models have no cache writes: a write price is the input price, so a
 /// write one reported would never be free.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
@@ -264,14 +264,18 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
     // $0.44 in, $0.014 cached, $1.32 out (the fallback)
     ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
+    // Clef-flash: $0.038 per million input tokens, no output charge.
+    // developers.cloudflare.com/workers-ai/models/clef-flash/ (2026-10-09).
+    (crate::decide::MODEL, TokenPrices { input: 38_000, cached_input: 38_000, cache_write: 38_000, output: 0 }),
 ];
 /// The default book's version. A ledger takes a book only when its version
 /// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 4 for Hermes' tool keys (2026-10-09), after
+/// to the defaults raises it: 5 for Clef-flash (2026-10-09), after
+/// 4 for Hermes' tool keys, after
 /// 3 for DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 4;
+pub const DEFAULT_BOOK_VERSION: u32 = 5;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -611,8 +615,8 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 4);
-        assert_eq!(book.models.len(), 4);
+        assert_eq!(book.version, 5);
+        assert_eq!(book.models.len(), 5);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 

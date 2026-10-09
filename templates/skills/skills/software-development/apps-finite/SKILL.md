@@ -146,7 +146,7 @@ fragment rollback garden                  # live back to the deploy before
   `fragment guide` for the operations and channels contract.
 - **Webhooks, schedules, background work**: a job, and a trigger on the
   inbox, a cron, or changed files.
-- **AI in the app**: `job.ai.text` and `job.ai.image` steps, billed to your
+- **AI in the app**: `job.ai.text`, `job.ai.decide` and `job.ai.image` steps, billed to your
   owner. Read `fragment guide` for the job and AI step contract.
 
 ## Check it in a real browser

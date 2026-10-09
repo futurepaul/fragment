@@ -309,7 +309,7 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded, fallback: Option<&'st
 }
 
 /// One call of a catalog model with its input, on the same transport,
-/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
+/// unmetered and read whole (`call`; a job's image or decision step: ai.rs, whose
 /// caller bounds the input and meters it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };

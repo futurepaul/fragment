@@ -1130,6 +1130,40 @@ The steps:
   or `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
+- `job.ai.decide({input, questions})` → `{answers, model, usage}`:
+  typed decisions on Workers AI's Clef-flash
+  (`@cf/cloudflare/clef-flash`). `input` is nonempty text, an object or
+  an array. `questions` maps 1 to 64 ids (1 to 100 ASCII letters,
+  digits, `_`, `.` or `-`) to one of:
+  - `{type: "choice", instructions, options}`: `options` maps 2 to 255
+    nonempty ids (at most 100 bytes) to nonempty descriptions. The answer
+    is `{type: "choice", choice, probabilities, confidence}`; `choice`
+    is one of those ids and `probabilities` maps every id to its probability.
+  - `{type: "predicate", instructions}`: answers
+    `{type: "predicate", probability}`, the estimated probability of true.
+  - `{type: "score", instructions, levels}`: `levels` is 2 to 10
+    nonempty descriptions, ordered low to high. Answers
+    `{type: "score", score, levels, probabilities, confidence}`: `score`
+    is the probability-weighted zero-based level index (may be fractional),
+    and `probabilities` maps string indices (`"0"`, `"1"`, …) to probabilities.
+  `instructions` is a nonempty string. Unknown request or question keys
+  are refused; there is no model selector or media input yet. The encoded
+  model request (input and all questions) is at most 16 KiB, below the
+  model's 24,576-token context. The platform maps these names to Clef's
+  `state`, `noul` and `criteria`; apps depend only on this contract.
+  Every answer is checked against its question, with probabilities and
+  confidence in [0, 1] and a complete distribution summing to 1 (within
+  0.001). A choice must be a highest-probability option; a score must match
+  its distribution (within 0.01). Confidence is the provider's estimate,
+  not a guarantee of correctness; applications own review thresholds.
+  Each step reserves a full context window per question, then settles
+  from `usage.input_tokens`, at $0.038 per million input tokens at list
+  (plus the book's fee and margin); output tokens are not charged. Missing
+  or invalid usage charges the reservation (`ai.cost-missing`). A malformed
+  paid answer is kept as a rejection (`ai.decide-refused`), charged, and
+  thrown as a step error; retries and replays reuse that rejection.
+  A 429 or 5xx retries on Clef-flash; permanent refusals release the hold.
+  Decisions do not use the text model fallback.
 - `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
   mediaType}`: a JPEG (`image/jpeg`) written to `main` at `path`, which
   ends in `.jpg` or `.jpeg` (a file is served by its extension: bug 5),
@@ -1141,7 +1175,7 @@ The steps:
 - `job.ai.video(…)` is refused, saying "video steps are off until they
   run on Cloudflare" (the debt ledger); nothing is reserved or called.
 
-A model's 429 or 5xx is answered by the fallback model (Models, below);
+A text model's 429 or 5xx is answered by the fallback model (Models, below);
 when the fallback fails too, the step is retried. Other refusals fail
 the step with the model's message. A run answers `costMicros`: what its paid steps were
 charged (none when nothing was).

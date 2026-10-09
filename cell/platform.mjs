@@ -344,6 +344,7 @@ class Job {
   // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
   // for each (docs/ledger.md):
   //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, tier, usage }
+  //   ai.decide({ input, questions }) → { answers, model, usage }: typed choices, predicates and scores
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
   //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
@@ -351,6 +352,7 @@ class Job {
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
     return {
       text: (opts) => step("ai.text", clean(opts)),
+      decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };

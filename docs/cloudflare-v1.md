@@ -455,6 +455,13 @@ speaking Cloudflare's APIs) returns once this product works.
     then switch to the route's `fallback` name (the deployment's fallback
     model), about 40 s after the stall began, and start the next turn on
     their tier again (docs/computers.md, Models).
+    Status, 2026-10-09 (Paul, `ai.decide`): jobs have a typed decision
+    step alongside text and images: choice, predicate and score questions
+    over text or JSON. The first implementation is Clef-flash on the same
+    Workers AI binding and gateway, metered in input tokens only, billed
+    to the fragment's owner. Its paid answers, including malformed-answer
+    rejections, are kept for retries and replay. The app contract is
+    independent of the provider's question names (docs/api.md, AI).
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;

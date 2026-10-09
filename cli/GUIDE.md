@@ -340,7 +340,7 @@ export class App extends DurableObject {
   secret `NAME`, filled in outside your code), `job.publish(channel,
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
-  `job.push(who, payload)`, `job.ai.text|image|video(...)`. A step that
+  `job.push(who, payload)`, `job.ai.text|decide|image|video(...)`. A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -364,6 +364,20 @@ export class App extends DurableObject {
   ledger (below). `job.ai.video` is off until videos run on Cloudflare.
   GLM can spend a small `max_tokens` thinking: `reasoning_effort` is
   `low` unless you ask for `high`.
+- **Decisions** (jobs): `job.ai.decide({input, questions})` chooses from
+  allowed answers using Clef-flash, with no prose to parse. `input` is
+  text or JSON. Each question has `instructions` and `type`: `choice`
+  with `options: {id: description}`, `predicate`, or `score` with ordered
+  `levels: [description, ...]`. Read `out.answers[id].choice`,
+  `.probability` or `.score` (a weighted zero-based level index).
+  Choice and score answers include `probabilities` and `confidence`.
+  Use decisions for categorization, routing and gates; use text for
+  writing or extracting arbitrary objects. Instructions and descriptions
+  are nonempty strings; 1–64 questions, 2–255 choices or 2–10 levels,
+  at most 16 KiB for the encoded model request, with no media or model
+  selector. Billed to the owner for input tokens only; caps and durable
+  replay apply as for text. Typed output can still be wrong: keep user
+  corrections and tune review thresholds against examples from your app.
 
 ## Pages
 
