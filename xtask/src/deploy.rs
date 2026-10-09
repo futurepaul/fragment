@@ -682,6 +682,12 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     c.remove("build");
     c.insert("name".into(), json!(n.cell));
     c.insert("main".into(), json!(root.join("cell/entry.mjs")));
+    // the release's files the build wrote (build.rs), uploaded with the
+    // Worker: from the config written under target/deploy, by its path
+    let assets = c.get_mut("assets").and_then(Value::as_object_mut).context("cell/wrangler.jsonc names the cell's Static Assets")?;
+    let dir = assets.get("directory").and_then(Value::as_str).context("the cell's Static Assets name their directory")?;
+    let dir = root.join("cell").join(dir);
+    assets.insert("directory".into(), json!(dir));
     c.insert("workers_dev".into(), json!(false));
     c.insert("preview_urls".into(), json!(false));
     c.insert("observability".into(), json!({ "enabled": true }));
@@ -1159,6 +1165,22 @@ mod tests {
         let whole = cell.to_string();
         for old in ["FRAGMENT_HOST_SECRET", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "FRAGMENT_KEY_", "key_file", "secrets/"] {
             assert!(!whole.contains(old), "{old} is in a rendered config");
+        }
+    }
+
+    /// Goal: a deploy, a branch's too, uploads the release's files with the
+    /// Worker, and serves none of them but through it. Method: the config it
+    /// writes (under target/deploy, so paths are absolute) names the
+    /// directory the build writes, bound as ASSETS, every request the
+    /// Worker's first.
+    #[test]
+    fn the_deploy_uploads_the_release_files() {
+        let own = deployment(Some("fragment.club"), Some("fragment.boats"));
+        for (d, branch) in [(&own, None), (&deployment(None, None), Some("p5"))] {
+            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+            let assets = &cell["assets"];
+            assert_eq!(assets["directory"], json!(devstack::repo_root().join("cell/build/assets")), "{branch:?}");
+            assert_eq!((&assets["binding"], &assets["run_worker_first"]), (&json!("ASSETS"), &json!(true)), "{branch:?}");
         }
     }
 

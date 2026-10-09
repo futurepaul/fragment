@@ -3,11 +3,27 @@ name = "fragment-templates"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "The templates under templates/, embedded: the CLI scaffolds them and the cell makes fragments from them."
+description = "The files the release serves from the cell's Static Assets (templates/): their index for the cell, and with `embed` their bytes for the CLI and xtask."
 build = "build.rs"
+
+[features]
+# Each file's bytes beside its index entry: the CLI scaffolds them, xtask
+# writes them into the assets directory a cell build uploads, and the e2e
+# compares what the cell serves with them. The cell builds without, and
+# reads them from its Static Assets (cell/src/assets.rs).
+embed = ["dep:sha2", "dep:hex"]
 
 [dependencies]
 fragment-core = { path = "../core" }
 fragment-proto = { path = "../proto" }
+# to check each file against its hash as xtask writes it (`write_assets`)
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+
+[build-dependencies]
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
 sha2 = "0.10"
 hex = "0.4"

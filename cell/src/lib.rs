@@ -28,6 +28,7 @@
 //! to the platform.
 
 mod ai;
+mod assets;
 mod auth;
 mod billing;
 mod blobs;

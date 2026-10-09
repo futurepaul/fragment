@@ -1072,7 +1072,7 @@ impl FragmentCell {
         // the create door checked it (lib.rs); a fragment no host reaches is never made
         fragment_core::names::host_fits(&body.name, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
         if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
-            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).chain(blessed::BLESSED).collect();
+            let names: Vec<&str> = fragment_templates::CATALOG.iter().map(|t| t.name).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
         if let Some(title) = &body.title {
@@ -1151,7 +1151,9 @@ impl FragmentCell {
             }
             // a blessed template's face is known now: the owner's list says
             // it is a chat or an agent from the start, not once it installs
-            if let Ok(m) = blessed::manifest(t) {
+            // (a read of the release that fails leaves it to the install,
+            // which sets it from the same manifest)
+            if let Ok(Ok(m)) = crate::assets::blessed_manifest(&self.env, t).await {
                 let title = body.title.as_deref().map(str::trim).or(m.title());
                 self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title))?;
             }

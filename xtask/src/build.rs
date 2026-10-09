@@ -13,12 +13,16 @@ use crate::{run, shown};
 
 pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 
-/// cell/ for wasm32, into its `build/`.
+/// cell/ for wasm32, into its `build/`, and the release's files beside it
+/// in `build/assets`, the Worker's Static Assets (cell/wrangler.jsonc): what
+/// a deploy uploads, `wrangler dev` serves and the e2e's staged copy holds.
 pub fn cell() -> Result<()> {
     worker_build_installed()?;
     let t0 = Instant::now();
-    run(Command::new("worker-build").arg("--release").current_dir(devstack::cell_dir()))?;
-    println!("built the cell for wasm32 in {:.1?}", t0.elapsed());
+    let dir = devstack::cell_dir();
+    run(Command::new("worker-build").arg("--release").current_dir(&dir))?;
+    let (files, bytes) = fragment_templates::write_assets(&dir.join("build/assets")).context("writing the release's files into cell/build/assets")?;
+    println!("built the cell for wasm32 in {:.1?}, and {files} files of the release, {:.2} MB, in its Static Assets", t0.elapsed(), bytes as f64 / 1e6);
     Ok(())
 }
 

@@ -10,28 +10,27 @@
 //! The cell installs a blessed fragment's code from here (cell/src/plane.rs:
 //! the release's code under the release's identity, `loader_id`, so a
 //! platform deploy that changes it starts a fresh worker, as a new commit
-//! would) and serves its site (cell/src/serve.rs).
+//! would) and serves its site (cell/src/serve.rs), each file's bytes read
+//! from its Static Assets by the hash this index names (cell/src/assets.rs).
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 
+use crate::{File, Template};
 use fragment_core::manifest::{self, Manifest};
 use fragment_proto::limits;
-use crate::Template;
-use sha2::{Digest, Sha256};
 
 /// The templates the platform serves from its release.
 pub const BLESSED: [&str; 4] = ["agent", "chat", "brain", "skills"];
 
-/// A blessed template's files, when `name` is one: named statics, never
-/// `crate::ALL`, so a binary links only the templates it names (build.rs:
-/// the cell carries the blessed ones and not `notes`).
-pub fn template(name: &str) -> Option<Template> {
+/// A blessed template, when `name` is one: named statics, never
+/// `crate::ALL`, so a binary links only the index of the templates it
+/// names (the cell carries the blessed ones and not `notes`).
+pub fn template(name: &str) -> Option<&'static Template> {
     match name {
-        "agent" => Some(crate::AGENT),
-        "chat" => Some(crate::CHAT),
-        "brain" => Some(crate::BRAIN),
-        "skills" => Some(crate::SKILLS),
+        "agent" => Some(&crate::AGENT),
+        "chat" => Some(&crate::CHAT),
+        "brain" => Some(&crate::BRAIN),
+        "skills" => Some(&crate::SKILLS),
         _ => None,
     }
 }
@@ -40,8 +39,8 @@ pub fn template(name: &str) -> Option<Template> {
 /// large, each file at most `DATA_FILE_MAX_BYTES`: a fragment lists it whole
 /// in one answer, and a computer installs it file by file.
 pub const DATA_FILES_MAX: usize = 1_000;
-pub const DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const DATA_FILE_MAX_BYTES: usize = 256 * 1024;
+pub const DATA_MAX_BYTES: u64 = 4 * 1024 * 1024;
+pub const DATA_FILE_MAX_BYTES: u64 = 256 * 1024;
 
 /// Whether `path` of a blessed template is its data: what every fragment on
 /// it lists and reads from the release (`GET …/files`, `…/file`, `__files`,
@@ -52,80 +51,50 @@ pub fn is_data(path: &str) -> bool {
     path != "fragment.json" && path != "README.md" && !is_code(path) && !path.starts_with("site/")
 }
 
-/// One data file of a blessed template, as a fragment on it lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DataFile {
-    pub path: &'static str,
-    pub bytes: &'static [u8],
-    /// `release:<24 hex>`, a hash of its bytes: its `lastCommitSha` in a
-    /// listing, so a reader fetches again only what a release changed.
-    pub version: String,
-}
-
-/// A data file's version: a hash of its bytes.
-pub fn data_version(bytes: &[u8]) -> String {
-    format!("release:{}", hex::encode(&Sha256::digest(bytes)[..12]))
+/// A data file's version, `release:<24 hex>` from its bytes' hash: its
+/// `lastCommitSha` in a listing, so a reader fetches again only what a
+/// release changed.
+pub fn data_version(f: &File) -> String {
+    format!("release:{}", &f.sha256[..24])
 }
 
 /// A blessed template's data files, in path order (none for a template
-/// that is not blessed). Made once per isolate.
-pub fn data(name: &str) -> &'static [DataFile] {
-    static DATA: OnceLock<BTreeMap<&'static str, Vec<DataFile>>> = OnceLock::new();
-    let all = DATA.get_or_init(|| {
-        BLESSED
-            .iter()
-            .filter_map(|n| {
-                let files = template(n)?.iter().filter(|(p, _)| is_data(p)).map(|(p, b)| DataFile { path: p, bytes: b, version: data_version(b) }).collect();
-                Some((*n, files))
-            })
-            .collect()
-    });
-    all.get(name).map_or(&[], Vec::as_slice)
+/// that is not blessed).
+pub fn data(name: &str) -> Vec<&'static File> {
+    template(name).map(|t| t.files.iter().filter(|f| is_data(f.path)).collect()).unwrap_or_default()
 }
 
 /// One data file of a blessed template, when `path` is one.
-pub fn data_file(name: &str, path: &str) -> Option<&'static DataFile> {
-    let files = data(name);
-    files.binary_search_by(|f| f.path.cmp(path)).ok().map(|i| &files[i])
+pub fn data_file(name: &str, path: &str) -> Option<&'static File> {
+    template(name)?.file(path).filter(|f| is_data(f.path))
 }
 
-/// A blessed template's manifest, as it runs.
-pub fn manifest(name: &str) -> Result<Manifest, String> {
+/// A blessed template's manifest file, or why there is none.
+pub fn manifest_file(name: &str) -> Result<&'static File, String> {
     let t = template(name).ok_or_else(|| format!("no blessed template {name:?} (the platform serves {})", BLESSED.join(", ")))?;
-    let bytes = t.iter().find(|(p, _)| *p == "fragment.json").map(|(_, b)| *b).ok_or_else(|| format!("the {name} template has no fragment.json"))?;
+    t.file("fragment.json").ok_or_else(|| format!("the {name} template has no fragment.json"))
+}
+
+/// A blessed template's manifest, as it runs, from its file's bytes
+/// (`manifest_file`'s).
+pub fn manifest(name: &str, bytes: &[u8]) -> Result<Manifest, String> {
     manifest::parse(bytes).map_err(|e| format!("the {name} template's fragment.json: {e}"))
 }
 
 /// Which release of a blessed template a fragment runs: a hash of its
-/// files, so a platform deploy that changes any of them is seen at the
-/// fragment's next request (cell/src/plane.rs installs it again). The files
-/// are constants of this build, so each template's hash is made once per
-/// isolate, when a fragment on it first asks (a chat never hashes the
-/// brain's 3 MiB viewer).
-pub fn release(name: &str) -> Option<String> {
-    static RELEASES: [OnceLock<String>; BLESSED.len()] = [const { OnceLock::new() }; BLESSED.len()];
-    let at = BLESSED.iter().position(|n| *n == name)?;
-    let t = template(name)?;
-    Some(RELEASES[at].get_or_init(|| hash(t)).clone())
-}
-
-fn hash(t: Template) -> String {
-    let mut h = Sha256::new();
-    for (path, bytes) in t {
-        h.update(path.as_bytes());
-        h.update([0]);
-        h.update(bytes);
-        h.update([0]);
-    }
-    hex::encode(&h.finalize()[..12])
+/// files, made by the build, so a platform deploy that changes any of them
+/// is seen at the fragment's next request (cell/src/plane.rs installs it
+/// again).
+pub fn release(name: &str) -> Option<&'static str> {
+    template(name).map(|t| t.release)
 }
 
 /// The file a blessed template serves for repo path `path` (`site/…`).
-pub fn site_file(name: &str, path: &str) -> Option<&'static [u8]> {
+pub fn site_file(name: &str, path: &str) -> Option<&'static File> {
     if !path.starts_with("site/") {
         return None;
     }
-    template(name)?.iter().find(|(p, _)| *p == path).map(|(_, b)| *b)
+    template(name)?.file(path)
 }
 
 /// Whether `path` is app code: what a fragment on a blessed template may
@@ -139,8 +108,8 @@ pub fn is_code(path: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Code {
     pub id: String,
-    pub source: &'static str,
-    pub modules: BTreeMap<String, &'static str>,
+    pub source: String,
+    pub modules: BTreeMap<String, String>,
 }
 
 /// Why a template's code is no code the cell installs (a build that
@@ -149,7 +118,7 @@ pub struct Code {
 pub enum CodeFault {
     NotUtf8(&'static str),
     TooManyModules(usize),
-    TooLarge(usize),
+    TooLarge(u64),
     /// `applib/` without an `app.mjs` to import it.
     LibWithoutApp,
 }
@@ -165,42 +134,56 @@ impl CodeFault {
     }
 }
 
-/// A blessed template's app code, `None` when it carries none (its
-/// fragments are channels and a site), held to an app's own limits.
-pub fn code(name: &str) -> Result<Option<Code>, CodeFault> {
+/// A blessed template's code files, `app.mjs` and its `applib/` modules in
+/// path order, `None` when it carries none (its fragments are channels and
+/// a site), held to an app's own limits by the sizes the index names.
+pub fn code_files(name: &str) -> Result<Option<Vec<&'static File>>, CodeFault> {
     let Some(t) = template(name) else { return Ok(None) };
-    let text = |path: &'static str, bytes: &'static [u8]| std::str::from_utf8(bytes).map_err(|_| CodeFault::NotUtf8(path));
-    let mut source = None;
-    let mut modules = BTreeMap::new();
-    let mut total = 0usize;
-    for (path, bytes) in t.iter().filter(|(p, _)| is_code(p)) {
-        total += bytes.len();
-        match *path {
-            "app.mjs" => source = Some(text(path, bytes)?),
-            lib => {
-                modules.insert(lib.to_string(), text(path, bytes)?);
-            }
-        }
+    let files: Vec<&'static File> = t.files.iter().filter(|f| is_code(f.path)).collect();
+    let source = files.iter().find(|f| f.path == "app.mjs");
+    let modules = files.len() - usize::from(source.is_some());
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    if modules > limits::APPLIB_FILES_MAX {
+        return Err(CodeFault::TooManyModules(modules));
     }
-    if modules.len() > limits::APPLIB_FILES_MAX {
-        return Err(CodeFault::TooManyModules(modules.len()));
-    }
-    if total > limits::APP_MODULES_MAX_BYTES || source.is_some_and(|s| s.len() > limits::SOURCE_MAX_BYTES) {
+    if total > limits::APP_MODULES_MAX_BYTES as u64 || source.is_some_and(|s| s.size > limits::SOURCE_MAX_BYTES as u64) {
         return Err(CodeFault::TooLarge(total));
     }
     match source {
-        None if modules.is_empty() => Ok(None),
+        None if modules == 0 => Ok(None),
         None => Err(CodeFault::LibWithoutApp),
-        Some(source) => {
-            let release = release(name).expect("a template found here has a release");
-            Ok(Some(Code { id: format!("blessed:{name}@{release}"), source, modules }))
+        Some(_) => Ok(Some(files)),
+    }
+}
+
+/// A blessed template's code from its code files' bytes (`code_files`'s,
+/// each with the bytes read for it).
+pub fn code(name: &str, read: Vec<(&'static File, Vec<u8>)>) -> Result<Code, CodeFault> {
+    let release = release(name).expect("code files are a blessed template's");
+    let mut source = None;
+    let mut modules = BTreeMap::new();
+    for (f, bytes) in read {
+        assert!(is_code(f.path), "{} is code", f.path);
+        let text = String::from_utf8(bytes).map_err(|_| CodeFault::NotUtf8(f.path))?;
+        match f.path {
+            "app.mjs" => source = Some(text),
+            lib => {
+                modules.insert(lib.to_string(), text);
+            }
         }
     }
+    let source = source.ok_or(CodeFault::LibWithoutApp)?;
+    Ok(Code { id: format!("blessed:{name}@{release}"), source, modules })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::bytes_of;
+
+    fn text(t: &Template, path: &str) -> String {
+        String::from_utf8(bytes_of(t, t.file(path).unwrap_or_else(|| panic!("{} has {path}", t.name)))).expect("UTF-8")
+    }
 
     /// Every blessed template parses, names its kind, has a page, and its
     /// code, when it carries some, is within an app's limits and runs the
@@ -209,15 +192,15 @@ mod tests {
     fn every_blessed_template_runs() {
         for name in BLESSED {
             let Some(t) = template(name) else { panic!("{name} is blessed but not under templates/") };
-            let m = manifest(name).unwrap();
+            let m = manifest(name, &bytes_of(t, manifest_file(name).unwrap())).unwrap();
             assert!(m.kind.is_some(), "{name} names its kind");
             assert!(m.template.is_none(), "{name} names no template itself");
             assert!(site_file(name, "site/index.html").is_some(), "{name} has a page");
-            assert_eq!(release(name), release(name));
-            assert_eq!(release(name), Some(hash(t)), "the cached release is the files' hash");
-            match code(name).unwrap_or_else(|e| panic!("{name}: {}", e.message())) {
-                Some(c) => {
-                    assert_eq!(c.id, format!("blessed:{name}@{}", release(name).unwrap()), "its code's identity is the release");
+            assert_eq!(release(name), Some(t.release), "its release is the build's hash of its files");
+            match code_files(name).unwrap_or_else(|e| panic!("{name}: {}", e.message())) {
+                Some(files) => {
+                    let c = code(name, files.into_iter().map(|f| (f, bytes_of(t, f))).collect()).unwrap_or_else(|e| panic!("{name}: {}", e.message()));
+                    assert_eq!(c.id, format!("blessed:{name}@{}", t.release), "its code's identity is the release");
                     assert!(c.source.contains("export class App"), "{name}'s app.mjs exports App");
                     assert!(!m.operations.is_empty(), "{name} declares the operations its code runs");
                     for op in m.operations.keys() {
@@ -230,9 +213,14 @@ mod tests {
                 None => assert!(m.operations.is_empty() && m.triggers.is_empty(), "{name} declares no operations without code"),
             }
         }
-        assert!(code("chat").unwrap().is_some(), "the chat carries its push (decision 9)");
+        assert!(code_files("chat").unwrap().is_some(), "the chat carries its push (decision 9)");
         assert!(template("todo").is_none(), "a template not blessed is only ever copied");
-        assert_eq!(code("todo"), Ok(None), "and its code is no release's");
+        assert_eq!(code_files("todo"), Ok(None), "and its code is no release's");
+        assert!(manifest_file("todo").unwrap_err().contains("agent, chat, brain, skills"), "a template not blessed is named so");
+        let chat = template("chat").unwrap();
+        let files = code_files("chat").unwrap().unwrap();
+        let read = |f: &'static File| (f, if f.path == "app.mjs" { vec![0xff] } else { bytes_of(chat, f) });
+        assert_eq!(code("chat", files.into_iter().map(read).collect()), Err(CodeFault::NotUtf8("app.mjs")), "bytes that are not UTF-8 are no code");
     }
 
     /// Goal: the notes viewer's bundle (the brain's too) carries no chunk
@@ -241,12 +229,12 @@ mod tests {
     /// not, is followed; every chunk is reached.
     #[test]
     fn the_viewer_carries_no_chunk_it_never_loads() {
-        let files: std::collections::BTreeMap<&str, &[u8]> = crate::NOTES.iter().filter_map(|(p, b)| Some((p.strip_prefix("site/assets/")?, *b))).collect();
+        let files: BTreeMap<&str, Vec<u8>> = crate::NOTES.files.iter().filter_map(|f| Some((f.path.strip_prefix("site/assets/")?, bytes_of(&crate::NOTES, f)))).collect();
         let (mut reached, mut queue) = (std::collections::BTreeSet::from(["viewer.js"]), vec!["viewer.js"]);
         // bounded: each file is queued once
         while let Some(f) = queue.pop() {
             let dir = f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
-            for named in std::str::from_utf8(files[f]).expect("JavaScript is UTF-8").split("\"./").skip(1).filter_map(|s| s.split_once('"')).map(|(n, _)| format!("{dir}{n}")) {
+            for named in std::str::from_utf8(&files[f]).expect("JavaScript is UTF-8").split("\"./").skip(1).filter_map(|s| s.split_once('"')).map(|(n, _)| format!("{dir}{n}")) {
                 if let Some((&path, _)) = files.get_key_value(named.as_str()) {
                     if reached.insert(path) {
                         queue.push(path);
@@ -259,33 +247,35 @@ mod tests {
     }
 
     /// Goal: every agent's image is one file (cell/shell/CREDITS.md).
-    /// Method: the chat's is the agent's, one copy in the binary.
+    /// Method: the chat's is the agent's: one asset.
     #[test]
     fn the_agent_image_is_one_file() {
         let (chat, agent) = (site_file("chat", "site/agent.png").expect("the chat's"), site_file("agent", "site/agent.png").expect("the agent's"));
-        assert!(std::ptr::eq(chat.as_ptr(), agent.as_ptr()), "embedded once");
+        assert_eq!(chat.sha256, agent.sha256, "one asset");
     }
 
     /// Goal: a brain (decision 30) is the notes viewer and the brain's own
     /// code, all of it the template's. Method: its page loads the viewer and
     /// its search; the viewer's files are the notes template's very bytes
-    /// (one copy in the binary, through the symlink build.rs follows); its
-    /// code carries its sections and its guide, which is one template
-    /// literal; its file trigger keeps the index.
+    /// (one asset, through the symlink build.rs follows); its code carries
+    /// its sections and its guide, which is one template literal; its file
+    /// trigger keeps the index.
     #[test]
     fn a_brain_is_the_notes_viewer_and_its_own_search() {
-        let page = std::str::from_utf8(site_file("brain", "site/index.html").expect("a brain has a page")).unwrap();
+        let brain = template("brain").unwrap();
+        let page = text(brain, "site/index.html");
         assert!(page.contains("assets/viewer.js") && page.contains("brain.js"), "its page is the viewer and its search");
-        for (path, bytes) in crate::NOTES.iter().filter(|(p, _)| p.starts_with("site/assets/")) {
-            let brain = site_file("brain", path).unwrap_or_else(|| panic!("the brain serves the viewer's {path}"));
-            assert!(std::ptr::eq(brain.as_ptr(), bytes.as_ptr()), "{path} is embedded once");
+        for f in crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")) {
+            let mine = site_file("brain", f.path).unwrap_or_else(|| panic!("the brain serves the viewer's {}", f.path));
+            assert_eq!(mine.sha256, f.sha256, "{} is one asset", f.path);
         }
-        let m = manifest("brain").unwrap();
+        let m = manifest("brain", &bytes_of(brain, manifest_file("brain").unwrap())).unwrap();
         assert_eq!(m.kind(), fragment_proto::FragmentKind::Brain);
         assert!(m.triggers.iter().any(|t| t.run == "changed"), "a file trigger keeps its index");
-        let c = code("brain").unwrap().expect("a brain carries code");
+        let files = code_files("brain").unwrap().expect("a brain carries code");
+        let c = code("brain", files.into_iter().map(|f| (f, bytes_of(brain, f))).collect()).unwrap();
         assert!(c.modules.contains_key("applib/sections.mjs") && c.modules.contains_key("applib/guide.mjs"), "{:?}", c.modules.keys());
-        let guide = c.modules["applib/guide.mjs"];
+        let guide = &c.modules["applib/guide.mjs"];
         let text = guide.split_once("String.raw`").map(|(_, t)| t).expect("the guide is String.raw");
         let body = text.strip_suffix("`;\n").expect("one template literal, to the end");
         assert!(!body.contains('`') && !body.contains("${"), "the guide holds no backtick or substitution");
@@ -309,10 +299,10 @@ mod tests {
     /// and only the blessed ones are named.
     #[test]
     fn blessed_templates_are_the_named_ones() {
-        for (name, files) in crate::ALL {
-            match template(name) {
-                Some(t) => assert!(std::ptr::eq(t, *files), "{name} is its own template"),
-                None => assert!(!BLESSED.contains(name), "{name} is blessed but not named"),
+        for t in crate::ALL {
+            match template(t.name) {
+                Some(b) => assert!(std::ptr::eq(b, *t), "{} is its own template", t.name),
+                None => assert!(!BLESSED.contains(&t.name), "{} is blessed but not named", t.name),
             }
         }
         assert!(BLESSED.iter().all(|n| template(n).is_some()));
@@ -332,9 +322,11 @@ mod tests {
         }
         assert!(data("agent").is_empty() && data("chat").is_empty(), "the agent and chat templates carry no data");
         assert!(data("todo").is_empty() && data("nope").is_empty(), "a template that is not blessed has none to serve");
-        assert_eq!(data_version(b"a"), data_version(b"a"));
-        assert_ne!(data_version(b"a"), data_version(b"b"));
-        assert!(data_version(b"").starts_with("release:") && data_version(b"").len() == "release:".len() + 24);
+        let skills = data("skills");
+        let (a, b) = (skills[0], skills[1]);
+        assert_eq!(data_version(a), format!("release:{}", &a.sha256[..24]), "a hash of its bytes");
+        assert_ne!(data_version(a), data_version(b));
+        assert!(data_version(a).len() == "release:".len() + 24);
     }
 
     /// Goal: decision 17's managed set, as the skills template carries it.
@@ -345,18 +337,20 @@ mod tests {
     /// it fits a listing.
     #[test]
     fn the_skills_template_is_the_managed_set() {
+        let skills = template("skills").unwrap();
         let files = data("skills");
         assert!(!files.is_empty());
         assert!(files.windows(2).all(|w| w[0].path < w[1].path), "in path order, as data_file searches it");
-        let total: usize = files.iter().map(|f| f.bytes.len()).sum();
+        let total: u64 = files.iter().map(|f| f.size).sum();
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
         for f in files {
             assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
-            assert!(f.bytes.len() <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.bytes.len());
+            assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
             assert_eq!(data_file("skills", f.path), Some(f));
-            if let Ok(text) = std::str::from_utf8(f.bytes) {
+            let bytes = bytes_of(skills, f);
+            if let Ok(text) = std::str::from_utf8(&bytes) {
                 // the repo is MIT, and the release hands this to every person
                 assert!(!text.contains("All rights reserved"), "{} is not ours to redistribute", f.path);
                 for finite_only in ["/profile-assets/", "~/.finite/", "FINITECHAT_HOME", "/home/node/", ".hermes/.env", ".hermes/venv", "git.finite.chat"] {
@@ -367,7 +361,7 @@ mod tests {
             let parts: Vec<&str> = f.path.split('/').collect();
             if parts.last() == Some(&"SKILL.md") {
                 assert!(matches!(parts.len(), 3 | 4), "{}: a skill sits at skills/<category>/<name>/ or skills/<name>/", f.path);
-                let text = std::str::from_utf8(f.bytes).expect("a SKILL.md is UTF-8");
+                let text = std::str::from_utf8(&bytes).expect("a SKILL.md is UTF-8");
                 let front = text.strip_prefix("---\n").and_then(|t| t.split_once("\n---")).map(|(f, _)| f).unwrap_or_else(|| panic!("{} has a frontmatter", f.path));
                 let name = front.lines().find_map(|l| l.strip_prefix("name:")).map(str::trim).unwrap_or_else(|| panic!("{} names itself", f.path));
                 assert_eq!(name, parts[parts.len() - 2], "{}: a skill's name is its directory's", f.path);
