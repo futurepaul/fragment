@@ -8,6 +8,17 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+#
+# Its layers, by how often each changes: a deploy pushes, and a computer's
+# first start after it pulls, only the layers that changed (a layer is
+# shared by digest while its build step is cached).
+#   1. The base (4.3 GB, 1.4 GB compressed): Hermes' image flattened, with
+#      everything pinned on it and our edits to it. It changes when a pin,
+#      document-requirements.txt or one of its steps changes.
+#   2. Ours (about 21 MB): the bridge, hermes-boot, the fragment CLI, and
+#      the image's own files. Most changes are only here.
+#   3. What `hermes-boot build-info` writes, then the image's version: a
+#      few KB each.
 
 # Hermes v0.21.6, the first stable of upstream's release pipeline (git tag
 # v0.21.6, commit 818c13be1dc4; its install stamp says 0.21.6), pinned by
@@ -60,6 +71,7 @@ FROM alpine:3.20 AS novnc
 ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6 https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz /novnc.tgz
 RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
+# The base (layer 1): nothing of ours that changes with our code is in it.
 FROM ${HERMES} AS hermes
 # Upstream's settings, as its image sets them: the flatten below restates
 # them, and checks it does.
@@ -115,21 +127,6 @@ RUN apt-get -o Acquire::Retries=3 update \
  && printf 'Defaults env_keep += "npm_config_prefix"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
-COPY --from=build /out/ /opt/fragment/bin/
-# The check the platform runs after it restores /data, before the gate
-# (docs/computers.md): the last hold's copies of Hermes' databases put back,
-# then each one's quick_check (hermes-boot's held.rs).
-RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate (docs/computers.md).\nexec /opt/fragment/bin/hermes-boot check-restore\n' > /usr/local/bin/computer-check \
- && chmod 755 /usr/local/bin/computer-check
-COPY --from=cli /out/fragment /usr/local/bin/fragment
-COPY images/hermes/preload.py /opt/fragment/preload.py
-COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
-COPY images/hermes/hooks /opt/fragment/hooks
-COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
-COPY images/hermes/botmode.py /opt/fragment/botmode.py
-COPY images/hermes/screen /opt/fragment/screen
-COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
-COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 
 # Every agent reads the pinned Hermes skills through the boot's read-only
 # view, beside the platform skill. Move them out of Hermes' sync source:
@@ -190,27 +187,51 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
 # A few vendored files are not Python 3 (compileall exits 1 for them); the
-# count proves the rest compiled.
+# count proves the rest compiled. Our plugin's is compiled with it, below.
 RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchecked-hash /opt/hermes > /dev/null || true; \
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
 
-# What the boot reads instead of finding it each time: the lean plugin list;
-# the image's Chromium, /opt/fragment/bin/chromium
-# (the full Chromium Hermes' build pins and names in
-# /etc/hermes/agent-browser-executable-path, always with the flags a
-# container needs, which Hermes adds only where it sees Docker:
-# boot/src/hermes.rs); the platform skill every profile
-# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
-# and the files the gateway loads, read ahead on the second CPU while /data
-# is restored (S3b, cut h).
-RUN /opt/fragment/bin/hermes-boot build-info \
- && mkdir -p /tmp/rh \
+# The files the gateway loads, read ahead on the second CPU while /data is
+# restored (S3b, cut h). And the base's directories that ours (below) lands
+# in are root's, 0755, as ours' are: its copy sets theirs, so the build
+# fails on a base whose differ.
+RUN mkdir -p /tmp/rh \
  && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
  && rm -rf /tmp/rh \
  && mkdir -p /run/computer /var/lib/fragment-run \
- && install -d -m 1777 /tmp/node-compile-cache
+ && install -d -m 1777 /tmp/node-compile-cache \
+ && test "$(stat -c '%a %u:%g' / /opt /opt/fragment /opt/hermes /opt/hermes/plugins /usr /usr/local /usr/local/bin | sort -u)" = '755 0:0'
 
-# One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
+# Our Hermes plugin, compiled as the base's bytecode is; it goes in layer 2.
+FROM hermes AS plugin
+COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork > /dev/null
+
+# Ours (layer 2): each of our files at its place in the image, root's, as
+# the base's directories they land in are.
+FROM scratch AS ours
+COPY --from=build /out/ /opt/fragment/bin/
+# The check the platform runs after it restores /data, before the gate
+# (docs/computers.md): the last hold's copies of Hermes' databases put back,
+# then each one's quick_check (hermes-boot's held.rs).
+COPY --chmod=755 <<'EOF' /usr/local/bin/computer-check
+#!/bin/sh
+# The platform runs this after a restore, before the gate (docs/computers.md).
+exec /opt/fragment/bin/hermes-boot check-restore
+EOF
+COPY --from=cli /out/fragment /usr/local/bin/fragment
+COPY images/hermes/preload.py /opt/fragment/preload.py
+COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
+COPY images/hermes/hooks /opt/fragment/hooks
+COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
+COPY images/hermes/botmode.py /opt/fragment/botmode.py
+COPY images/hermes/screen /opt/fragment/screen
+COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
+COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
+
+# The base as one layer (S3b, cut i: -0.2 s per warm start against
+# upstream's 37 layers and ours), and nothing deleted from it left in a
+# lower layer; the image's settings are
 # restated, without upstream's VOLUME. Hermes' PM finds its tool store (its
 # Python, Node, npm, uv, Chromium) by HERMES_RUNTIME_DIR, and Hermes no
 # longer falls back to a system node, npm or uv: unset, both would look in
@@ -275,9 +296,18 @@ RUN env | sort > /tmp/env.now \
  && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
  && rm /tmp/env.now \
  && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
+COPY --from=ours / /
+# What the boot reads instead of finding it each time: the lean plugin list;
+# the image's Chromium, /opt/fragment/bin/chromium
+# (the full Chromium Hermes' build pins and names in
+# /etc/hermes/agent-browser-executable-path, always with the flags a
+# container needs, which Hermes adds only where it sees Docker:
+# boot/src/hermes.rs); and the platform skill every profile
+# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs).
+RUN /opt/fragment/bin/hermes-boot build-info
 # which build this is, served beside the screen (the platform's upgrade and
 # rollback lane reads it through the computer's port): a layer of its own,
-# so another build shares the one above
+# so another build shares the ones above
 ARG IMAGE_VERSION=1
 RUN echo "$IMAGE_VERSION" > /opt/fragment/screen/version.txt
 EXPOSE 6080

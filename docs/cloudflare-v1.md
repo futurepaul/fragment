@@ -1486,7 +1486,10 @@ What goes where:
   dashboard and screen lazy. (Setup gated on stamps went on 2026-10-06,
   issue 156: the image carries no bundled skills, so nothing syncs them,
   and the config migration runs at every boot, a no-op of 0.07 s on a
-  desktop CPU.)
+  desktop CPU. The single layer became a single-layer base on
+  2026-10-09, with our code in a few small layers above it, so a deploy
+  that changes only our code pushes about 9 MB, not 1.4 GB:
+  images/hermes/Dockerfile.)
 - **Upstream Hermes:** load only the configured platforms, key the skills
   sync on the image revision, use lazy imports, and ship bytecode.
 - **The generic Computer DO:** snapshot-backed wakes (decision 18) and a
