@@ -291,7 +291,8 @@ pub fn desktop_grants() -> Vec<String> {
 /// deployment may give it (`credential_env`, the guest view's: Hermes reads
 /// the list once per gateway, so it names them all, held now or not, and
 /// each value is the profile's `.env`'s, read again at every turn). Hermes
-/// never passes a name it keeps for its own providers' keys
+/// never passes a name it keeps for its own providers' keys (left out of
+/// the passthrough list, which otherwise warns at every turn)
 /// (`PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY`, …: its
 /// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
 /// profile's credentials file (`credentials_sh`) as its shell starts.
@@ -425,7 +426,7 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     // only to the commands of this profile's turns. Its shell's start files are
     // Hermes' own three, then the agent's credentials.
     let mut passed: Vec<String> = PROFILE_ENV.iter().map(|s| s.to_string()).collect();
-    for e in credential_env.iter().filter(|e| env_name_ok(e)) {
+    for e in credential_env.iter().filter(|e| env_name_ok(e) && !provider_env_blocked(e)) {
         if !passed.contains(e) {
             passed.push(e.clone());
         }
@@ -438,6 +439,21 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     // in Hermes' home (left unset, the gateway's own home, /data/hermes)
     y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
+}
+
+/// Hermes v0.21.6's `_HERMES_PROVIDER_ENV_BLOCKLIST`, read from the pinned
+/// image's `tools/environments/local_env_policy.py`, plus its dynamic
+/// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf). The Docker lane
+/// checks the snapshot against the image, so a new pin cannot silently
+/// change the policy. Only sandbox registration is filtered: native tools
+/// still read the profile's `.env` through Hermes' secret scope, and the
+/// terminal's shell still sources `credentials.sh`.
+pub const PROVIDER_ENV_BLOCKLIST: &str = include_str!("provider-env-blocklist.txt");
+
+fn provider_env_blocked(name: &str) -> bool {
+    PROVIDER_ENV_BLOCKLIST.lines().any(|n| n == name)
+        || (name.starts_with("AUXILIARY_") && (name.ends_with("_API_KEY") || name.ends_with("_BASE_URL")))
+        || (name.starts_with("GATEWAY_RELAY_") && ["_SECRET", "_KEY", "_TOKEN"].iter().any(|suffix| name.ends_with(suffix)))
 }
 
 /// The flags Chromium needs in a container: Hermes' own
@@ -1220,8 +1236,8 @@ mod tests {
 
     /// Valid: each credential's placeholder is in its environment
     /// variables, in the profile's `.env` (for Hermes and its tools) and in
-    /// the terminal's credentials file; the terminal is passed every name
-    /// the deployment may give, held now or not.
+    /// the terminal's credentials file; sandbox passthrough keeps allowed
+    /// names and leaves Hermes' provider credentials out.
     #[test]
     fn a_profile_holds_its_credentials_placeholders() {
         let mut a = agent();
@@ -1236,7 +1252,19 @@ mod tests {
         assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
         let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
         let p = profile_config(&a, &Tier::Medium.into(), "http://model.fragment.internal", &env, Path::new("/c.sh"));
-        assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"PERPLEXITY_API_KEY\", \"XAI_API_KEY\"]"), "{p}");
+        assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\"]"), "{p}");
+    }
+
+    /// Every pinned provider name, plus dynamic internal secrets, is
+    /// refused; the skills' Google and X API placeholders still pass.
+    #[test]
+    fn no_blocklisted_name_is_in_profile_passthrough() {
+        let mut env: Vec<String> = PROVIDER_ENV_BLOCKLIST.lines().map(str::to_string).collect();
+        assert!(env.len() > 300, "the full pinned policy, not just today's offered providers");
+        env.extend(["AUXILIARY_TEST_API_KEY", "AUXILIARY_TEST_BASE_URL", "GATEWAY_RELAY_TEST_TOKEN", "GATEWAY_RELAY_TEST_SECRET", "GATEWAY_RELAY_TEST_KEY", "GOOGLE_OAUTH_ACCESS_TOKEN", "X_API_BEARER_TOKEN"].map(str::to_string));
+        let p = profile_config(&agent(), &Tier::Medium.into(), "http://model.fragment.internal", &env, Path::new("/c.sh"));
+        let passed = p.lines().find(|l| l.starts_with("  env_passthrough:")).unwrap();
+        assert_eq!(passed, "  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"X_API_BEARER_TOKEN\"]");
     }
 
     /// Invalid: a credential the platform sent out of shape (a name an image

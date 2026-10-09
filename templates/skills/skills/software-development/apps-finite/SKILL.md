@@ -137,17 +137,17 @@ fragment rollback garden                  # live back to the deploy before
   Markdown that should stay the source belongs in the `notes` template.
 - **Stateful app**: operations in `fragment.json` and `app.mjs` over the
   fragment's own SQLite; pages call them and follow channels live. Read
-  `references/shared/19-backend.md`.
+  `fragment guide` for the operations and channels contract.
 - **Webhooks, schedules, background work**: a job, and a trigger on the
   inbox, a cron, or changed files.
 - **AI in the app**: `job.ai.text` and `job.ai.image` steps, billed to your
-  owner. Read `references/shared/20-llm-api.md`.
+  owner. Read `fragment guide` for the job and AI step contract.
 
 ## Check it in a real browser
 
 Open the live link in a browser and check it at desktop and phone widths
 before you share it: a page is not validated because its files deployed.
-For rich apps, use Playwright (`references/shared/12-playwright-interactive.md`)
+For rich apps, use Playwright
 or your browser tools. A `link` fragment opens with its share link (`fragment
 open garden`); a `members` fragment needs a signed-in member, so check it
 in your signed-in browser. Do not widen visibility just to run QA.
@@ -188,12 +188,9 @@ and visual systems. Use them when useful; this skill supplies the Fragment
 publishing and state contract. For a design audit, Hermes' hub offers
 `impeccable` as an optional skill.
 
-Read only the platform reference the task needs:
-
-- `references/shared/09-technical.md`: the Fragment build and publish loop.
-- `references/shared/12-playwright-interactive.md`: browser QA on this computer.
-- `references/shared/19-backend.md`: operations, SQLite, channels and jobs.
-- `references/shared/20-llm-api.md`: metered AI steps and outbound fetches.
+Read `fragment guide` for the build and publish loop, operations, SQLite,
+channels, jobs, AI steps and outbound fetches. Check the live page with
+your browser tools or Playwright, as above.
 
 ### Fragment overrides
 
@@ -227,24 +224,3 @@ When using generic web skills, keep Fragment's platform contract:
 - The share link's `?view=` token is a secret: send it to the people the
   human named, and never render it into public pages.
 - Do not claim it works until you opened its link and saw it work.
-
-## Reference map
-
-- `references/shared/01-design-tokens.md`: base tokens and CSS system
-- `references/shared/02-typography.md`: font pairing and type rules
-- `references/shared/03-motion.md`: animation and motion systems
-- `references/shared/04-layout.md`: responsive structure and composition
-- `references/shared/05-taste.md`: polish, empty states, and finishing passes
-- `references/shared/06-css-and-tailwind.md`: Tailwind / CSS implementation patterns
-- `references/shared/07-toolkit.md`: libraries and supporting tools
-- `references/shared/08-standards.md`: accessibility, performance, anti-patterns
-- `references/shared/09-technical.md`: the fragment folder, deploys, and project rules
-- `references/shared/10-charts-and-dataviz.md`: charts and dashboard patterns
-- `references/shared/11-web-technologies.md`: compatibility notes
-- `references/shared/12-playwright-interactive.md`: browser QA on your computer
-- `references/shared/19-backend.md`: operations, channels, jobs and triggers
-- `references/shared/20-llm-api.md`: AI steps and outside APIs in an app
-- `references/informational/informational.md`: informational / marketing site guidance
-- `references/game/game.md`: browser game guidance
-- `references/game/2d-canvas.md`: 2D canvas specifics
-- `references/game/game-testing.md`: game QA

@@ -1345,7 +1345,8 @@ and how a runtime finds them, is the image's.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
   agents), so it is always the binary's in the image; the build fails if
-  `fragment skill` is no skill named `fragment`. A missing `fragment
+  `fragment skill` is no skill named `fragment`, or any bundled or platform
+  skill mentions a reference path it does not ship. A missing `fragment
   skill` instruction belongs in cli/SKILL.md. The profiles find it in its
   view, `/var/lib/fragment-run/platform-skills` (the boot's, read-only to
   the agents, never saved): a copy `hermes-boot` makes at each start and
@@ -1424,8 +1425,11 @@ and how a runtime finds them, is the image's.
   under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
   Hermes reads again at every turn, so its own tools (its Perplexity web
   search, ElevenLabs speech, xAI) use them too; and the profile's config
-  passes every variable of the catalog (`credentialEnv`) to its terminal,
-  named once since Hermes reads the list once per gateway. Hermes never
+  lists the catalog's allowed variables (`credentialEnv`) in its terminal's
+  passthrough, including `GOOGLE_OAUTH_ACCESS_TOKEN` and `X_API_BEARER_TOKEN`.
+  Provider names are left out of that list (Hermes otherwise warns on
+  every turn); the pinned policy is checked by the image's Docker test.
+  Hermes never
   passes a name it keeps for its own providers' keys (its
   `_HERMES_PROVIDER_ENV_BLOCKLIST`: `PERPLEXITY_API_KEY`, `XAI_API_KEY`,
   `ELEVENLABS_API_KEY` among them), so the profile's terminal also sources

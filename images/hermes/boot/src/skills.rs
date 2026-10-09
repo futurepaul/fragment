@@ -109,6 +109,37 @@ pub fn write_platform_skill(dir: &Path, skill: &str) -> std::io::Result<()> {
     write_file(dir, PLATFORM_PATH, skill.as_bytes())
 }
 
+/// At image build, every concrete reference mentioned by a bundled or
+/// platform skill must exist. Walk bounded trees iteratively, and check
+/// their text helpers too: a reference may itself point to another file.
+pub fn check_references(dir: &Path) -> std::io::Result<()> {
+    let mut pending = vec![(dir.to_path_buf(), None::<PathBuf>, 0)];
+    let mut count = 0;
+    while let Some((dir, root, depth)) = pending.pop() {
+        assert!(depth <= DEPTH_MAX, "the image's skill tree is bounded");
+        let root = if dir.join("SKILL.md").is_file() { Some(dir.clone()) } else { root };
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            count += 1;
+            assert!(count <= 10_000, "the pinned bundled set is bounded");
+            if entry.file_type()?.is_dir() {
+                pending.push((entry.path(), root.clone(), depth + 1));
+            } else if let Some(root) = &root {
+                let path = entry.path();
+                let bytes = std::fs::read(&path)?;
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    for reference in crate::skill_references::paths(text) {
+                        if !root.join(reference).exists() {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} mentions missing {reference}", path.display())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// When the next install of the managed skills is due after one that found
 /// the owner's skills fragment (`Some(true)`), found none (`Some(false)`),
 /// or did not answer (`None`): sooner while there is none.
@@ -688,6 +719,28 @@ mod tests {
         assert!(platform_skill(cli_body).is_err(), "no frontmatter");
         assert!(platform_skill(&cli.replacen("name: fragment", "name: other", 1)).is_err(), "another name");
         assert!(platform_skill(&format!("{cli}{}", "x".repeat(PLATFORM_MAX_BYTES))).is_err(), "past its bound");
+    }
+
+    /// The real platform skill passes. A bundled skill's missing reference
+    /// fails the build check; shipping it fixes the check, including nested
+    /// references, and removing it fails again.
+    #[test]
+    fn platform_references_exist_and_missing_ones_fail() {
+        let root = std::env::temp_dir().join(format!("hermes-boot-references-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let platform = root.join("platform");
+        let skill = platform_skill(include_str!("../../../../cli/SKILL.md")).unwrap();
+        write_platform_skill(&platform, &skill).unwrap();
+        check_references(&platform).unwrap();
+        write_file(&platform, "test/example/SKILL.md", b"Read `references/example.md`.\n").unwrap();
+        assert!(check_references(&platform).unwrap_err().to_string().contains("references/example.md"));
+        write_file(&platform, "test/example/references/example.md", b"Read `references/missing.md`.\n").unwrap();
+        assert!(check_references(&platform).unwrap_err().to_string().contains("references/missing.md"));
+        write_file(&platform, "test/example/references/missing.md", b"The nested reference.\n").unwrap();
+        check_references(&platform).unwrap();
+        std::fs::remove_file(platform.join("test/example/references/example.md")).unwrap();
+        assert!(check_references(&platform).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

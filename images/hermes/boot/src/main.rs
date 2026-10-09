@@ -23,6 +23,7 @@ mod desktop;
 mod held;
 mod hermes;
 mod skills;
+mod skill_references;
 mod sync;
 
 use std::collections::BTreeMap;
@@ -532,6 +533,9 @@ fn build_info() -> ! {
     }
     let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
     skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
+    for dir in [skills::PLATFORM_DIR, skills::BUNDLED_DIR] {
+        skills::check_references(Path::new(dir)).unwrap_or_else(|e| fail(&format!("{dir}: {e}")));
+    }
     println!("{} plugins disabled; Chromium {full:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
