@@ -1168,7 +1168,12 @@ async fn boot_main() {
     let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
-    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
+    // each agent's Bot Chat, found before the gateway's config: its route
+    // is there (bots.rs, `profile_routes`)
+    let mut chats = BotChats::new();
+    find_bot_chats(&api, &agents, &mut chats).await;
+    let managed = hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms) + &bots::profile_routes(&agents, &chats);
+    std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
@@ -1198,8 +1203,6 @@ async fn boot_main() {
         // anyway, as it would find it
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
-    let mut chats = BotChats::new();
-    find_bot_chats(&api, &agents, &mut chats).await;
     write_ready(&agents, &home, &chats);
     let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
