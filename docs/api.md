@@ -1603,13 +1603,21 @@ or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 
 The stylesheet (`<link rel="stylesheet" href="./__fragment.css">`,
 `cell/fragment.css`) is for a page that links it: the platform adds it
-to no page. It holds theme variables, light and dark by
-`prefers-color-scheme` (`--bg`, `--fg`, `--muted`, `--line`, `--accent`,
-`--danger`; `--font`, `--font-display`, `--font-mono`; `--text-sm`,
-`--text-lg`, `--text-xl`; `--radius`), and base styles for the body,
-`main`, headings, `small`, links, `code`, media, form controls, buttons
-(the accent), and the focus ring. The variables' names hold across
-releases; their values, and the base styles, may change with one.
+to no page. It follows the shell's look: Funnel Sans (with system-font
+fallbacks), warm greys, one blue, and solid pill buttons. Its theme
+variables use `light-dark()`, light or dark by the system's
+`prefers-color-scheme`; a page may choose with `color-scheme` on `:root`
+or `data-theme="light"` / `"dark"` on `<html>`. The variables are
+`--bg`, `--fg`, `--muted`, `--faint`, `--line`, `--line-strong`,
+`--surface`, `--soft`, `--accent`, `--on-accent`, `--success`, `--danger`;
+`--font`, `--font-display`, `--font-mono`; `--text-sm`, `--text-lg`,
+`--text-xl`; `--radius`. Their names hold across releases; their values
+and the base styles may change with one. Element base styles use
+`:where()` (zero specificity), so a page's rules override them: the
+body, `main` (content starts at the top), modest headings, `small`,
+links, `code`, `pre`, media, form controls, buttons and the focus ring.
+`[hidden]` stays hidden. Fonts are requested from Google Fonts, as in
+the shell; a page may override `--font` and `--font-mono`.
 
 CLI: `fragment call <name> <op> --input '{...}' | @file | - [--id ID]`
 (a file, or stdin, for an input over the 128 KiB one argument holds on
