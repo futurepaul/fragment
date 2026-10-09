@@ -228,6 +228,10 @@ async fn the_hermes_image() {
     let tag = hermes_tag();
     let built = build(&repo_dir(), "images/hermes/Dockerfile", &tag);
     eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size(&tag) / 1_000_000);
+    // A changed Hermes pin must update the boot's sandbox policy too.
+    let policy = Command::new(docker()).args(["run", "--rm", "--entrypoint", "/opt/hermes/.venv/bin/python", &tag, "-c", "from tools.environments.local_env_policy import _HERMES_PROVIDER_ENV_BLOCKLIST; print('\\n'.join(sorted(_HERMES_PROVIDER_ENV_BLOCKLIST)))"]).output().expect("read Hermes' policy");
+    assert!(policy.status.success(), "{}", String::from_utf8_lossy(&policy.stderr));
+    assert_eq!(String::from_utf8(policy.stdout).unwrap(), include_str!("../../hermes/boot/src/provider-env-blocklist.txt"), "the boot's policy is the pinned Hermes' own");
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
         let f = w.fragments.get_mut("juniper--k3x9").unwrap();
