@@ -174,6 +174,11 @@ pub const RECONNECT_MS_MAX: u64 = 30_000;
 
 /// An HTTP call to the fragment API is given this long.
 pub const HTTP_TIMEOUT_MS: u64 = 15_000;
+/// A file Hermes sends by URL is fetched within this long, its redirects
+/// included (Hermes waits 30 s for an op's answer), following at most this
+/// many redirects (runtime/relay/fetch.rs).
+pub const MEDIA_FETCH_MS: u64 = 20_000;
+pub const MEDIA_REDIRECTS_MAX: usize = 3;
 /// The bridge looks at the platform's hold this often, to answer it (the
 /// platform waits 20 s for the answer: docs/computers.md).
 pub const HOLD_POLL_MS: u64 = 100;
@@ -252,3 +257,4 @@ const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOT
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
+const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");

@@ -31,6 +31,10 @@
 //!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked;
+//! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
+//!   model whose tool made one at its provider (FAL) gives it; and the
+//!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
+//!   that provider's CDN would;
 //! - Hermes' self-improvement review (its prompts start `Review the
 //!   conversation above`), where it may save to memory, of a conversation
 //!   where a person said `remember this` is answered by a `memory` call
@@ -194,6 +198,9 @@ fn unhurried(body: &Value) -> bool {
 
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
+/// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
+/// one pixel of the agents' violet.
+pub const IMAGE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x58\xd1\xfd\xea\x3f\x00\x07\x19\x03\x1d\x5b\xc5\x9f\x97\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
 /// What Hermes' memory review saves (its `memory` tool, `add`).
 pub const REMEMBERED: &str = "Paul tests the bridge in Docker.";
 
@@ -277,6 +284,11 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes' smart-approval guardian asks for one word: a person decides.
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
+    }
+    // `image: <url>`: an answer with that image, as a model whose tool made
+    // one at its provider gives it (a markdown image, which Hermes sends)
+    if let Some(url) = last_user.lines().find_map(|l| l.split_once("image: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty()) {
+        return (format!("scripted: here it is\n\n![a cat]({url})"), None);
     }
     // Hermes' self-improvement review of its memory saves one thing, of a
     // conversation that asked it to remember something (others' reviews
@@ -382,6 +394,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
     let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    if path.starts_with("/generated/") && path.ends_with(".png") {
+        return Response::builder().status(StatusCode::OK).header("content-type", "image/png").body(http_body_util::Full::new(bytes::Bytes::from_static(IMAGE))).unwrap();
+    }
     if path.ends_with("/models") {
         return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }

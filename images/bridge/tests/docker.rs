@@ -1798,6 +1798,38 @@ fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: an image an agent made
+/// with FAL's image generation showed as a bare link): real Hermes sends a
+/// reply's image link by its URL (`send_media`), and the bridge fetches it:
+/// the reply carries the image as the chat's blob, its bytes the
+/// provider's, and no link as text. Method: the scripted model answers
+/// `image: <url>` with that image as markdown, as a model whose tool made
+/// one does, and its own server is the provider's CDN; it is on this host,
+/// a local address, so the bridge is told it may fetch from one
+/// (`BRIDGE_MEDIA_LOCAL=allow`, a test's: refused otherwise, tests/relay.rs).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_image_sent_by_url_is_the_replys_file() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("BRIDGE_MEDIA_LOCAL", "allow")]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let url = format!("http://model.fragment.internal:{}/generated/cat.png", model.addr.port());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let turn = asked(&fake, &chat, &c, &format!("image: {url}"), ended).await;
+    fake.with(|w| {
+        let said: Vec<serde_json::Value> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).collect();
+        eprintln!("image: the turn said {said:?}");
+        let file = said.iter().find(|r| r.get("attachments").is_some()).unwrap_or_else(|| panic!("a reply with the image: {said:?}"));
+        assert_eq!(file["attachments"][0]["type"], "image/png", "{file}");
+        let sha = file["attachments"][0]["sha256"].as_str().unwrap_or("");
+        assert_eq!(w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.to_vec()), Some(support::model::IMAGE.to_vec()), "the chat's blob is the provider's image");
+        assert!(!said.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains(&url))), "no link as text: {said:?}");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a question in words left
 /// the page saying "Juniper is working"): real Hermes' open clarify (no
 /// choices: `❓ <question>`) is the turn's reply, then a `turn.asked` naming

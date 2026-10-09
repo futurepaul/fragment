@@ -25,7 +25,7 @@ fn free_port() -> SocketAddr {
 }
 
 fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media") } })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true } })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -583,6 +583,128 @@ async fn media_both_ways() {
         assert_eq!(r["attachments"][0]["name"], "cat.png");
         assert!(w.fragments[&chat].blobs.contains_key(r["attachments"][0]["sha256"].as_str().unwrap()));
     });
+    bridge.stop().await;
+}
+
+/// A provider's file server, as FAL's CDN would be (here on this host):
+/// `/cat.png` an image, `/moved.png` a redirect to it, `/page.html` a page,
+/// `/big.png` an image past the 25 MiB a chat takes.
+async fn provider() -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    use hyper::{Response, StatusCode};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let handler = |req: hyper::Request<hyper::body::Incoming>, _peer: SocketAddr| async move {
+        let answer = |status: StatusCode, kind: &str, body: Vec<u8>| Response::builder().status(status).header("content-type", kind).body(http_body_util::Full::new(bytes::Bytes::from(body))).unwrap();
+        match req.uri().path() {
+            "/cat.png" => answer(StatusCode::OK, "image/png", CAT.to_vec()),
+            "/slow/cat.png" => {
+                // past the turn's end: the turn waits for it
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                answer(StatusCode::OK, "image/png", CAT.to_vec())
+            }
+            "/moved.png" => Response::builder().status(StatusCode::FOUND).header("location", "/cat.png").body(http_body_util::Full::new(bytes::Bytes::new())).unwrap(),
+            "/page.html" => answer(StatusCode::OK, "text/html", b"<script>alert(1)</script>".to_vec()),
+            "/big.png" => answer(StatusCode::OK, "image/png", vec![0; 26 * 1024 * 1024]),
+            _ => answer(StatusCode::NOT_FOUND, "text/plain", b"no".to_vec()),
+        }
+    };
+    tokio::spawn(fragment_bridge::net::serve(listener, handler, rx));
+    (addr, stop)
+}
+
+/// A PNG's bytes, as a provider serves one.
+const CAT: &[u8] = b"\x89PNG\r\n\x1a\na generated cat";
+
+/// Goal (the finite-mono parity audit, 2026-10-09: an image Hermes made
+/// with FAL showed as a bare link): a file Hermes sends by a URL of its
+/// provider's is fetched and posted as the reply's attachment, the chat's
+/// blob, as an uploaded one is; a redirect is followed. Invalid: a page (a
+/// type no chat shows), a file past 25 MiB, and, but for a test's local
+/// setting, a plain-http URL on a local address: each refused, and Hermes
+/// sends the link as text instead (its base adapter's send_image).
+#[tokio::test]
+async fn an_image_sent_by_url_is_fetched() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-image-url", &["juniper"]).await;
+    let (cdn, _stop) = provider().await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let of = |w: &World, turn: &str| replies(w, &chat).into_iter().filter(|r| r["turn"] == turn).collect::<Vec<_>>();
+    for (path, fetched) in [("cat.png", true), ("moved.png", true), ("page.html", false), ("big.png", false)] {
+        let url = format!("http://{cdn}/{path}");
+        let said = fake.say(&chat, &person("paul"), json!({ "text": format!("show me image:{url}") }));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+        fake.with(|w| {
+            let said = of(w, &turn);
+            let file = said.iter().find(|r| r.get("attachments").is_some());
+            if fetched {
+                let file = file.unwrap_or_else(|| panic!("{path}: a reply with the file: {said:?}"));
+                assert_eq!((&file["text"], &file["attachments"][0]["type"], &file["attachments"][0]["name"]), (&json!("a cat"), &json!("image/png"), &json!("cat.png")), "{path}");
+                let sha = file["attachments"][0]["sha256"].as_str().unwrap();
+                assert_eq!(w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.to_vec()), Some(CAT.to_vec()), "{path}: the chat's blob is the provider's bytes");
+                assert!(!said.iter().any(|r| r["text"].as_str().unwrap_or("").contains(&url) && r["text"].as_str().unwrap_or("").starts_with("a cat")), "{path}: no link as text");
+            } else {
+                assert!(file.is_none(), "{path}: refused: {said:?}");
+                assert!(said.iter().any(|r| r["text"] == format!("a cat\n{url}")), "{path}: the link as text instead: {said:?}");
+            }
+        });
+    }
+    bridge.stop().await;
+
+    // a bridge not set for local servers: plain http, and a local address, are refused
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-image-url-public");
+    let listen = free_port();
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config }));
+    let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let url = format!("http://{cdn}/cat.png");
+    let said = fake.say(&chat, &person("paul"), json!({ "text": format!("show me image:{url}") }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let said: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == turn).collect();
+        assert!(said.iter().all(|r| r.get("attachments").is_none()) && said.iter().any(|r| r["text"] == format!("a cat\n{url}")), "refused, the link as text: {said:?}");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (the parity audit, 2026-10-09, as real Hermes does it: a streamed
+/// reply's image links are sent as nothing but text): a reply's image link
+/// (markdown, its URL an image's) is fetched and is the reply's file, the
+/// link gone from its text; the turn ends once it is in hand. A link that
+/// is not fetched (gone at its provider) stays in the text, and the turn
+/// still ends.
+#[tokio::test]
+async fn a_replys_image_link_is_its_file() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-picture", &["juniper"]).await;
+    let (cdn, _stop) = provider().await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    for (path, fetched) in [("cat.png", true), ("slow/cat.png", true), ("gone.png", false)] {
+        let url = format!("http://{cdn}/{path}");
+        let said = fake.say(&chat, &person("paul"), json!({ "text": format!("draw picture:{url}") }));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+        fake.with(|w| {
+            let said: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == turn).collect();
+            assert_eq!(said.len(), 1, "{path}: its one reply: {said:?}");
+            let echo = format!("echo: [paul] draw picture:{url}");
+            if fetched {
+                assert_eq!(said[0]["text"], echo, "{path}: the link gone from the text");
+                assert_eq!((&said[0]["attachments"][0]["type"], &said[0]["attachments"][0]["name"]), (&json!("image/png"), &json!("cat.png")), "{path}");
+                let sha = said[0]["attachments"][0]["sha256"].as_str().unwrap();
+                assert_eq!(w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.to_vec()), Some(CAT.to_vec()));
+            } else {
+                assert_eq!(said[0]["text"], format!("{echo}\n\n![a cat]({url})"), "{path}: the link stays");
+                assert!(said[0].get("attachments").is_none());
+            }
+            assert_eq!(work_of(w, &chat, &turn, "turn.end")[0]["outcome"], "idle");
+        });
+    }
     bridge.stop().await;
 }
 

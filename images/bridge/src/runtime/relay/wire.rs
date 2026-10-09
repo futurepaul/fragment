@@ -474,6 +474,60 @@ pub fn notice(text: &str) -> Option<(NoticeCategory, String)> {
     (!words.is_empty()).then(|| (*category, words.to_string()))
 }
 
+/// What in an image link's URL says it is an image, as Hermes reads one
+/// (`extract_images`): an image's extension, or FAL's or Replicate's CDN.
+const IMAGE_MARKERS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", "fal.media", "fal-cdn", "replicate.delivery"];
+
+/// A reply's image links, as Hermes v0.21.6's `extract_images` reads them
+/// (`gateway/platforms/base.py`): `![alt](http(s)://…)` whose URL says it
+/// is an image (`IMAGE_MARKERS`), each as its markdown stands in the text,
+/// and its URL; at most `ATTACHMENTS_MAX`. Hermes sends them as images only
+/// from a reply it did not stream, and ours are all streamed (its
+/// post-stream delivery takes `MEDIA:` files alone), so the bridge does.
+pub fn image_links(text: &str) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    let mut at = 0;
+    // bounded by the text: each pass moves `at` forward
+    while let Some(found) = text[at..].find("![") {
+        let start = at + found;
+        at = start + 2;
+        let Some(close) = text[at..].find("](") else { break };
+        if text[at..at + close].contains(['[', ']']) {
+            continue;
+        }
+        let from = at + close + 2;
+        let Some(end) = text[from..].find(|c: char| c == ')' || c.is_whitespace()).filter(|e| text[from + e..].starts_with(')')) else { continue };
+        let url = &text[from..from + end];
+        let lower = url.to_ascii_lowercase();
+        if (lower.starts_with("https://") || lower.starts_with("http://")) && IMAGE_MARKERS.iter().any(|m| lower.contains(m)) {
+            links.push((text[start..from + end + 1].to_string(), url.to_string()));
+            if links.len() == crate::limits::ATTACHMENTS_MAX {
+                break;
+            }
+        }
+        at = from + end + 1;
+    }
+    links
+}
+
+/// A reply's text without the image links that are its files now, and the
+/// blank lines they leave.
+pub fn without_links(text: &str, links: &[String]) -> String {
+    let mut out = text.to_string();
+    for l in links {
+        out = out.replacen(l.as_str(), "", 1);
+    }
+    let lines: Vec<&str> = out.lines().map(str::trim_end).collect();
+    let mut kept: Vec<&str> = Vec::new();
+    for l in lines {
+        if l.is_empty() && kept.last().is_none_or(|p| p.is_empty()) {
+            continue;
+        }
+        kept.push(l);
+    }
+    kept.join("\n").trim().to_string()
+}
+
 /// A message's text without the edit stream's cursor, and whether it still
 /// streams.
 pub fn uncursored(content: &str) -> (&str, bool) {
@@ -658,6 +712,23 @@ mod tests {
         for not in ["💻 terminal: `ls`", "🔍 Searching the web for x", "⚙️ computer_use...", "⚡ some_tool", "📝 Updating skill x", "💬 thinking", "❓ Which one?", "✏️ Type your answer:", "Here is the answer.", "💾", "⚠️  ", "", "⏩ Steer queued into current run — arrives after the next tool call: 'x'", "↪ Redirected current run", "💬 /btw: \"why\"\n\nbecause"] {
             assert_eq!(n(not), None, "{not}");
         }
+    }
+
+    /// A reply's image links are Hermes': markdown images whose URL says it
+    /// is one (an extension, FAL's CDN), http(s) only; a link, a page, a
+    /// relative image, a broken one is none. Taken out, the text keeps the
+    /// rest, with no blank lines piled where they were.
+    #[test]
+    fn a_replys_image_links() {
+        let text = "Here it is:\n\n![a cat](https://v3.fal.media/files/abc/xyz)\n\nand ![two](http://cdn.test/b.PNG?x=1) too, [a link](https://e.test/c.png), ![page](https://e.test/page.html), ![mine](./__blob/aa), ![bad](https://e.test/x .png), ![x](ftp://e.test/x.png)";
+        let links = image_links(text);
+        assert_eq!(links, vec![("![a cat](https://v3.fal.media/files/abc/xyz)".to_string(), "https://v3.fal.media/files/abc/xyz".to_string()), ("![two](http://cdn.test/b.PNG?x=1)".to_string(), "http://cdn.test/b.PNG?x=1".to_string())]);
+        let rest = without_links(text, &links.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>());
+        assert!(rest.starts_with("Here it is:\n\nand  too, [a link]"), "{rest:?}");
+        assert_eq!(without_links("scripted: here it is\n\n![a](https://a.test/a.png)", &["![a](https://a.test/a.png)".into()]), "scripted: here it is");
+        assert!(image_links("no images here ![unclosed](https://a.test/a.png").is_empty());
+        let many: String = (0..12).map(|i| format!("![{i}](https://a.test/{i}.png) ")).collect();
+        assert_eq!(image_links(&many).len(), crate::limits::ATTACHMENTS_MAX);
     }
 
     /// The gateway's own test vector (docs/hermes-relay.md): its token is

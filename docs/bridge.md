@@ -110,6 +110,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
+| `BRIDGE_MEDIA_LOCAL` | | `allow`: a file Hermes sends by URL may come over plain `http`, from a local address (a test's fake server: tests/docker.rs). Unset in every image |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
@@ -461,6 +462,24 @@ get_chat_info`.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
   token.
+- A file Hermes sends by a URL of its provider's (`send_media` naming
+  one: a reply's image link, as FAL's image generation hands back) is
+  fetched by the bridge (`relay/fetch.rs`), apart from the loop, and is
+  the reply's attachment as an uploaded one is; the op is answered once it
+  is in hand. Only `https`, from a host whose every address is public (no
+  loopback, private, link-local or shared range, no `*.internal`), the
+  connection made to the address checked; at most 25 MiB; a type the
+  fragment serves as itself (an image, audio, video, a PDF); within 20 s
+  (Hermes waits 30 s for an answer), at most 3 redirects, each checked as
+  the first. Refused, the answer says why, and Hermes sends the link as
+  text (its base adapter's `send_image`).
+- A reply's image links are fetched the same way: Hermes sends a reply's
+  `![alt](url)` (its URL an image's: an extension, FAL's or Replicate's
+  CDN) as an image only from a reply it did not stream (`extract_images`),
+  and ours all stream, so the reply carried the link as text. The bridge
+  reads them as Hermes does (`wire::image_links`), fetches each, and puts
+  it on the reply, the link taken out of its text; the turn's end waits for
+  them (at most the fetch's 20 s). One not fetched stays a link.
 - A question to answer in words: an open `clarify` (`❓ …`, the base
   adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
   clarify's card, each read by its glyph (Hermes' translations keep

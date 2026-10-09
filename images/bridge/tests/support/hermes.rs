@@ -32,6 +32,12 @@
 //!   before its reply, a send answering nothing, and its self-improvement
 //!   review's (`💾 Self-improvement review: Memory updated`) after its `✅`,
 //!   as v0.21.6 releases it once the turn is done;
+//! - `picture:<url>` ends its reply with that image as markdown
+//!   (`![a cat](<url>)`), streamed with it, as a model writes an image its
+//!   tool made: v0.21.6 sends no image of a streamed reply's;
+//! - `image:<url>` sends that image by its URL after the reply, as v0.21.6
+//!   sends a reply's image link (its `send_image`), and the link as text
+//!   (`a cat\n<url>`) when the connector does not take it;
 //! - `media` uploads a file to `/relay/media` and sends it; inbound media
 //!   is downloaded with the token and its bytes counted in the reply;
 //! - the reply echoes what it heard: `echo: [<user_name>] <text>`;
@@ -528,6 +534,10 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         // cut with its container: its message stays its session's last
         return;
     }
+    if let Some(url) = text.split_whitespace().find_map(|w| w.strip_prefix("picture:")) {
+        // an image its tool made, as a model writes one into its answer
+        reply = format!("{reply}\n\n![a cat]({url})");
+    }
     let ms = gw.seen.lock().unwrap().turn_ms;
     let drafts = if text.contains("slow") { 20 } else { 2 };
     for i in 1..=drafts {
@@ -548,6 +558,14 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     if text.contains("media") {
         if let Some(url) = upload(gw, b"a picture of a cat").await {
             gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "image", "source_url": url, "content": "a cat", "reply_to": mid, "filename": "cat.png", "metadata": {} })).await;
+        }
+    }
+    if let Some(url) = text.split_whitespace().find_map(|w| w.strip_prefix("image:")) {
+        // a reply's image link, as v0.21.6 sends one (its send_image):
+        // passed through by URL, else the link as text (the base adapter's)
+        let sent = gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "image", "source_url": url, "content": "a cat", "reply_to": mid, "metadata": {} })).await;
+        if sent["success"] != json!(true) {
+            gw.act(json!({ "op": "send", "chat_id": chat, "content": format!("a cat\n{url}"), "reply_to": mid, "metadata": { "reply_to_message_id": mid } })).await;
         }
     }
     gw.act(react("👀", true)).await;
