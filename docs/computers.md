@@ -1343,7 +1343,8 @@ and how a runtime finds them, is the image's.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
   agents), so it is always the binary's in the image; the build fails if
-  `fragment skill` is no skill named `fragment`. A missing `fragment
+  `fragment skill` is no skill named `fragment`, or any bundled or platform
+  skill mentions a reference path it does not ship. A missing `fragment
   skill` instruction belongs in cli/SKILL.md. The profiles find it in its
   view, `/var/lib/fragment-run/platform-skills` (the boot's, read-only to
   the agents, never saved): a copy `hermes-boot` makes at each start and
