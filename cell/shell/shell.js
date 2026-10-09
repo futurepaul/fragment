@@ -194,7 +194,7 @@ function show(spec) {
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket).
 function frameOf(src, title, name = null) {
   const frame = el("iframe");
-  frame.title = title;
+  frame.setAttribute("aria-label", title);
   frame.src = src;
   frame.allow = "clipboard-write; microphone";
   if (name) frame.dataset.fragment = name;
@@ -390,7 +390,7 @@ function badges(f) {
 const sheet = $("sheet");
 function share(name) {
   const frame = el("iframe");
-  frame.title = `Share ${titleOf(name)}`;
+  frame.setAttribute("aria-label", `Share ${titleOf(name)}`);
   frame.allow = "clipboard-write";
   frame.src = `/share/${encodeURIComponent(name)}`;
   sheet.replaceChildren(frame);
@@ -463,9 +463,10 @@ function renderHeading() {
   if (!open) return;
   const who = identity(state.current);
   $("chat-title").textContent = who.title;
+  $("chat-title").title = who.title;
   $("agent-mark").replaceChildren(mark(state.current, "small"));
   const frame = state.frames.get(state.current);
-  if (frame) frame.title = who.title;
+  if (frame) frame.setAttribute("aria-label", who.title);
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
@@ -734,7 +735,7 @@ addEventListener("message", async (e) => {
     const path = url.searchParams.get("path") || String(ask.title || "");
     const frame = el("iframe");
     frame.src = url.href;
-    frame.title = path;
+    frame.setAttribute("aria-label", path);
     show({ key: `file:${url.href}`, title: path.split("/").pop(), icon: paneIcon("folder"), body: frame });
     return;
   }

@@ -222,11 +222,20 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .step pre { margin: 4px 0 0 21px; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
 /* what it does: its icon, its verb, its arguments */
 .step-name { display: flex; align-items: baseline; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; }
-.step-name svg { width: 14px; height: 14px; align-self: center; color: var(--text-icon); }
+.step-name svg { width: 14px; height: 14px; flex: none; align-self: center; color: var(--text-icon); }
+.step-label { display: flex; align-items: baseline; gap: 7px; flex: 1; min-width: 0; }
 .step-name .step-verb { flex: none; }
-.step-name .step-args { min-width: 0; font: 500 12px/1.5 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-name .step-args { display: block; flex: 1; min-width: 0; font: 500 12px/1.5 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 3em; overflow: hidden; }
+.step-status { display: inline-flex; flex: none; align-self: flex-start; padding-top: 2px; }
+.step-status.done svg { color: var(--text-tertiary); }
+.step-status.running svg { color: var(--chat-agent-color); }
+.step-status.failed svg { color: var(--danger-text); }
 .step.error pre, .step.error .step-name, .step.error .step-args { color: var(--danger-text); }
-.step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; color: var(--text-secondary); font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.step-text .md > :last-child { margin-bottom: 0; }
+.step-text .md code { background: var(--surface-muted); }
+.note-expand { border: 0; padding: 2px 0; background: none; color: var(--text-tertiary); font: inherit; cursor: pointer; }
+.note-expand:hover, .note-expand:focus-visible { color: var(--text-primary); }
 .step-text + .step { border-top: 0; }
 
 /* an approval: the agent asks its owner, who answers with a button */
