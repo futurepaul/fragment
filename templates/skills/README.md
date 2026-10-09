@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Six skills, each teaching a Fragment platform contract:
+Twelve skills: six Fragment platform contracts and six integrations Paul retains:
 
 | Skill | Why it is ours |
 |---|---|
@@ -47,7 +47,14 @@ Six skills, each teaching a Fragment platform contract:
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 
-The 2026-10-08 audit removed 35 generic copies from the Finite skills
+| cocod-finite | Cashu wallet / Lightning payments; initialized wallet required |
+| nostr-agent-interface-cli-finite | Nostr CLI and schema discovery; signing material required for writes |
+| x-api-finite | Read-only app-bearer X API helper; operator key required |
+| music-generation-finite | Direct ElevenLabs/FAL music execution; operator key required |
+| trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
+| polymarket-finite | Deterministic public-data helper; no trading or key required |
+
+The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
 snapshot imported on 2026-10-03. It also removed apps' generic design and
 game references, retaining the four platform references. The inventory,
 sources, PDF experiment and recommendations are in
@@ -71,8 +78,13 @@ The retained model-council helper uses `FRAGMENT_MODEL` and
 `FRAGMENT_AS_AGENT`, never a provider key. The image skill uses the
 platform's `job.ai.image`, not Hermes' FAL tool (FAL is not offered by the
 default catalog). Perplexity research uses Hermes' native web tools with
-`PERPLEXITY_API_KEY`; specialized vendor or wallet skills can be installed
-when needed, rather than competing in every agent's catalog.
+`PERPLEXITY_API_KEY`; the retained vendor/wallet integrations have narrow triggers and explicit prerequisites.
+
+Agents improve a read-only managed skill by making a complete writable copy in
+their own profile skills tree. The image's tool plugin does this before supported
+`skill_manage` writes; that copy shadows the baseline and syncs to the agent's
+fragment. A later managed release never overwrites it. Remove the copy to follow
+the baseline again.
 
 ## Its page
 

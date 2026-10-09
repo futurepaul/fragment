@@ -200,9 +200,9 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
-        "the managed set contains the six platform skills; generic skills come from Hermes",
-        skill_names.len() == 6
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite"].iter().all(|n| skill_names.contains(n)),
+        "the managed set contains the twelve retained skills; generic skills come from Hermes",
+        skill_names.len() == 12
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"].iter().all(|n| skill_names.contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";
