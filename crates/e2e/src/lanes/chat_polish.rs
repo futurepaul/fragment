@@ -98,8 +98,11 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     chrome.viewport(&page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'wide '.repeat(80); t.querySelector('table').style.width = '900px'; return true; })()")?;
     s.ok("wide tables scroll within the reply on a phone", chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.scrollLeft = 100; return t.scrollLeft > 0 && t.scrollWidth > t.clientWidth && document.documentElement.scrollWidth <= innerWidth; })()")? == true, "");
+    chrome.screenshot(&page, &shots.join("markdown-wide-table-phone.png"))?;
+    chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'Language'; t.querySelector('table').style.removeProperty('width'); t.scrollLeft = 0; document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-phone.png"))?;
     chrome.viewport(&page, 1280, 860, false)?;
+    chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-desktop.png"))?;
     // Reopen to discard only the markdown fixture. A real network outage
     // exercises the library's retries, then the message's own Retry.
@@ -118,7 +121,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
 
     // A completed record fixture names an actual agent as the lead, but
     // does not join its computer to this quiet chat. The frame receives
-    // the existing shell roster seam, and actual channel work starts end
+    // the existing shell roster seam, and actual channel work records end
     // its waiting status; no new platform test levers are needed.
     for body in [json!({ "kind": "turn.start", "turn": "fixture-old", "agent": agent }), json!({ "kind": "turn.end", "turn": "fixture-old", "outcome": "idle" })] {
         let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": body["kind"], "body": body })))?;
