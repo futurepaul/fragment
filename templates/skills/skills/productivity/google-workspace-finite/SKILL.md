@@ -1,7 +1,7 @@
 ---
 name: google-workspace-finite
 description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
-version: 2.1.0
+version: 2.2.0
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
@@ -27,6 +27,10 @@ placeholder as its access token by itself: every Google API it knows, as
 `gws <service> <resource> <method>`, JSON out. Where `gws` is not on your
 PATH, the bundled helper (`scripts/google_api.py`, Python's standard
 library only) does the common calls the same way.
+
+Hermes' standalone `google-workspace` skill is omitted from this image:
+its OAuth setup and token-file helpers are for a different authentication
+contract. Use this skill and `gws` here.
 
 ## Connected?
 

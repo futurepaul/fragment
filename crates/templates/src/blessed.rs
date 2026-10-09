@@ -375,13 +375,13 @@ mod tests {
                 assert!(names.insert(name.to_string()), "{name} twice");
             }
         }
-        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"] {
+        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
         for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 41, "finite-skills' 47, less shared-skills and powerpoint, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
+        assert_eq!(names.len(), 6, "only Fragment platform workflows; generic skills belong to the pinned runtime or its hub");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 

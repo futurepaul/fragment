@@ -5,7 +5,6 @@ triggers:
   - generate an image
   - draw a picture
   - make an illustration
-  - edit an image
 ---
 
 # Image generation
@@ -25,7 +24,7 @@ an edit, say so plainly, and offer one of:
 
 - a new image from a prompt that describes the edited result;
 - an edit you can make with code (crop, resize, composite, text overlay
-  with Pillow: see `meme-from-template-finite`).
+  with Pillow).
 
 ## Set up once
 
@@ -35,7 +34,7 @@ owner's. Make it the first time (it is reused after):
 ```sh
 fragment list --json                                  # an images fragment already? reuse it
 mkdir -p ~/apps/images && cp -R ${HERMES_SKILL_DIR}/images-app/. ~/apps/images/
-fragment create images
+fragment create images                                  # prints images--<suffix>; the bare label resolves it
 fragment deploy images --dir ~/apps/images
 ```
 
