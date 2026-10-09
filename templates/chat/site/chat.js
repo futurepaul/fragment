@@ -38,6 +38,7 @@
 import * as fragment from "./__fragment.js";
 import { svg } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
+import { renderAttachments } from "./media.js";
 import "./tooltips.js";
 
 // A message's text and files (docs/chat-records.md).
@@ -75,10 +76,6 @@ const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const SUGGESTIONS = ["Build something", "Explore an idea", "Make a plan"];
 const SHA256 = /^[0-9a-f]{64}$/;
-// The images `__blob` serves as themselves (passive media), shown inline.
-const SHOWN_IMAGE = /^image\/(png|jpeg|webp|gif)$/;
-// The audio it serves as itself, shown as a player (a voice memo).
-const SHOWN_AUDIO = /^audio\/(webm|ogg|mp4|mpeg|wav)$/;
 // A voice memo: the recorder's audio, asked for in this order (Chrome and
 // Firefox record Opus, Safari AAC), at a voice's bitrate, for at most this
 // long (it stops itself, and is sent), named by its type.
@@ -577,46 +574,7 @@ export function mount(root) {
     return wrap;
   }
 
-  // Files: an image the fragment serves as one shows, audio (a voice memo)
-  // plays; anything else is a chip that downloads it.
-  function attachmentsNode(list) {
-    const files = el("div", "message-attachments");
-    for (const a of list) {
-      const href = `./__blob/${a.sha256}`;
-      if (SHOWN_AUDIO.test(essence(a.type))) {
-        const memo = el("div", "attachment-audio");
-        memo.title = a.name || "a voice memo";
-        memo.innerHTML = svg("mic");
-        const audio = el("audio");
-        audio.controls = true;
-        audio.preload = "metadata";
-        audio.src = href;
-        audio.setAttribute("aria-label", a.name || "a voice memo");
-        memo.append(audio);
-        files.append(memo);
-      } else if (SHOWN_IMAGE.test(a.type)) {
-        const link = el("a", "attachment-image");
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.title = a.name;
-        const img = el("img");
-        img.src = href;
-        img.alt = a.name || "an image";
-        img.loading = "lazy";
-        link.append(img);
-        files.append(link);
-      } else {
-        const chip = el("a", "attachment-chip");
-        chip.href = href;
-        chip.download = a.name || a.sha256.slice(0, 12);
-        chip.innerHTML = svg("file");
-        chip.append(el("span", "attachment-name", a.name || "a file"), el("span", "attachment-size", size(a.size)));
-        files.append(chip);
-      }
-    }
-    return files;
-  }
+  const attachmentsNode = renderAttachments;
 
   // A turn's steps, one card: open while it works ("Working"), folded once
   // done ("Worked through N steps") unless someone opened it.

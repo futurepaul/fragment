@@ -172,6 +172,15 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .attachment-audio { display: flex; align-items: center; gap: 8px; width: min(320px, 100%); min-width: 0; padding: 4px 6px 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); color: var(--text-tertiary); }
 .attachment-audio svg { width: 14px; height: 14px; }
 .attachment-audio audio { display: block; flex: 1; min-width: 0; height: 32px; }
+.attachment { min-width: 0; max-width: 100%; width: fit-content; }
+.attachment-video, .attachment-pdf { width: 440px; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface-muted); }
+.attachment-video video { display: block; width: 100%; max-height: 360px; }
+.attachment-pdf { display: block; height: 420px; }
+.attachment-actions { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 6px 2px; }
+.attachment-actions a, .attachment-actions button { color: var(--text-secondary); }
+.attachment-actions .attachment-name { flex: 1; }
+.attachment-actions button { border: 0; background: none; font: inherit; padding: 0; cursor: pointer; }
+.attachment-actions a:hover, .attachment-actions button:hover { color: var(--text-primary); }
 
 /* a turn's steps */
 details.tools { margin: 18px 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); overflow: hidden; }

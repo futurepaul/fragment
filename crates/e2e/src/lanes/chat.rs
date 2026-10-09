@@ -41,6 +41,9 @@ use fragment_nip98::Keys;
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
+#[path = "chat_polish.rs"]
+mod polish;
+
 /// A start of the stub and its bridge's first follow (as the computers lane's).
 const WAKE: Duration = Duration::from_secs(90);
 /// A turn of the scripted agent, once awake, as a page sees it.
@@ -510,6 +513,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &by_hand,
     );
 
+    polish::check(s, api, &owner, &owner_session, &mut chrome)?;
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())
