@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/fakes", "crates/devstack", "crates/e2e", "crates/templates", "xtask"]
 # cell/ builds for wasm32 with worker-build.
-exclude = ["cell"]
+exclude = ["cell", "goose"]
 
 [workspace.package]
 edition = "2021"

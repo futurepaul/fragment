@@ -298,6 +298,37 @@ class Job {
     return Promise.resolve(done.value);
   }
 
+  #agentAbort = null;
+
+  // Goose's WASM GDK owns the loop. These callbacks are capabilities the
+  // author supplies, normally backed by this job's checkpointed steps.
+  get agent() {
+    return { run: async (opts, callbacks) => {
+      if (this.#agentAbort) throw new Error("one Goose loop may run per job invocation");
+      for (const name of ["model", "tool", "commit"]) {
+        if (typeof callbacks?.[name] !== "function") throw new TypeError(`agent.run needs a ${name} callback`);
+      }
+      const abort = new AbortController();
+      this.#agentAbort = abort;
+      const ended = new Promise((_, reject) => abort.signal.addEventListener("abort", () => reject(new Error("job invocation ended")), { once: true }));
+      ended.catch(() => {});
+      const wrapped = {};
+      for (const name of ["model", "tool", "commit"]) {
+        wrapped[name] = async (input) => JSON.stringify(await Promise.race([callbacks[name](JSON.parse(input)), ended]));
+      }
+      try {
+        const { run_goose } = await import("./fragment-goose.js");
+        return JSON.parse(await run_goose(JSON.stringify(opts), wrapped));
+      }
+      finally { this.#agentAbort = null; }
+    } };
+  }
+
+  // A Workflow round suspends at its first missing step. Release the WASM
+  // future too: a never-resolving JS callback must not retain Rust state
+  // for every replay until this facet is evicted.
+  dispose() { this.#agentAbort?.abort(); }
+
   // An HTTP request from the platform (the app itself has no network).
   // Header values may name the fragment's secrets as {{NAME}}.
   fetch(url, init = {}) {
@@ -599,6 +630,8 @@ export class App extends AuthorApp {
       ]);
     } catch (e) {
       return next ? { next } : { failed: describe(e) };
+    } finally {
+      job.dispose();
     }
     if (next) return { next };
     const text = JSON.stringify(out.value ?? null) ?? "null";

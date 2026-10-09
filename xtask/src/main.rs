@@ -366,6 +366,10 @@ fn check() -> Result<()> {
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
+    build::goose()?;
+    run(Command::new("cargo").args(["test", "--locked"]).current_dir(root.join("goose")))?;
+    run(Command::new("cargo").args(["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]).current_dir(root.join("goose")))?;
+    run(Command::new("cargo").args(["clippy", "--locked", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"]).current_dir(root.join("goose")))?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])

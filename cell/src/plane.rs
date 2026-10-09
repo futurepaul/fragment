@@ -30,6 +30,9 @@ use crate::js;
 
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
+/// Built first by xtask: Goose's GDK, executed inside the app facet.
+pub const GOOSE_JS: &str = include_str!("../../goose/build/worker/shim.mjs");
+pub const GOOSE_WASM: &[u8] = include_bytes!("../../goose/build/worker/index.wasm");
 /// Tree rows per insert statement.
 const TREE_BATCH: usize = 20;
 /// How far apart a quiet fragment's passes (its housekeeping) are: a day.

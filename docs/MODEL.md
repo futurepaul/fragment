@@ -242,6 +242,14 @@ acts with the lower of their role and the agent's cap
 a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
 #156): one runtime, with one set of turn semantics.
 
+On the optchat branch, the personal mind's loop is Goose's WASM GDK
+inside its fragment's app facet (Paul, 2026-10-09; docs/optchat.md).
+`job.agent.run` hosts its state machine over author-supplied,
+checkpointed effects. It is a library in the existing facet, not the
+removed separate agent Worker or a new agent identity. Its memory and
+logs remain the mind's SQLite and channels; native Goose on computers
+is its hands.
+
 ## Computers
 
 A computer is a container a person owns, run by the `Computer` Durable

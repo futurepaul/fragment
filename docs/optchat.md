@@ -204,11 +204,22 @@ each with its reason. Everything else in the gist holds as it says.
 
 - **The mind** is the one memory and the main agent. It is a blessed
   template (`templates/mind`), so the platform holds none of its logic,
-  and every person's mind runs the same release.
+  and every person's mind runs the same release. Its main loop is **Goose's
+  WASM GDK inside that fragment's app facet**, through `job.agent.run`:
+  Goose's `StateMachine`, `InferenceRunner` and `ToolOperation`, from the
+  same WASM-compatible fork the former `agent/` Worker used (rev
+  `12922e73`). Paul confirmed this on 2026-10-09: the JavaScript loop the
+  spike first shipped was not the intended runtime. The template supplies
+  the shared memory view, fixed prompt, tools and checkpointed model/tool/
+  log effects; Goose drives their sequence and termination. The platform
+  supplies the sandboxed library, not an agent identity or a second log.
 - **goose** is the hands. It runs on the person's computer (Containers),
   takes hand-offs as turns through the bridge, and reports back. Each
   hand-off is a fresh goose session whose first message is the mind's
-  view, so goose knows what the mind knows. A machine of the person's own
+  view, so goose knows what the mind knows. This is the **compressed shared
+  view**, not every raw message in its prompt. Its mind MCP lets it expand
+  the underlying messages with `zoom`, `date` and `search`, read-only.
+  A machine of the person's own
   can be hands too, beside the computer ("A machine as hands", below):
   the same bridge and goose, and the mind picks which hands a task goes
   to (`computer(task, on)`).

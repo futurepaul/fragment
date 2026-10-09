@@ -7,5 +7,7 @@ cell/.dev.vars
 cell/build/
 cell/client/
 cell/target/
+goose/build/
+goose/target/
 .wrangler/
 cell/wrangler.local.jsonc

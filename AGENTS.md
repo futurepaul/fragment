@@ -39,7 +39,7 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
    `docs/optchat.md` — the spike's contract on this branch (one memory,
-   every chat; goose as the hands).
+   every chat; WASM Goose GDK as the mind's loop, native goose as the hands).
 3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
 4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.

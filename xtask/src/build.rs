@@ -16,10 +16,21 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// cell/ for wasm32, into its `build/`.
 pub fn cell() -> Result<()> {
     worker_build_installed()?;
+    goose()?;
     let t0 = Instant::now();
     run(Command::new("worker-build").arg("--release").current_dir(devstack::cell_dir()))?;
     println!("built the cell for wasm32 in {:.1?}", t0.elapsed());
     Ok(())
+}
+
+/// The generic Goose GDK module that the platform loads into app facets.
+/// worker-build owns wasm-bindgen and esbuild, as it does for the cell.
+pub fn goose() -> Result<()> {
+    let root = devstack::repo_root();
+    run(Command::new("worker-build")
+        .args(["--release", "--locked"])
+        .env("CUSTOM_SHIM", root.join("goose/shim.js"))
+        .current_dir(root.join("goose")))
 }
 
 fn worker_build_installed() -> Result<()> {

@@ -1577,6 +1577,19 @@ and the AI steps (`job.ai.*`), all above:
   lists hold them (`[{id, principal, data}]`, one a socket that shares
   any). Each is a step, so a run reads what was true when it first took
   it, again on a retry.
+- `job.agent.run({messages, tools}, {model, tool, commit})`: Goose's WASM
+  GDK state machine in this app facet, with a fresh context. This is a
+  library call, not another durable step: its callbacks must use this
+  job's steps to record effects. `model(messages)` returns the existing
+  text step's answer with `message`; `tool({id, name, args})` returns
+  `{text, ...}`; `commit(event)` records `model` or `tools` effects and
+  returns queued user `messages`, `stopped`, and an optional `result`.
+  Replay rebuilds the loop and reuses the callbacks' recorded steps.
+  The runtime has no network or additional credentials, takes at most
+  1 MiB of initial messages/tools and 64 tools, bounds the accumulated
+  wire messages at 4 MiB and the loop at 80 machine steps. It cancels
+  pending WASM callbacks when a Workflow round suspends. `goose/README.md`
+  describes the GDK/native-CLI boundary.
 - As the fragment's owner, on their other fragments (the mind's apps:
   docs/optchat.md): `job.owner.fragments()` and `job.owner.call(fragment,
   op, input)`. Only a fragment whose live code is a blessed template's

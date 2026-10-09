@@ -46,7 +46,8 @@ jobs:
             target
             !target/tools
             cell/target
-          key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock') }}
+            goose/target
+          key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'goose/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       # the pinned Node `node --check` runs on, unpacked: the e2e's key,
       # which its first shard saves from master
@@ -66,6 +67,7 @@ jobs:
             target
             !target/tools
             cell/target
+            goose/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   e2e-shard:
@@ -96,8 +98,9 @@ jobs:
             target/release
             target/debug
             cell/target
+            goose/target
             images/target/release
-          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'images/Cargo.lock') }}
+          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'goose/Cargo.lock', 'images/Cargo.lock') }}
           restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       # worker-build itself, and the tools it fetches (wasm-bindgen at the
       # lockfile's version, wasm-opt, esbuild)
@@ -140,6 +143,7 @@ jobs:
             target/release
             target/debug
             cell/target
+            goose/target
             images/target/release
           key: ${{ steps.cargo.outputs.cache-primary-key }}
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.worker-build.outputs.cache-hit != 'true'

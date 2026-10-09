@@ -1894,82 +1894,76 @@ export class App extends DurableObject {
         { role: "system", content: system(b.about) },
         { role: "user", content: [{ type: "text", text: v.text, cache: "blocks" }, { type: "text", text: state }, { type: "text", text: b.texts.join("\n\n") }] },
       ];
+      // Goose's WASM GDK owns inference/tool sequencing and termination.
+      // The template supplies policy and checkpointed effects, keeping
+      // UniiChat's raw wire prefix, logs and memory format unchanged.
       let convo = 0;
+      let calls = 0;
       let last = false;
-      for (let calls = 0; calls < CALLS_MAX; calls++) {
-        last = last || calls === CALLS_MAX - 1 || s.left() < 4 || s.bytes > RESULTS_SOFT_BYTES || convo > CONVO_MAX_BYTES;
-        const a = await s.text({
-          model: "cheap",
-          messages,
-          tools: CALL_TOOLS,
-          tool_choice: last ? "none" : "auto",
-          draft: { channel: "log", turn: `turn:${thread}` },
-          // the person's model for chat (docs/optchat.md, "Your own models")
-          role: "chat",
-        });
-        // `message` is the platform's answer with tools; without it, the text
-        const msg = a && typeof a.message === "object" && a.message !== null ? a.message : { role: "assistant", content: a?.text ?? "" };
-        const content = typeof msg.content === "string" ? msg.content : typeof a?.text === "string" ? a.text : "";
-        const asked = !last && Array.isArray(msg.tool_calls) ? msg.tool_calls.slice(0, TOOL_CALLS_ANSWERED) : [];
-        const entries = [];
-        if (content.trim()) entries.push({ kind: "talk", text: content });
-        const results = [];
-        // what this answer's results add to the conversation so far
-        let adding = 0;
-        for (const [k, tc] of asked.entries()) {
-          const name = String(tc?.function?.name ?? "");
-          const raw = tc?.function?.arguments;
-          let args = null;
-          try {
-            args = typeof raw === "string" ? JSON.parse(raw || "{}") : raw && typeof raw === "object" ? raw : {};
-          } catch {
-            args = null;
-          }
+      let round = null;
+      return await job.agent.run({ messages, tools: CALL_TOOLS }, {
+        model: async (wire) => {
+          if (calls >= CALLS_MAX) throw new Error("the turn exceeded its model call limit");
+          last = last || calls === CALLS_MAX - 1 || s.left() < 4 || s.bytes > RESULTS_SOFT_BYTES || convo > CONVO_MAX_BYTES;
+          const a = await s.text({ model: "cheap", messages: wire, tools: CALL_TOOLS, tool_choice: last ? "none" : "auto", draft: { channel: "log", turn: `turn:${thread}` }, role: "chat" });
+          const msg = a && typeof a.message === "object" && a.message !== null ? a.message : { role: "assistant", content: a?.text ?? "" };
+          const asked = !last && Array.isArray(msg.tool_calls) ? msg.tool_calls.slice(0, TOOL_CALLS_ANSWERED) : [];
+          const said = { role: "assistant", content: msg.content ?? a?.text ?? null, ...(asked.length ? { tool_calls: asked } : {}), ...(Array.isArray(msg.thinking_blocks) ? { thinking_blocks: msg.thinking_blocks } : {}) };
+          calls++;
+          return { ...a, message: said };
+        },
+        tool: async ({ id, name, args }) => {
+          const k = round.asked.findIndex((tc) => tc.id === id);
           let out;
           if (k >= TOOL_CALLS_MAX) out = { text: `Error: at most ${TOOL_CALLS_MAX} tool calls run in one answer; call this one again.` };
-          else if (args === null || typeof args !== "object") out = { text: "Error: the arguments are not a JSON object." };
-          // a tool's steps (3 at most), this answer's log, a pump, and a last call and its log
-          else if (s.left() < 7) {
-            out = { text: "Error: this turn is out of steps; answer with what you have." };
-            last = true;
-          } else if (convo + adding > CONVO_MAX_BYTES) {
-            // a page or a message whole is up to CAP: a few fill a call's arguments
+          else if (convo + round.adding > CONVO_MAX_BYTES) {
             out = { text: "Error: this turn has read all it can hold; answer with what you have." };
             last = true;
           } else out = await this.#tool(job, s, name, args, ctx);
-          // §1: a tool's output is clipped to its head and tail
           const echo = M.capText(out.text);
-          adding += M.utf8(echo);
-          entries.push({ kind: "tool", text: `${name} ${args === null ? String(raw) : JSON.stringify(args)}`, task: out.task ?? null });
-          entries.push({ kind: "echo", text: echo, task: out.task ?? null });
-          results.push({ role: "tool", tool_call_id: String(tc?.id ?? `call_${calls}_${k}`), content: echo });
-        }
-        // the call's own timing (the platform's), its tools, and when its log landed
-        const t = a?.timing && typeof a.timing === "object" ? a.timing : {};
-        const u = a?.usage ?? {};
-        const timed = { first: t.first_ms ?? null, ms: t.ms ?? null, model: a?.model ?? null, calls: t.calls ?? null, thought: t.thought ?? null, tokens: [u.prompt_tokens ?? null, u.prompt_tokens_details?.cached_tokens ?? null, u.completion_tokens ?? null], tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: null };
-        if (timing.calls.length < CALLS_MAX) timing.calls.push(timed);
-        // the last call (no tools): its log ends the turn in the same step
-        const end = asked.length ? null : { state: "done", timing, profiles: h.fresh };
-        const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries, take: asked.length > 0, end });
-        timed.logged = lg.at ?? null;
-        if (lg.pump) await s.call("pump", {});
-        if (!asked.length) return { state: "done", ended: lg.ended ?? null };
-        if (lg.stopped) return { state: "stopped" };
-        // an answer's thinking blocks (Anthropic's, opaque) go back with its calls
-        const said = { role: "assistant", content: msg.content ?? null, tool_calls: asked, ...(Array.isArray(msg.thinking_blocks) ? { thinking_blocks: msg.thinking_blocks } : {}) };
-        messages.push(said, ...results);
-        convo += sizeOf(said) + results.reduce((n, r) => n + sizeOf(r), 0);
-        // §6: what the person (or a hand-off's report) said meanwhile, between tool calls
-        const heard = lg.heard?.texts ?? [];
-        if (heard.length) {
-          const said = { role: "user", content: heard.join("\n\n") };
-          messages.push(said);
-          convo += sizeOf(said);
-          for (const f of lg.heard.attachments ?? []) if (ctx.attachments.length < F.FILES_MAX && !ctx.attachments.some((x) => x.sha256 === f.sha256)) ctx.attachments.push(f);
-        }
-      }
-      return { state: "done" };
+          round.adding += M.utf8(echo);
+          return { ...out, text: echo };
+        },
+        commit: async (event) => {
+          if (event.type === "model") {
+            const a = event.answer;
+            const msg = a.message;
+            const content = typeof msg.content === "string" ? msg.content : a?.text ?? "";
+            const asked = msg.tool_calls ?? [];
+            const t = a?.timing ?? {};
+            const u = a?.usage ?? {};
+            const timed = { first: t.first_ms ?? null, ms: t.ms ?? null, model: a?.model ?? null, calls: t.calls ?? null, thought: t.thought ?? null, tokens: [u.prompt_tokens ?? null, u.prompt_tokens_details?.cached_tokens ?? null, u.completion_tokens ?? null], tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: null };
+            timing.calls.push(timed);
+            round = { asked, said: msg, timed, adding: 0, entries: content.trim() ? [{ kind: "talk", text: content }] : [] };
+            if (asked.length) return {};
+          } else {
+            for (const { id, output } of event.results) {
+              const tc = round.asked.find((tc) => tc.id === id);
+              const name = String(tc?.function?.name ?? "");
+              const raw = tc?.function?.arguments;
+              let args = null;
+              try { args = typeof raw === "string" ? JSON.parse(raw || "{}") : raw ?? {}; } catch {}
+              const echo = M.capText(output.text);
+              round.entries.push({ kind: "tool", text: `${name} ${args === null ? String(raw) : JSON.stringify(args)}`, task: output.task ?? null });
+              round.entries.push({ kind: "echo", text: echo, task: output.task ?? null });
+              convo += sizeOf({ role: "tool", tool_call_id: id, content: echo });
+            }
+            convo += sizeOf(round.said);
+          }
+          const take = round.asked.length > 0;
+          const end = take ? null : { state: "done", timing, profiles: h.fresh };
+          const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries: round.entries, take, end });
+          round.timed.logged = lg.at ?? null;
+          if (lg.pump) await s.call("pump", {});
+          if (!take) return { result: { state: "done", ended: lg.ended ?? null } };
+          if (lg.stopped) return { stopped: true, result: { state: "stopped" } };
+          const heard = lg.heard?.texts ?? [];
+          const added = heard.length ? [{ role: "user", content: heard.join("\n\n") }] : [];
+          for (const msg of added) convo += sizeOf(msg);
+          for (const f of lg.heard?.attachments ?? []) if (ctx.attachments.length < F.FILES_MAX && !ctx.attachments.some((x) => x.sha256 === f.sha256)) ctx.attachments.push(f);
+          return { messages: added };
+        },
+      });
     } catch (e) {
       return { state: "error", error: describe(e) };
     }

@@ -63,6 +63,8 @@ fn platform() -> &'static Platform {
         let limits = facet::limits_js();
         let mut hasher = Sha256::new();
         hasher.update(PLATFORM_JS.as_bytes());
+        hasher.update(crate::plane::GOOSE_JS.as_bytes());
+        hasher.update(crate::plane::GOOSE_WASM);
         hasher.update(b"\0");
         hasher.update(facet::LIMITS_MODULE.as_bytes());
         hasher.update(b"\0");

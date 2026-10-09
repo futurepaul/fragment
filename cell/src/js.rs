@@ -118,6 +118,10 @@ fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
 fn worker_code(ctx: &JsValue, code: &AppCode) -> CellResult<Object> {
     let modules = Object::new();
     set(&modules, "platform.js", code.platform);
+    set(&modules, "fragment-goose.js", crate::plane::GOOSE_JS);
+    let goose = Object::new();
+    set(&goose, "wasm", js_sys::Uint8Array::from(crate::plane::GOOSE_WASM).buffer());
+    set(&modules, "index.wasm", goose);
     set(&modules, facet::LIMITS_MODULE, code.limits);
     set(&modules, "app.js", code.source.as_str());
     for (path, source) in &code.modules {

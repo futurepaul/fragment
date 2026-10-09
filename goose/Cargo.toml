@@ -1,0 +1,36 @@
+[package]
+name = "fragment-goose"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.48", default-features = false, features = ["sync", "macros", "rt"] }
+tokio-util = { version = "0.7", default-features = false }
+rmcp = { version = "3.2.0", default-features = false }
+goose-agent = { git = "https://github.com/futurepaul/goose", rev = "12922e73ce9f8a36ec157813305ee33be0896873" }
+goose-provider-types = { git = "https://github.com/futurepaul/goose", rev = "12922e73ce9f8a36ec157813305ee33be0896873", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "=0.8.5"
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "=0.4.78"
+js-sys = "=0.3.105"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1", features = ["js"] }
+chrono = { version = "0.4", features = ["wasmbind"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
