@@ -1280,14 +1280,21 @@ actually makes a chat a Bot Chat"), so the image does both
   completion in such a session (message_agent's answer among them) had
   no adapter to go through: the gateway retried it every 5 s, silently,
   for ever (p5, 2026-10-09). The
-  boot routes each agent's Bot Chat to its profile in the gateway's
-  config (`profile_routes`, in the managed overlay: `bots::profile_routes`),
-  which makes the profile one the gateway reaches through the default
-  profile's relay (v0.21.6: `gateway/authz_mixin.py`,
-  `_is_shared_bot_satellite`). No route picks a message's profile: the
-  relay names it on each. The gateway reads them as it starts: an agent
-  whose Bot Chat is found later has its route at the next start, and
-  until then its sessions are that gateway's own.
+  boot routes each agent to its profile in the gateway's config
+  (`profile_routes`, in the managed overlay: `bots::profile_routes`), by
+  one chat: its Bot Chat, else a chat it is in (an agent in no chat has
+  no session to lose one in). A route makes its profile one the gateway
+  reaches through the default profile's relay (v0.21.6:
+  `gateway/authz_mixin.py`, `_is_shared_bot_satellite`), and Hermes asks
+  only whether any route names the profile, so one reaches the agent's
+  sessions in every chat it is in (its other chats, the shell's
+  `<label>-chat-<n>`, group chats, an app's chat). No route picks a
+  message's profile: the relay names it on each. The gateway reads them
+  as it starts, and no verb of Hermes' reloads them (`rescan-profiles`
+  serves a new profile, not new routes); none is needed between starts:
+  a chat or an agent come since has its sessions in that gateway's life,
+  which hold their live adapter, and every start is a boot's, which
+  writes the routes first.
 - An agent with no such chat (made by other means than the shell) has no
   Bot Chat of ours, and no owner: Hermes runs a teammate's message in a
   Bot Chat of its own, outside the bridge, which the person sees nowhere
@@ -1312,7 +1319,9 @@ Proven by the Docker lane's `bots_message_each_other` (the scripted
 model: the roster and the tool from an agent's first turn in its own
 chat, a message posted into the other's chat as the sender, answered
 there by a turn of the bridge's, settled once, and said in the sender's
-chat, and so again after the container restarts), and on a preview by the hosted `bot-mode` section, run by name
+chat, and so again after the container restarts, with a background
+job's completion in a chat that is no Bot Chat, and in the chat of an
+agent with none), and on a preview by the hosted `bot-mode` section, run by name
 (`--only bot-mode`): two real agents. Juniper, asked to have Maple make
 and publish a todo app and show it in her browser, runs `message_agent`.
 Maple's turn of it, in her own chat, makes the app, which goes live, and

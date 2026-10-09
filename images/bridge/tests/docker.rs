@@ -2456,12 +2456,15 @@ fn bot_chat_of(c: &Container, profile: &str) -> serde_json::Value {
 async fn bots_message_each_other() {
     let tag = hermes_tag();
     build(&repo_dir(), "images/hermes/Dockerfile", &tag);
-    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple"]).await;
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple", "fern"]).await;
     let model = Model::start("0.0.0.0:0").await;
     // each its own chat, labelled for it, its suffix its own: the boot finds it
     let (jchat, mchat) = (fake.chat_named("juniper-chat--h6j7", &["juniper"]), fake.chat_named("maple-chat--z8w6", &["maple"]));
+    // and chats that are no Bot Chat: juniper's second (the shell's
+    // `<label>-chat-<n>`), and fern's only one, so fern has no Bot Chat
+    let (jchat2, garden) = (fake.chat_named("juniper-chat-2--m4q8", &["juniper"]), fake.chat_named("garden--r2d5", &["fern"]));
     let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
-    fake.until(180_000, "Hermes' bridge to follow both agents' chats", |w| w.live_sockets() >= 4).await;
+    fake.until(180_000, "Hermes' bridge to follow the agents' chats", |w| w.live_sockets() >= 7).await;
     let yaml = c.exec_out(&["cat", "/data/hermes/profiles/maple--k3x9/profile.yaml"]);
     assert!(yaml.contains("display_name: \"Maple\"\n") && yaml.contains("ui_meta:\n  hermes-bots:\n    title: \"Maple\"\n"), "maple is a bot, named by her fragment's title: {yaml}");
     // each bot's first message in its own chat makes its session there
@@ -2559,11 +2562,19 @@ async fn bots_message_each_other() {
     assert!(fake.with(|w| seq_of(w, &jchat, "npub1maple", "pong").is_some()), "maple's message back is a hand-off in juniper's chat");
 
     // After a restart (p5, 2026-10-09: a deploy, then the first message),
-    // maple's answer still comes back: Hermes reads juniper's session back
-    // from disk, with no live adapter, and reaches it through the relay
-    // only because her profile is routed (bots.rs, `profile_routes`)
-    let routes = c.exec_out(&["cat", "/etc/hermes/config.yaml"]);
-    assert!(routes.contains("profile_routes:\n  - name: \"juniper--k3x9\"\n    platform: \"relay\"\n    profile: \"juniper--k3x9\"\n    chat_id: \"juniper-chat--h6j7/juniper--k3x9\"\n"), "each bot's chat routed to its profile: {routes}");
+    // maple's answer still comes back, and a background job's completion
+    // in any chat: Hermes reads each session back from disk, with no live
+    // adapter, and reaches it through the relay only because its agent's
+    // profile is routed (bots.rs, `profile_routes`). Sessions in the other
+    // chats first, made before the restart.
+    let first = |chat: &str, agent: &str, text: &str| {
+        let said = fake.say(chat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id(agent, chat, "chat", said["seq"].as_u64().unwrap())
+    };
+    for (chat, agent) in [(&jchat2, "juniper--k3x9"), (&garden, "fern--k3x9")] {
+        let turn = first(chat, agent, "hello in another chat");
+        within(&fake, chat, &c, 180_000, "a first reply in a chat that is no Bot Chat", |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    }
     let started = c.logs().matches("\"botmode.started\"").count();
     c.restart();
     let t = Instant::now();
@@ -2574,6 +2585,21 @@ async fn bots_message_each_other() {
     }
     asked(&fake, &jchat, &c, "dm: maple: ping after a restart", |w, turn| reply(w, &jchat, turn).is_some()).await;
     within(&fake, &jchat, &c, 180_000, "juniper to say maple's answer after a restart", |w| w.bodies(&jchat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("relayed:") && t.contains("ping after a restart")))).await;
+    // a job started in juniper's second chat, and in fern's (who has no
+    // Bot Chat): each one's completion comes back, a turn of its own there
+    let completed = |w: &support::fake::World, chat: &str| w.bodies(chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("[IMPORTANT: Background process")));
+    for (chat, agent) in [(&jchat2, "juniper--k3x9"), (&garden, "fern--k3x9")] {
+        first(chat, agent, "notify: sleep 2 && echo the-job-ran");
+        within(&fake, chat, &c, 120_000, &format!("{agent}'s job's completion after a restart"), |w| completed(w, chat)).await;
+    }
+    // one route a profile reaches its sessions in every chat: each bot by
+    // its Bot Chat, fern by her chat, and none for juniper's second chat
+    let routes = c.exec_out(&["cat", "/etc/hermes/config.yaml"]);
+    let route = |agent: &str, chat: &str| format!("  - name: \"{agent}\"\n    platform: \"relay\"\n    profile: \"{agent}\"\n    chat_id: \"{chat}/{agent}\"\n");
+    for (agent, chat) in [("juniper--k3x9", "juniper-chat--h6j7"), ("maple--k3x9", "maple-chat--z8w6"), ("fern--k3x9", "garden--r2d5")] {
+        assert!(routes.contains(&route(agent, chat)), "each agent routed to its profile by one chat: {routes}");
+    }
+    assert_eq!(routes.matches("  - name: ").count(), 3, "one route a profile: {routes}");
 
     // `/new` in her Bot Chat (its owner's command, docs/chat-records.md): a
     // new session under the chat's own key, which the hook titles `Bot

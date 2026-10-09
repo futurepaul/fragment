@@ -9,7 +9,9 @@
 //!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
 //!   the transcript, the answer names it; `run: <command>` runs that, and
 //!   `start: <command>` starts it as a background process (Hermes refuses
-//!   a foreground `&`), each answer quoting what the tool said; `send:
+//!   a foreground `&`), and `notify: <command>` as one whose completion
+//!   Hermes brings back as a turn of its own (`notify_on_complete`), each
+//!   answer quoting what the tool said; `send:
 //!   <command>` runs that, and its answer sends the file the command names
 //!   (`made=<path>` in what it printed) as Hermes' `MEDIA:` tag;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
@@ -215,6 +217,9 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `start: <command>`: that command as Hermes' background process
     let start = last_user.lines().find_map(|l| l.split_once("start: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
+    // `notify: <command>`: that command as a background process whose
+    // completion Hermes brings back to the chat as a turn of its own
+    let notify = last_user.lines().find_map(|l| l.split_once("notify: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `send: <command>`: that command, then the file it names sent
     let send = last_user.lines().find_map(|l| l.split_once("send: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
@@ -243,7 +248,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -273,6 +278,10 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     if let (Some(command), true) = (start.as_deref(), has_terminal) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "background": true }).to_string() } });
+        return (String::new(), Some(call));
+    }
+    if let (Some(command), true) = (notify.as_deref(), has_terminal) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "background": true, "notify_on_complete": true }).to_string() } });
         return (String::new(), Some(call));
     }
     let command = if let Some(c) = run.as_deref().or(send.as_deref()) {
