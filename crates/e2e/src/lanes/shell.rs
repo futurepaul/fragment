@@ -959,7 +959,10 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     };
     let saved = pick(b, "openrouter anthropic/claude-sonnet-5.5")?;
     let after = agent_json();
+    b.eval(page, &format!("(document.querySelector('[data-model-for={lead:?}]')?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-own-models.png"));
+    b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
     s.ok(
         "picked, it is the agent's agent.json model ({provider, id}), its tier and colour kept",
         saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" }) && after["tier"] == before["tier"] && after["color"] == before["color"],
