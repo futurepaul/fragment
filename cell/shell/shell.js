@@ -1263,6 +1263,17 @@ function noticeRow(n) {
     ok.dataset.action = "seen";
     ok.onclick = () => sawNotice(n.life, ok);
     actions.append(ok);
+  } else if (n.kind === "update") {
+    // told only between turns, never restarted behind their back; an
+    // always-on computer never sleeps, so never updates by itself
+    const itself = state.computer?.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps.";
+    say("An update is ready for your computer", `Restart to get it — about a minute; your chats and work are kept.${itself}`);
+    restart("Restart");
+    const later = el("button", null, "Later");
+    later.type = "button";
+    later.dataset.action = "later";
+    later.onclick = () => updateLater(n.version, later);
+    actions.append(later);
   } else return null;
   row.append(copy, actions);
   return row;
@@ -1303,6 +1314,17 @@ async function sawNotice(life, button) {
   button.disabled = true;
   try {
     computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
+  } catch {
+    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+  }
+}
+// Later: this update is told no more, anywhere, until another is ready.
+async function updateLater(version, button) {
+  const c = state.computer;
+  if (!c) return;
+  button.disabled = true;
+  try {
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/later`, { version }));
   } catch {
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
@@ -1450,10 +1472,20 @@ async function openSettings(push = true) {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
   }
   const c = state.computer;
+  // the version it runs (asleep: the one it starts on), and the latest when
+  // it runs an older one (docs/computers.md, "What its owner is told")
+  const behind = !!(c?.version && c.latest && c.version !== c.latest);
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", PHASE[c.phase] ?? c.phase), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [
+          line("State", PHASE[c.phase] ?? c.phase),
+          line("Version", c.version ?? c.latest ?? c.image),
+          ...(behind
+            ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
+            : []),
+          ...(c.why ? [el("p", "settings-warning", c.why)] : []),
+        ]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   // each agent's own desktop

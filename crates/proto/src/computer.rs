@@ -218,6 +218,17 @@ pub struct ComputerView {
     pub owner: String,
     /// The pinned image's name (the deployment's `containers` config).
     pub image: String,
+    /// The version of the image it runs now (`fragment_core::computer::
+    /// version_of`): its running start's; none while it runs nothing
+    /// (asleep, starting, won't wake).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The version its next start runs: its pinned image as the deployment
+    /// has it now (a deploy that changed the image, or a pin, changes it);
+    /// none when the deployment has no image by that name. Running another,
+    /// a restart takes it, and so does its next sleep and wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
     pub phase: ComputerPhase,
     /// Its newest start (the Computer DO's generation, 0 before its first):
     /// what a restart names, so the same restart asked twice is made once.
@@ -228,8 +239,8 @@ pub struct ComputerView {
     pub why: Option<String>,
     /// What its owner is told of it now (docs/computers.md, "What its
     /// owner is told"), the most pressing first: it won't start, its saves
-    /// are failing, or a start went back to an older save. Its owner's view
-    /// only (the guest's is empty).
+    /// are failing, a start went back to an older save, or an update is
+    /// ready. Its owner's view only (the guest's is empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<ComputerNotice>,
     pub agents: Vec<ComputerAgent>,
@@ -400,6 +411,12 @@ pub enum ComputerNotice {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<i64>,
     },
+    /// An update is ready: it is awake on another image than its next
+    /// start runs (`version`, its view's `latest`), with no turn running.
+    /// A restart takes it, and so does its next sleep and wake. Its owner
+    /// may put it off (`POST …/notices/later {version}`): told no more until
+    /// a version other than that one is ready.
+    Update { version: String },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
@@ -417,6 +434,14 @@ pub struct RestartAsk {
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeen {
     pub life: u64,
+}
+
+/// `POST /api/computers/{id}/notices/later`: its owner put off the update
+/// to `version` (an `update` notice's): told no more until another is ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLater {
+    pub version: String,
 }
 
 /// `POST /api/computers/{id}/ports/{port}/ticket` → a one-time link that
@@ -513,15 +538,18 @@ mod tests {
         let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None };
         assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::json!({ "kind": "went_back", "life": 4, "cause": "unsaved", "endedAt": 30, "pending": true }));
         assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
-        for n in [unsaved, back] {
+        let update = ComputerNotice::Update { version: "0123456789ab".into() };
+        assert_eq!(serde_json::to_value(&update).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab" }));
+        for n in [unsaved, back, update] {
             assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
         }
         // a view from before notices reads as none, at no start
         let v: ComputerView = serde_json::from_str(r#"{"computer":"computer:0123456789abcdef01234567","owner":"id:p","image":"stub","phase":"asleep","agents":[],"origin":"https://x"}"#).unwrap();
-        assert!(v.notices.is_empty() && v.generation == 0);
+        assert!(v.notices.is_empty() && v.generation == 0 && v.version.is_none() && v.latest.is_none());
         let ask: RestartAsk = serde_json::from_str("{}").unwrap();
         assert_eq!(ask.generation, None);
         assert!(serde_json::from_str::<RestartAsk>(r#"{"gen":1}"#).is_err() && serde_json::from_str::<NoticeSeen>(r#"{"life":1,"x":2}"#).is_err(), "a field it does not know is refused");
+        assert!(serde_json::from_str::<UpdateLater>(r#"{"version":"0123456789ab","life":1}"#).is_err() && serde_json::from_str::<UpdateLater>("{}").is_err(), "it names a version, and only that");
     }
 
     /// The guest's credentials on the wire, as an image reads them.

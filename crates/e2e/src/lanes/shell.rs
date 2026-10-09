@@ -807,6 +807,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     models_ui(s, api, &mut b, &page, &session, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
+    update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -930,6 +931,73 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     s.ok(
         "settings' Restart computer asks once more, then restarts it, saved first: nothing to tell",
         asked && confirm && restarted && settled && v["restored"]["rollback"] == false && v["notices"].as_array().is_none_or(|l| l.is_empty()),
+        &v,
+    );
+    Ok(())
+}
+
+/// An update, as the person sees it (docs/computers.md, "What its owner is
+/// told"; Paul, 2026-10-09: "new update, click to restart"): their computer
+/// awake, between turns, on another image than its next start runs (a pin
+/// here, which is what a deploy that changed its image is to it) is shown
+/// at once, with no reload, over settings, with Restart and Later; settings
+/// says the version it runs and the latest. Restart takes it, and nothing
+/// more is told; Later puts a version off, here and after a reload, while
+/// settings still says the latest.
+fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=update]')";
+    let settings_text = |b: &mut Browser| b.eval(page, "document.getElementById('settings-page').innerText").ok().and_then(|t| t.as_str().map(str::to_string)).unwrap_or_default();
+    let idle = |s: &Suite| s.eventually(std::time::Duration::from_secs(15), || super::computers::lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    // settings' Computer section, in view for its screenshot
+    let to_computer = "([...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.scrollIntoView({ block: 'start' }), true)";
+    let first = view();
+    let running = first["version"].as_str().unwrap_or("").to_string();
+    idle(s);
+    let r = shell(api, session, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })), &[])?;
+    let latest = r.body["latest"].as_str().unwrap_or("").to_string();
+    let told = b.until(page, &format!("{shown}?.innerText.includes('An update is ready for your computer') && !!{shown}.querySelector('button[data-action=restart]') && !!{shown}.querySelector('button[data-action=later]')"), wait);
+    let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
+    let _ = b.screenshot(page, &shots.join("computer-update.png"));
+    s.ok(
+        "an update is shown at once, with no reload: an update is ready, Restart (about a minute, chats and work kept; or by itself at its next sleep), and Later",
+        r.status == 200 && told && !running.is_empty() && latest != running && said.as_str().is_some_and(|t| t.contains("about a minute; your chats and work are kept") && t.contains("the next time your computer sleeps")),
+        json!({ "said": said, "view": r.body }),
+    );
+    // settings, read again, says the version it runs and the latest
+    b.reload(page)?;
+    let versions = b.until(page, "document.getElementById('settings-page').innerText.includes('Latest version')", wait);
+    let text = settings_text(b);
+    b.eval(page, to_computer)?;
+    let _ = b.screenshot(page, &shots.join("settings-update.png"));
+    s.ok("settings says the version it runs, and the latest, ready", versions && text.contains(&running) && text.contains(&latest), &text[..text.len().min(800)]);
+    // Restart, in the notice: it takes the update, and nothing more is told
+    b.eval(page, &format!("({shown}.querySelector('button[data-action=restart]').click(), true)"))?;
+    let restarted = s.eventually(std::time::Duration::from_secs(90), || {
+        let v = view();
+        v["phase"] == "awake" && v["version"] == latest.as_str()
+    });
+    let settled = b.until(page, "document.getElementById('computer-notices').hidden && !!document.querySelector('#settings-page [data-action=restart-ask]') && !document.getElementById('settings-page').innerText.includes('Latest version')", wait);
+    let v = view();
+    s.ok("Restart in the notice takes it: it runs the latest, and nothing more is told", restarted && settled && v["latest"] == latest.as_str() && v["notices"].as_array().is_none_or(|l| l.is_empty()), &v);
+    // pinned back, another version is ready; Later puts it off, here and after a reload
+    idle(s);
+    shell(api, session, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })), &[])?;
+    let again = b.until(page, &format!("!!{shown}?.querySelector('button[data-action=later]')"), wait);
+    b.eval(page, &format!("({shown}.querySelector('button[data-action=later]').click(), true)"))?;
+    let hidden = b.until(page, "document.getElementById('computer-notices').hidden", wait);
+    b.reload(page)?;
+    let loaded = b.until(page, "!document.getElementById('settings-page').hidden && document.getElementById('settings-page').innerText.includes('Latest version')", wait);
+    let still = b.eval(page, "document.getElementById('computer-notices').hidden")?;
+    b.eval(page, to_computer)?;
+    let _ = b.screenshot(page, &shots.join("settings-update-later.png"));
+    let v = view();
+    s.ok(
+        "Later: that version is told no more, here or after a reload, and settings still says the latest",
+        again && hidden && loaded && still == true && v["notices"].as_array().is_none_or(|l| l.is_empty()) && v["latest"] == running.as_str() && v["version"] == latest.as_str(),
         &v,
     );
     Ok(())
