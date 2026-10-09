@@ -55,6 +55,12 @@ fn runtime() -> Box<dyn Runtime> {
                 gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
                 secret,
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
+                // a test's fake servers, local and plain http (runtime/relay/fetch.rs)
+                media_local: match env("BRIDGE_MEDIA_LOCAL").as_deref() {
+                    None | Some("") => false,
+                    Some("allow") => true,
+                    Some(_) => fail("BRIDGE_MEDIA_LOCAL is `allow`, or unset"),
+                },
             };
             Box::new(Relay { config })
         }

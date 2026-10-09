@@ -10,7 +10,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::records::PromptOption;
+use crate::records::{Category, NoticeCategory, PromptOption, Step};
 
 /// The contract this connector speaks.
 pub const CONTRACT_VERSION: u64 = 1;
@@ -426,6 +426,108 @@ pub fn question(text: &str) -> Option<String> {
     (!asked.is_empty()).then(|| asked.to_string())
 }
 
+/// The glyphs Hermes v0.21.6's gateway starts its notices with, and what
+/// each is about: every message it sends mid-turn that is neither a reply
+/// nor tool progress (its status and warning rails, its busy acks, a
+/// prompt's acks, its self-improvement review), read from its `gateway/`,
+/// `agent/` and `locales/en.yaml`. No tool's emoji is among them (its
+/// registry's, and `⚙️`/`⚡`, its default ones), so no progress line reads
+/// as one. Nor are its words on a person's own message (`⏩` a steer's,
+/// `↪` a redirect's) and a side question's answer (`💬 /btw: …`): those
+/// are messages of their own (`act`'s asides, before any notice). Longest
+/// first: `⚠️` before `⚠`.
+const NOTICES: &[(&str, NoticeCategory)] = &[
+    // its self-improvement review (`display.review.summary_callback`)
+    ("💾", NoticeCategory::Memory),
+    // its inactivity warning ("I seem to be stuck"), a sub-agent's failure
+    // (`format_subagent_failure_line`), its agent's warnings
+    ("⚠️", NoticeCategory::Warning),
+    ("⚠", NoticeCategory::Warning),
+    // a denied approval's ack, and failures
+    ("❌", NoticeCategory::Warning),
+    ("⛔", NoticeCategory::Warning),
+    // busy acks ("⏳ Compressing context"), waits, expiries, timeouts
+    ("⏳", NoticeCategory::Info),
+    ("⌛", NoticeCategory::Info),
+    ("⏱️", NoticeCategory::Info),
+    ("⏱", NoticeCategory::Info),
+    // an approval's or a choice's ack ("✅ Approved once"), compaction done
+    ("✅", NoticeCategory::Info),
+    ("✓", NoticeCategory::Info),
+    // context compaction's status
+    ("🗜️", NoticeCategory::Info),
+    ("📦", NoticeCategory::Info),
+    ("💤", NoticeCategory::Info),
+    ("ℹ️", NoticeCategory::Info),
+    ("ℹ", NoticeCategory::Info),
+    // a cancelled clarify
+    ("↩️", NoticeCategory::Info),
+];
+
+/// A message of Hermes' that is a notice (`NOTICES`, by its leading
+/// glyph): what it is about, and its words without the glyph; `None` for
+/// any other.
+pub fn notice(text: &str) -> Option<(NoticeCategory, String)> {
+    let t = text.trim_start();
+    let (glyph, category) = NOTICES.iter().find(|(g, _)| t.starts_with(g))?;
+    let words = t[glyph.len()..].trim_start_matches('\u{fe0f}').trim();
+    (!words.is_empty()).then(|| (*category, words.to_string()))
+}
+
+/// What in an image link's URL says it is an image, as Hermes reads one
+/// (`extract_images`): an image's extension, or FAL's or Replicate's CDN.
+const IMAGE_MARKERS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", "fal.media", "fal-cdn", "replicate.delivery"];
+
+/// A reply's image links, as Hermes v0.21.6's `extract_images` reads them
+/// (`gateway/platforms/base.py`): `![alt](http(s)://…)` whose URL says it
+/// is an image (`IMAGE_MARKERS`), each as its markdown stands in the text,
+/// and its URL; at most `ATTACHMENTS_MAX`. Hermes sends them as images only
+/// from a reply it did not stream, and ours are all streamed (its
+/// post-stream delivery takes `MEDIA:` files alone), so the bridge does.
+pub fn image_links(text: &str) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    let mut at = 0;
+    // bounded by the text: each pass moves `at` forward
+    while let Some(found) = text[at..].find("![") {
+        let start = at + found;
+        at = start + 2;
+        let Some(close) = text[at..].find("](") else { break };
+        if text[at..at + close].contains(['[', ']']) {
+            continue;
+        }
+        let from = at + close + 2;
+        let Some(end) = text[from..].find(|c: char| c == ')' || c.is_whitespace()).filter(|e| text[from + e..].starts_with(')')) else { continue };
+        let url = &text[from..from + end];
+        let lower = url.to_ascii_lowercase();
+        if (lower.starts_with("https://") || lower.starts_with("http://")) && IMAGE_MARKERS.iter().any(|m| lower.contains(m)) {
+            links.push((text[start..from + end + 1].to_string(), url.to_string()));
+            if links.len() == crate::limits::ATTACHMENTS_MAX {
+                break;
+            }
+        }
+        at = from + end + 1;
+    }
+    links
+}
+
+/// A reply's text without the image links that are its files now, and the
+/// blank lines they leave.
+pub fn without_links(text: &str, links: &[String]) -> String {
+    let mut out = text.to_string();
+    for l in links {
+        out = out.replacen(l.as_str(), "", 1);
+    }
+    let lines: Vec<&str> = out.lines().map(str::trim_end).collect();
+    let mut kept: Vec<&str> = Vec::new();
+    for l in lines {
+        if l.is_empty() && kept.last().is_none_or(|p| p.is_empty()) {
+            continue;
+        }
+        kept.push(l);
+    }
+    kept.join("\n").trim().to_string()
+}
+
 /// A message's text without the edit stream's cursor, and whether it still
 /// streams.
 pub fn uncursored(content: &str) -> (&str, bool) {
@@ -436,17 +538,18 @@ pub fn uncursored(content: &str) -> (&str, bool) {
 }
 
 /// Hermes' tool progress is one message whose lines grow, a step each
-/// (`step_of`): its steps past the first `seen`, as (tool, arguments).
-/// A terminal command comes as a fenced block (Hermes v0.21.5's
+/// (`step_of`): its steps past the first `seen`. A terminal command comes
+/// as a fenced block (Hermes v0.21.5's
 /// `_progress_terminal_blocks`, on a platform with code blocks, as Relay
 /// is): `💻 terminal`, then the command between fences, which is that
 /// step's arguments, never a step of its own. Back to back, a command's
 /// header is dropped, and its block is a step of the tool before it. A
 /// header whose block has not closed yet (an edit cut inside it) is no
-/// step until it has.
-pub fn new_steps(content: &str, seen: usize) -> Vec<(String, String)> {
+/// step until it has. Each step is said `ok`, with no excerpt nor words:
+/// progress says neither.
+pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
     let (text, _) = uncursored(content);
-    let mut steps: Vec<(String, String)> = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
     // whether the last step is a header waiting for its block
     let mut header = false;
     let mut block: Option<Vec<&str>> = None;
@@ -459,19 +562,19 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<(String, String)> {
             };
             let cmd = cmd.join("\n");
             match steps.last_mut() {
-                Some(last) if header => last.1 = cmd,
+                Some(last) if header => last.args = cmd,
                 last => {
-                    let tool = last.map_or_else(|| "terminal".to_string(), |s| s.0.clone());
-                    steps.push((tool, cmd));
+                    let tool = last.map_or_else(|| "terminal".to_string(), |s| s.tool.clone());
+                    steps.push(step(tool, cmd));
                 }
             }
             header = false;
         } else if let Some(cmd) = block.as_mut() {
             cmd.push(line);
         } else if !line.is_empty() {
-            let (tool, args) = step_of(line);
-            header = args.is_empty();
-            steps.push((tool, args));
+            let s = step_of(line);
+            header = s.args.is_empty();
+            steps.push(s);
         }
     }
     if block.is_some() && header {
@@ -480,17 +583,93 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<(String, String)> {
     steps.into_iter().skip(seen).collect()
 }
 
-/// A progress line as a step: its tool (the first word after the emoji)
-/// and the rest as its arguments (`💻 terminal: \`ls\``).
-pub fn step_of(line: &str) -> (String, String) {
+fn step(tool: String, args: String) -> Step {
+    let category = category_of(&tool);
+    Step { tool, args, ok: true, excerpt: String::new(), text: String::new(), category }
+}
+
+/// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
+/// step's category), and the verb its progress line says in place of its
+/// name (its friendly labels, on by default: `display.verb` of
+/// `locales/en.yaml`), joined to the call's preview by " for " or " ". A
+/// tool not here is `other`, but for its browser's (`browser_…`).
+const TOOLS: &[(&str, Option<&str>, Category)] = &[
+    ("terminal", Some("Running"), Category::Shell),
+    ("execute_code", Some("Running code"), Category::Shell),
+    ("process_manage", None, Category::Shell),
+    ("web_search", Some("Searching the web"), Category::Web),
+    ("x_search", None, Category::Web),
+    ("read_file", Some("Reading"), Category::Read),
+    // the same verb as read_file's: a preview that is a URL is this one's
+    ("web_extract", Some("Reading"), Category::Read),
+    ("search_files", Some("Searching files"), Category::Read),
+    ("session_search", Some("Searching past sessions"), Category::Read),
+    ("skill_view", Some("Reading skill"), Category::Read),
+    ("skills_list", Some("Listing skills"), Category::Read),
+    ("vision_analyze", Some("Looking at the image"), Category::Read),
+    ("write_file", Some("Writing"), Category::Write),
+    ("patch", Some("Editing"), Category::Write),
+    ("skill_manage", Some("Updating skill"), Category::Write),
+    ("browser_navigate", Some("Browsing"), Category::Browser),
+    ("browser_click", Some("Clicking"), Category::Browser),
+    ("browser_type", Some("Typing"), Category::Browser),
+    ("browser_exec", None, Category::Browser),
+    ("computer_use", None, Category::Browser),
+    ("image_generate", Some("Generating image"), Category::Image),
+    ("delegate_task", Some("Delegating"), Category::Delegate),
+    ("message_agent", None, Category::Delegate),
+    ("memory", Some("Updating memory"), Category::Memory),
+    ("video_generate", Some("Generating video"), Category::Other),
+    ("text_to_speech", Some("Generating speech"), Category::Other),
+    ("clarify", Some("Asking"), Category::Other),
+    ("todo_list", Some("Updating tasks"), Category::Other),
+    ("cronjob_manage", Some("Scheduling"), Category::Other),
+];
+
+/// What a Hermes tool does.
+pub fn category_of(tool: &str) -> Category {
+    match TOOLS.iter().find(|(name, _, _)| *name == tool) {
+        Some((_, _, c)) => *c,
+        None if tool.starts_with("browser_") => Category::Browser,
+        None => Category::Other,
+    }
+}
+
+/// A progress line as a step: its tool and the call's preview, its
+/// arguments. Hermes says a tool with a friendly label by its verb
+/// (`🔍 Searching the web for rust`, `✍️ Writing notes.md`), any other by
+/// its name (`🖥️ computer_use: "capture"`, `⚙️ computer_use...`): a verb is
+/// its tool's name here (`TOOLS`), the preview's quotes and a repeat's count
+/// (` (×2)`) go, and the line's first word is the tool when no verb fits.
+pub fn step_of(line: &str) -> Step {
     let body = line.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
     if body.is_empty() {
-        return (line.trim().to_string(), String::new());
+        return step(line.trim().to_string(), String::new());
     }
-    let end = body.find(|c: char| c == ':' || c.is_whitespace() || c == '(').unwrap_or(body.len());
-    let tool = body[..end].to_string();
-    let rest = body[end..].trim_start_matches([':', ' ']).trim();
-    (tool, rest.to_string())
+    // the longest verb the line starts with, whole (of two alike, the first
+    // listed: max_by_key keeps the last of its equals)
+    let verb = TOOLS
+        .iter()
+        .rev()
+        .filter_map(|(tool, verb, _)| Some((*tool, (*verb)?)))
+        .filter(|(_, verb)| body.strip_prefix(verb).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
+        .max_by_key(|(_, verb)| verb.len());
+    let (tool, args) = match verb {
+        Some((tool, verb)) => {
+            let rest = &body[verb.len()..];
+            let args = rest.strip_prefix(" for ").unwrap_or(rest).trim();
+            let url = args.starts_with("https://") || args.starts_with("http://");
+            (if tool == "read_file" && url { "web_extract" } else { tool }, args)
+        }
+        None => {
+            let end = body.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(body.len());
+            let rest = body[end..].strip_prefix("...").unwrap_or(&body[end..]);
+            (&body[..end], rest.trim_start_matches([':', ' ']).trim())
+        }
+    };
+    let args = args.rsplit_once(" (×").filter(|(_, n)| n.strip_suffix(')').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).map_or(args, |(a, _)| a.trim_end());
+    let args = args.strip_prefix('"').and_then(|a| a.strip_suffix('"')).unwrap_or(args);
+    step(tool.to_string(), args.to_string())
 }
 
 #[cfg(test)]
@@ -510,6 +689,46 @@ mod tests {
         for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️", "💻 terminal ❓", "✍️ Writing notes.md"] {
             assert_eq!(question(not), None, "{not}");
         }
+    }
+
+    /// A notice is Hermes' message that starts with one of its notice
+    /// glyphs: what it is about, its words without the glyph. A progress
+    /// line (a tool's emoji, Hermes' default ones included), a question in
+    /// words, a reply, or a glyph with no words is no notice.
+    #[test]
+    fn a_notice_is_by_its_glyph() {
+        let n = |t: &str| notice(t).map(|(c, w)| (c.as_str(), w));
+        assert_eq!(n("💾 Self-improvement review: Memory updated"), Some(("memory", "Self-improvement review: Memory updated".into())));
+        assert_eq!(n("⚠️ I seem to be stuck (no activity for 5 min)."), Some(("warning", "I seem to be stuck (no activity for 5 min).".into())));
+        assert_eq!(n("⚠ Compression aborted: x"), Some(("warning", "Compression aborted: x".into())));
+        assert_eq!(n("⚠️ Subagent failed — \"research\" after 12s."), Some(("warning", "Subagent failed — \"research\" after 12s.".into())));
+        assert_eq!(n("⏳ Compressing context — your message is queued"), Some(("info", "Compressing context — your message is queued".into())));
+        assert_eq!(n("⌛ Approval timed out after 1 hour — the command was NOT run."), Some(("info", "Approval timed out after 1 hour — the command was NOT run.".into())));
+        assert_eq!(n("✅ Approved once"), Some(("info", "Approved once".into())));
+        assert_eq!(n("❌ Denied"), Some(("warning", "Denied".into())));
+        assert_eq!(n("  ℹ️ Context compression deferred"), Some(("info", "Context compression deferred".into())));
+        assert_eq!(n("⏱️ The AI model service is rate-limiting requests."), Some(("info", "The AI model service is rate-limiting requests.".into())));
+        // a steer's word, a redirect's, a side question's answer: messages of their own (asides)
+        for not in ["💻 terminal: `ls`", "🔍 Searching the web for x", "⚙️ computer_use...", "⚡ some_tool", "📝 Updating skill x", "💬 thinking", "❓ Which one?", "✏️ Type your answer:", "Here is the answer.", "💾", "⚠️  ", "", "⏩ Steer queued into current run — arrives after the next tool call: 'x'", "↪ Redirected current run", "💬 /btw: \"why\"\n\nbecause"] {
+            assert_eq!(n(not), None, "{not}");
+        }
+    }
+
+    /// A reply's image links are Hermes': markdown images whose URL says it
+    /// is one (an extension, FAL's CDN), http(s) only; a link, a page, a
+    /// relative image, a broken one is none. Taken out, the text keeps the
+    /// rest, with no blank lines piled where they were.
+    #[test]
+    fn a_replys_image_links() {
+        let text = "Here it is:\n\n![a cat](https://v3.fal.media/files/abc/xyz)\n\nand ![two](http://cdn.test/b.PNG?x=1) too, [a link](https://e.test/c.png), ![page](https://e.test/page.html), ![mine](./__blob/aa), ![bad](https://e.test/x .png), ![x](ftp://e.test/x.png)";
+        let links = image_links(text);
+        assert_eq!(links, vec![("![a cat](https://v3.fal.media/files/abc/xyz)".to_string(), "https://v3.fal.media/files/abc/xyz".to_string()), ("![two](http://cdn.test/b.PNG?x=1)".to_string(), "http://cdn.test/b.PNG?x=1".to_string())]);
+        let rest = without_links(text, &links.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>());
+        assert!(rest.starts_with("Here it is:\n\nand  too, [a link]"), "{rest:?}");
+        assert_eq!(without_links("scripted: here it is\n\n![a](https://a.test/a.png)", &["![a](https://a.test/a.png)".into()]), "scripted: here it is");
+        assert!(image_links("no images here ![unclosed](https://a.test/a.png").is_empty());
+        let many: String = (0..12).map(|i| format!("![{i}](https://a.test/{i}.png) ")).collect();
+        assert_eq!(image_links(&many).len(), crate::limits::ATTACHMENTS_MAX);
     }
 
     /// The gateway's own test vector (docs/hermes-relay.md): its token is
@@ -632,29 +851,66 @@ mod tests {
         assert_eq!(split_chat_id("nochat"), None);
     }
 
+    /// A step's (tool, arguments, category).
+    fn said(s: &Step) -> (&str, &str, &str) {
+        (s.tool.as_str(), s.args.as_str(), s.category.as_str())
+    }
+
     #[test]
     fn progress_grows_into_steps() {
         assert_eq!(uncursored("Hello wo ▉"), ("Hello wo", true));
         assert_eq!(uncursored("Hello world"), ("Hello world", false));
-        let step = |t: &str, a: &str| (t.to_string(), a.to_string());
+        let all = |content: &str, seen: usize| new_steps(content, seen).iter().map(|s| (s.tool.clone(), s.args.clone(), s.category.as_str())).collect::<Vec<_>>();
+        let step = |t: &str, a: &str, c: &'static str| (t.to_string(), a.to_string(), c);
         // a terminal command's block is its header's arguments, never a step
         let progress = "💻 terminal\n```\nuname -a && nproc\n```\n🔍 web_search: \"rust\" ▉";
-        assert_eq!(new_steps(progress, 0), vec![step("terminal", "uname -a && nproc"), step("web_search", "\"rust\"")]);
-        assert_eq!(new_steps(progress, 1), vec![step("web_search", "\"rust\"")]);
-        assert!(new_steps(progress, 2).is_empty());
+        assert_eq!(all(progress, 0), vec![step("terminal", "uname -a && nproc", "shell"), step("web_search", "rust", "web")]);
+        assert_eq!(all(progress, 1), vec![step("web_search", "rust", "web")]);
+        assert!(all(progress, 2).is_empty());
         // back to back, the header is dropped: the block is the tool before it's
         let twice = "💻 terminal\n```\nls\n```\n```\ncat notes.md\n```";
-        assert_eq!(new_steps(twice, 0), vec![step("terminal", "ls"), step("terminal", "cat notes.md")]);
+        assert_eq!(all(twice, 0), vec![step("terminal", "ls", "shell"), step("terminal", "cat notes.md", "shell")]);
         // a header whose block has not closed is no step until it has
-        assert!(new_steps("💻 terminal\n```\nls", 0).is_empty());
-        assert_eq!(new_steps("💻 terminal\n```\nls\n```", 0), vec![step("terminal", "ls")]);
+        assert!(all("💻 terminal\n```\nls", 0).is_empty());
+        assert_eq!(all("💻 terminal\n```\nls\n```", 0), vec![step("terminal", "ls", "shell")]);
         // the inline form, a friendly verb, a header with no block, a repeat's count
-        assert_eq!(new_steps("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`"), step("Writing", "/data/hermes/notes.md"), step("thinking...", "")]);
-        assert_eq!(new_steps("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls")]);
-        assert!(new_steps("", 0).is_empty());
-        assert_eq!(step_of("💻 terminal: `ls -la`"), ("terminal".into(), "`ls -la`".into()));
-        assert_eq!(step_of("🔍 web_search(\"q\")"), ("web_search".into(), "(\"q\")".into()));
-        assert_eq!(step_of("⚙️ thinking..."), ("thinking...".into(), String::new()));
-        assert_eq!(step_of("✅"), ("✅".into(), String::new()));
+        assert_eq!(all("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`", "shell"), step("write_file", "/data/hermes/notes.md", "write"), step("thinking", "", "other")]);
+        assert_eq!(all("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls", "shell")]);
+        assert!(all("", 0).is_empty());
+        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty() && s.text.is_empty()));
+    }
+
+    /// Hermes' progress lines, each read as its tool, its preview and what
+    /// it does: by name (with its preview quoted, pending, a header, a call)
+    /// or by its friendly verb (its connector dropped, the longest verb
+    /// whole); a repeat's count goes; a line no verb fits is its first word's.
+    #[test]
+    fn a_progress_line_is_its_tool() {
+        for (line, want) in [
+            ("💻 terminal: `ls -la`", ("terminal", "`ls -la`", "shell")),
+            ("🔍 web_search(\"q\")", ("web_search", "(\"q\")", "web")),
+            ("🖥️ computer_use: \"capture the screen\"", ("computer_use", "capture the screen", "browser")),
+            ("📸 browser_snapshot...", ("browser_snapshot", "", "browser")),
+            ("⚙️ mcp_github_search: \"issues\"", ("mcp_github_search", "issues", "other")),
+            ("🔀 message_agent: \"maple\" (×3)", ("message_agent", "maple", "delegate")),
+            ("🔍 Searching the web for rust async", ("web_search", "rust async", "web")),
+            ("🔎 Searching files for TODO", ("search_files", "TODO", "read")),
+            ("🔍 Searching past sessions", ("session_search", "", "read")),
+            ("📖 Reading /data/work/notes.md", ("read_file", "/data/work/notes.md", "read")),
+            ("📄 Reading https://example.com/a", ("web_extract", "https://example.com/a", "read")),
+            ("📚 Reading skill fragment-apps", ("skill_view", "fragment-apps", "read")),
+            ("📖 Reading skillful.txt", ("read_file", "skillful.txt", "read")),
+            ("🐍 Running code import os", ("execute_code", "import os", "shell")),
+            ("🔧 Editing src/main.rs", ("patch", "src/main.rs", "write")),
+            ("🌐 Browsing https://example.com", ("browser_navigate", "https://example.com", "browser")),
+            ("🎨 Generating image a cat in a hat", ("image_generate", "a cat in a hat", "image")),
+            ("🔀 Delegating research pricing", ("delegate_task", "research pricing", "delegate")),
+            ("🧠 Updating memory add: likes tea", ("memory", "add: likes tea", "memory")),
+            ("✍️ Writing notes.md (×2)", ("write_file", "notes.md", "write")),
+            ("⚙️ Runningman stuff", ("Runningman", "stuff", "other")),
+            ("✅", ("✅", "", "other")),
+        ] {
+            assert_eq!(said(&step_of(line)), want, "{line}");
+        }
     }
 }

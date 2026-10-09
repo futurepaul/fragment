@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn step(tool: &str, args: &str, ok: bool) -> Step {
-        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), text: String::new() }
+        Step { tool: tool.into(), args: args.into(), ok, excerpt: String::new(), text: String::new(), category: crate::records::Category::Shell }
     }
 
     /// Goal (P5): the turn after a cut one is told of it, with its steps and

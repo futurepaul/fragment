@@ -132,8 +132,32 @@ async fn tool_steps() {
         assert_eq!(steps.len(), 1);
         assert_eq!((steps[0]["tool"].as_str(), steps[0]["step"].as_u64(), steps[0]["ok"].as_bool(), steps[0]["turn"].as_str()), (Some("search"), Some(1), Some(true), Some(turn.as_str())));
         assert_eq!(steps[0]["text"], "Let me look.");
+        assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
         assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+    });
+    bridge.stop().await;
+}
+
+/// Goal: a runtime's notices are its turn's `turn.notice`s, before its end
+/// and after it (the stub's `notice`: as Hermes sends its review once the
+/// turn is done), never a step nor a reply.
+#[tokio::test]
+async fn notices_are_the_turns() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("notices");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "a notice please" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "the turn's end, then its review's notice", |w| w.bodies(&chat, "work", "turn.notice").len() == 2).await;
+    fake.with(|w| {
+        let kinds: Vec<String> = w.records(&chat, "work").iter().filter_map(|r| r["body"]["kind"].as_str().filter(|k| k.starts_with("turn.")).map(str::to_string)).collect();
+        assert_eq!(kinds, vec!["turn.start", "turn.notice", "turn.end", "turn.notice"], "the turn's records");
+        let notices: Vec<(Value, Value, Value)> = w.bodies(&chat, "work", "turn.notice").iter().map(|n| (n["turn"].clone(), n["category"].clone(), n["text"].clone())).collect();
+        assert_eq!(notices, vec![(json!(turn), json!("info"), json!("Compressing context")), (json!(turn), json!("memory"), json!("Self-improvement review: Memory updated"))]);
+        assert_eq!(w.bodies(&chat, "chat", "reply").len(), 1, "its one reply");
     });
     bridge.stop().await;
 }
@@ -225,6 +249,8 @@ async fn a_question_answered_in_words() {
         assert_eq!(started, vec![json!(turn), json!(turn_of("juniper", &chat, seq(&other)))], "the answer started no turn; skyler's ran after");
         assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
         assert!(w.bodies(&chat, "work", "turn.end").iter().all(|e| e["outcome"] == "idle"));
+        // the chat was told whose answer the turn waited for, once
+        assert_eq!(w.bodies(&chat, "work", "turn.asked"), vec![json!({ "kind": "turn.asked", "turn": turn, "asks": person("paul") })]);
     });
     bridge.stop().await;
 }
@@ -852,7 +878,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             let text = |turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
             let next = text(&next);
             let note = next.strip_prefix("echo: [paul] good morning\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{wakes}: the turn after the cut one is told of it: {next:?}")).to_string();
-            for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search {\"q\":\"a slow tool please\"} (ok)"] {
+            for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search a slow tool please (ok)"] {
                 assert!(note.contains(said), "{wakes}: {said:?} in {note}");
             }
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");

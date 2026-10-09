@@ -8,6 +8,9 @@
 //!   answers the turn's message: a reply part;
 //! - its tool progress is a `send` answering nothing whose lines grow by
 //!   `edit`s: each new line a step;
+//! - a `send` answering nothing that starts with a notice glyph (`💾`,
+//!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
+//!   turn running or not (its review comes after its turn's `✅`);
 //! - the model's text beside a tool call arrives as a reply too (Hermes
 //!   ends a draft segment at every tool boundary with such a `send`): the
 //!   step that follows takes it back (`Event::Retract`) as its words, and
@@ -30,8 +33,12 @@
 //!   its startup restore, then run): that `✅` ends nothing, and Hermes
 //!   ends no person's turn without saying something. No clock: a bracket
 //!   that never ends is the engine's idle bound's;
-//! - a file is uploaded to `/relay/media`, then sent by `send_media`;
-//!   a message's attachments are re-hosted at `/relay/media/<id>`;
+//! - a file is uploaded to `/relay/media`, then sent by `send_media`, or
+//!   sent by a URL of its provider's, which the bridge fetches (`fetch`),
+//!   answering once it has it; a reply's image links (which Hermes sends as
+//!   images only from a reply it did not stream) are fetched too, and are
+//!   the reply's files, its end waiting for them; a message's attachments
+//!   are re-hosted at `/relay/media/<id>`;
 //! - a command of the menu (`menu`) is said as it is: a turn's text
 //!   (`TurnStart::command`), or beside the running turn
 //!   (`Command::Aside`: `/steer`, `/btw`), whose answers (a `send`
@@ -43,6 +50,7 @@
 //! dial (Hermes drops one it saw, by message id). A new dial replaces the
 //! one before.
 
+pub mod fetch;
 pub mod menu;
 pub mod wire;
 
@@ -87,6 +95,9 @@ pub struct RelayConfig {
     pub secret: String,
     /// Where uploads land (scratch, not `/data`).
     pub media_dir: PathBuf,
+    /// A file sent by URL may come over plain http from a local address (a
+    /// test's fake server; `BRIDGE_MEDIA_LOCAL=allow`).
+    pub media_local: bool,
 }
 
 pub struct Relay {
@@ -123,11 +134,15 @@ impl MediaTable {
     }
 }
 
-/// What the connections tell the runtime's loop.
+/// What the connections tell the runtime's loop, and a file sent by URL
+/// once fetched (or refused): the answer to `request` on `conn`.
 enum Wire {
     Connected { conn: u64, tx: mpsc::Sender<Message> },
     Frame { conn: u64, text: String },
     Closed { conn: u64 },
+    Fetched { conn: u64, request: String, chat: String, caption: String, file: Result<LocalFile, String> },
+    /// One of a reply's image links (its markdown, `link`), fetched or not.
+    Pictured { turn: String, part: u32, link: String, file: Result<LocalFile, String> },
 }
 
 /// A turn Hermes was handed.
@@ -172,6 +187,12 @@ struct Inflight {
     narration: Option<String>,
     /// Messages taken as a step's words: an edit of one changes nothing.
     taken: Vec<String>,
+    /// Its replies' image links being fetched (`picture`), the reply parts
+    /// they are in with their text as it stands, and its end, held while any
+    /// is (an idle end alone: a stop or a failure ends it at once).
+    pictures: usize,
+    pictured: HashMap<u32, String>,
+    pending_end: Option<Outcome>,
 }
 
 impl Inflight {
@@ -232,7 +253,7 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         tokio::spawn(net::serve(listener, handler, io.shutdown.clone()));
     }
 
-    let mut st = Loop { cfg, events: io.events.clone(), media, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
+    let mut st = Loop { cfg, events: io.events.clone(), media, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
@@ -327,6 +348,22 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
     net::refusal(StatusCode::NOT_FOUND, "not_found", "the relay answers /relay and /relay/media")
 }
 
+/// A fetched file, kept with the uploads (`up-<n>` in the media directory,
+/// let go as they are): named as Hermes names it, else as its URL does.
+async fn keep(media: &Arc<Mutex<MediaTable>>, dir: &std::path::Path, f: fetch::Fetched, name: Option<String>) -> Result<LocalFile, String> {
+    let id = {
+        let mut t = media.lock().expect("the media table");
+        t.uploads += 1;
+        format!("up-{}", t.uploads)
+    };
+    let path = dir.join(&id);
+    tokio::fs::write(&path, &f.bytes).await.map_err(|e| format!("keeping it: {e}"))?;
+    let name = name.filter(|n| !n.trim().is_empty()).or_else(|| f.url.file_name()).unwrap_or_else(|| "file".into());
+    let file = LocalFile { path, media_type: f.media_type.to_string(), name, size: f.bytes.len() as u64 };
+    media.lock().expect("the media table").insert(id, Media { file: file.clone() });
+    Ok(file)
+}
+
 /// One dial: frames in to the loop, frames out from it, until either ends.
 async fn connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, conn: u64) {
     let (mut sink, mut stream) = ws.split();
@@ -366,6 +403,8 @@ struct Loop {
     cfg: RelayConfig,
     events: mpsc::Sender<Event>,
     media: Arc<Mutex<MediaTable>>,
+    /// A file sent by URL comes back here, fetched.
+    wire_tx: mpsc::Sender<Wire>,
     inflight: HashMap<String, Inflight>,
     by_chat: HashMap<String, String>,
     answers: Vec<PendingAnswer>,
@@ -527,7 +566,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new(), pictures: 0, pictured: HashMap::new(), pending_end: None });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -540,6 +579,14 @@ impl Loop {
                     let _ = old_tx.try_send(Message::Close(Some(CloseFrame { code: CloseCode::from(4000), reason: "replaced by a new dial".into() })));
                 }
                 self.greet(false).await;
+            }
+            Wire::Pictured { turn, part, link, file } => self.pictured(&turn, part, link, file).await,
+            Wire::Fetched { conn, request, chat, caption, file } => {
+                let answer = self.fetched(&chat, caption, file).await;
+                // answered on the dial that asked, if it is still the one
+                if self.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
+                    let _ = self.send(wire::result(&request, answer));
+                }
             }
             Wire::Closed { conn } => {
                 if self.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
@@ -611,8 +658,15 @@ impl Loop {
                 let _ = self.send(wire::going_idle_ack());
             }
             FromGateway::Outbound { request_id, action } => {
-                let answer = self.act(action).await;
-                let _ = self.send(wire::result(&request_id, answer));
+                // a file sent by a URL of its provider's is answered once
+                // fetched (`Wire::Fetched`), the loop going on meanwhile
+                let answer = match action {
+                    Action::SendMedia { chat, source_url, caption, filename, .. } if self.hosted(&source_url).is_none() && fetch::parse(&source_url, true).is_ok() => self.fetch_media(&request_id, chat, source_url, caption, filename),
+                    action => Some(self.act(action).await),
+                };
+                if let Some(answer) = answer {
+                    let _ = self.send(wire::result(&request_id, answer));
+                }
             }
             FromGateway::Other(_) => {}
         }
@@ -662,11 +716,24 @@ impl Loop {
                 let text = text.to_string();
                 let Some(turn) = turn_of(&chat, &self.by_chat) else {
                     let Some((fragment, agent)) = wire::split_chat_id(&chat) else { return json!({ "success": false, "error": "no chat by that id" }) };
-                    self.emit(Event::Say { agent: agent.to_string(), fragment: fragment.to_string(), text }).await;
+                    let (agent, fragment) = (agent.to_string(), fragment.to_string());
+                    // a notice after its turn (its review, released once
+                    // the turn is done) is still that turn's
+                    match wire::notice(&text) {
+                        Some((category, text)) => self.emit(Event::Notice { agent, fragment, category, text }).await,
+                        None => self.emit(Event::Say { agent, fragment, text }).await,
+                    }
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                if f.worded && text.trim_start().starts_with("✏️") {
+                let notice = if reply { None } else { wire::notice(&text) };
+                if let Some((category, text)) = notice {
+                    // neither a reply nor a step: its edits change nothing
+                    f.take_message(id.clone());
+                    let (fragment, agent) = (f.start.fragment.clone(), f.start.agent.fragment.clone());
+                    crate::ev!("relay.notice", { "turn": turn, "category": category.as_str() });
+                    self.emit(Event::Notice { agent, fragment, category, text }).await;
+                } else if f.worded && text.trim_start().starts_with("✏️") {
                     // "Other"'s ask for words, which went with its answer
                     f.worded = false;
                     f.take_message(id.clone());
@@ -693,7 +760,14 @@ impl Loop {
                     f.parts.insert(id.clone(), part);
                     f.open_reply = Some((id.clone(), part, text.clone()));
                     f.narration = None;
-                    self.emit(Event::Reply { turn, part, text }).await;
+                    // its image links are its files, once fetched
+                    let links = wire::image_links(&text);
+                    if !links.is_empty() {
+                        f.pictures += links.len();
+                        f.pictured.insert(part, text.clone());
+                    }
+                    self.emit(Event::Reply { turn: turn.clone(), part, text }).await;
+                    self.picture(&turn, part, links);
                 } else {
                     let steps = wire::new_steps(&content, 0);
                     f.progress.insert(id.clone(), steps.len());
@@ -736,9 +810,13 @@ impl Loop {
                 if message_id != turn {
                     return ok;
                 }
-                let ended = self.inflight.get(&turn).expect("held").ended_by(&emoji, remove);
-                if let Some(outcome) = ended {
-                    self.end(&turn, outcome).await;
+                let f = self.inflight.get_mut(&turn).expect("held");
+                match f.ended_by(&emoji, remove) {
+                    // done, with its reply's images still coming: it ends
+                    // once they are in hand (`pictured`)
+                    Some(Outcome::Idle) if f.pictures > 0 => f.pending_end = Some(Outcome::Idle),
+                    Some(outcome) => self.end(&turn, outcome).await,
+                    None => {}
                 }
                 ok
             }
@@ -760,24 +838,11 @@ impl Loop {
                 json!({ "success": true, "message_id": id })
             }
             Action::SendMedia { chat, source_url, caption, filename, .. } => {
-                let Some(turn) = turn_of(&chat, &self.by_chat) else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
-                let media_id = source_url.rsplit_once("/relay/media/").map(|(_, id)| id.to_string()).unwrap_or_default();
-                let found = self.media.lock().expect("the media table").by_id.get(&media_id).cloned();
-                let Some(mut m) = found else { return json!({ "success": false, "error": "only media uploaded to this connector is sent" }) };
+                let Some(mut m) = self.hosted(&source_url) else { return json!({ "success": false, "error": "only media uploaded to this connector, or at an http(s) URL, is sent" }) };
                 if let Some(name) = filename {
                     m.file.name = name;
                 }
-                let id = self.message_id();
-                let f = self.inflight.get_mut(&turn).expect("held");
-                let part = f.next_part;
-                f.next_part += 1;
-                // a part of its own: the engine posts the one open before it
-                (f.open_reply, f.narration) = (None, None);
-                if !caption.trim().is_empty() {
-                    self.emit(Event::Reply { turn: turn.clone(), part, text: caption }).await;
-                }
-                self.emit(Event::Attachment { turn, part, file: m.file }).await;
-                json!({ "success": true, "message_id": id })
+                self.attach(&chat, caption, m.file).await
             }
             Action::GetChatInfo { chat } => {
                 let name = self.by_chat.get(&chat).and_then(|t| self.inflight.get(t)).map(|f| f.start.chat_name.clone()).or_else(|| wire::split_chat_id(&chat).map(|(f, _)| f.split('.').next().unwrap_or(f).to_string())).unwrap_or(chat);
@@ -787,11 +852,117 @@ impl Loop {
         }
     }
 
+    /// A file Hermes uploaded to `/relay/media` (or a message's, re-hosted
+    /// there) that a URL names.
+    fn hosted(&self, url: &str) -> Option<Media> {
+        let id = url.rsplit_once("/relay/media/")?.1;
+        self.media.lock().expect("the media table").by_id.get(id).cloned()
+    }
+
+    /// A file of the chat's turn, its own reply part with its caption: the
+    /// op's answer.
+    async fn attach(&mut self, chat: &str, caption: String, file: LocalFile) -> Value {
+        let Some(turn) = self.by_chat.get(chat).cloned() else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
+        let id = self.message_id();
+        let f = self.inflight.get_mut(&turn).expect("held");
+        let part = f.next_part;
+        f.next_part += 1;
+        // a part of its own: the engine posts the one open before it
+        (f.open_reply, f.narration) = (None, None);
+        if !caption.trim().is_empty() {
+            self.emit(Event::Reply { turn: turn.clone(), part, text: caption }).await;
+        }
+        self.emit(Event::Attachment { turn, part, file }).await;
+        json!({ "success": true, "message_id": id })
+    }
+
+    /// A file Hermes sends by a URL of its provider's (FAL's image, say):
+    /// fetched apart from the loop (`fetch`, within its bounds), kept with
+    /// the uploads, then attached as an upload is, and the op answered then
+    /// (`Wire::Fetched`, `fetched`). Refused, it answers why, and Hermes
+    /// sends the link as text instead.
+    fn fetch_media(&mut self, request: &str, chat: String, url: String, caption: String, filename: Option<String>) -> Option<Value> {
+        crate::ev!("relay.op", { "op": "send_media", "chat": chat, "by_url": true, "turn": self.by_chat.get(&chat) });
+        if !self.by_chat.contains_key(&chat) {
+            return Some(json!({ "success": false, "error": "no turn runs in that chat" }));
+        }
+        self.spoke(&chat);
+        // no dial: no one to answer, nor to fetch it for
+        let (conn, _) = self.conn.as_ref()?;
+        let (conn, request, tx, media, dir, local) = (*conn, request.to_string(), self.wire_tx.clone(), self.media.clone(), self.cfg.media_dir.clone(), self.cfg.media_local);
+        tokio::spawn(async move {
+            let file = match fetch::fetch(&url, local).await {
+                Ok(f) => keep(&media, &dir, f, filename).await,
+                Err(why) => Err(why.to_string()),
+            };
+            crate::ev!("relay.fetched", { "chat": chat, "ok": file.is_ok(), "size": file.as_ref().map_or(0, |f| f.size), "why": file.as_ref().err() });
+            let _ = tx.send(Wire::Fetched { conn, request, chat, caption, file }).await;
+        });
+        None
+    }
+
+    /// A reply's image links (`wire::image_links`: Hermes sends them as
+    /// images only from a reply it did not stream, and ours stream), each
+    /// fetched as a file sent by URL is (`Wire::Pictured`, `pictured`).
+    fn picture(&self, turn: &str, part: u32, links: Vec<(String, String)>) {
+        for (link, url) in links {
+            let (tx, media, dir, local, turn) = (self.wire_tx.clone(), self.media.clone(), self.cfg.media_dir.clone(), self.cfg.media_local, turn.to_string());
+            tokio::spawn(async move {
+                let file = match fetch::fetch(&url, local).await {
+                    Ok(f) => keep(&media, &dir, f, None).await,
+                    Err(why) => Err(why.to_string()),
+                };
+                crate::ev!("relay.pictured", { "turn": turn, "part": part, "ok": file.is_ok(), "why": file.as_ref().err() });
+                let _ = tx.send(Wire::Pictured { turn, part, link, file }).await;
+            });
+        }
+    }
+
+    /// One of a reply's image links, fetched: the reply without it, and the
+    /// file on it; refused, the link stays. The last of a turn's ends it if
+    /// its end came meanwhile.
+    async fn pictured(&mut self, turn: &str, part: u32, link: String, file: Result<LocalFile, String>) {
+        // a turn over (stopped, gone quiet) takes no file
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        f.pictures = f.pictures.saturating_sub(1);
+        // a part taken back since (a step's words) shows nothing of it
+        let shown = match (&file, f.pictured.get_mut(&part)) {
+            (Ok(_), Some(text)) => {
+                *text = wire::without_links(text, std::slice::from_ref(&link));
+                Some(text.clone())
+            }
+            _ => None,
+        };
+        if let (Some(text), Some(open)) = (&shown, f.open_reply.as_mut().filter(|o| o.1 == part)) {
+            open.2 = text.clone();
+        }
+        let done = (f.pictures == 0).then(|| {
+            f.pictured.clear();
+            f.pending_end.take()
+        });
+        if let (Some(text), Ok(file)) = (shown, file) {
+            self.emit(Event::Reply { turn: turn.to_string(), part, text }).await;
+            self.emit(Event::Attachment { turn: turn.to_string(), part, file }).await;
+        }
+        if let Some(Some(outcome)) = done {
+            self.end(turn, outcome).await;
+        }
+    }
+
+    /// A file sent by URL, fetched or refused: attached to the chat's turn
+    /// still running, and the op's answer.
+    async fn fetched(&mut self, chat: &str, caption: String, file: Result<LocalFile, String>) -> Value {
+        match file {
+            Ok(file) => self.attach(chat, caption, file).await,
+            Err(why) => json!({ "success": false, "error": format!("the file at that URL is not sent: {why}") }),
+        }
+    }
+
     /// New lines of a turn's tool progress, each a step. The first takes
     /// the reply part still open before it as its words (Hermes' text
     /// before the call: a reply taken back, never posted); a step while
     /// drafts stream makes the `send` ending them its words too.
-    async fn steps(&mut self, turn: &str, steps: Vec<(String, String)>) {
+    async fn steps(&mut self, turn: &str, steps: Vec<Step>) {
         if steps.is_empty() {
             return;
         }
@@ -804,6 +975,8 @@ impl Loop {
         if let Some((id, part, text)) = f.open_reply.take() {
             f.parts.remove(&id);
             f.take_message(id);
+            // taken back, its image links are no reply's files
+            f.pictured.remove(&part);
             f.narration = Some(text.clone());
             (words, retract) = (text, Some(part));
         }
@@ -811,9 +984,9 @@ impl Loop {
             crate::ev!("relay.narration", { "turn": turn, "after_step": false });
             self.emit(Event::Retract { turn: turn.to_string(), part }).await;
         }
-        for (tool, args) in steps {
+        for step in steps {
             let text = std::mem::take(&mut words);
-            self.emit(Event::Step { turn: turn.to_string(), step: Step { tool, args, ok: true, excerpt: String::new(), text } }).await;
+            self.emit(Event::Step { turn: turn.to_string(), step: Step { text, ..step } }).await;
         }
     }
 

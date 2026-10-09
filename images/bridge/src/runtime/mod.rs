@@ -217,8 +217,9 @@ pub enum Command {
     Aside { agent: String, fragment: String, chat_name: String, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
-/// What a runtime tells the bridge. Every event but `Connected` and `Say`
-/// names its turn; one for a turn the bridge no longer holds is dropped.
+/// What a runtime tells the bridge. Every event but `Connected`, `Say` and
+/// `Notice` names its turn; one for a turn the bridge no longer holds is
+/// dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The runtime can take turns now (true), or cannot (false). The bridge
@@ -250,6 +251,11 @@ pub enum Event {
     /// Something the runtime said with no turn running (a reminder it set):
     /// posted as a turn of its own in that chat.
     Say { agent: String, fragment: String, text: String },
+    /// A notice of the runtime's about the agent's work in a chat, neither a
+    /// step nor a reply (it seems stuck, its context was compressed, it
+    /// updated its memory): the agent's turn running there, or, with none,
+    /// the last that ran there in this life, posts it (`turn.notice`).
+    Notice { agent: String, fragment: String, category: crate::records::NoticeCategory, text: String },
 }
 
 /// Why a runtime stopped.

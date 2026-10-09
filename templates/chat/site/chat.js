@@ -99,6 +99,30 @@ const MEMO_BITS_PER_S = 64000;
 const MEMO_MAX_MS = 5 * 60 * 1000;
 const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
 
+// What a step does (its `category`, docs/chat-records.md): an icon and the
+// verb its line starts with. A step of any other (`other`, or one from before
+// steps said) is its tool's own name.
+const STEP_SAYS = {
+  shell: ["terminal", "Running"],
+  web: ["globe", "Searching the web"],
+  read: ["book-open", "Reading"],
+  write: ["pencil", "Writing"],
+  browser: ["app-window", "Browsing"],
+  image: ["image", "Making an image"],
+  delegate: ["users", "Delegating"],
+  memory: ["brain", "Updating memory"],
+};
+
+// What a runtime's notice is about (its `category`): its icon. Any other is `info`.
+const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
+
+/// A step as a line reads it: `{icon, verb, args}` ("Running", `npm test`).
+export function stepSays(s) {
+  const args = typeof s.args === "string" ? s.args : "";
+  const [icon, verb] = Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category] : ["wrench", typeof s.tool === "string" && s.tool ? s.tool : "a tool"];
+  return { icon, verb, args };
+}
+
 /// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
 export function essence(type) {
   return String(type ?? "").split(";")[0].trim().toLowerCase();
@@ -447,7 +471,7 @@ export function mount(root) {
   // ---- records ----
   function turnOf(id) {
     if (!state.turns.has(id)) {
-      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), end: null });
+      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
     return state.turns.get(id);
   }
@@ -462,6 +486,9 @@ export function mount(root) {
   const expired = (p) => Number.isFinite(p.expiresAt) && Date.now() > p.expiresAt;
   // a turn waiting on a person: its open card says so, not a working line
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
+  // a turn waiting on its asker's words (`turn.asked`): until they say
+  // something to the chat after it, or the turn goes on or ends
+  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -519,13 +546,20 @@ export function mount(root) {
     const t = turnOf(b.turn);
     t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
     touch(t, record.at, n);
-    if (b.kind === "turn.start") {
+    // the turn went on past its question: it waits on no one now
+    if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
+    if (b.kind === "turn.asked" && typeof b.asks === "string") {
+      if (!t.asked || record.seq > t.asked.seq) t.asked = { asks: b.asks, at: record.at, seq: record.seq };
+      want(b.asks);
+    } else if (b.kind === "turn.start") {
       t.asker = typeof b.asker === "string" ? b.asker : null;
       t.cause = b.cause ?? null;
       t.startAt = record.at;
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
     } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
       t.steps.set(b.step, { ...b, at: record.at, n });
+    } else if (b.kind === "turn.notice" && typeof b.text === "string" && b.text.trim()) {
+      t.notices.set(record.seq, { text: b.text, category: Object.hasOwn(NOTICE_ICON, b.category) ? b.category : "info", at: record.at, n, seq: record.seq });
     } else if (b.kind === "turn.prompt" && typeof b.prompt === "string") {
       t.prompts.set(b.prompt, { ...b, options: Array.isArray(b.options) ? b.options.filter((o) => o && typeof o.id === "string") : [], at: record.at, n });
       expiryTimer();
@@ -588,6 +622,7 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       for (const s of t.steps.values()) items.push({ at: s.at, n: s.n, type: "step", t, s });
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
+      for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
       if (t.end && t.end.outcome !== "idle") items.push({ at: t.end.at, n: t.end.n, type: "end", t });
     }
     const now = Date.now();
@@ -597,7 +632,7 @@ export function mount(root) {
       items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", turn, d });
     }
     for (const t of state.turns.values()) {
-      if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: "working", t });
+      if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -644,8 +679,12 @@ export function mount(root) {
         return promptNode(it.t, it.p);
       case "end":
         return endNode(it.t);
+      case "notice":
+        return noticeNode(it.t, it.x);
       case "draft":
         return draftNode(it.turn, it.d);
+      case "asked":
+        return askedNode(it.t);
       default:
         return workingNode(it.t);
     }
@@ -701,13 +740,17 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      input.placeholder = mine
-        ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
-        : !firstName
-          ? "Message"
-          : others
-            ? `Message ${firstName}, or @ someone else`
-            : `Message ${firstName}`;
+      // an agent waiting on this person's words: what they type is the answer
+      const askedMe = [...state.turns.values()].find((t) => waitsOnWords(t) && t.asked.asks === state.me?.principal);
+      input.placeholder = askedMe
+        ? `Your answer for ${who(askedMe.agent).name}`
+        : mine
+          ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
+          : !firstName
+            ? "Message"
+            : others
+              ? `Message ${firstName}, or @ someone else`
+              : `Message ${firstName}`;
     }
     refreshSend();
   }
@@ -880,8 +923,10 @@ export function mount(root) {
     }
   }
 
-  // A turn's steps, one card: open while it works ("Working"), folded once
-  // done ("Worked through N steps") unless someone opened it.
+  // A turn's steps, one card: open while it works, saying what it does now
+  // ("Running: npm test"), folded once done ("Worked through N steps")
+  // unless someone opened it. Each step is its icon, its verb and its
+  // arguments, then what came of it.
   function stepsNode(t, steps) {
     const key = `s:${t.id}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
@@ -898,15 +943,20 @@ export function mount(root) {
         };
         const summary = el("summary");
         summary.innerHTML = svg(live ? "loader" : "wrench", live ? "spin" : "");
-        summary.append(el("span", "grow", live ? `Working · ${plural(steps.length, "step")}` : `Worked through ${plural(steps.length, "step")}`));
+        const now = stepSays(steps[steps.length - 1]);
+        summary.append(el("span", "grow", live ? `${now.verb}${now.args ? `: ${now.args}` : ""}` : `Worked through ${plural(steps.length, "step")}`));
         summary.insertAdjacentHTML("beforeend", svg("chevron", "chev"));
         d.append(summary);
         for (const s of steps) {
           if (s.text) d.append(el("div", "step-text", s.text));
           const step = el("div", `step${s.ok === false ? " error" : ""}`);
-          const pre = el("pre");
-          pre.append(el("span", "step-name", `${s.tool ?? "tool"}${s.args ? ` ${s.args}` : ""}\n`), s.excerpt || (s.ok === false ? "failed" : "done"));
-          step.append(pre);
+          const says = stepSays(s);
+          step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+          const name = el("div", "step-name");
+          name.innerHTML = svg(says.icon);
+          name.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
+          if (says.args) name.append(el("code", "step-args", says.args));
+          step.append(name, el("pre", null, s.excerpt || (s.ok === false ? "failed" : "done")));
           d.append(step);
         }
         return d;
@@ -1034,6 +1084,23 @@ export function mount(root) {
     ];
   }
 
+  // A notice of the agent's runtime (`turn.notice`): a quiet line in the
+  // turn, its icon saying what it is about.
+  function noticeNode(t, x) {
+    const key = `n:${x.seq}`;
+    return [
+      key,
+      cached(key, `${x.category}|${x.text}`, () => {
+        const line = el("div", `msg notice runtime ${x.category}`);
+        line.dataset.turn = t.id;
+        line.dataset.category = x.category;
+        line.innerHTML = svg(NOTICE_ICON[x.category]);
+        line.append(el("span", "said", x.text));
+        return line;
+      }),
+    ];
+  }
+
   // A reply as it streams: its draft, the cursor at the end of its text.
   function draftNode(turn, d) {
     const key = `d:${turn}`;
@@ -1079,6 +1146,25 @@ export function mount(root) {
         const dots = el("span", "dots");
         dots.append(el("i"), el("i"), el("i"));
         if (!late && phase !== "wont_wake") hint.append(dots);
+        hint.append(said);
+        line.append(hint);
+        return line;
+      }),
+    ];
+  }
+
+  // A turn waiting on its asker's words, in place of its working line: whose.
+  function askedNode(t) {
+    const asks = t.asked.asks;
+    const said = asks === state.me?.principal ? "Waiting for your answer" : `Waiting for ${who(asks).name}'s answer`;
+    const key = `q:${t.id}`;
+    return [
+      key,
+      cached(key, said, () => {
+        const line = el("div", "msg working asked");
+        line.dataset.turn = t.id;
+        const hint = el("span", "hint");
+        hint.innerHTML = svg("asked");
         hint.append(said);
         line.append(hint);
         return line;

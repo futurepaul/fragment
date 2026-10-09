@@ -383,6 +383,45 @@ pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &st
         "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life })
 }
 
+/// What a step does, whatever its runtime calls the tool: a page shows each
+/// with its own icon and verb (docs/chat-records.md, `turn.step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    /// A command, or code, run.
+    Shell,
+    /// A search of the web.
+    Web,
+    /// A file, a page, or a skill read, or files searched.
+    Read,
+    /// A file written or edited.
+    Write,
+    /// The agent's browser, or its desktop, driven.
+    Browser,
+    /// An image made.
+    Image,
+    /// Work handed to another agent.
+    Delegate,
+    /// What the agent remembers, changed.
+    Memory,
+    Other,
+}
+
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Category::Shell => "shell",
+            Category::Web => "web",
+            Category::Read => "read",
+            Category::Write => "write",
+            Category::Browser => "browser",
+            Category::Image => "image",
+            Category::Delegate => "delegate",
+            Category::Memory => "memory",
+            Category::Other => "other",
+        }
+    }
+}
+
 /// One step of a turn (a tool call), numbered from 1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
@@ -392,6 +431,7 @@ pub struct Step {
     pub excerpt: String,
     /// The model's text before the call, if any.
     pub text: String,
+    pub category: Category,
 }
 
 pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
@@ -401,6 +441,7 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         "turn": turn,
         "step": n,
         "tool": cut(&s.tool, limits::STEP_TOOL_MAX_CHARS),
+        "category": s.category.as_str(),
         "args": cut_or_empty(&s.args, limits::STEP_ARGS_MAX_CHARS),
         "ok": s.ok,
         "excerpt": cut_or_empty(&s.excerpt, limits::STEP_EXCERPT_MAX_CHARS),
@@ -410,6 +451,38 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         body["text"] = json!(text);
     }
     body
+}
+
+/// A turn asking `asks` something to answer in words: their next message
+/// to the agent in the chat is the answer.
+pub fn turn_asked(turn: &str, asks: &str) -> Value {
+    json!({ "kind": "turn.asked", "turn": turn, "asks": asks })
+}
+
+/// What a runtime's notice is about (docs/chat-records.md, `turn.notice`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeCategory {
+    /// How the turn goes: a wait, a confirmation, its context compressed.
+    Info,
+    /// Something went wrong, or may: it seems stuck, a sub-agent failed.
+    Warning,
+    /// What the agent remembers changed (its review after a turn).
+    Memory,
+}
+
+impl NoticeCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoticeCategory::Info => "info",
+            NoticeCategory::Warning => "warning",
+            NoticeCategory::Memory => "memory",
+        }
+    }
+}
+
+/// A runtime's notice in a turn: neither a step nor a reply.
+pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
+    json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
 }
 
 fn cut_or_empty(text: &str, max: usize) -> String {
@@ -669,8 +742,14 @@ mod tests {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
-        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new() };
-        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "args": "ls", "ok": true, "excerpt": "" }));
+        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell };
+        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }));
+        assert_eq!(turn_asked("t", "npub1p"), json!({ "kind": "turn.asked", "turn": "t", "asks": "npub1p" }));
+        assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
+        assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
+        assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
+        let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
+        assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p", None))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("other", "npub1p", Some("purple"))))["text"], "purple");

@@ -141,6 +141,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .msg.notice { display: flex; align-items: flex-start; gap: 7px; font-size: 13px; color: var(--text-tertiary); }
 .msg.notice svg { width: 14px; height: 14px; margin-top: 2px; }
 .msg.notice .why { color: var(--text-secondary); }
+/* a notice of the agent's runtime, as quiet: what it is about, by its icon */
+.msg.notice.runtime.warning svg { color: var(--danger-text); }
+.msg.notice.runtime.memory svg { color: var(--chat-agent-color, var(--text-tertiary)); }
 
 /* markdown */
 .md p, .md ul, .md ol, .md pre, .md-code, .md blockquote, .md .md-table { margin: 0 0 .75rem; }
@@ -216,9 +219,13 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .step { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--chat-code); }
-.step pre { margin: 0; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); max-height: 240px; overflow-y: auto; }
-.step .step-name { color: var(--text-primary); }
-.step.error pre, .step.error .step-name { color: var(--danger-text); }
+.step pre { margin: 4px 0 0 21px; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
+/* what it does: its icon, its verb, its arguments */
+.step-name { display: flex; align-items: baseline; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; }
+.step-name svg { width: 14px; height: 14px; align-self: center; color: var(--text-icon); }
+.step-name .step-verb { flex: none; }
+.step-name .step-args { min-width: 0; font: 500 12px/1.5 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step.error pre, .step.error .step-name, .step.error .step-args { color: var(--danger-text); }
 .step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; color: var(--text-secondary); font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-text + .step { border-top: 0; }
 
@@ -251,6 +258,8 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 
 /* working */
 .hint { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+/* waiting on its asker's words */
+.msg.asked .hint svg { width: 15px; height: 15px; color: var(--chat-agent-color, var(--accent-blue)); }
 .dots { display: inline-flex; gap: 3px; }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--chat-agent-color, var(--accent-blue)); animation: bounce 1.15s ease-in-out infinite; }
 .dots i:nth-child(2) { animation-delay: .13s; } .dots i:nth-child(3) { animation-delay: .26s; }

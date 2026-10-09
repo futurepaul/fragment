@@ -52,11 +52,12 @@ A runtime gets commands and sends events, each naming its turn
 | `Draft {text}` | the reply so far, shown live |
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
-| `Step {tool, args, ok, excerpt, text}` | a tool call |
+| `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
-| `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
+| `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
+| `Notice {agent, fragment, category, text}` | a notice, neither a step nor a reply: a `turn.notice` of the agent's turn running in that chat, or of the last this life ran there (none: not posted) |
 
 A runtime also names its **menu** (`Runtime::menu`): the commands it
 takes from its agents' owners, each with how the bridge carries it
@@ -109,6 +110,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
+| `BRIDGE_MEDIA_LOCAL` | | `allow`: a file Hermes sends by URL may come over plain `http`, from a local address (a test's fake server: tests/docker.rs). Unset in every image |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
@@ -412,6 +414,16 @@ get_chat_info`.
   sooner until a newer one, so a turn's last quick tool call showed no
   step; our image patches its sender to send the line once the interval
   is out (images/hermes/Dockerfile; the debt ledger).
+- A progress line names its tool (`🖥️ computer_use: "capture"`, a
+  terminal command's fenced block) or says its friendly verb (`🔍
+  Searching the web for rust`, `✍️ Writing notes.md`: Hermes' own labels
+  for its built-in tools, `display.verb` of its `locales/en.yaml`). One
+  table of Hermes' tools (`relay/wire.rs`, `TOOLS`) reads either as the
+  step's `tool` (Hermes' name for it), its `args` (the call's preview,
+  its quotes and a repeat's count dropped) and its `category`; a tool not
+  there is `other`, but for its browser's (`browser_…`). Hermes cuts a
+  preview at its `display.tool_preview_length`, 40 unless set: our image
+  sets it to 140, the most a step's `args` keeps (`hermes-boot`).
 - One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
   segment at every tool boundary with a `send` answering the message, so
   the model's text beside a tool call ("Let me check that.") arrives as
@@ -432,11 +444,42 @@ get_chat_info`.
   (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
   is a test's shorter one). At its timeout Hermes tries to edit the card
   (the bridge refuses: it is no message of the turn), sends `⌛ Approval
-  timed out …` (a step), hands the model `BLOCKED: Command timed out
+  timed out …` (a notice), hands the model `BLOCKED: Command timed out
   without user response`, and the turn goes on to its reply.
+- A notice is a `send` answering nothing that starts with one of the
+  glyphs Hermes' gateway starts its notices with (`relay/wire.rs`,
+  `NOTICES`, read from v0.21.6: `💾` its self-improvement review, `⚠️` its
+  inactivity warning and a sub-agent's failure, `⏳` its busy acks and
+  waits, `⌛` an approval's timeout, `✅`/`❌` a prompt's ack, its
+  compaction's status, …): a `Notice` (`turn.notice`), the glyph its
+  category, never a step. Hermes releases its review's notice once the
+  turn is done, after its `✅`, so a notice with no turn running is the
+  turn's the engine last ran in that chat, not a turn of its own. No
+  tool's emoji is a notice glyph, so no progress line reads as one; and
+  Hermes' word on a command said beside a turn (`⏩` a steer's, `💬 /btw:`
+  a side question's answer) is the command's message of its own
+  (above, "Commands"), read before any notice.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
   token.
+- A file Hermes sends by a URL of its provider's (`send_media` naming
+  one: a reply's image link, as FAL's image generation hands back) is
+  fetched by the bridge (`relay/fetch.rs`), apart from the loop, and is
+  the reply's attachment as an uploaded one is; the op is answered once it
+  is in hand. Only `https`, from a host whose every address is public (no
+  loopback, private, link-local or shared range, no `*.internal`), the
+  connection made to the address checked; at most 25 MiB; a type the
+  fragment serves as itself (an image, audio, video, a PDF); within 20 s
+  (Hermes waits 30 s for an answer), at most 3 redirects, each checked as
+  the first. Refused, the answer says why, and Hermes sends the link as
+  text (its base adapter's `send_image`).
+- A reply's image links are fetched the same way: Hermes sends a reply's
+  `![alt](url)` (its URL an image's: an extension, FAL's or Replicate's
+  CDN) as an image only from a reply it did not stream (`extract_images`),
+  and ours all stream, so the reply carried the link as text. The bridge
+  reads them as Hermes does (`wire::image_links`), fetches each, and puts
+  it on the reply, the link taken out of its text; the turn's end waits for
+  them (at most the fetch's 20 s). One not fetched stays a link.
 - A question to answer in words: an open `clarify` (`❓ …`, the base
   adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
   clarify's card, each read by its glyph (Hermes' translations keep

@@ -174,6 +174,48 @@ fn a_reply_streams_then_posts() {
     assert_eq!(ev(&mut e, Event::Reply { turn: turn.clone(), part: 2, text: "late".into() }, T0 + 5), Step::default());
 }
 
+/// Goal: a runtime's notice (neither a step nor a reply) is a `turn.notice`
+/// of the agent's turn running in its chat, numbered from 1; one after the
+/// turn's end (a review its runtime finishes once the turn is done) is
+/// still that turn's; the next turn there takes those after it. Invalid: a
+/// notice before any turn ran there, an agent not of this computer, no
+/// words, another chat: nothing. Past the bound, nothing. Restart: a new
+/// life knows no turn of the last one's, so a late notice goes unposted.
+#[test]
+fn notices_belong_to_the_chats_turn() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let notice = |agent: &str, fragment: &str, text: &str| Event::Notice { agent: agent.into(), fragment: fragment.into(), category: NoticeCategory::Warning, text: text.into() };
+    let mine = |text: &str| notice("juniper--k3x9", "talk--k3x9", text);
+    assert!(posts(&ev(&mut e, mine("before any turn"), T0)).is_empty(), "no turn ran there");
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("started").turn;
+    let s = ev(&mut e, mine("I seem to be stuck"), T0 + 1);
+    assert_eq!(posts(&s), vec![(records::work_id(&turn, "n1"), json!({ "kind": "turn.notice", "turn": turn, "category": "warning", "text": "I seem to be stuck" }))]);
+    assert!(!s.dirty, "this life's alone");
+    for bad in [notice("rowan--k3x9", "talk--k3x9", "not ours"), mine("  "), notice("juniper--k3x9", "notes--k3x9", "no turn there")] {
+        assert!(posts(&ev(&mut e, bad.clone(), T0 + 1)).is_empty(), "{bad:?}");
+    }
+    // the turn ends; its review's notice after is still its own
+    ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 2);
+    let late = ev(&mut e, Event::Notice { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), category: NoticeCategory::Memory, text: "Memory updated".into() }, T0 + 3);
+    assert_eq!(posts(&late), vec![(records::work_id(&turn, "n2"), json!({ "kind": "turn.notice", "turn": turn, "category": "memory", "text": "Memory updated" }))]);
+    // the next turn there takes the next
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), T0 + 4)).expect("started").turn;
+    assert_eq!(posts(&ev(&mut e, mine("Compressing context"), T0 + 5))[0].0, records::work_id(&t2, "n1"));
+    // the bound
+    for _ in 1..limits::NOTICES_PER_TURN_MAX {
+        assert_eq!(posts(&ev(&mut e, mine("again"), T0 + 6)).len(), 1);
+    }
+    assert!(posts(&ev(&mut e, mine("one too many"), T0 + 7)).is_empty(), "at most {} a turn", limits::NOTICES_PER_TURN_MAX);
+    // restart: the next life knows no turn of this one's
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 8);
+    e2.recover(T0 + 8);
+    assert!(posts(&e2.step(Input::Runtime(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
+}
+
 /// Goal: text, then a tool call, then text: the first reply posts before the
 /// step, steps number from 1, and a late edit of a posted part is dropped.
 #[test]
@@ -183,7 +225,7 @@ fn steps_split_replies() {
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "look it up" }), T0)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking.".into() }, T0 + 1);
-    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new() };
+    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new(), category: crate::records::Category::Web };
     let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step.clone() }, T0 + 2);
     assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
     assert_eq!(posts(&s)[1].0, records::work_id(&turn, "1"));
@@ -641,10 +683,16 @@ fn a_question_is_answered_by_the_next_message() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "keep my garden notes" }), T0)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "What do you plant?".into() }, T0 + 1);
     let asked = ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2);
-    assert_eq!(posts(&asked), vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn }))], "the question shows at once");
+    assert_eq!(
+        posts(&asked),
+        vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn })), (records::work_id(&turn, "q1"), json!({ "kind": "turn.asked", "turn": turn, "asks": "npub1paul" }))],
+        "the question shows at once, then whose answer it waits for"
+    );
     assert!(asked.dirty);
     assert!(e.state().turns[&turn].asking);
     assert_eq!(keepalive(&asked), None, "still running: the computer stays up");
+    // replay: the runtime saying it asks again, before an answer, posts nothing more
+    assert!(posts(&ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2)).is_empty());
 
     // invalid: another person's message, an empty one, one to the other agent
     let skyler = said(&mut e, &a, &v, 2, "npub1skyler", json!({ "text": "tomatoes?" }), T0 + 3);
@@ -1683,7 +1731,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new() } }));
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new(), category: crate::records::Category::Shell } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.

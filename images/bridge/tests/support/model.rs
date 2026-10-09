@@ -31,9 +31,19 @@
 //!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked;
+//! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
+//!   model whose tool made one at its provider (FAL) gives it; and the
+//!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
+//!   that provider's CDN would;
+//! - Hermes' self-improvement review (its prompts start `Review the
+//!   conversation above`), where it may save to memory, of a conversation
+//!   where a person said `remember this` is answered by a `memory` call
+//!   that adds `REMEMBERED` (any other's saves nothing);
 //! - of a message with channel context before it (`[Recent channel
 //!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
 //!   turn), only the message after `[New message]` is acted on;
+//! - a last user message saying `take your time` is answered after
+//!   `UNHURRIED_MS`, each of its calls;
 //! - a last user message saying `stall` is held `STALL_S` before any of
 //!   its answer is sent (a model that streams nothing, as Workers AI's
 //!   DeepSeek did on 2026-10-09), on any model but the route's `fallback`,
@@ -171,11 +181,28 @@ pub const STALL_S: u64 = 120;
 /// not to the route's `fallback`.
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
-    last_user.contains("stall") && body["model"] != "fallback"
+    // Hermes' review prompts say "install" (and so `stall`): never one of a test's
+    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != "fallback"
+}
+
+/// How long a call waits whose last user message says `take your time`: past
+/// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
+/// turn's next call ends it (docs/technical-debt-ledger.md, "A quick tool's
+/// step can be lost in Hermes").
+pub const UNHURRIED_MS: u64 = 1_000;
+
+fn unhurried(body: &Value) -> bool {
+    let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
+    last_user.contains("take your time")
 }
 
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
+/// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
+/// one pixel of the agents' violet.
+pub const IMAGE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x58\xd1\xfd\xea\x3f\x00\x07\x19\x03\x1d\x5b\xc5\x9f\x97\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+/// What Hermes' memory review saves (its `memory` tool, `add`).
+pub const REMEMBERED: &str = "Paul tests the bridge in Docker.";
 
 fn text_of(content: &Value) -> String {
     match content {
@@ -257,6 +284,19 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes' smart-approval guardian asks for one word: a person decides.
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
+    }
+    // `image: <url>`: an answer with that image, as a model whose tool made
+    // one at its provider gives it (a markdown image, which Hermes sends)
+    if let Some(url) = last_user.lines().find_map(|l| l.split_once("image: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty()) {
+        return (format!("scripted: here it is\n\n![a cat]({url})"), None);
+    }
+    // Hermes' self-improvement review of its memory saves one thing, of a
+    // conversation that asked it to remember something (others' reviews
+    // save nothing, as before)
+    let asked_to_remember = messages.iter().any(|m| m["role"] == "user" && text_of(&m["content"]).contains("remember this"));
+    if last_user.starts_with("Review the conversation above") && asked_to_remember && offered("memory") {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "memory", "arguments": json!({ "action": "add", "target": "memory", "content": REMEMBERED }).to_string() } });
+        return (String::new(), Some(call));
     }
     if last_user.contains("end this turn with exactly [SILENT]") {
         return ("[SILENT]".into(), None);
@@ -354,6 +394,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
     let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    if path.starts_with("/generated/") && path.ends_with(".png") {
+        return Response::builder().status(StatusCode::OK).header("content-type", "image/png").body(http_body_util::Full::new(bytes::Bytes::from_static(IMAGE))).unwrap();
+    }
     if path.ends_with("/models") {
         return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }
@@ -372,6 +415,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     if stalls(&v) {
         // nothing at all, not even the answer's head, until the stall is over
         tokio::time::sleep(std::time::Duration::from_secs(STALL_S)).await;
+    }
+    if unhurried(&v) {
+        tokio::time::sleep(std::time::Duration::from_millis(UNHURRIED_MS)).await;
     }
     let (text, tool) = answer(&v);
     let model = v["model"].as_str().unwrap_or("cheap").to_string();
@@ -519,6 +565,18 @@ fn answers_are_the_transcripts() {
     let had = "[IMPORTANT: Background process proc_3 completed (exit code 0).\nOutput:\n{\"reply\": \"Maple also messaged you this answer directly. If it adds nothing for your person, end this turn with exactly [SILENT].\\n\\nscripted: Message from x\"}]";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": had }], "tools": bots }));
     assert_eq!((t.as_str(), call), ("[SILENT]", None));
+    // Hermes' memory review saves one thing, where it may
+    let memory = json!([{ "type": "function", "function": { "name": "memory" } }]);
+    let review = "Review the conversation above and consider saving to memory if appropriate.\n\nMemory has …";
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] remember this: hi" }, { "role": "assistant", "content": "scripted: hi" }, { "role": "user", "content": review }], "tools": memory }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "action": "add", "target": "memory", "content": REMEMBERED }).to_string());
+    let both = "Review the conversation above and update two things:\n\n**Memory**: …";
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] remember this: hi" }, { "role": "user", "content": both }], "tools": memory }));
+    assert!(call.is_some(), "its memory-and-skills review saves it too");
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] hi" }, { "role": "assistant", "content": "scripted: hi" }, { "role": "user", "content": review }], "tools": memory }));
+    assert!(call.is_none(), "nothing asked to be remembered, nothing saved");
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": review }], "tools": tools }));
+    assert_eq!((t.as_str(), call.is_none()), ("scripted: Review the conversation above and consider saving to memory if appropriate.", true), "no memory tool, no call");
     // a note on a cut risky turn is context: the message after it is answered
     let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));

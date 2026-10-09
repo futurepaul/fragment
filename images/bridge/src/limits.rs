@@ -62,6 +62,16 @@ pub const STEPS_PER_TURN_MAX: u32 = 200;
 /// Replies one turn posts, at most (a runtime that sends more is looping).
 pub const REPLIES_PER_TURN_MAX: u32 = 64;
 
+/// Notices one turn posts, at most (each a line of the chat's, quietly);
+/// the rest are dropped.
+pub const NOTICES_PER_TURN_MAX: u32 = 32;
+/// A notice's text, at most.
+pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
+/// Chats whose last turn the engine keeps for its runtime's notices, at
+/// most (one per agent and chat it ran a turn in this life): past it, the
+/// one longest unused goes.
+pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
+
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;
 
@@ -164,6 +174,11 @@ pub const RECONNECT_MS_MAX: u64 = 30_000;
 
 /// An HTTP call to the fragment API is given this long.
 pub const HTTP_TIMEOUT_MS: u64 = 15_000;
+/// A file Hermes sends by URL is fetched within this long, its redirects
+/// included (Hermes waits 30 s for an op's answer), following at most this
+/// many redirects (runtime/relay/fetch.rs).
+pub const MEDIA_FETCH_MS: u64 = 20_000;
+pub const MEDIA_REDIRECTS_MAX: usize = 3;
 /// The bridge looks at the platform's hold this often, to answer it (the
 /// platform waits 20 s for the answer: docs/computers.md).
 pub const HOLD_POLL_MS: u64 = 100;
@@ -242,3 +257,4 @@ const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOT
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
+const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");

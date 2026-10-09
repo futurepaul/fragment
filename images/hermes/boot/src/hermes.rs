@@ -192,8 +192,13 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     // call is no message of its own (Hermes' default for a platform it has no tier
     // for, as `relay`, is to send each as one). Hermes reads `display` for a turn
     // from the profile's config with this overlay merged over it (its
-    // `_load_gateway_config`, under the profile's scope).
-    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
+    // `_load_gateway_config`, under the profile's scope). A step's preview is as
+    // long as the bridge keeps a step's arguments (Hermes cuts it at 40 when
+    // unset: its `_preview_cap`).
+    y.push_str(&format!(
+        "display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  tool_preview_length: {}\n  long_running_notifications: false\n  interim_assistant_messages: false\n",
+        fragment_bridge::limits::STEP_ARGS_MAX_CHARS
+    ));
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
     // Approvals default to Hermes' `smart` mode (decision 16): a terminal command
     // Hermes flags, or an execute_code script, goes first to its guardian (the
@@ -941,6 +946,7 @@ mod tests {
         // message of its own, for every platform (none names `relay`)
         let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
         assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
+        assert!(display.contains(&"  tool_preview_length: 140"), "a step's preview as long as the bridge keeps its arguments: {m}");
         assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
         // a test's shorter approval, held within the bridge's bounds
         assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);

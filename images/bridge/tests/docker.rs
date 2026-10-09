@@ -1798,6 +1798,140 @@ fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: an image an agent made
+/// with FAL's image generation showed as a bare link): real Hermes sends a
+/// reply's image link by its URL (`send_media`), and the bridge fetches it:
+/// the reply carries the image as the chat's blob, its bytes the
+/// provider's, and no link as text. Method: the scripted model answers
+/// `image: <url>` with that image as markdown, as a model whose tool made
+/// one does, and its own server is the provider's CDN; it is on this host,
+/// a local address, so the bridge is told it may fetch from one
+/// (`BRIDGE_MEDIA_LOCAL=allow`, a test's: refused otherwise, tests/relay.rs).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_image_sent_by_url_is_the_replys_file() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("BRIDGE_MEDIA_LOCAL", "allow")]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let url = format!("http://model.fragment.internal:{}/generated/cat.png", model.addr.port());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let turn = asked(&fake, &chat, &c, &format!("image: {url}"), ended).await;
+    fake.with(|w| {
+        let said: Vec<serde_json::Value> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).collect();
+        eprintln!("image: the turn said {said:?}");
+        let file = said.iter().find(|r| r.get("attachments").is_some()).unwrap_or_else(|| panic!("a reply with the image: {said:?}"));
+        assert_eq!(file["attachments"][0]["type"], "image/png", "{file}");
+        let sha = file["attachments"][0]["sha256"].as_str().unwrap_or("");
+        assert_eq!(w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.to_vec()), Some(support::model::IMAGE.to_vec()), "the chat's blob is the provider's image");
+        assert!(!said.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains(&url))), "no link as text: {said:?}");
+    });
+}
+
+/// Goal (the finite-mono parity audit, 2026-10-09: a question in words left
+/// the page saying "Juniper is working"): real Hermes' open clarify (no
+/// choices: `❓ <question>`) is the turn's reply, then a `turn.asked` naming
+/// its asker, once; the asker's next message is its answer, and the turn's
+/// reply after quotes it.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_question_in_words_says_whose_answer_it_waits_for() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(asked(w), vec![json!({ "kind": "turn.asked", "turn": turn, "asks": person("paul") })]);
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.len() == 1 && replies[0].starts_with("What should I call the plant?"), "the question is its reply, before: {replies:?}");
+    });
+    fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains("Fernando")), "the answer reached the clarify: {replies:?}");
+        assert_eq!(asked(w).len(), 1, "asked once");
+        let started = w.bodies(&chat, "work", "turn.start").len();
+        assert_eq!(started, 2, "the answer started no turn of its own (hello, then this one)");
+    });
+}
+
+/// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
+/// tool name and its arguments cut at 40 characters): real Hermes' progress
+/// lines are steps that say what they do. Its terminal's fenced block, its
+/// write_file's friendly verb (`✍️ Writing <path>`) and its execute_code's
+/// (`🐍 Running code …`) are each their tool, their category, and their
+/// preview whole up to the bridge's 140 (the image's
+/// `display.tool_preview_length`), not Hermes' 40.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn steps_say_what_they_do() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let steps = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == turn).map(|s| (s["tool"].as_str().unwrap_or("").to_string(), s["category"].as_str().unwrap_or("").to_string(), s["args"].as_str().unwrap_or("").to_string())).collect::<Vec<_>>();
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    // each past Hermes' default preview of 40
+    let command = "echo a-command-that-runs-well-past-forty-characters-0123456789";
+    let path = "/data/work/juniper--k3x9/a-file-whose-path-runs-past-forty-characters.txt";
+    let code = "print('a script whose one line runs well past forty characters')";
+    // the model takes its time after each call: a quick tool's line is sent
+    // only if its turn runs on past Hermes' progress poll (the debt ledger)
+    for (said, want) in [(format!("take your time\nrun: {command}"), ("terminal", "shell", command)), (format!("take your time\nwrite: {path}"), ("write_file", "write", path)), (format!("take your time\ncode: {code}"), ("execute_code", "shell", code))] {
+        let turn = asked(&fake, &chat, &c, &said, ended).await;
+        let got = fake.with(|w| steps(w, &turn));
+        eprintln!("steps: {said:?} is {got:?}");
+        assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
+    }
+}
+
+/// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
+/// steps, `💾 Self-improvement review: Memory updated` one named
+/// "Self-improvement"; Paul keeps these): real Hermes' review of its memory,
+/// which it runs after every tenth turn of a session (its
+/// `memory.nudge_interval`) and announces once the turn is done, is a
+/// `turn.notice` of the turn it reviewed (`memory`), never a step nor a
+/// reply. Method: short turns until one is reviewed, the scripted model
+/// saving one thing when asked to review.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_memory_review_is_a_notice() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let reviewed = |w: &support::fake::World| w.bodies(&chat, "work", "turn.notice").into_iter().find(|n| n["category"] == "memory");
+    let reviews = || model.calls.lock().unwrap().iter().filter(|call| content_text(call.body["messages"].as_array().and_then(|m| m.last()).unwrap_or(&json!(null))).starts_with("Review the conversation")).count();
+    let mut turns = Vec::new();
+    // bounded: the nudge's ten turns, and a few more. Once the model is
+    // asked to review, nothing more is said: Hermes cancels a review a live
+    // turn of its session meets (`cancel_background_review_for_live_turn`)
+    for n in 0..14 {
+        turns.push(asked(&fake, &chat, &c, &format!("remember this: fact number {n}"), ended).await);
+        let t = Instant::now();
+        // bounded: four seconds
+        while reviews() == 0 && t.elapsed() < Duration::from_secs(4) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if reviews() > 0 {
+            break;
+        }
+    }
+    if tokio::time::timeout(Duration::from_secs(60), fake.until(120_000, "the review's notice", |w| reviewed(w).is_some())).await.is_err() {
+        let logs = c.exec_out(&["sh", "-c", "grep -rhi 'review' /data/hermes/logs /data/hermes/profiles/juniper--k3x9/logs 2>/dev/null | tail -30"]);
+        panic!("no review's notice after {} turns; the model was asked to review {} times; Hermes logged:\n{logs}\n{}", turns.len(), reviews(), told(&fake, &chat, &c));
+    }
+    fake.with(|w| {
+        let n = reviewed(w).unwrap();
+        eprintln!("review: {n} after {} turns; work: {:?}", turns.len(), w.records(&chat, "work").iter().rev().take(6).map(|r| r["body"]["kind"].clone()).collect::<Vec<_>>());
+        assert_eq!(n["text"], "Self-improvement review: Memory updated", "{n}");
+        assert!(turns.iter().any(|t| n["turn"] == t.as_str()), "the notice is a turn's it reviewed: {n}");
+        let steps = w.bodies(&chat, "work", "turn.step");
+        assert!(!steps.iter().any(|s| s["tool"].as_str().is_some_and(|t| t.starts_with("Self"))), "no step: {steps:?}");
+        let said = w.bodies(&chat, "chat", "reply");
+        assert!(!said.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("Self-improvement"))), "no reply: {said:?}");
+    });
+}
+
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
 // 1hr window and now it's not responding to chats") ----
 

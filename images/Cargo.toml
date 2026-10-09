@@ -1,7 +1,9 @@
 # The computer images' Rust (docs/computers.md): the bridge every image runs,
 # and the Hermes image's boot tool. Its own workspace and lock, apart from the
 # repo's root workspace, so an image's build context is `images/` alone and
-# its dependencies are only these (no TLS, no async runtime but tokio).
+# its dependencies are only these (no async runtime but tokio; TLS only for
+# the bridge's fetch of a file Hermes sends by URL, rustls on ring with
+# webpki's roots, as the root workspace's).
 [workspace]
 resolver = "2"
 members = ["bridge", "hermes/boot"]
@@ -23,6 +25,8 @@ serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util", "process"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 
 [profile.release]
 strip = true

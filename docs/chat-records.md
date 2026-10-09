@@ -49,8 +49,9 @@ at most 16. A turn's records, in order:
 
 1. `turn.start` on `work`: its claim, posted before its runtime hears of
    it (`work`, below);
-2. any number of `turn.step`, replies on `chat`, and `turn.prompt`
-   (each `turn.prompt` followed by its `turn.prompt.closed`);
+2. any number of `turn.step`, replies on `chat`, `turn.prompt` (each
+   followed by its `turn.prompt.closed`), `turn.asked` and `turn.notice`
+   (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
 Every turn has both its start and its end, one of each: a turn refused
@@ -238,13 +239,22 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "args": "`ls -la`", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
 ```
 
-Part `<step>`, from 1: one tool call. `tool` and `args` at most 140
-characters, `excerpt` (its result) and `text` (the model's words before
-it) at most 300; empty when the runtime does not say. At most 200 a
-turn.
+Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
+it) and `args` (the call's preview) at most 140 characters, `excerpt`
+(its result) and `text` (the model's words before it) at most 300; empty
+when the runtime does not say. At most 200 a turn. `category` is what it
+does, whatever the runtime calls the tool: `shell` (a command or code
+run), `web` (a search of the web), `read` (a file, page or skill read, or
+files searched), `write` (a file written or edited), `browser` (its
+browser or desktop driven), `image` (an image made), `delegate` (work
+handed to another agent), `memory` (what it remembers, changed), or
+`other`; a page shows each with its own icon and verb ("Running: ls -la",
+"Searching the web: …"), and a step with another or none (one from before
+steps said) as `other`, by its `tool`. The bridge's runtime says which
+(our Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>", "text": "Run `rm -rf x`?",
@@ -275,6 +285,38 @@ Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
 waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
 across a restart, and the agent's next turn is told the card was cut
 with it), or `stopped`.
+
+```json
+{ "kind": "turn.asked", "turn": "…", "asks": "npub1…" }
+```
+
+Part `q<part>`: the turn asks `asks` (its asker) something to answer in
+words, the question being its reply part `<part>`, and waits, running,
+for their next message to the agent in the chat, which is the answer
+(above, "A person's message"). Posted once a question, after the reply
+that asks it; a runtime saying it asks again before an answer posts
+nothing more. Nothing records the answer on `work`: a page takes the
+turn as waiting on `asks` until `asks` posts a message on `chat` (no
+`turn`) at or after the record's `at`, or a later record of the turn's
+on `work` (a step, a card, a notice, its end) says it went on. A
+`turn.asked` without `asks` as a string is not one.
+
+```json
+{ "kind": "turn.notice", "turn": "…", "category": "memory",
+  "text": "Self-improvement review: Memory updated" }
+```
+
+Part `n<k>`, from 1: a notice of the agent's runtime, neither a step nor
+a reply (it seems stuck, its context was compressed, an approval's
+acknowledgment, it updated its memory). `category` is what it is about:
+`info`, `warning`, or `memory` (a page shows any other as `info`); `text`
+at most 300 characters. At most 32 a turn. A notice the runtime sends
+after the turn's end (its review of the turn, once the turn is done) is
+still that turn's, posted after its `turn.end`: the turn of the agent's
+the bridge last ran in that chat, in its life. With none (the agent's
+last turn there ran in an earlier life), a notice belongs to no turn and
+is not posted. A page shows each as a quiet line, never in a card of
+steps nor as the agent's words, and never pushes it.
 
 ```json
 { "kind": "turn.end", "turn": "…", "outcome": "idle" }
@@ -352,13 +394,20 @@ The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
-agent's consecutive steps as one card; a prompt as a card whose buttons
+agent's consecutive steps as one card (each its category's icon, verb and
+arguments; while it works, the card's head says what it does now); a
+prompt as a card whose buttons
 only `asks` may press (enabled for them alone), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a
-reply; and a turn's end when it was not `idle` (Stopped, or the error,
+reply; a runtime's notice, quietly, its category's icon beside its
+words; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft shows after the turn's last record, and while
-a turn runs with no draft nor open card, a working line does.
+a turn runs with no draft nor open card, a working line does: "Waiting
+for your answer" in its place while the turn waits on the page's person's
+words (`turn.asked`), its composer saying what they type answers it
+("Your answer for Juniper"), or whose answer it waits for, to anyone
+else.
 
 Load earlier messages reads older pages of both channels, keeping the
 visible message in place and the live cursor at its end. When scrolled

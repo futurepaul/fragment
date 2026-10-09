@@ -4,7 +4,8 @@
 //! turn is a pure function of its message:
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: a step (`search`, its args, ok, an excerpt) before the reply;
+//! - `tool`: a step (`search`, a `web` one: the message's first 40
+//!   characters its args, ok, an excerpt) before the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
@@ -19,6 +20,9 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
+//! - `notice`: a notice before the reply (`info`, "Compressing context"),
+//!   and one after the turn's end (`memory`, "Self-improvement review:
+//!   Memory updated"), as Hermes sends its review once its turn is done;
 //! - `fetch <http url> with <value> [in <header> | in query <param> | as
 //!   basic <user>]`: the guest's own request, as any SDK sends one, with no
 //!   header of ours: `<value>` is `$<NAME>`, the agent's credential in that
@@ -68,7 +72,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::records::{Outcome, PromptOption, Step};
+use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
 
 /// The scripted agent's commands: one of each way the bridge carries one
@@ -486,11 +490,11 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
     }
     if text.contains("tool") {
-        let step = Step { tool: "search".into(), args: format!("{{\"q\":\"{}\"}}", ts.text.chars().take(40).collect::<String>()), ok: true, excerpt: "3 results".into(), text: "Let me look.".into() };
+        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), text: "Let me look.".into(), category: Category::Web };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if text.contains("approve") || text.contains("risky") {
-        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new() } }).await;
+        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell } }).await;
         let options = vec![
             PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
             PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
@@ -564,6 +568,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(note) = &ts.note {
         reply = format!("{reply}\n\n(told: {note})");
     }
+    if text.split_whitespace().any(|w| w == "notice") {
+        emit(Event::Notice { agent: ts.agent.fragment.clone(), fragment: ts.fragment.clone(), category: NoticeCategory::Info, text: "Compressing context".into() }).await;
+    }
     let drafts = if text.contains("slow") { 20 } else { 2 };
     for i in 1..=drafts {
         let cut = reply.chars().count() * i / (drafts + 1);
@@ -582,7 +589,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
+    let noticed = text.split_whitespace().any(|w| w == "notice");
     emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
+    if noticed {
+        let (agent, fragment) = (ts.agent.fragment.clone(), ts.fragment.clone());
+        emit(Event::Notice { agent, fragment, category: NoticeCategory::Memory, text: "Self-improvement review: Memory updated".into() }).await;
+    }
 }
 
 #[cfg(test)]

@@ -96,7 +96,10 @@ upgrade re-reads it, and the real-Hermes lane
   - `prompt {prompt_kind, prompt_id, content, options: [{id, label,
     style?}], timeout_s?}`: buttons; exec approvals offer `once`,
     `session`, `always`, `deny` (fewer after a smart deny);
-  - `send_media {media_kind, source_url, content, filename?}`;
+  - `send_media {media_kind, source_url, content, filename?}`: its
+    `source_url` a file uploaded to `/relay/media`, or "an already-public
+    URL (passed through)" (a reply's image link: `send_image`); declined,
+    Hermes sends the link as text;
   - `get_chat_info`, `thread_create`, `thread_rename`;
   - `task_card`, `task_card_stop`: only for Slack chats
     (`gateway/run_turn.py`), so Relay's own steps are progress text;
@@ -148,7 +151,7 @@ group_sessions_per_user: false     # one session per chat, "[name] …" each mes
 gateway: {multiplex_profiles: true}
 onboarding: {profile_build: "off"}
 streaming: {enabled: true, transport: "draft"}
-display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", long_running_notifications: false, interim_assistant_messages: false}
+display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", tool_preview_length: 140, long_running_notifications: false, interim_assistant_messages: false}
 platforms: {relay: {gateway_restart_notification: false}}
 approvals: {mode: "smart", timeout: 3600, destructive_slash_confirm: false}
 agent: {disabled_toolsets: ["cronjob"]}   # its routines are fragment cron (decision 38)
