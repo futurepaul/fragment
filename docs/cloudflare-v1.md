@@ -370,14 +370,31 @@ speaking Cloudflare's APIs) returns once this product works.
     it. Every call is counted by agent and month, and the shell's
     Connections page shows it.
 23. **Models through AI Gateway**, Unified Billing, with zero data
-    retention on and the gateway's request logs off. Three tiers: GLM-5.3
-    Flash (cheap), GLM-5.3 (medium), both on Workers AI, and Claude Opus
-    5.5 (high). The computer's model intercept adds the gateway credential
-    and reads usage for the ledger.
+    retention on and the gateway's request logs off. Three tiers:
+    DeepSeek V4 Flash (cheap), GLM-5.3 (medium), both on Workers AI, and
+    Claude Opus 5.5 (high). The computer's model intercept adds the
+    gateway credential and reads usage for the ledger.
 
-    **Agents default to cheap, GLM-5.3 Flash** (Paul, 2026-10-08), both
-    when the shell makes one and when its profile names no tier. Medium
-    stays selectable in `agent.json`.
+    **Agents default to cheap** (Paul, 2026-10-08), both when the shell
+    makes one and when its profile names no tier. Medium stays selectable
+    in `agent.json`. **Cheap is DeepSeek V4 Flash**
+    (`@cf/deepseek-ai/deepseek-v4-flash-0731`) since 2026-10-09, with
+    GLM-5.3 Flash, cheap's model before, as its fallback (below). Paul,
+    2026-10-08: "glm 5.3 flash seems weirdly slow… we might want to try
+    out deepseek flash"; his call, on 2026-10-09, on what was measured
+    that night on a preview: two Hermes agents on one computer, each asked
+    three times, alternately, for a ~1,500-word essay in one call of its
+    file tool (a ~2,000-token argument), read from the gateway's log.
+
+    | | first byte (s) | output tokens/s | the write (s) | whole turn (s) |
+    |---|---|---|---|---|
+    | GLM-5.3 Flash | 1.27, 0.87, 0.89 | 31.2, 30.1, 27.7 | 78.7, 67.6, 73.8 | 86.2, 70.7, 76.9 |
+    | DeepSeek V4 Flash | 0.95, 1.00, 1.16 | 83.7, 83.7, 85.0 | 32.6, 23.6, 28.3 | 37.0, 27.8, 33.9 |
+
+    DeepSeek lists at $0.44 in, $0.014 cached, $1.32 out a million tokens
+    (GLM-5.3 Flash: $0.15, $0.03, $0.50): an essay's write cost $0.003 to
+    $0.009 on it, $0.0015 to $0.003 on GLM. It reads no images, so
+    `vision` stays GLM-5.3 Flash (below).
 
     **The high tier stays off until Cloudflare raises Unified Billing's
     Opus limit** (about 2 calls a minute per edge machine; spike S4).
@@ -394,7 +411,7 @@ speaking Cloudflare's APIs) returns once this product works.
     vision model (`vision_model` in its config, `FRAGMENT_VISION_MODEL`;
     one the price book does not price is refused), GLM-5.3 Flash by
     default. Workers AI's catalog marks it "Vision: Yes"; GLM-5.3 reads no
-    images. Our Hermes image sends every agent's image calls there,
+    images, nor (since it became the cheap tier's) does DeepSeek V4 Flash. Our Hermes image sends every agent's image calls there,
     whatever its tier (its `computer_use` screenshots, and images people
     attach), metered to the agent's owner as any call (docs/computers.md,
     Models). It is no tier: agents and jobs cannot pick it. DeepSeek
@@ -410,16 +427,17 @@ speaking Cloudflare's APIs) returns once this product works.
     then 500, for five minutes, and the agent's turn gave up). A tier's
     call whose model fails before answering anything (not reached, 429, or
     a 5xx) is made once more, the same, on the deployment's fallback model
-    (`fallback_model` in its config, `FRAGMENT_FALLBACK_MODEL`; DeepSeek
-    V4 Flash, `@cf/deepseek-ai/deepseek-v4-flash-0731`, unless named; one
-    the price book prices). Errors only: no cut-off on a slow first byte,
+    (`fallback_model` in its config, `FRAGMENT_FALLBACK_MODEL`; one the
+    price book prices). It was DeepSeek V4 Flash behind GLM-5.3 Flash; since
+    2026-10-09 it is GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`) unless
+    named, behind the cheap tier's DeepSeek. Errors only: no cut-off on a slow first byte,
     and no race (the fallback is called only after the model failed). An
     answer that began is final, the fallback's failure is the call's, and
     there is no third try. The call keeps its one hold and is settled
     from the fallback's usage at its prices. A job's text step falls back
-    the same; `vision` and transcriptions do not (DeepSeek reads no
-    images). DeepSeek runs on Workers AI too, so this survives a model's
-    failure, not Workers AI's; GLM-5.3 Flash stays the cheap tier's.
+    the same; `vision` and transcriptions do not (`vision`'s model is
+    GLM-5.3 Flash itself). Both run on Workers AI, so this survives a
+    model's failure, not Workers AI's.
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;

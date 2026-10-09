@@ -799,7 +799,7 @@ pub struct MemberList {
 /// A model tier (docs/cloudflare-v1.md, decision 23): what an agent's
 /// `model`, a fragment's `agent.model`, a job's `ai.text` `model`, and a
 /// model call's `model` name. The platform maps each to its model
-/// (`fragment_core::models`): `cheap` is GLM-5.3 Flash and `medium`
+/// (`fragment_core::models`): `cheap` is DeepSeek V4 Flash and `medium`
 /// GLM-5.3, both on Workers AI. `high` (Opus) is a name the platform
 /// refuses, saying why, until Cloudflare raises Unified Billing's Opus
 /// limit; a model id is never one.

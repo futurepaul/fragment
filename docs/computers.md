@@ -509,8 +509,9 @@ expires within 30 days. The container application is the deployment's
   calls the model through AI Gateway, streams its answer back, and
   settles the final usage (lesson 7). A call whose model fails before
   answering (not reached, 429, or a 5xx) is made once more on the
-  deployment's fallback model, DeepSeek V4 Flash unless its config names
-  another (docs/api.md, Models): the guest sees only the answer.
+  deployment's fallback model, GLM-5.3 Flash (behind the cheap tier's
+  DeepSeek V4 Flash) unless its config names another (docs/api.md,
+  Models): the guest sees only the answer.
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
@@ -522,10 +523,11 @@ expires within 30 days. The container application is the deployment's
 - `model` may also be `vision`: the deployment's vision model (its
   config's `vision_model`, the cell's `FRAGMENT_VISION_MODEL`), GLM-5.3
   Flash unless it names another (Paul, 2026-10-05). Workers AI's catalog
-  marks GLM-5.3 Flash "Vision: Yes"; GLM-5.3, the medium tier's, reads no
-  images. The vision model must be one the price book prices, or the
-  deploy is refused (and the cell, at its first request); GLM-5.3 Flash
-  is the cheap tier's own row, so no new book version. `vision` is
+  marks GLM-5.3 Flash "Vision: Yes"; neither DeepSeek V4 Flash, the cheap
+  tier's, nor GLM-5.3, the medium tier's, reads images. The vision model
+  must be one the price book prices, or the deploy is refused (and the
+  cell, at its first request); GLM-5.3 Flash is priced (it is the
+  fallback's row too). `vision` is
   bounded, reserved and settled as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
@@ -536,7 +538,7 @@ expires within 30 days. The container application is the deployment's
   (named outright, Hermes routes every capture so: its
   `tools/computer_use/vision_routing.py`), and an image a person attaches
   too. Before, a capture went to the agent's own tier's model, which on
-  the medium tier reads no images. DeepSeek Flash's vision build is only
+  the medium tier (and now the cheap) reads no images. DeepSeek Flash's vision build is only
   on DeepSeek's own API (decision 23, its status).
 - **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
   - **Config.** Each profile has `stt: {provider: openai, language: "",
@@ -887,7 +889,7 @@ settings and state):
   platform does not answer for (no 200, 403 or 404) is said
   (`profile.tier_unread`), and the profile's config stays as the last boot
   wrote it, its tier with it; a profile with none yet takes the cheap
-  tier (GLM-5.3 Flash, Paul, 2026-10-08). The shell writes `cheap` for
+  tier (DeepSeek V4 Flash since 2026-10-09; Paul). The shell writes `cheap` for
   both the first agent and each new agent. Its `model: {provider, id}`,
   beside the tier, is a model of a provider its owner connected, which it
   runs on while its credentials hold that provider (above, "An agent's

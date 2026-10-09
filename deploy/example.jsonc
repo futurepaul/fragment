@@ -73,10 +73,10 @@
   // (fragment_core::price), or the deploy is refused.
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
   // The model a tier's call is made on once more when its own fails before
-  // answering (not reached, 429 or a 5xx), settled at its prices. DeepSeek
-  // V4 Flash unless named here; one the price book prices, or the deploy is
-  // refused. `vision` has no fallback.
-  // "fallback_model": "@cf/deepseek-ai/deepseek-v4-flash-0731",
+  // answering (not reached, 429 or a 5xx), settled at its prices. GLM-5.3
+  // Flash unless named here (the cheap tier is DeepSeek V4 Flash); one the
+  // price book prices, or the deploy is refused. `vision` has no fallback.
+  // "fallback_model": "@cf/zai-org/glm-5.3-flash",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
   // Where a person whose computer will not start gets help: an https page

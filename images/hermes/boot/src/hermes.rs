@@ -20,7 +20,8 @@ pub enum Tier {
     High,
 }
 
-/// New agents run on GLM-5.3 Flash (Paul, 2026-10-08).
+/// New agents run on the cheap tier: DeepSeek V4 Flash since 2026-10-09
+/// (Paul; GLM-5.3 Flash before, now its fallback).
 pub const DEFAULT_TIER: Tier = Tier::Cheap;
 
 impl Tier {

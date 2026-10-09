@@ -37,14 +37,17 @@ const TRIGGERS_JSON: &[u8] = br#"{
   "operations": { "tick": { "kind": "mutation" }, "filed": { "kind": "mutation" }, "notes": { "kind": "query", "role": "viewer" } },
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
+/// The cheap tier's model, DeepSeek V4 Flash since 2026-10-09
+/// (fragment_core::models::CHEAP_MODEL).
+const CHEAP: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
+/// GLM-5.3 Flash: the route's fallback and its vision model
+/// (fragment_core::models::FALLBACK_MODEL_DEFAULT, VISION_MODEL_DEFAULT).
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 /// The model route, as an agent calls it (its computer's model intercept).
 const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
 const GLM: &str = "@cf/zai-org/glm-5.3";
-/// The route's fallback model (fragment_core::models::FALLBACK_MODEL_DEFAULT).
-const DEEPSEEK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 const USD: i64 = 1_000_000;
 
 fn tokens(model: &str, input: u64, cached: u64, output: u64) -> Usage {
@@ -286,11 +289,11 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.set_usage(&[Used { prompt: 1000, cached: 200, completion: 500 }]);
     let r = api.op(&owner, &name, "summarize", "t-1", json!({ "text": "the notes", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let paid = charge(&tokens(FLASH, 800, 200, 500));
+    let paid = charge(&tokens(CHEAP, 800, 200, 500));
     let after = ledger(api, &owner);
     s.ok(
         "an AI step runs on its tier's model through the model route",
-        run["status"] == "succeeded" && run["output"]["text"] == "echo: the notes" && run["output"]["model"] == FLASH && run["output"]["tier"] == "cheap",
+        run["status"] == "succeeded" && run["output"]["text"] == "echo: the notes" && run["output"]["model"] == CHEAP && run["output"]["tier"] == "cheap",
         &run,
     );
     let step = entries(api, &owner_id, &format!("step:{name}@"));
@@ -324,7 +327,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": run, "ledger": v }),
     );
     // its model and the fallback both down: every try fails
-    s.ai.down(&[FLASH, DEEPSEEK]);
+    s.ai.down(&[CHEAP, FLASH]);
     let r = api.op(&owner, &name, "summarize", "t-503", json!({ "text": "flaky", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
     s.ai.down(&[]);
@@ -342,7 +345,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.set_usage(&[Used { prompt: 100, cached: 0, completion: 10 }]);
     let r = api.op(&owner, &name, "summarize", "t-retried", json!({ "text": "paid once", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let once = charge(&tokens(FLASH, 100, 0, 10));
+    let once = charge(&tokens(CHEAP, 100, 0, 10));
     s.ok(
         "a text step that failed after its paid call is tried again from what it kept: one call, one charge (bug 2)",
         run["status"] == "succeeded" && run["output"]["text"] == "echo: paid once" && s.ai.calls().len() == calls + 1 && run_charged(api, &owner_id, &name, &run) == once && run_steps(api, &owner_id, &name, &run).len() == 1,
@@ -549,7 +552,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "an unstreamed call answers OpenAI's shape, and is settled from its usage",
         r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && aig().len() == before + 1 && settled == before + 1
-            && aig().iter().any(|e| e["entry"]["end"]["charge"] == charge(&tokens(FLASH, 50, 0, 20))),
+            && aig().iter().any(|e| e["entry"]["end"]["charge"] == charge(&tokens(CHEAP, 50, 0, 20))),
         json!({ "answer": r.body, "entries": aig() }),
     );
     s.ai.set_usage(&[Used { prompt: 40, cached: 10, completion: 30 }]);
@@ -558,13 +561,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let last = lines.last().cloned().unwrap_or_default();
     let shaped = lines.iter().filter(|l| l["choices"].as_array().is_some_and(|c| !c.is_empty())).all(|l| l.get("usage").is_none())
         && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30;
-    let streamed = charge(&tokens(FLASH, 30, 10, 30));
+    let streamed = charge(&tokens(CHEAP, 30, 10, 30));
     let landed = s.eventually(wait, || aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
     s.ok("and is settled from its last, cumulative usage only", landed, json!(aig()));
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
-    let worst = charge(&Usage::Tokens { model: FLASH.into(), input: chat(true).to_string().len() as u64 + 60, cached_input: 0, cache_write: 0, output: 16_384 });
+    let worst = charge(&Usage::Tokens { model: CHEAP.into(), input: chat(true).to_string().len() as u64 + 60, cached_input: 0, cache_write: 0, output: 16_384 });
     let broke = s.eventually(wait, || aig().iter().filter(|e| e["entry"]["end"]["basis"] == "reservation").count() == 1);
     s.ok("a stream that broke before its usage is settled at its worst case", r.status == 200 && broke, format!("about {worst} µ$: {}", json!(aig())));
     fallback(s, api, &hand, &owner_id, wait)?;
@@ -595,7 +598,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
 /// The route's fallback (Paul, 2026-10-08): a call whose model fails before
 /// answering (Workers AI's 502 "could not route request to AI model", as
 /// GLM-5.3 Flash answered every call for five minutes on 2026-10-09) is
-/// made once more, the same, on the fallback model, DeepSeek V4 Flash, under
+/// made once more, the same, on the fallback model, GLM-5.3 Flash, under
 /// the same hold, and settled at the fallback's prices; when the fallback
 /// fails too, its failure is the call's, after two tries and no more; a
 /// refusal of the request is never tried again.
@@ -603,21 +606,21 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
     let chat = |stream: bool| json!({ "model": "cheap", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
     let aig = || entries(api, owner_id, "aig:");
     let tried = |s: &Suite, from: usize| s.ai.calls()[from..].iter().map(|c| c.model.clone()).collect::<Vec<_>>();
-    s.ai.down(&[FLASH]);
+    s.ai.down(&[CHEAP]);
     let (calls, before) = (s.ai.calls().len(), aig().len());
     s.ai.set_usage(&[Used { prompt: 60, cached: 0, completion: 25 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
     let made = s.ai.calls()[calls..].to_vec();
-    let fell = charge(&tokens(DEEPSEEK, 60, 0, 25));
+    let fell = charge(&tokens(FLASH, 60, 0, 25));
     let settled = s.eventually(wait, || {
         let new = aig();
         new.len() == before + 1 && new.iter().filter(|e| e["entry"]["end"]["charge"] == fell && e["entry"]["end"]["basis"] == "usage").count() == 1
     });
     s.ok(
-        "a call whose model is down is made once more, the same, on the fallback model (DeepSeek V4 Flash), which answers it",
+        "a call whose model is down is made once more, the same, on the fallback model (GLM-5.3 Flash), which answers it",
         r.status == 200
             && r.body["choices"][0]["message"]["content"] == "echo: hello"
-            && tried(s, calls) == [FLASH, DEEPSEEK]
+            && tried(s, calls) == [CHEAP, FLASH]
             && made.len() == 2
             && made[0].body == made[1].body
             && made[0].metadata == made[1].metadata,
@@ -628,27 +631,27 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
     s.ai.set_usage(&[Used { prompt: 40, cached: 10, completion: 30 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(true)))?;
     let last = r.text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").filter_map(|d| serde_json::from_str::<Value>(d).ok()).next_back().unwrap_or_default();
-    let streamed = charge(&tokens(DEEPSEEK, 30, 10, 30));
+    let streamed = charge(&tokens(FLASH, 30, 10, 30));
     let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
     s.ok(
         "a streamed call falls back the same, streams the fallback's answer in OpenAI's shape, and is settled from its last usage at its prices",
-        r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30 && tried(s, calls) == [FLASH, DEEPSEEK] && settled,
+        r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30 && tried(s, calls) == [CHEAP, FLASH] && settled,
         json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
     );
-    s.ai.down(&[FLASH, DEEPSEEK]);
+    s.ai.down(&[CHEAP, FLASH]);
     let (calls, before) = (s.ai.calls().len(), aig().len());
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
     let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().filter(|e| end_of(e) == "released").count() >= 1);
     s.ai.down(&[]);
     s.ok(
         "when the fallback is down too, its 502 is the call's, after two tries and no more, and the hold goes back",
-        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == [FLASH, DEEPSEEK] && released,
+        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == [CHEAP, FLASH] && released,
         json!({ "status": r.status, "answer": r.text, "tried": tried(s, calls) }),
     );
     let calls = s.ai.calls().len();
     s.ai.fail_next(&[400]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
-    s.ok("a refusal of the request (400) is the call's: the fallback is not asked", r.status == 400 && tried(s, calls) == [FLASH], json!({ "status": r.status, "tried": tried(s, calls) }));
+    s.ok("a refusal of the request (400) is the call's: the fallback is not asked", r.status == 400 && tried(s, calls) == [CHEAP], json!({ "status": r.status, "tried": tried(s, calls) }));
     Ok(())
 }
 
@@ -705,7 +708,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let r = api.signed(hand, "POST", route, Some(&look(&small)))?;
     s.ai.down(&[]);
     s.ok(
-        "`vision` has no fallback (DeepSeek reads no images): its model's 502 is the call's, after one try",
+        "`vision` has no fallback (its model, GLM-5.3 Flash, is the fallback's own): its model's 502 is the call's, after one try",
         r.status == 502 && s.ai.calls().len() == calls + 1,
         json!({ "status": r.status, "calls": s.ai.calls().len() - calls }),
     );

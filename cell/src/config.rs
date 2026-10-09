@@ -163,7 +163,7 @@ pub struct Config {
     pub vision_model: String,
     /// `FRAGMENT_FALLBACK_MODEL` (the deploy config's `fallback_model`):
     /// the model a tier's call is made on once more when its own fails
-    /// before answering (`fragment_core::models::Tries`). DeepSeek V4 Flash
+    /// before answering (`fragment_core::models::Tries`). GLM-5.3 Flash
     /// unless named; one the price book does not price is refused, at the
     /// deploy and here.
     pub fallback_model: String,

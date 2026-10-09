@@ -246,8 +246,8 @@ pub struct PriceBook {
 
 // The default book, at list price on 2026-10-02, each with its source.
 
-/// The tiers' models (decision 23) and the route's fallback model
-/// (`fragment_core::models::FALLBACK_MODEL_DEFAULT`). Sources: Workers AI's
+/// The tiers' models (decision 23), the route's vision and fallback model
+/// (`fragment_core::models`). Sources: Workers AI's
 /// catalog (`GET /ai/models/search`, `properties.price`) for both GLMs and
 /// DeepSeek V4 Flash (read 2026-10-09; its neurons on two calls that day
 /// matched these to the micro-dollar), and the AI model catalog page for
@@ -256,13 +256,13 @@ pub struct PriceBook {
 /// models have no cache writes: a write price is the input price, so a
 /// write one reported would never be free.
 pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
-    // $0.15 in, $0.03 cached, $0.50 out per million tokens
+    // $0.15 in, $0.03 cached, $0.50 out per million tokens (vision, and the fallback)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
-    // $0.44 in, $0.014 cached, $1.32 out (the fallback model)
+    // $0.44 in, $0.014 cached, $1.32 out (the cheap tier's)
     ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
 ];
 /// The default book's version. A ledger takes a book only when its version
@@ -643,7 +643,7 @@ mod tests {
             (GLM, 122_016, 0, 3, 15_530.508593767881),
             (GLM, 257_908, 50_432, 3, 34_017.87968751788),
             (FLASH, 23, 0, 15, 0.9954546093940735),
-            // DeepSeek V4 Flash, 2026-10-09 (the fallback model's price)
+            // DeepSeek V4 Flash, 2026-10-09 (the cheap tier's price)
             (DEEPSEEK, 302, 0, 82, 21.920000076293945),
             (DEEPSEEK, 100, 0, 64, 11.680000305175781),
         ];

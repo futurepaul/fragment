@@ -83,7 +83,7 @@ struct Deployment {
     vision_model: Option<String>,
     /// The model a tier's call is made on once more when its own fails
     /// before answering (`FRAGMENT_FALLBACK_MODEL`; cell/src/models.rs):
-    /// DeepSeek V4 Flash unless named; one the price book does not price is
+    /// GLM-5.3 Flash unless named; one the price book does not price is
     /// refused (`fragment_core::models::fallback_model`).
     fallback_model: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
@@ -1237,7 +1237,7 @@ mod tests {
     /// refused before a deploy otherwise (the cell would refuse them at its
     /// first request); named, each is the cell's variable
     /// (`FRAGMENT_VISION_MODEL`, `FRAGMENT_FALLBACK_MODEL`), and unnamed the
-    /// cell's default (GLM-5.3 Flash; DeepSeek V4 Flash).
+    /// cell's default (GLM-5.3 Flash, both).
     #[test]
     fn a_vision_or_fallback_model_the_book_does_not_price_is_refused() {
         let with = |vision: Option<&str>, fallback: Option<&str>| {

@@ -15,12 +15,13 @@
 //!
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx) is made once more, the same, on the deployment's fallback
-//! model (`FRAGMENT_FALLBACK_MODEL`, DeepSeek V4 Flash unless named;
-//! `fragment_core::models::Tries`), logged as `model.fallback`, under the
-//! same hold, and settled as the fallback's. Not a race: the fallback is
-//! called only after the model failed. An answer that began is final, and
-//! the fallback's failure is passed through as any. `vision` has none (the
-//! fallback reads no images), nor a transcription.
+//! model (`FRAGMENT_FALLBACK_MODEL`, GLM-5.3 Flash unless named, behind the
+//! cheap tier's DeepSeek V4 Flash; `fragment_core::models::Tries`), logged
+//! as `model.fallback`, under the same hold, and settled as the fallback's.
+//! Not a race: the fallback is called only after the model failed. An
+//! answer that began is final, and the fallback's failure is passed
+//! through as any. `vision` has none (its model is the fallback's own), nor
+//! a transcription.
 //!
 //! Two transports, one input. Production calls the Worker's `AI` binding
 //! through the deployment's AI Gateway (`AI_GATEWAY_ID`), its logs off and
