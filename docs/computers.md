@@ -888,7 +888,15 @@ settings and state):
   earlier attempt's build, not that release. Hermes there is Python
   3.14.7 in a venv its own package manager (PM) builds, its tools (its
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
-  store at `/opt/hermes/tools`. One Hermes
+  store at `/opt/hermes/tools`. Its layers go by how often each changes:
+  the base, one layer (Hermes' image flattened, with everything pinned
+  on it: 4.3 GB, 1.4 GB compressed), then ours (the bridge, `hermes-boot`,
+  the fragment CLI and the image's own files: about 21 MB, 9 MB
+  compressed), then a few KB `hermes-boot build-info` writes and the
+  image's version. A deploy that changes only our code pushes the small
+  ones; the base changes only with a pin, `document-requirements.txt` or
+  one of its steps (or when the deploying machine's build cache has lost
+  it). One Hermes
   profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a

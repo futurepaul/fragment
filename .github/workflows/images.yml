@@ -89,14 +89,13 @@ jobs:
   #
   # No layer cache, by measurement (PR #252): with BuildKit's layers in the
   # Actions cache (mode=max), an image whose every input was unchanged built
-  # in 2 minutes, but that is a re-run's case. A change to the image changes
-  # its last layer (the whole image, 1.4 GB compressed); the CLI's stage, the
-  # build's longest, reads the root workspace, which 108 of master's 147
-  # commits from 2026-10-01 to 10-08 changed; and of the 33 pairs of
-  # master's image-touching commits in that time, the CLI's stage was
-  # unchanged across 6 and the image across none. What the cache would
-  # still hit (the Hermes base and its first layers) is off the build's
-  # critical path, which is the Rust. It cost 3.3 GB of the repository's
+  # in 2 minutes, but that is a re-run's case. The CLI's stage, the build's
+  # longest, reads the root workspace, which 108 of master's 147 commits
+  # from 2026-10-01 to 10-08 changed: of the 33 pairs of master's
+  # image-touching commits in that time, the CLI's stage was unchanged
+  # across 6. What the cache would still hit (the Hermes base, its own
+  # layer since 2026-10-09) is off the build's critical path, which is the
+  # Rust. It cost 3.3 GB of the repository's
   # 10 GB of caches, and about 1.5 GB more at each write, against the
   # caches ci.yml reads on every run.
   #
