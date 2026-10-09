@@ -1,6 +1,6 @@
 //! The release's files in the Worker's Static Assets (`ASSETS`,
-//! cell/wrangler.jsonc): the templates, each file named by its SHA-256.
-//! The cell carries only their index
+//! cell/wrangler.jsonc): the templates, the shell's files and the agent
+//! docs, each named by its SHA-256. The cell carries only their index
 //! (crates/templates, made by its build), so an isolate holds a file's
 //! bytes only while it reads one, and none of them in its memory from the
 //! start; `cargo xtask build` writes the files beside the Worker
@@ -58,4 +58,23 @@ pub(crate) async fn body(env: &Env, f: &File, headers: Headers) -> CellResult<Re
     let (_, body) = fetch(env, f).await?.into_parts();
     headers.set("content-length", &f.size.to_string())?;
     Ok(Response::from_body(body)?.with_headers(headers))
+}
+
+/// A file the platform answers as its own (the agent docs): revalidated
+/// by its hash (`no-cache`), a 304 and a HEAD answered from the index
+/// before any read.
+pub(crate) async fn serve(req: &Request, env: &Env, f: &File, content_type: &str) -> CellResult<Response> {
+    let etag = format!("\"{}\"", &f.sha256[..16]);
+    if let Some(resp) = crate::serve::not_modified(req, &etag, "no-cache")? {
+        return Ok(resp);
+    }
+    let h = Headers::new();
+    h.set("content-type", content_type)?;
+    h.set("cache-control", "no-cache")?;
+    h.set("etag", &etag)?;
+    if req.method() == Method::Head {
+        h.set("content-length", &f.size.to_string())?;
+        return Ok(Response::empty()?.with_headers(h));
+    }
+    body(env, f, h).await
 }

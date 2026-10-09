@@ -2,16 +2,18 @@
 // cell's Static Assets, as an index of each one's path, SHA-256 and size
 // (the cell reads a file's bytes by its hash: cell/src/assets.rs), and,
 // with the `embed` feature, their bytes (the CLI, xtask, which writes them
-// into the assets, and the e2e): one `Template` per directory under
-// templates/ (every file but src/, which holds sources of committed
-// bundles), and `ALL`. Each template's release, a hash of its paths and
-// bytes, is made here, so a cell that never holds the bytes names it all
-// the same.
+// into the assets, and the e2e). They are one `Template` per directory
+// under templates/ (every file but src/, which holds sources of committed
+// bundles) and `ALL`; the shell's files (cell/shell/, `SHELL`); and the
+// agent docs (cli/SKILL.md, cli/GUIDE.md). Each template's release, a
+// hash of its paths and bytes, is made here, so a cell that never holds
+// the bytes names it all the same.
 //
 // A template may hold another's files through a symlink (the brain's
 // viewer is the notes template's, `templates/brain/site/assets`; the
-// chat's agent.png is the agent's): one asset, and embedded, its bytes
-// are in a binary once. A symlink that leaves templates/ fails the build.
+// chat's agent.png is the agent's, and so is the shell's): one asset, and
+// embedded, its bytes are in a binary once. A symlink in a template that
+// leaves templates/ fails the build.
 use std::collections::BTreeMap;
 use std::{env, fs, path::Path, path::PathBuf};
 
@@ -58,7 +60,11 @@ fn main() {
     let embed = env::var_os("CARGO_FEATURE_EMBED").is_some();
     let repo = fs::canonicalize(Path::new(&manifest).join("../..")).expect("the repo");
     let tdir = repo.join("templates");
-    println!("cargo:rerun-if-changed={}", tdir.display());
+    let shell = repo.join("cell/shell");
+    let docs = [("SKILL_MD", repo.join("cli/SKILL.md")), ("GUIDE_MD", repo.join("cli/GUIDE.md"))];
+    for watched in [&tdir, &shell].into_iter().chain(docs.iter().map(|(_, p)| p)) {
+        println!("cargo:rerun-if-changed={}", watched.display());
+    }
     let mut names: Vec<String> = fs::read_dir(&tdir)
         .expect("templates/")
         .flatten()
@@ -97,6 +103,24 @@ fn main() {
         src.push_str(&format!("    &{},\n", name.to_uppercase()));
     }
     src.push_str("];\n");
+    let mut files = Vec::new();
+    collect(&shell, &shell, &mut files);
+    // its sources are files too: the shell has no src/ to skip
+    assert!(!shell.join("src").exists(), "cell/shell/src would be skipped");
+    files.sort();
+    src.push_str("pub static SHELL: &[File] = &[\n");
+    for (rel, path) in files {
+        let real = fs::canonicalize(&path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
+        assert!(real.starts_with(&repo), "cell/shell/{rel} is a symlink out of the repo");
+        let bytes = fs::read(&real).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
+        src.push_str(&format!("    {},\n", entry(&rel, &bytes, statics.id(real), embed)));
+    }
+    src.push_str("];\n");
+    for (name, path) in &docs {
+        let bytes = fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let file = path.file_name().expect("a doc is a file").to_string_lossy().to_string();
+        src.push_str(&format!("pub static {name}: File = {};\n", entry(&file, &bytes, statics.id(path.clone()), embed)));
+    }
     if embed {
         for (real, id) in &statics.ids {
             src.push_str(&format!("static B{id}: &[u8] = include_bytes!({:?});\n", real.display().to_string()));

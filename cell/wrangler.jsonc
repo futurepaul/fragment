@@ -16,11 +16,11 @@
   "compatibility_flags": ["nodejs_compat", "containers_pid_namespace"],
   // `cargo xtask build`: worker-build, then the release's files into
   // build/assets (below), so a rebuild under `wrangler dev` writes both
-  "build": { "command": "cargo run --quiet --manifest-path ../Cargo.toml --package xtask -- build", "watch_dir": ["src", "shell", "../crates", "../templates"] },
-  // The release's files (assets.rs): the templates, each file named by its
-  // SHA-256, which the cell reads through ASSETS by the index it carries
-  // (crates/templates). Every request runs the cell first, so nothing is
-  // served from them but by the router.
+  "build": { "command": "cargo run --quiet --manifest-path ../Cargo.toml --package xtask -- build", "watch_dir": ["src", "shell", "../crates", "../templates", "../cli"] },
+  // The release's files (assets.rs): the templates, the shell's files and
+  // the agent docs, each named by its SHA-256, which the cell reads through
+  // ASSETS by the index it carries (crates/templates). Every request runs
+  // the cell first, so nothing is served from them but by the router.
   "assets": { "directory": "build/assets", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none", "not_found_handling": "none" },
   "worker_loaders": [{ "binding": "LOADER" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).

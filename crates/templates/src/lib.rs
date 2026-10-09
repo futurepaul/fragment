@@ -1,6 +1,8 @@
 //! The files the release serves from the cell's Static Assets: the
 //! templates under `templates/` (`fragment new` scaffolds them, and the
-//! cell makes a fragment from one: docs/api.md, Control API).
+//! cell makes a fragment from one: docs/api.md, Control API), the shell's
+//! files (`cell/shell/`), and the agent docs (`cli/SKILL.md`,
+//! `cli/GUIDE.md`, the platform's `/llms.txt` and `/llms-full.txt`).
 //!
 //! The cell holds only their index: each file's path, SHA-256 and size,
 //! and each template's release (build.rs), and reads a file's bytes from
@@ -12,7 +14,8 @@
 /// One file, as the build found it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct File {
-    /// Its path within its template (relative to a fragment's root).
+    /// Its path within its template (relative to a fragment's root), or
+    /// its name in the shell.
     pub path: &'static str,
     /// Its bytes' SHA-256, hex: its name among the cell's Static Assets.
     pub sha256: &'static str,
@@ -48,14 +51,53 @@ include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 /// (`fragment new --template notes`).
 pub static CATALOG: [&Template; 4] = [&BLANK, &TODO, &INBOX, &CALORIES];
 
+/// A file of cell/shell/ by its path there: a published one, or a page
+/// (`index.html`, `admin.html`).
+pub fn shell(name: &str) -> Option<&'static File> {
+    SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
+}
+
+/// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
+/// each with its content type: of the rest of cell/shell/, its pages are
+/// served at their own paths, and its credits and licenses not at all.
+const SHELL_PUBLISHED: [(&str, &str); 16] = [
+    ("shell.js", "text/javascript; charset=utf-8"),
+    ("shell.css", "text/css; charset=utf-8"),
+    ("layout.js", "text/javascript; charset=utf-8"),
+    ("viewer.js", "text/javascript; charset=utf-8"),
+    ("agent-identity.js", "text/javascript; charset=utf-8"),
+    ("app-icons.js", "text/javascript; charset=utf-8"),
+    ("lucide-icons.js", "text/javascript; charset=utf-8"),
+    ("tooltips.js", "text/javascript; charset=utf-8"),
+    // Settings' Billing: a seat, credit, an org (docs/billing.md)
+    ("billing.js", "text/javascript; charset=utf-8"),
+    ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
+    ("manifest.webmanifest", "application/manifest+json"),
+    ("icon.svg", "image/svg+xml"),
+    // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
+    ("wallpaper.jpg", "image/jpeg"),
+    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
+    ("agent.png", "image/png"),
+    // the operators' admin page (`/admin`)
+    ("admin.js", "text/javascript; charset=utf-8"),
+    ("admin.css", "text/css; charset=utf-8"),
+];
+
+/// A file the shell publishes, by its name, and its content type.
+pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
+    let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
+    Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
+}
+
 pub mod blessed;
 
 /// Every file the cell may read from its Static Assets, each once: the
-/// blessed and catalog templates'.
+/// blessed and catalog templates', the shell's and the agent docs.
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
+    let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain([&SKILL_MD, &GUIDE_MD]);
     let mut seen = std::collections::BTreeSet::new();
-    templates.flat_map(|t| t.files.iter()).filter(|f| seen.insert(f.sha256)).collect()
+    all.filter(|f| seen.insert(f.sha256)).collect()
 }
 
 /// Writes every file of `release_files` into `dir`, each named by its
@@ -124,9 +166,10 @@ pub(crate) mod tests {
     /// the build uploads and the repo holds, and a template's release is
     /// the hash of its paths and bytes it always was (a fragment's
     /// installed release, and its code's identity, do not change with
-    /// where the bytes live). Method: every file of every template read
-    /// from the repo, hashed and measured; each release made again as it
-    /// was made at run time; every file listed, in path order.
+    /// where the bytes live). Method: every file of every template, the
+    /// shell and the docs read from the repo, hashed and measured; each
+    /// release made again as it was made at run time; every file under
+    /// each directory listed, in path order.
     #[test]
     fn the_index_is_the_files() {
         let check = |what: &str, f: &File, bytes: &[u8]| {
@@ -150,13 +193,42 @@ pub(crate) mod tests {
             assert!(t.files.iter().all(|f| t.file(f.path) == Some(f)), "{}'s files are found by path", t.name);
             assert!(!t.files.iter().any(|f| f.path.starts_with("src/") || f.path.ends_with(".DS_Store")), "{} carries no sources", t.name);
         }
+        for f in SHELL {
+            check(&format!("cell/shell/{}", f.path), f, &std::fs::read(repo().join("cell/shell").join(f.path)).unwrap());
+            assert_eq!(shell(f.path), Some(f));
+        }
+        assert!(SHELL.windows(2).all(|w| w[0].path < w[1].path), "the shell's files are in path order");
+        check("cli/SKILL.md", &SKILL_MD, &std::fs::read(repo().join("cli/SKILL.md")).unwrap());
+        check("cli/GUIDE.md", &GUIDE_MD, &std::fs::read(repo().join("cli/GUIDE.md")).unwrap());
+        assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
+        let count = |dir: &str| walkdir(&repo().join(dir));
+        assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");
+    }
+
+    /// Goal: the shell publishes its own files and nothing else of
+    /// cell/shell/. Method: every file it names is indexed, with its type;
+    /// its pages, credits and licenses are indexed but not published.
+    #[test]
+    fn the_shell_publishes_its_files_alone() {
+        for (name, content_type) in SHELL_PUBLISHED {
+            assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
+        }
+        for name in ["index.html", "admin.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt"] {
+            assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
+        }
+        assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
+    }
+
+    fn walkdir(dir: &std::path::Path) -> usize {
+        let files = std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name() != ".DS_Store");
+        files.map(|e| if e.path().is_dir() { walkdir(&e.path()) } else { 1 }).sum()
     }
 
     /// Goal: what a cell build uploads is what the cell may read, once
-    /// each, and nothing else. Method: the blessed and catalog templates'
-    /// files are all there; a file two hold (the agent's image) is one; a
-    /// template the cell does not serve adds only what another it serves
-    /// holds too (notes' viewer is the brain's).
+    /// each, and nothing else. Method: the blessed and catalog templates',
+    /// the shell's and the docs' files are all there; a file two hold (the
+    /// agent's image) is one; a template the cell does not serve adds only
+    /// what another it serves holds too (notes' viewer is the brain's).
     #[test]
     fn the_release_files_are_what_the_cell_reads() {
         let files = release_files();
@@ -165,6 +237,7 @@ pub(crate) mod tests {
         for t in blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG) {
             assert!(t.files.iter().all(|f| hashes.contains(f.sha256)), "{}", t.name);
         }
+        assert!(SHELL.iter().chain([&SKILL_MD, &GUIDE_MD]).all(|f| hashes.contains(f.sha256)));
         assert!(NOTES.files.iter().any(|f| f.path == "app.mjs" && !hashes.contains(f.sha256)), "notes is the CLI's");
         assert!(NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).all(|f| hashes.contains(f.sha256)), "its viewer is the brain's");
         assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories"]);

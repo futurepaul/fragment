@@ -97,6 +97,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let script = shell_site(s, api, &session, &agent, "agent.js")?;
     s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), script.status);
+    release_assets(s, api, &session, &agent)?;
     let channels = shell(api, &session, "GET", &format!("/api/f/{agent}/channels"), None, &[])?;
     s.ok(
         "the template's channels run on it",
@@ -612,6 +613,68 @@ fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// A fragment's page, as the shell's person sees it once signed in there.
+/// The release's files (cell/src/assets.rs), read from the cell's Static
+/// Assets and served by the router alone, each as its route answered it
+/// when the cell held its bytes: the shell's with their type, validator and
+/// policy, a blessed template's site file as the release's bytes, and none
+/// of the assets at a path of its own (`run_worker_first`).
+fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Result<()> {
+    let js = fragment_templates::shell("shell.js").context("the release's shell.js")?;
+    let r = api.unsigned("GET", "/__shell/shell.js", None)?;
+    let tag = r.header("etag");
+    s.ok(
+        "the shell's script is the release's bytes, typed, revalidated by their hash, never sniffed",
+        r.status == 200
+            && r.bytes == js.bytes
+            && r.header("content-type") == "text/javascript; charset=utf-8"
+            && tag == format!("\"s-{}\"", &js.sha256[..20])
+            && r.header("cache-control") == "no-cache"
+            && r.header("x-content-type-options") == "nosniff",
+        format!("{} {} bytes, {} {tag}", r.status, r.bytes.len(), r.header("content-type")),
+    );
+    let again = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", tag)], ..Call::default() })?;
+    let wallpaper = fragment_templates::shell("wallpaper.jpg").context("the release's wallpaper")?;
+    let head = api.call(Call { method: "HEAD", url: format!("{}/__shell/wallpaper.jpg", api.base), ..Call::default() })?;
+    s.ok(
+        "asked again it is 304, and a HEAD names a file's size and type alone",
+        again.status == 304 && again.bytes.is_empty() && head.status == 200 && head.header("content-length") == wallpaper.size.to_string() && head.header("content-type") == "image/jpeg" && head.bytes.is_empty(),
+        format!("{} / HEAD {} {} {}", again.status, head.status, head.header("content-length"), head.header("content-type")),
+    );
+    let index = fragment_templates::shell("index.html").context("the release's shell page")?;
+    let page = api.unsigned("GET", "/", None)?;
+    s.ok(
+        "the shell's page is the release's, under the platform's policy",
+        page.status == 200 && page.bytes == index.bytes && page.header("content-security-policy").contains("frame-ancestors 'none'") && page.header("x-frame-options") == "DENY" && page.header("cache-control") == "no-store",
+        format!("{} {} bytes; {}", page.status, page.bytes.len(), page.header("content-security-policy")),
+    );
+    let paths = [
+        "/__shell/CREDITS.md".to_string(),
+        "/__shell/index.html".into(),
+        "/__shell/vendor/lucide-LICENSE".into(),
+        format!("/{}", js.sha256),
+        format!("/__shell/{}", js.sha256),
+        format!("/assets/{}", js.sha256),
+        format!("/build/assets/{}", js.sha256),
+    ];
+    let mut served = vec![];
+    for path in &paths {
+        let r = api.unsigned("GET", path, None)?;
+        if r.status != 404 || r.bytes == js.bytes {
+            served.push(format!("{path}: {}", r.status));
+        }
+    }
+    s.ok("nothing else of cell/shell/, and no asset by its name, is served (404)", served.is_empty(), served.join(", "));
+    let f = fragment_templates::blessed::site_file("agent", "site/agent.js").context("the release's agent.js")?;
+    let r = shell_site(s, api, session, agent, "agent.js")?;
+    let by_name = shell_site(s, api, session, agent, f.sha256)?;
+    s.ok(
+        "a blessed template's file is the release's bytes, and its fragment's host serves no asset by its name",
+        r.status == 200 && r.bytes == f.bytes && by_name.status == 404 && by_name.bytes != f.bytes,
+        format!("{} {} bytes / by its name {}", r.status, r.bytes.len(), by_name.status),
+    );
+    Ok(())
+}
+
 fn shell_site(_s: &Suite, api: &Api, session: &str, name: &str, path: &str) -> Result<Reply> {
     let token = super::signin::site_cookie(api, session, name)?;
     api.call(Call { method: "GET", url: api.site_url(name, path), cookie: Some(format!("fragment_site={token}")), ..Call::default() })

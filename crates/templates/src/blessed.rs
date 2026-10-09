@@ -247,11 +247,12 @@ mod tests {
     }
 
     /// Goal: every agent's image is one file (cell/shell/CREDITS.md).
-    /// Method: the chat's is the agent's: one asset.
+    /// Method: the chat's and the shell's are the agent's: one asset.
     #[test]
     fn the_agent_image_is_one_file() {
         let (chat, agent) = (site_file("chat", "site/agent.png").expect("the chat's"), site_file("agent", "site/agent.png").expect("the agent's"));
         assert_eq!(chat.sha256, agent.sha256, "one asset");
+        assert_eq!(crate::shell("agent.png").map(|f| f.sha256), Some(agent.sha256), "the shell's too");
     }
 
     /// Goal: a brain (decision 30) is the notes viewer and the brain's own
