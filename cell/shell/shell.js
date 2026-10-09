@@ -689,10 +689,20 @@ function pickName() {
   const free = NAMES.filter((n) => !taken.has(n));
   return free.length ? free[Math.floor(Math.random() * free.length)] : `Unit ${state.fragments.length + 1}`;
 }
+// The agent speaks first: a routine on its own `tasks`, which its computer
+// takes as a turn in its chat asked by its owner (docs/chat-records.md,
+// `tasks`), so its chat opens with its hello and no message of the
+// person's. Posted once it is in the chat, where its turn posts; its id
+// makes a retry the same record.
+const hello = (agent, chat) =>
+  api("POST", `/api/f/${agent}/channels/tasks`, {
+    id: "hello",
+    body: { kind: "routine", chat, text: "You were just made, and this is your chat with the person you work for. Say hello in a sentence or two: who you are, and what you will do for them (your SOUL.md). Start no work until they answer." },
+  });
 // Through public APIs only: the agent fragment (the agent template, its job
 // in SOUL.md), assigned to the person's computer; a chat with it (the chat
-// template), the agent added (the platform wakes its computer); and the job
-// as the person's first message, which the agent answers.
+// template), the agent added (the platform wakes its computer); and its
+// hello.
 async function makeAgent(job, chosen) {
   const name = chosen?.trim() || pickName();
   const label = freeLabel(slug(name));
@@ -708,8 +718,10 @@ async function makeAgent(job, chosen) {
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
   const chat = await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: name });
-  if (id) await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
-  await api("POST", `/api/f/${chat.name}/channels/chat`, { id: "job", body: { text: job.trim() } });
+  if (id) {
+    await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
+    await hello(agent.name, chat.name);
+  }
   return chat.name;
 }
 const dialog = $("new-agent-dialog");
@@ -1683,8 +1695,9 @@ async function firstAgentOnceSeated() {
 }
 // The first agent (Paul, 2026-10-03): no question asked. It is the
 // person's default agent, in charge, made with its computer and its chat
-// while this screen waits, so the chat opens with it ready and the first
-// message is answered at once, not after a computer's first start.
+// while this screen waits, so the chat opens with it ready, saying hello,
+// and the first message is answered at once, not after a computer's first
+// start.
 const SETUP_WAIT_MS = 4 * 60_000;
 const firstSoul = (name, owner) => `You are ${name}, ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
 // Each step reuses what an earlier try made: a retry picks up where it stopped.
@@ -1719,6 +1732,7 @@ async function defaultAgent(step) {
     (await api("POST", "/api/fragments", { label: chatLabel, template: "chat", title })).name;
   // adding it to its chat is what wakes the computer (the platform's `joined`)
   await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
+  await hello(agent.name, chatName);
   api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
   return { chat: chatName, id, computer: computer.computer };
 }

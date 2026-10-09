@@ -376,6 +376,13 @@ the computer; the agent takes it as a turn in `chat`, asked by its
 owner. One older than an hour when its computer first reads it is
 skipped, as cron skips a missed run.
 
+**The agent's hello.** The shell posts one as its owner, with the id
+`hello`, once it has made an agent and added it to its chat (the first
+run's default agent too): asked to say hello there, who it is and what
+it will do (its job is its `SOUL.md`), it speaks first, and the chat
+holds no message of its person's before it (cell/shell/shell.js,
+`hello`).
+
 Only the agent fragment itself (its cron, the platform's `joined`: a
 principal that is no identity) and the agent's owner ask anything on
 `tasks`. Any other poster's record is passed over, whatever it says:

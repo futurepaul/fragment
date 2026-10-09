@@ -603,7 +603,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let awake = computers.body["computers"][0]["phase"] == "awake";
     let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"));
     s.ok("as it opens, its computer is awake and the agent follows the chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
+    let first_id = agent_ids(api, &session, &[&first_label])?.remove(0);
+    let (hello, seen) = said_hello(s, api, &session, &chat, &first_id, agent_wait);
+    s.ok("the agent speaks first: its hello, and no message of the person's before it", hello, &seen);
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
+    let _ = s.eventually(wait, || b.eval_in_frame(&page, &host, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
+    let _ = b.screenshot(&page, &shots.join("first-hello.png"));
     // the person's first message, answered by an agent already up
     let t0 = std::time::Instant::now();
     let mut typed = false;
@@ -639,8 +644,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // its row may show before the dialog closes (the list is read again as it is made)
     let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2 && !document.getElementById('new-agent-dialog').open", agent_wait);
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
-    let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, "reader")?), None, &[])?;
+    let reader = own_named(api, &session, "reader")?;
+    let settings = shell(api, &session, "GET", &format!("/api/f/{reader}/file?path=agent.json"), None, &[])?;
     s.ok("an agent made from the sidebar also names the cheap tier", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
+    // its job is its SOUL.md, never a message of the person's: it says hello
+    let soul = shell(api, &session, "GET", &format!("/api/f/{reader}/file?path=SOUL.md"), None, &[])?;
+    let reader_chat = own_named(api, &session, "reader-chat")?;
+    let reader_id = agent_ids(api, &session, &["reader"])?.remove(0);
+    let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
+    s.ok("its job is its SOUL.md, not the person's first message: the agent speaks first, its hello", soul.text == "keep my reading list\n" && hello, json!({ "soul": soul.text, "chat": seen }));
+    let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
+    let _ = b.screenshot(&page, &shots.join("new-agent-hello.png"));
 
     // both agents in one chat, search, and archiving, as the person uses them
     let first_title = row.as_str().unwrap_or("").to_string();
@@ -882,7 +896,8 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    let _ = b.screenshot(page, &s.dir("shell-ui").join("desktop-connections.png"));
+    // the lane's pictures so far are there: `dir` would start it afresh
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections.png"));
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
@@ -1191,6 +1206,22 @@ struct Person<'a> {
 /// A JS string literal.
 fn js(s: &str) -> String {
     serde_json::to_string(s).expect("a string encodes")
+}
+
+/// Whether `agent` speaks first in `chat` within `wait`: a reply of the
+/// turn the shell's routine on its `tasks` starts (the stub echoes it as
+/// `[your routine]`), and no one else's record there. With what the chat
+/// holds, for the check's note.
+fn said_hello(s: &Suite, api: &Api, session: &str, chat: &str, agent: &str, wait: std::time::Duration) -> (bool, Value) {
+    let mut seen = Vec::new();
+    let hello = s.eventually(wait, || {
+        seen = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=1000"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default();
+        !seen.is_empty() && seen.iter().all(|r| r["principal"] == agent) && seen.iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: [your routine] ")))
+    });
+    (hello, seen.iter().map(|r| json!({ "principal": r["principal"], "body": r["body"] })).collect())
 }
 
 /// The replies on a chat's `chat` from `agent` whose text holds `said`.
