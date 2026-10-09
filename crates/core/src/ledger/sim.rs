@@ -300,7 +300,7 @@ impl Sim {
             batches: Vec::new(),
             serial: 0,
             seat_seq: 0,
-            book_version: 1,
+            book_version: crate::price::DEFAULT_BOOK_VERSION,
             stats: Stats::default(),
         };
         // most runs start as a seat; the rest find their plan as they go

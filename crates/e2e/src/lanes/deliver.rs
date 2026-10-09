@@ -272,8 +272,14 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     s.ai.fail_next(&[503]);
+    let calls = s.ai.calls().len();
     let r = run("t2", "summarize", json!({ "text": "again" }))?;
-    s.ok("the model's 503 is retried", r["output"]["text"] == "echo: again", &r);
+    let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
+    s.ok(
+        "a text step whose model answers 503 is answered by the fallback model, once, and costs the fallback's call",
+        r["output"]["text"] == "echo: again" && r["output"]["model"] == "@cf/deepseek-ai/deepseek-v4-flash-0731" && tried == ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4-flash-0731"] && cost(&r) > 0,
+        json!({ "run": r, "tried": tried }),
+    );
     s.ai.fail_next(&[503]);
     let r = run("i3", "draw", json!({ "prompt": "a harbour at dusk", "path": "art/dusk.jpg" }))?;
     s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);

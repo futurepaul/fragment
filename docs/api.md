@@ -1135,8 +1135,9 @@ The steps:
 - `job.ai.video(…)` is refused, saying "video steps are off until they
   run on Cloudflare" (the debt ledger); nothing is reserved or called.
 
-A model's 429 or 5xx is retried; other refusals fail the step with the
-model's message. A run answers `costMicros`: what its paid steps were
+A model's 429 or 5xx is answered by the fallback model (Models, below);
+when the fallback fails too, the step is retried. Other refusals fail
+the step with the model's message. A run answers `costMicros`: what its paid steps were
 charged (none when nothing was).
 
 ### Models (docs/cloudflare-v1.md, decision 23)
@@ -1154,6 +1155,17 @@ config's `vision_model`, GLM-5.3 Flash unless named, one the price book
 prices), for a runtime's calls about an image (Hermes' screenshots:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
+
+A tier's call whose model fails before answering anything (not reached,
+429, or a 5xx) is made once more, the same, on the deployment's fallback
+model (its config's `fallback_model`, DeepSeek V4 Flash,
+`@cf/deepseek-ai/deepseek-v4-flash-0731`, unless named; one the price
+book prices), and its answer is the call's: settled from its usage at
+its prices, under the call's one hold. An answer that began is final; a
+refusal of the request (another 4xx) is the call's; when the fallback
+fails too, its failure is the call's, released, after two tries in all.
+`vision` and transcriptions have no fallback. A job's text step falls
+back the same, and its output's `model` names the model that answered.
 
 | method & path | who | body → answer |
 | --- | --- | --- |

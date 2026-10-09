@@ -400,6 +400,23 @@ speaking Cloudflare's APIs) returns once this product works.
     Unified Billing offers DeepSeek V4 Pro alone, and AI Gateway's DeepSeek
     provider takes our own key, which this decision declines. Paul may
     revisit that.
+
+    **A fallback model** (Paul, 2026-10-08: "we def need fallback
+    models"; on 2026-10-09 Workers AI answered every call to GLM-5.3
+    Flash from one agent with 502 "could not route request to AI model",
+    then 500, for five minutes, and the agent's turn gave up). A tier's
+    call whose model fails before answering anything (not reached, 429, or
+    a 5xx) is made once more, the same, on the deployment's fallback model
+    (`fallback_model` in its config, `FRAGMENT_FALLBACK_MODEL`; DeepSeek
+    V4 Flash, `@cf/deepseek-ai/deepseek-v4-flash-0731`, unless named; one
+    the price book prices). Errors only: no cut-off on a slow first byte,
+    and no race (the fallback is called only after the model failed). An
+    answer that began is final, the fallback's failure is the call's, and
+    there is no third try. The call keeps its one hold and is settled
+    from the fallback's usage at its prices. A job's text step falls back
+    the same; `vision` and transcriptions do not (DeepSeek reads no
+    images). DeepSeek runs on Workers AI too, so this survives a model's
+    failure, not Workers AI's; GLM-5.3 Flash stays the cheap tier's.
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;

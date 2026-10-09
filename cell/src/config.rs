@@ -149,8 +149,10 @@ pub struct Config {
     /// `secrets_store::operator_key` names it, and each priced, which is the
     /// price book's `keys`) and people's own keys, each with its hosts, its
     /// placements and its environment variables. None by default.
-    /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults' 1) grows with
-    /// every change to a key's price, or ledgers made before keep their book.
+    /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults',
+    /// `fragment_core::price::DEFAULT_BOOK_VERSION`; the book's is the higher
+    /// of the two) grows with every change to a key's price, or ledgers made
+    /// before keep their book.
     pub providers: fragment_core::catalog::Catalog,
     pub price_book_version: u32,
     /// `FRAGMENT_VISION_MODEL` (the deploy config's `vision_model`): the
@@ -159,6 +161,12 @@ pub struct Config {
     /// Flash unless named; one the price book does not price is refused
     /// (`fragment_core::models::vision_model`), at the deploy and here.
     pub vision_model: String,
+    /// `FRAGMENT_FALLBACK_MODEL` (the deploy config's `fallback_model`):
+    /// the model a tier's call is made on once more when its own fails
+    /// before answering (`fragment_core::models::Tries`). DeepSeek V4 Flash
+    /// unless named; one the price book does not price is refused, at the
+    /// deploy and here.
+    pub fallback_model: String,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
@@ -309,6 +317,8 @@ impl Config {
                 .unwrap_or(1),
             vision_model: fragment_core::models::vision_model(var(env, "FRAGMENT_VISION_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
                 .unwrap_or_else(|e| panic!("FRAGMENT_VISION_MODEL: {e}")),
+            fallback_model: fragment_core::models::fallback_model(var(env, "FRAGMENT_FALLBACK_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
+                .unwrap_or_else(|e| panic!("FRAGMENT_FALLBACK_MODEL: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
