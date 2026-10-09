@@ -3,8 +3,8 @@
 //! computer it runs on (runs_on.rs). Records go out through the delivery
 //! outbox and queue (deliveries.rs) as `{type: "record", fragment,
 //! channel, record}` (`fragment_proto::Delivery`), unsigned: the URL is
-//! the subscriber's capability. A member's subscriptions end with its
-//! membership.
+//! the subscriber's capability; a computer's wake goes from the outbox to
+//! the computer itself. A member's subscriptions end with its membership.
 
 use fragment_core::{egress, npub};
 use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
@@ -105,8 +105,8 @@ impl FragmentCell {
     /// A new record's deliveries, one per subscription to its channel,
     /// written to the delivery outbox in the same step as the record (the
     /// caller appends, then calls this, with no await between; channels.rs
-    /// `published`). Answers whether there are any to drain.
-    pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<bool> {
+    /// `published`).
+    pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<()> {
         self.test_countdown(MetaKey::TestFailOutbox, "the record's outbox write failed after its append")?;
         // a computer is never woken by what its own agents post (its poster
         // holds a wake subscription to the same computer): it was awake to
@@ -114,10 +114,10 @@ impl FragmentCell {
         // fragment's own key (its cron's, the platform's records) is shown
         // as its npub, which on an agent's fragment is its agent's identity,
         // yet it is no agent posting, and wakes it.
-        let rows = self.rows(
+        self.exec(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? \
              AND NOT (url LIKE 'computer:%' AND url IN (SELECT url FROM subs WHERE url LIKE 'computer:%' \
-               AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))) RETURNING id",
+               AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))",
             vec![
                 SqlStorageValue::Integer(record.seq),
                 SqlStorageValue::Integer(crate::js::now_ms()),
@@ -129,8 +129,7 @@ impl FragmentCell {
         self.exec(
             "UPDATE records SET outboxed = 1 WHERE channel = ? AND seq = ?",
             vec![record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
-        )?;
-        Ok(!rows.is_empty())
+        )
     }
 
     /// Whether a record's deliveries were written (`outbox_record`).

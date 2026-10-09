@@ -110,10 +110,14 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "announce", "j2", json!({ "who": "*", "title": "after the drop" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok("then only the live subscription is pushed to", run["output"]["queued"] == 1, &run);
+    // that push lands first (its run may finish before it does): the next
+    // count is the flaky push's alone
+    s.eventually(wait, || s.push.received("a").iter().any(|p| p["title"] == "after the drop"));
     s.push.fail("a", 2);
     let before = s.push.received("a").len();
     api.op(&owner, &name, "notify_all", "n3", json!({ "title": "flaky" }))?;
-    s.ok("a push service's 503 is retried until it lands", s.eventually(Duration::from_secs(60), || s.push.received("a").len() == before + 2), "");
+    let landed = s.eventually(Duration::from_secs(60), || s.push.received("a").len() == before + 1);
+    s.ok("a push service's 503 is retried until it lands", landed && s.push.received("a").last().is_some_and(|p| p["title"] == "flaky"), format!("{:?}", s.push.received("a")));
 
     // the outbox: a record or a push whose queue send fails is still
     // delivered, since it was written down with what caused it

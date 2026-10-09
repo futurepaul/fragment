@@ -189,8 +189,14 @@ pub struct FragmentCell {
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
     /// A record woke an idle search cursor, and the alarm is not armed for
-    /// it yet (search.rs `log_search`; channels.rs `published` arms it).
+    /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
+    /// What a write leaves for after its answer is asked for, and has not
+    /// begun (`later`).
+    pub(crate) later_asked: Cell<bool>,
+    /// Serializes `launch_queued`: two at once would each start a queued
+    /// run's Workflow and say so.
+    pub(crate) launching: futures_util::lock::Mutex<()>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
 }
@@ -220,6 +226,8 @@ impl DurableObject for FragmentCell {
             standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
             search_woke: Cell::new(false),
+            later_asked: Cell::new(false),
+            launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
         }
     }
@@ -1308,6 +1316,54 @@ impl FragmentCell {
     /// Arms the alarm for the earliest due work, or `at` if that is sooner.
     pub(crate) async fn schedule_by(&self, at: i64) -> CellResult<()> {
         self.arm(Some(at), ALARM_SOON_MS).await
+    }
+
+    /// What a write leaves for after its answer (`after_answer`): its
+    /// records' deliveries, the runs it queued, the alarm for search. Asked
+    /// for any number of times before it begins, it runs once.
+    pub(crate) fn later(&self) {
+        if self.later_asked.replace(true) {
+            return;
+        }
+        // SAFETY: the reasoning of worker-macros' own handlers, which hand
+        // the runtime `&'static self` futures: the object is never
+        // destroyed while a promise it gave the runtime runs, and
+        // `waitUntil` holds this one until it settles.
+        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
+        self.state.wait_until(cell.after_answer());
+    }
+
+    /// After the answer: the delivery outbox drained (a computer's wakes
+    /// among it), queued runs' Workflows started, and the alarm armed for a
+    /// search cursor a record woke, none of which the answer waits on. Each
+    /// is the alarm's too (the outbox's rows and a woken cursor stay due,
+    /// queued runs stay queued), so whatever this cuts short or fails is
+    /// late, never lost. One line says where it waited, when it did anything.
+    async fn after_answer(&self) {
+        // a turn of its own: written in the answer's, its writes would join
+        // the answer's commit, and the answer would wait on them
+        worker::Delay::from(std::time::Duration::ZERO).await;
+        // a write from here on asks again: this run may read before it
+        self.later_asked.set(false);
+        let mut laps = js::Laps::start();
+        let searched = self.search_woke.replace(false);
+        if searched {
+            if let Err(e) = self.schedule().await {
+                console_error!("{}", json!({ "event": "search.arm-failed", "code": e.code, "message": e.message }));
+            }
+        }
+        laps.lap("search");
+        // side by side: a wake waits on its computer's start, and a launch
+        // waits on no wake
+        let t0 = js::now_ms();
+        let drain = async { (self.drain_deliveries().await, js::now_ms() - t0) };
+        let launch = async { (self.launch_queued().await, js::now_ms() - t0) };
+        let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
+        laps.took("drain", drain_ms);
+        laps.took("launch", launch_ms);
+        if searched || drained.queued + drained.woken + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        }
     }
 
     /// Arms the alarm for the earliest due work (or `also`), but no sooner

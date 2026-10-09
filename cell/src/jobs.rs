@@ -434,22 +434,25 @@ impl FragmentCell {
         Ok(format!("{}-a{attempt}", self.run_key(run)?))
     }
 
-    /// Starts the Workflows of queued runs. A failure leaves them queued for
-    /// the alarm to try again.
-    pub(crate) async fn launch_queued(&self) {
+    /// Starts the Workflows of queued runs, one launcher at a time. A
+    /// failure leaves them queued for the alarm to try again. Answers how
+    /// many it started.
+    pub(crate) async fn launch_queued(&self) -> usize {
+        let _one = self.launching.lock().await;
         let Ok(rows) =
             self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
         else {
-            return;
+            return 0;
         };
         // most calls queue nothing: they read no more than this
         if rows.is_empty() {
-            return;
+            return 0;
         }
-        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else { return };
+        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else { return 0 };
+        let mut started = 0;
         for run in rows.iter().map(run_row) {
             let (id, attempt) = (run.id, run.attempt);
-            let Ok(instance) = self.instance_id(id, attempt) else { return };
+            let Ok(instance) = self.instance_id(id, attempt) else { return started };
             let params = json!({ "fragment": name, "incarnation": incarnation, "run": id, "attempt": attempt });
             match js::jobs_create(self.env.as_ref(), &instance, &params).await {
                 Ok(()) => {
@@ -458,14 +461,16 @@ impl FragmentCell {
                         vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
                     );
                     self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt }));
+                    started += 1;
                 }
                 Err(e) => {
                     self.event("run.launch-failed", &format!("run #{id}: its Workflow did not start: {}", e.message), json!({ "run": id }));
                     let _ = self.schedule().await;
-                    return;
+                    return started;
                 }
             }
         }
+        started
     }
 
     /// The run a Workflow callback is for, if it is still that attempt and
@@ -524,7 +529,11 @@ impl FragmentCell {
                     "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND status = 'held' AND finished_at > ?",
                     vec![op.into(), SqlStorageValue::Integer((now - limits::AUTO_PAUSE_WINDOW_MS).max(since))],
                 )?;
-                if held >= limits::AUTO_PAUSE_HELD {
+                // only installed code says an operation is gone, and one it
+                // no longer has is paused no more (`forget_undeclared_pauses`):
+                // a run of it held after the install pauses nothing
+                let gone = matches!(self.declared(op), Err(e) if e.code == ErrorCode::UnknownOperation);
+                if held >= limits::AUTO_PAUSE_HELD && !gone {
                     let why = format!("{held} held runs in {} minutes; last: {}", limits::AUTO_PAUSE_WINDOW_MS / 60_000, clip(&e));
                     self.set_paused(op, true, "auto", &why)?;
                 }
@@ -698,7 +707,7 @@ impl FragmentCell {
             self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
             let summary = format!("{} run #{id}: the app's code changed under attempt {attempt}; attempt {} starts on the new code", run.op, attempt + 1);
             self.event("run.restarted", &summary, json!({ "run": id, "attempt": attempt + 1 }));
-            self.launch_queued().await;
+            self.later();
         }
         Ok(json!({ "stop": true }))
     }
@@ -812,7 +821,7 @@ impl FragmentCell {
             // lost after the step ran and its answer was kept: the Workflow tries it again
             self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
         }
-        self.launch_queued().await;
+        self.later();
         Ok(json!({ "kept": index }))
     }
 
@@ -824,7 +833,7 @@ impl FragmentCell {
             Step::Publish { channel, kind, body } => self.step_publish(run, index, &channel, &kind, body).await,
             Step::Push { who, payload } => {
                 let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
-                match self.send_push(&key, &who, &payload).await {
+                match self.send_push(&key, &who, &payload) {
                     Ok(n) => Ok(json!({ "queued": n })),
                     Err(e) if e.code == ErrorCode::HostFailed => Err(StepFail::Retry(e.message)),
                     Err(e) => Err(permanent(e.message)),
@@ -971,7 +980,7 @@ impl FragmentCell {
         fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
-        self.published(&record, appended, run.depth + 1).await.map_err(retry)?;
+        self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
 
@@ -1256,7 +1265,7 @@ impl FragmentCell {
         let by = npub::display(self.caller_id(caller)?);
         let op = row["op"].as_str().expect("runs.op is TEXT NOT NULL");
         self.event("run.replayed", &format!("{op} run #{} by {by}", body.run), json!({ "run": body.run }));
-        self.launch_queued().await;
+        self.later();
         json_response(&json!({ "ok": true, "run": body.run, "attempt": row["attempt"] }))
     }
 
@@ -1325,8 +1334,7 @@ impl FragmentCell {
         // unkeyed: a sender's retry is a new record, so a failure of its
         // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
-        let runs = self.published(&record, true, hops).await?;
-        self.launch_queued().await;
+        let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }
 

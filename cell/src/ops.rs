@@ -234,7 +234,8 @@ impl FragmentCell {
         let role = decide(facts.visibility, standing, purpose, decl.role)?;
         // a mutation or a job writes: past its owner's overdraft the fragment
         // takes none, and its queries still answer
-        if decl.kind != OpKind::Query {
+        let writes = decl.kind != OpKind::Query;
+        if writes {
             self.writable().await?;
         }
         // Members act with their own role, which is never `public`: only
@@ -248,7 +249,10 @@ impl FragmentCell {
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
         let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
-        self.launch_queued().await;
+        // a job's run, queued, starts after the answer; a query queues nothing
+        if writes {
+            self.later();
+        }
         Ok(result)
     }
 

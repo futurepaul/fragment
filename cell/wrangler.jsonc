@@ -28,7 +28,8 @@
       { "binding": "METERS", "queue": "fragment-ledger" }
     ],
     "consumers": [
-      { "queue": "fragment-deliveries", "max_batch_size": 20, "max_batch_timeout": 1, "max_retries": 5, "dead_letter_queue": "fragment-deliveries-dead" },
+      // a delivery waits for no batch to fill (0: the least Queues takes)
+      { "queue": "fragment-deliveries", "max_batch_size": 20, "max_batch_timeout": 0, "max_retries": 5, "dead_letter_queue": "fragment-deliveries-dead" },
       { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 },
       // a fragment sends a batch again until it is acknowledged: no dead letters
       { "queue": "fragment-ledger", "max_batch_size": 20, "max_batch_timeout": 1, "max_retries": 100 }

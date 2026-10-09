@@ -1071,16 +1071,21 @@ there, or opens one.
 
 Every delivery is first written to the fragment's delivery outbox with
 what caused it (a record's deliveries in the same turn as the record, a
-push as it is accepted), then built whole by the fragment (a push is
-encrypted for its browser, RFC 8291, and signed with the fragment's VAPID
-key, RFC 8292) and put on the `fragment-deliveries` queue; it leaves the
-outbox once the queue has it. One the queue does not take waits and is
-tried again from the fragment's alarm (`delivery.deferred`), up to 20
-times (then `delivery.failed`), so delivery is at least once: a record
-subscriber dedupes by channel and `seq`. From the queue: a 429, 5xx, or
-network failure is retried with a growing wait; a push service's 404 or
-410 drops the subscription (`push.gone`); a delivery out of retries is
-reported (`delivery.failed`).
+push as it is accepted), then, once the write has answered, built whole
+by the fragment (a push is encrypted for its browser, RFC 8291, and
+signed with the fragment's VAPID key, RFC 8292) and put on the
+`fragment-deliveries` queue; it leaves the outbox once the queue has it.
+A computer's wake (docs/computers.md) goes from the outbox to the
+computer itself, never through the queue, and leaves it once the
+computer answers. One the queue does not take, or a wake that fails for
+now, waits and is tried again from the fragment's alarm
+(`delivery.deferred`), up to 20 times (then `delivery.failed`), so
+delivery is at least once: a record subscriber dedupes by channel and
+`seq`. From the queue: a 429, 5xx, or network failure is retried with a
+growing wait; a push service's 404 or 410 drops the subscription
+(`push.gone`); a delivery out of retries is reported
+(`delivery.failed`), as is a wake its computer refuses for good (it
+won't wake, or its owner cannot pay).
 
 ### AI
 
