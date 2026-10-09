@@ -63,6 +63,18 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.eventually(Duration::from_secs(30), || api.op(&owner, &paid, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
+    // A held run bought its first decision, but the second was refused.
+    // Restart and replay must reuse the first decision's durable receipt.
+    let decider = s.named(&api, &owner, "restart-decide")?;
+    let dc = s.create(&api, &owner, &decider)?;
+    ship(s, &dc, LEDGER_APP, LEDGER_JSON);
+    let decision = json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is it a snack?" } } });
+    s.ai.pass_next(1);
+    s.ai.fail_next(&[400]);
+    let r = api.op(&owner, &decider, "decide_twice", "before", decision.clone())?;
+    let decision_held = jobs::settle(&api, &owner, &decider, jobs::started(&r), &["held"], Duration::from_secs(40));
+    anyhow::ensure!(decision_held["status"] == "held", "decision restart setup: {decision_held}");
+    let decisions_before = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::MODEL).count();
     // an operator's grant and the fragment's cap: commands the ledger keeps
     let op_session = api.sign_in("operator@e2e.test")?;
     let op_id = api.approve(&op_session, &s.operator)?.body["id"].as_str().unwrap_or("").to_string();
@@ -104,6 +116,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start(false)?;
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
+    api.signed(&owner, "POST", &format!("/api/f/{decider}/replay"), Some(&json!({ "run": decision_held["id"] })))?;
+    let decision_done = jobs::settle(&api, &owner, &decider, decision_held["id"].as_i64().unwrap_or(0), &["succeeded", "held"], Duration::from_secs(40));
+    let decisions_after = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::MODEL).count();
+    s.ok("after a restart a replay reuses the first paid decision and buys only the previously refused second", decision_done["status"] == "succeeded" && decision_done["output"]["one"] == decision_done["output"]["two"] && decisions_after == decisions_before + 1, &decision_done);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
     let r = api.status(&member, &name)?;
     s.ok("after a restart members survive", r.status == 200 && r.body["role"] == "editor", &r);
@@ -194,8 +210,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "delete setup: {r}");
     let left = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "ended" })))?;
     let lists_left = left.body["ended"][0]["lists"].as_i64().unwrap_or(0);
+    s.ai.decide_next(&[json!({ "answers": {}, "usage": { "input_tokens": 300 } })]);
+    let r = api.op(&owner, &decider, "decide", "bad-before-crash", decision)?;
+    let bad_decision = jobs::settle(&api, &owner, &decider, jobs::started(&r), &["held"], Duration::from_secs(40));
+    let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::MODEL).count();
     s.crash()?;
     let api = s.start(false)?;
+    api.signed(&owner, "POST", &format!("/api/f/{decider}/replay"), Some(&json!({ "run": bad_decision["id"] })))?;
+    let bad_again = jobs::settle(&api, &owner, &decider, bad_decision["id"].as_i64().unwrap_or(0), &["held"], Duration::from_secs(40));
+    s.ok("after a crash a malformed paid decision remains rejected without another vendor call", bad_again["error"] == bad_decision["error"] && bad_again["status"] == "held" && s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::MODEL).count() == calls_before_crash, &bad_again);
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("after a crash an acknowledged mutation replays", r.body["replayed"] == true, &r);
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");

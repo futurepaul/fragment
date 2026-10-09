@@ -12,6 +12,7 @@ pub mod codestorage;
 pub mod computer;
 pub mod cron;
 pub mod ddl;
+pub mod decide;
 pub mod effects;
 pub mod ended;
 pub mod egress;

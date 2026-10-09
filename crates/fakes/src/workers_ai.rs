@@ -19,6 +19,10 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! The decision model (`DECISION_MODEL`, Clef-flash) returns System One
+//! answers and input usage. Its default chooses the first option/level;
+//! `decide_next` scripts raw answers for tests, never an accuracy claim.
+//!
 //! The transcription model (`TRANSCRIBE_MODEL`, Whisper) answers as its
 //! catalog's output schema says, `{text, word_count, transcription_info:
 //! {language, duration, …}, segments, vtt}`, from the audio's own bytes: a
@@ -63,6 +67,8 @@ use crate::http::{Handler, Request, Response, Server};
 pub use fragment_core::media::IMAGE_MODEL;
 /// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
 pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
+/// Clef-flash, a typed-decision vendor boundary, not grocery accuracy proof.
+pub use fragment_core::decide::MODEL as DECISION_MODEL;
 /// What Whisper hears in audio that carries no words of `spoken_wav`'s.
 pub const NO_WORDS: &str = "(no words)";
 
@@ -139,6 +145,8 @@ struct State {
     said: VecDeque<String>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
+    /// Raw System One answers queued by tests, including malformed ones.
+    decisions: VecDeque<Value>,
     /// The next streamed answers end before their usage, in order.
     breaks: VecDeque<bool>,
     delays: VecDeque<u64>,
@@ -540,6 +548,34 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
 }
 
+/// The default is deliberately mechanical: the first option or level,
+/// and 0.5 for a predicate. Tests supply semantic answers explicitly.
+fn decision_answer(s: &mut State, input: &Value, log_id: &str) -> Response {
+    let answer = s.decisions.pop_front().unwrap_or_else(|| {
+        let mut answers = serde_json::Map::new();
+        for (id, q) in input["questions"].as_object().into_iter().flatten() {
+            let a = match q["type"].as_str() {
+                Some("noul") => json!({ "type": "noul", "noul": 0.5 }),
+                Some("choice") => {
+                    let keys: Vec<&String> = q["criteria"].as_object().into_iter().flatten().map(|(k, _)| k).collect();
+                    let ps: serde_json::Map<String, Value> = keys.iter().enumerate().map(|(i, k)| ((*k).clone(), json!(if i == 0 { 1.0 } else { 0.0 }))).collect();
+                    json!({ "type": "choice", "choice": keys.first(), "probabilities": ps, "confidence": 1.0 })
+                },
+                Some("score") => {
+                    let ps: serde_json::Map<String, Value> = (0..q["criteria"].as_array().map_or(0, Vec::len)).map(|i| (i.to_string(), json!(if i == 0 { 1.0 } else { 0.0 }))).collect();
+                    json!({ "type": "score", "score": 0.0, "probabilities": ps, "confidence": 1.0 })
+                },
+                _ => Value::Null,
+            };
+            answers.insert(id.clone(), a);
+        }
+        let used = s.usage.pop_front();
+        let tokens = used.map_or((input.to_string().len() as u64).div_ceil(4), |u| u.prompt);
+        json!({ "model": "clef-flash", "answers": answers, "usage": { "input_tokens": tokens, "output_tokens": 0 } })
+    });
+    Response::json(200, &answer).with_header("cf-aig-log-id", log_id)
+}
+
 fn answer(s: &mut State, req: &Request) -> Response {
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
@@ -563,6 +599,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     }
     if model == TRANSCRIBE_MODEL {
         return transcription_answer(&body, &log_id);
+    }
+    if model == DECISION_MODEL {
+        return decision_answer(s, &body, &log_id);
     }
     if let Some(why) = image_refusal(&model, &body) {
         return problem(400, &why);
@@ -652,6 +691,7 @@ impl WorkersAi {
         let mut s = self.state();
         s.said.clear();
         s.usage.clear();
+        s.decisions.clear();
         s.breaks.clear();
         s.delays.clear();
     }
@@ -664,6 +704,12 @@ impl WorkersAi {
     /// What the next answers report they used, in order.
     pub fn set_usage(&self, used: &[Used]) {
         self.state().usage.extend(used.iter().copied());
+    }
+
+    /// Supply the decision model's raw response, rather than claiming the
+    /// deterministic fake can classify real input.
+    pub fn decide_next(&self, answers: &[Value]) {
+        self.state().decisions.extend(answers.iter().cloned());
     }
 
     /// The next streamed answer ends before its usage (a dropped stream).

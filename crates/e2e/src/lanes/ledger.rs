@@ -414,6 +414,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("agents are stopped: the credit is used up")) && s.ai.calls().len() == calls,
         &run,
     );
+    let decision = json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is it a snack?" } } });
+    let r = api.op(&owner, &name, "decide", "decision-zero", decision.clone())?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("at zero a decision is refused before its vendor call", run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("credit is used up")) && s.ai.calls().len() == calls, &run);
     let hand = Keys::generate();
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
@@ -532,6 +536,12 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         theirs["status"] == "held" && theirs["error"].as_str().is_some_and(|e| e.contains("cap this month")) && s.ai.calls().len() == calls,
         &theirs,
     );
+    let r = api.op(&visitor, &name, "decide", "decision-visitor-cap", decision.clone())?;
+    let theirs = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("past its cap, a visitor's decision is refused before its vendor call", theirs["status"] == "held" && theirs["error"].as_str().is_some_and(|e| e.contains("cap this month")) && s.ai.calls().len() == calls, &theirs);
+    let r = api.op(&owner, &name, "decide", "decision-owner-cap", decision)?;
+    let ours = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("the owner's decision can still run past their fragment's cap", ours["status"] == "succeeded", &ours);
     let r = api.op(&owner, &name, "ask", "o-1", json!({ "text": "from its owner" }))?;
     let ours = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok("while its owner's goes on", ours["status"] == "succeeded" && ours["output"]["text"] == "echo: from its owner", &ours);

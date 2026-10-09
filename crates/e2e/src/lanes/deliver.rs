@@ -296,7 +296,83 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
         &r,
     );
+    decisions(s, api, &owner, &name, wait)?;
     calories(s, api, wait)
+}
+
+/// Vendor-boundary fixtures prove transport and typed answers, not the
+/// real model's accuracy on groceries. That needs a hosted evaluation.
+fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, wait: Duration) -> Result<()> {
+    use fragment_core::{decide, price::{PriceBook, Usage}};
+    use super::ledger::entries;
+    let owner_id = api.identity(owner)?;
+    let run = |id: &str, input: Value| -> Result<Value> {
+        let r = api.op(owner, name, "decide", id, input)?;
+        Ok(settle(api, owner, name, started(&r), &["succeeded", "held"], wait))
+    };
+    let opts = json!({ "input": "tallow potato chips", "questions": {
+        "aisle": { "type": "choice", "instructions": "Choose the aisle for the finished product", "options": { "snacks": "Chips and crackers", "produce": "Fresh fruit and vegetables", "grocery": "Shelf-stable foods", "frozen": "Frozen foods" } },
+        "snack": { "type": "predicate", "instructions": "Is it a snack?" },
+        "urgency": { "type": "score", "instructions": "How soon?", "levels": ["Later", "Now"] }
+    } });
+    for (i, (item, aisle)) in [("tallow potato chips", "snacks"), ("kale chips", "snacks"), ("potato", "produce"), ("peanut butter", "grocery"), ("ice cream", "frozen")].iter().enumerate() {
+        let mut input = opts.clone();
+        input["input"] = json!(item);
+        let mut ps = json!({ "snacks": 0.0, "produce": 0.0, "grocery": 0.0, "frozen": 0.0 });
+        ps[*aisle] = json!(1.0);
+        s.ai.decide_next(&[json!({ "model": "clef-flash", "answers": {
+            "aisle": { "type": "choice", "choice": aisle, "probabilities": ps, "confidence": 1.0 },
+            "snack": { "type": "noul", "noul": 0.9 },
+            "urgency": { "type": "score", "score": 0.25, "probabilities": { "0": 0.75, "1": 0.25 }, "confidence": 0.5 }
+        }, "usage": { "input_tokens": 300, "output_tokens": 40 } })]);
+        let r = run(&format!("decision-{i}"), input)?;
+        let expected = PriceBook::defaults().price(&Usage::Tokens { model: decide::MODEL.into(), input: 300, cached_input: 0, cache_write: 0, output: 0 }).unwrap().charge;
+        s.ok(&format!("ai.decide passes the fixture's {item} → {aisle}, with typed probabilities and input-only billing"),
+            r["status"] == "succeeded" && r["output"]["answers"]["aisle"]["choice"] == *aisle
+                && r["output"]["answers"]["snack"]["probability"] == 0.9 && r["output"]["answers"]["urgency"]["score"] == 0.25
+                && r["costMicros"] == expected, &r);
+    }
+    let call = s.ai.calls().last().cloned();
+    s.ok("decisions use Clef-flash on the existing transport with opaque payer metadata and no key",
+        call.as_ref().is_some_and(|c| c.model == decide::MODEL && c.body["model"] == "clef-flash" && c.body["state"] == "ice cream"
+            && c.body["questions"]["snack"]["type"] == "noul" && c.body["questions"]["aisle"]["criteria"] == opts["questions"]["aisle"]["options"]
+            && c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16) && c.authorization.is_none()), format!("{call:?}"));
+
+    let calls = s.ai.calls().len();
+    for (i, bad) in [json!({ "input": "chips", "questions": {} }), json!({ "input": "chips", "questions": opts["questions"], "model": "cheap" }),
+        json!({ "input": "chips", "questions": { "x": { "type": "choice", "instructions": "Aisle?", "options": { "only": "One" } } } }),
+        json!({ "input": "x".repeat(decide::INPUT_MAX_BYTES), "questions": opts["questions"] })].into_iter().enumerate() {
+        let r = run(&format!("decision-invalid-{i}"), bad)?;
+        s.ok("invalid decisions are held before any reservation or vendor call", r["status"] == "held" && r["costMicros"].as_i64().unwrap_or(0) == 0 && s.ai.calls().len() == calls, &r);
+    }
+    // An answer bought once is kept across a lost reply to the Workflow.
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-after-paid", "times": 1 })))?;
+    let r = run("decision-retry-paid", opts.clone())?;
+    let marker = format!("/run/{}/attempt/", r["id"]);
+    let paid: Vec<Value> = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect();
+    s.ok("a decision failed after payment retries from its kept answer: one vendor call and one charge", r["status"] == "succeeded" && s.ai.calls().len() == calls + 1
+        && paid.len() == 1 && paid[0]["entry"]["end"]["end"] == "settled" && paid[0]["entry"]["end"]["charge"] == r["costMicros"], json!({ "run": r, "paid": paid }));
+    s.ai.fail_next(&[503]);
+    let calls = s.ai.calls().len();
+    let r = run("decision-503", opts.clone())?;
+    s.ok("a decision model's 503 retries on the decision model", r["status"] == "succeeded" && s.ai.calls().len() == calls + 2 && s.ai.calls()[calls..].iter().all(|c| c.model == decide::MODEL), &r);
+    s.ai.fail_next(&[400]);
+    let r = run("decision-400", opts.clone())?;
+    s.ok("a decision model's permanent refusal releases its reservation", r["status"] == "held" && r["costMicros"].as_i64().unwrap_or(0) == 0, &r);
+
+    // Missing usage pays the reservation; malformed output is also paid
+    // and retained as a rejection, so a replay never buys it again.
+    s.ai.decide_next(&[json!({ "answers": {} })]);
+    let calls = s.ai.calls().len();
+    let held = run("decision-malformed", opts.clone())?;
+    let expected = PriceBook::defaults().price(&Usage::Tokens { model: decide::MODEL.into(), input: 24_576 * 3, cached_input: 0, cache_write: 0, output: 0 }).unwrap().charge;
+    let marker = format!("/run/{}/attempt/", held["id"]);
+    let paid: Vec<Value> = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect();
+    s.ok("a malformed paid decision is held and missing usage is charged at the reservation", held["status"] == "held" && held["costMicros"] == expected && paid.len() == 1 && paid[0]["entry"]["end"]["basis"] == "reservation", json!({ "run": held, "entries": paid }));
+    api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;
+    let again = settle(api, owner, name, held["id"].as_i64().unwrap_or(0), &["held"], wait);
+    s.ok("replaying a malformed paid decision reuses its rejection and never calls again", again["status"] == "held" && again["error"] == held["error"] && s.ai.calls().len() == calls + 1, &again);
+    Ok(())
 }
 
 /// The calories template, with no agent (Paul, 2026-10-07): a signed-in

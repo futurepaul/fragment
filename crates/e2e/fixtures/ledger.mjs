@@ -11,6 +11,16 @@ export class App extends DurableObject {
     return await job.ai.text({ model: tier, prompt: text });
   }
 
+  async decide(input, job) {
+    return await job.ai.decide(input);
+  }
+
+  async decide_twice(input, job) {
+    const one = await job.ai.decide(input);
+    const two = await job.ai.decide(input);
+    return { one, two };
+  }
+
   // two paid steps: a replay after the second failed pays only for it
   async twice({ a, b }, job) {
     const one = await job.ai.text({ prompt: a });

@@ -1,5 +1,6 @@
 //! AI steps (a job's `ai.*`; docs/api.md, AI). Text goes through the
-//! platform's model route by tier (models.rs); an image is FLUX.1
+//! platform's model route by tier (models.rs); typed decisions are
+//! Clef-flash on the same transport, priced in input tokens only; an image is FLUX.1
 //! [schnell] on Workers AI, on the model route's transport (the AI binding
 //! through the deployment's gateway), priced in neurons by its tiles and
 //! steps (fragment_core::media). A generated image is a file written to
@@ -25,6 +26,7 @@
 //! whose retries ran out, or of a run that ended.
 
 use fragment_core::ledger::{Release, Released, Reserve, Reserved, Settle, Spend};
+use fragment_core::decide;
 use fragment_core::media;
 use fragment_core::models as bounds;
 use fragment_core::price::Usage;
@@ -266,6 +268,7 @@ impl FragmentCell {
     pub(crate) async fn step_ai(&self, run: &RunRow, index: u32, step: &Step) -> Result<Value, StepFail> {
         match step {
             Step::AiText(t) => self.step_text(run, index, t).await,
+            Step::AiDecide(d) => self.step_decide(run, index, d).await,
             Step::AiImage(image) => {
                 let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
@@ -319,6 +322,39 @@ impl FragmentCell {
         failed
     }
 
+    /// A paid decision, including a malformed answer, is kept before
+    /// settlement. Retries and explicit replays never buy it again.
+    async fn step_decide(&self, run: &RunRow, index: u32, d: &decide::Decide) -> Result<Value, StepFail> {
+        let p = self.paying(run, index)?;
+        if let Some(kept) = self.kept(&p.key)? {
+            self.settle_kept(&p, &kept).await?;
+            return decision_result(kept.result);
+        }
+        let call = decide::bound(d).map_err(|e| permanent(e.message()))?;
+        self.reserve(&p, call.worst()).await?;
+        let (status, bytes, log_id) = crate::models::run(&self.env, decide::MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+        if status != 200 {
+            return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
+        }
+        let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let usage = call.usage(&response);
+        if usage.is_none() {
+            self.event("ai.cost-missing", &format!("{}: the decision model reported no valid input usage; charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+        }
+        let result = match call.answer(&response) {
+            Ok(answer) => answer,
+            Err(e) => {
+                let message = e.message();
+                self.event("ai.decide-refused", &format!("{}: {message}; its paid answer is kept", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+                json!({ "error": message })
+            }
+        };
+        self.keep(&p, &result, usage.as_ref())?;
+        self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
+        self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
+        decision_result(result)
+    }
+
     /// `job.ai.text`: the model route's call, unstreamed, kept, then settled.
     async fn step_text(&self, run: &RunRow, index: u32, t: &AiText) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
@@ -358,5 +394,12 @@ impl FragmentCell {
         self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
+    }
+}
+
+fn decision_result(result: Value) -> Result<Value, StepFail> {
+    match result["error"].as_str() {
+        Some(message) => Err(permanent(message)),
+        None => Ok(result),
     }
 }
