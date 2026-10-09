@@ -13,7 +13,8 @@
 //!   <command>` runs that, and its answer sends the file the command names
 //!   (`made=<path>` in what it printed) as Hermes' `MEDIA:` tag;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
-//!   a `computer_use` capture, `write: <path>` a `write_file` of one line
+//!   a `computer_use` capture, `desk: <json>` a `computer_use` call with
+//!   those arguments, `write: <path>` a `write_file` of one line
 //!   there, and `code: <python>` an `execute_code` of that line (each
 //!   through Hermes' `tool_call` bridge when it defers the tool); their
 //!   answers quote what the tool said;
@@ -205,6 +206,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
     let look = last_user.contains("look at your screen");
+    // `desk: <json>`: computer_use with those arguments (a scroll, a focus)
+    let desk = last_user.lines().find_map(|l| l.split_once("desk: ").and_then(|(_, a)| serde_json::from_str::<Value>(a.trim()).ok())).filter(Value::is_object);
     // `write: <path>`: Hermes' write_file puts `WRITTEN` there
     let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     // `code: <python>`: Hermes' execute_code runs that line
@@ -223,7 +226,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() || code.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -277,7 +280,11 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes defers computer_use behind its tool_search bridge: listed in
     // tool_search's description, invoked through tool_call
     let deferred = |name: &str| offered("tool_call") && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains(name))));
-    let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
+    let look = match (desk, look) {
+        (Some(args), _) => Some(args),
+        (None, true) => Some(json!({ "action": "capture", "mode": "vision", "app": "screen" })),
+        (None, false) => None,
+    };
     if let Some(path) = write {
         let args = json!({ "path": path, "content": WRITTEN });
         return if offered("write_file") {
@@ -301,9 +308,9 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     match (browse, look) {
         (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
         (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
-        (None, true) if offered("computer_use") => return (String::new(), Some(call("computer_use", capture))),
-        (None, true) if deferred("computer_use") => return (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "computer_use", "arguments": capture }] })))),
-        (None, true) => return ("scripted: no computer_use among my tools".into(), None),
+        (None, Some(args)) if offered("computer_use") => return (String::new(), Some(call("computer_use", args))),
+        (None, Some(args)) if deferred("computer_use") => return (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "computer_use", "arguments": args }] })))),
+        (None, Some(_)) => return ("scripted: no computer_use among my tools".into(), None),
         _ => {}
     }
     // The first line of what the user said: Hermes appends its own notes
@@ -416,6 +423,12 @@ fn answers_are_the_transcripts() {
     assert!(call["function"]["name"] == "tool_call" && call["function"]["arguments"].as_str().unwrap().contains("\"computer_use\""), "{call}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no computer_use among my tools", None));
+    // `desk:` is computer_use with its arguments, and the answer quotes it
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] desk: {\"action\": \"scroll\", \"direction\": \"down\"}" }], "tools": bridged }));
+    let args: Value = serde_json::from_str(call.unwrap()["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args, json!({ "calls": [{ "name": "computer_use", "arguments": { "action": "scroll", "direction": "down" } }] }));
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] desk: {\"action\": \"scroll\"}" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "scrolled" }], "tools": bridged }));
+    assert_eq!(t, "scripted: the tool said: scrolled");
     // `start:` is a background process, and the answer quotes what it said
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] start: chromium about:blank" }], "tools": tools }));
     assert_eq!(call.unwrap()["function"]["arguments"], json!({ "command": "chromium about:blank", "background": true }).to_string());

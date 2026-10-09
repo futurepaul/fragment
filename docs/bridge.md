@@ -375,6 +375,9 @@ get_chat_info`.
   sends once.
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
+  What asks at all is the image's (docs/computers.md, "Approvals in our
+  Hermes image"): a terminal command Hermes flags, once its smart
+  guardian escalates it, but never an action on the agent's own desktop.
   Expiry needs no word: Hermes' `approvals.timeout` is the card's life
   (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
   is a test's shorter one). At its timeout Hermes tries to edit the card
