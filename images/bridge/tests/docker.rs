@@ -1800,6 +1800,54 @@ async fn an_expired_approval_ends_its_turn() {
     });
 }
 
+/// Goal (Paul on p5, 2026-10-09: "xbt-2000 is asking me for permission for
+/// silly things like changing focus in computer use and scrolling"): an
+/// agent's own desktop never asks its owner, and a command Hermes flags in
+/// its terminal still does, after its smart guardian, which runs as the
+/// agent on its own model through the route (so it is metered as the
+/// agent's other calls are).
+///
+/// Method: the image with a 20 s approval, so a desktop action that asked
+/// would end its turn `BLOCKED` within it; the scripted model scrolls,
+/// changes focus raising the window (its `bring_to_front` scope too), and
+/// clicks in the foreground, each a turn of its own, after a capture that
+/// starts the desktop. None is a card, and none is refused. Then `rm -rf`,
+/// which the guardian (scripted: `ESCALATE`) leaves to a person: a card.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agents_own_desktop_never_asks() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let look = x.say("look at your screen");
+    within(fake, chat, &c, 240_000, "its look", |w| x.reply(w, &look).is_some()).await;
+    for args in [
+        json!({ "action": "scroll", "direction": "down", "amount": 3, "coordinate": [400, 300] }),
+        json!({ "action": "focus_app", "app": "xfce4-panel", "raise_window": true }),
+        json!({ "action": "click", "coordinate": [400, 300], "delivery_mode": "foreground" }),
+    ] {
+        let turn = x.say(&format!("desk: {args}"));
+        within(fake, chat, &c, APPROVAL_S * 1000 + 60_000, &format!("{} to end", args["action"]), |w| x.reply(w, &turn).is_some() && !x.ends(w, &turn).is_empty()).await;
+        fake.with(|w| {
+            let said = x.reply(w, &turn).unwrap()["text"].as_str().unwrap_or("").to_string();
+            eprintln!("desktop: {} said {}", args["action"], said.chars().take(300).collect::<String>());
+            assert!(x.cards(w, &turn).is_empty(), "{} asks no one: {:?}", args["action"], x.cards(w, &turn));
+            assert!(said.starts_with("scripted: the tool said:"), "the tool ran: {said}");
+            assert!(!said.contains("BLOCKED") && !said.contains("requires approval") && !said.contains("denied"), "{} is not refused: {said}", args["action"]);
+        });
+    }
+    // a flagged command: the guardian first, as the agent, on its tier; then a card
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let risky = x.say("do the risky thing");
+    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    let card = fake.with(|w| x.cards(w, &risky)[0].clone());
+    fake.say(chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "deny" }));
+    within(fake, chat, &c, 120_000, "the denied turn's end", |w| !x.ends(w, &risky).is_empty()).await;
+    let calls = x.model.calls.lock().unwrap();
+    let guardian: Vec<_> = calls[calls_before..].iter().filter(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")).collect();
+    assert_eq!(guardian.len(), 1, "the guardian reviewed it once: {guardian:?}");
+    assert_eq!((guardian[0].agent.as_deref(), guardian[0].model.as_str()), (Some("juniper--k3x9"), "cheap"), "as the agent, on its own model, through the route");
+}
+
 // ---- a turn a restart cuts, then the next message (P5; F10) ----
 
 /// The text of a model message (its content, or its parts' text).
