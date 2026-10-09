@@ -159,6 +159,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .md-code-copy { font: inherit; border: 0; background: none; color: inherit; cursor: pointer; }
 .md .md-code pre { border: 0; border-radius: 0; margin: 0; }
 .md a { color: var(--accent-blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-blue), transparent 45%); text-underline-offset: 3px; }
+/* "Open" after a link to another fragment's page: beside the chat, in the shell's viewer (chat.js `openBeside`) */
+.md .open-beside { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 6px; padding: 1px 8px 1px 6px; vertical-align: 1px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-subtle); color: var(--text-primary); font: 600 12px/18px var(--font-sans); cursor: pointer; }
+.md .open-beside:hover { background: var(--surface-muted); border-color: var(--accent-blue); }
+.md .open-beside svg { width: 13px; height: 13px; }
 .md code { font: 500 .92em var(--font-mono); background: var(--chat-code); border-radius: 6px; padding: .1rem .35rem; }
 .md pre { border: 1px solid var(--border); border-radius: 12px; padding: .85rem; background: var(--chat-code); overflow-x: auto; }
 .md pre code { background: none; padding: 0; font-size: 13px; line-height: 1.5; }

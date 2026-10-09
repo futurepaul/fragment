@@ -103,6 +103,9 @@ const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-versio
 
 /// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
 const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
+/// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
+/// refuse it.
+const SEEN_BODY_MAX_BYTES: usize = 1024;
 
 /// The agent docs on the platform's origin, for an agent with no CLI yet
 /// (llmstxt.org): `fragment skill`'s text and `fragment guide`'s, the same
@@ -585,9 +588,9 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .filter_map(|f| {
             // a people-only share is the fragment's to know: a call decides again
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
-            // the asker's own view (their search's preview, their archiving) stays theirs
+            // the asker's own view (their search's preview and unread, their archiving) stays theirs
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, owned, ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, unread: 0, archived: false, owned, ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -1047,6 +1050,21 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/archived", &init)?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
+        }
+        // the signer has seen a chat's messages (principal.rs): their own
+        // view again, so their row counts none of them unread
+        (Method::Put, ["api", "fragments", name, "seen"]) => {
+            let body = read_body(&mut req, SEEN_BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
+            if !body.is_empty() {
+                return Err(CellError::invalid("PUT …/seen takes no body: it marks what the list holds now"));
+            }
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/seen", &init)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
         }
         // search over the signer's own list (principal.rs): agents need none,

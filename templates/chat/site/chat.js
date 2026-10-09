@@ -114,6 +114,25 @@ export function colorOf(id) {
   return AGENT_COLORS[h % AGENT_COLORS.length];
 }
 
+// A fragment's name at the start of its host's first label (docs/api.md, Names).
+const NAME_AT = /^[a-z0-9](?:-?[a-z0-9])*--[a-km-np-z2-9]{4}/;
+
+/// Whether `href` is a page of another fragment of this one's deployment:
+/// its host is this page's with another fragment's name in front (a
+/// branch's mark and the zone, the scheme and the port the same). The
+/// shell that frames the chat decides again before it opens one.
+export function fragmentPage(href, here = location) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return false;
+  }
+  const mine = here.hostname.match(NAME_AT);
+  const theirs = url.hostname.match(NAME_AT);
+  return !!mine && !!theirs && url.protocol === here.protocol && url.port === here.port && url.hostname !== here.hostname && url.hostname.slice(theirs[0].length) === here.hostname.slice(mine[0].length);
+}
+
 /// `text` cut to at most `max` bytes of UTF-8, at a character's edge.
 export function cutBytes(text, max) {
   const bytes = new TextEncoder().encode(text);
@@ -662,6 +681,7 @@ export function mount(root) {
     if (m.turn) wrap.dataset.turn = m.turn;
     const body = el("div", "md");
     body.append(renderMarkdown(m.text));
+    openBeside(body);
     wrap.append(byline(m.principal, w), body);
     if (m.attachments.length) wrap.append(attachmentsNode(m.attachments));
     const actions = el("div", "actions");
@@ -683,6 +703,24 @@ export function mount(root) {
   }
 
   const attachmentsNode = renderMessageAttachments;
+
+  // A link to another fragment's page (an app an agent made) gets "Open":
+  // the shell that frames the chat opens it beside the chat, in its viewer
+  // (`{fragment: "open", url}`; docs/api.md, The shell). The link itself
+  // still opens a tab.
+  function openBeside(md) {
+    if (!framed) return;
+    for (const a of md.querySelectorAll("a[href]:not(.shot-link)")) {
+      if (!fragmentPage(a.href)) continue;
+      const open = el("button", "open-beside");
+      open.type = "button";
+      open.title = "Open beside the chat";
+      open.innerHTML = svg("panel");
+      open.append("Open");
+      open.onclick = () => window.parent.postMessage({ fragment: "open", url: a.href }, "*");
+      a.after(open);
+    }
+  }
 
   // A turn's steps, one card: open while it works ("Working"), folded once
   // done ("Worked through N steps") unless someone opened it.
@@ -872,6 +910,7 @@ export function mount(root) {
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
       : late ? `${name} has not started a reply yet.`
       : starting ? `${name} is starting up…`
+      : phase === "sleeping" ? `${name}'s computer is going to sleep…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.id : "pending"}`;
     return [
@@ -1317,7 +1356,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "wont_wake"].includes(a.phase) ? a.phase : null }));
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
       schedule();
       if (picking) updateMentions();
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {

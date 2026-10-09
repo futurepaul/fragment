@@ -309,9 +309,10 @@ cannot embed them.
 A channel post that fails has its error and Retry on the message itself.
 Retry keeps its id and body so a lost answer cannot write it twice. Until
 a turn starts, the waiting line uses the shell roster's optional `phase`:
-`asleep` or `starting` says the agent is starting up, and `wont_wake`
-says its computer could not start. Without a phase it uses presence and
-waits plainly. After 90 seconds without a turn or a known startup state it
+`asleep` or `starting` says the agent is starting up, `sleeping` says its
+computer is going to sleep, and `wont_wake` says it could not start.
+For `awake` and views without a phase, the line uses presence and waits
+plainly. After 90 seconds without a turn or a known startup state it
 says the agent has not started a reply yet; a later `turn.start` replaces
 the line. A known startup stays explained until then. No transport
 state is persisted as a chat record. It posts:
@@ -370,6 +371,14 @@ agent joined starts nothing). So the first message to an agent new to the
 chat costs one click. An add declined, refused, or unanswered for 120 s
 sends nothing and says why in the banner, the message kept in the
 composer.
+
+**An app beside the chat.** Framed, a link in an agent's reply to a page
+of another fragment of the deployment (its host the page's own with
+another fragment's name in front: an app the agent made) is followed by
+"Open", which asks the shell to open that page in its viewer beside the
+chat (`{fragment: "open", url}`; the shell checks the URL again:
+docs/api.md, The shell). The link itself still opens a tab, and nothing
+is offered on a page with no shell around it.
 
 ## Push
 

@@ -192,7 +192,83 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
     search_follows_reading(s, api)?;
+    unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
+}
+
+/// A chat's `unread` in a person's list (docs/api.md, Control API): the
+/// messages their search holds after the last they marked seen (`PUT
+/// /api/fragments/{name}/seen`), each person's own. Valid: a chat counts
+/// every message before any mark (the person's own from elsewhere too),
+/// a mark clears it and tells their open shell, a new message counts one;
+/// another member's count is theirs alone. Replay: a mark again answers
+/// the same. Invalid: a body, a name that is none, a bare label, a
+/// fragment not theirs, no one. Leaving the chat drops the mark: back in,
+/// everything counts again.
+fn unread_and_seen(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "unread-talk", "template": "chat", "title": "Unread talk" })), &[])?;
+    let chat = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200, "making the chat: {r}");
+    let post = |id: &str, text: &str| shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })), &[]);
+    let took = s.eventually(SEARCH_WAIT, || post("u1", "first of three").is_ok_and(|r| r.status == 200));
+    anyhow::ensure!(took && post("u2", "second of three")?.status == 200, "posting to the chat");
+    let row_in = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat.as_str()).cloned()).unwrap_or(Value::Null);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]).map(|r| row_in(&r)).unwrap_or(Value::Null);
+    let counted = s.eventually(SEARCH_WAIT, || mine()["unread"] == 2);
+    s.ok("a chat counts the messages its person's search holds, before any mark: two (their own, from elsewhere, too)", counted, mine());
+
+    // marked seen: nothing unread, and their open shell is told
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = watching(Socket::connect(api, &url, None, Some(&format!("fragment_session={session}")), Some(&api.base)).map(|(socket, _)| socket));
+    let seen = |extra: Option<&Value>| shell(api, session, "PUT", &format!("/api/fragments/{chat}/seen"), extra, &[]);
+    let r = seen(None)?;
+    let told_it = told(&mut tab);
+    s.ok(
+        "PUT …/seen marks it: {name, unread: 0}, its row counts nothing (left out), and their open shell is told",
+        r.status == 200 && r.body == json!({ "name": chat, "unread": 0 }) && mine()["unread"].is_null() && told_it == json!({ "type": "changed" }),
+        json!([r.body, mine(), told_it]),
+    );
+    let again = seen(None)?;
+    s.ok("marking it again answers the same", again.status == 200 && again.body == r.body, &again);
+    if let Ok(w) = tab {
+        w.close();
+    }
+    anyhow::ensure!(post("u3", "third of three")?.status == 200, "posting again");
+    let one = s.eventually(SEARCH_WAIT, || mine()["unread"] == 1);
+    s.ok("a message after the mark counts one", one, mine());
+
+    // each person's own: a member never marked counts all three; theirs moves alone
+    let member = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let theirs = || api.signed(&member, "GET", "/api/fragments", None).map(|r| row_in(&r)).unwrap_or(Value::Null);
+    let three = s.eventually(SEARCH_WAIT, || theirs()["unread"] == 3);
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/seen"), None)?;
+    s.ok(
+        "a member's count is theirs (all three, never marked); their mark (signed, with their key) clears theirs, and the person's stays one",
+        three && r.status == 200 && theirs()["unread"].is_null() && mine()["unread"] == 1,
+        json!({ "theirs": theirs(), "mine": mine(), "mark": r.body }),
+    );
+    // leaving drops their mark: back in, all three count again
+    let out = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{member_id}"), None, &[])?;
+    let back = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    let again = s.eventually(SEARCH_WAIT, || theirs()["unread"] == 3);
+    s.ok("removed and added again, the member counts all three again (their mark went with them)", out.status == 200 && back.status == 200 && again, theirs());
+
+    // refused: a body, no name, a bare label, not theirs, no one
+    let body = seen(Some(&json!({ "n": 1 })))?;
+    s.ok("a mark takes no body (400)", body.status == 400, &body);
+    let r = shell(api, session, "PUT", "/api/fragments/Not%20A%20Name/seen", None, &[])?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let r = shell(api, session, "PUT", "/api/fragments/unread-talk/seen", None, &[])?;
+    s.ok("a bare label names nothing here (404)", r.status == 404 && r.message().contains("in full"), &r);
+    let outsider = api.person()?;
+    let r = api.signed(&outsider, "PUT", &format!("/api/fragments/{chat}/seen"), None)?;
+    s.ok("a fragment they are not in is none of theirs to mark (404)", r.status == 404, &r);
+    let r = api.call(Call { method: "PUT", url: format!("{}/api/fragments/{chat}/seen", api.base), ..Call::default() })?;
+    s.ok("and no one unsigned marks anything (401)", r.status == 401, &r);
+    Ok(())
 }
 
 /// A watch socket of a person's list, past its `hello`; or why not (the
@@ -656,9 +732,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(&page, &shots.join("new-agent-hello.png"));
 
-    // both agents in one chat, search, and archiving, as the person uses them
+    // what came to a chat not open, and another chat with the Reader
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
+    unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
+    new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &reader_id, &shots)?;
+
+    // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
     // the person's agents in any chat's @, and one asking another
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -696,6 +776,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    let groceries = own_named(api, &session, "groceries")?;
+    open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
     // settings, at /settings: what a person needs of their account
@@ -767,6 +849,27 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
+    // an app's window on a phone: a sheet from the bottom, the chat's top above it
+    b.click(&page, "#toggle-left")?;
+    b.until(&page, "document.getElementById('layout').classList.contains('left-open')", wait);
+    // a script's click: under the phone's emulation a second pointer
+    // press right after the first reaches no element of the page
+    b.eval(&page, "(document.querySelector('#apps .row.app-row')?.click(), true)")?;
+    let sheet = b.until(
+        &page,
+        "(() => { const v = document.getElementById('viewer').getBoundingClientRect(); return document.getElementById('layout').classList.contains('right-open') \
+         && Math.abs(v.bottom - innerHeight) < 2 && Math.abs(v.width - innerWidth) < 2 && v.top > 24 && !!document.querySelector('#stack .pane iframe'); })()",
+        wait,
+    );
+    let shown = b.eval(&page, "document.querySelector('#stack .pane')?.dataset.key?.replace(/^app:/, '') ?? ''")?;
+    let shown = shown.as_str().unwrap_or_default().to_string();
+    let _ = s.eventually(wait, || !shown.is_empty() && b.eval_in_frame(&page, &shown, "document.readyState").ok() == Some(json!("complete")));
+    let _ = b.screenshot(&page, &shots.join("phone-sheet.png"));
+    s.ok(
+        "on a phone an app's window opens as a sheet from the bottom, the chat's top showing above it",
+        sheet,
+        b.eval(&page, "(() => { const v = document.getElementById('viewer').getBoundingClientRect(); return { top: v.top, bottom: v.bottom, width: v.width, innerWidth, innerHeight }; })()")?,
+    );
     println!("      (screenshots: {})", shots.display());
     Ok(())
 }
@@ -1383,6 +1486,186 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
+/// A chat's `unread` in the person's list (0 when its row leaves it out).
+fn unread_of(api: &Api, session: &str, chat: &str) -> i64 {
+    let r = shell(api, session, "GET", "/api/fragments", None, &[]);
+    r.ok().and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat).map(|f| f["unread"].as_i64().unwrap_or(0)))).unwrap_or(-1)
+}
+
+/// The fragment of the chat the shell shows (its frame not hidden).
+fn open_chat(b: &mut Browser, page: &Page) -> String {
+    b.eval(page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+}
+
+/// Types `text` into the open chat's composer, in its frame (`host`), and
+/// sends it, once its composer is ready. Whether it was sent.
+fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bool {
+    let typed = format!(
+        "(() => {{ const t = document.getElementById('text'); if (!t || t.disabled || document.getElementById('say')?.dataset.ready !== '1') return false; t.value = {}; t.dispatchEvent(new Event('input', {{ bubbles: true }})); document.getElementById('say').requestSubmit(); return true; }})()",
+        js(text)
+    );
+    s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, host, &typed).ok() == Some(Value::Bool(true)))
+}
+
+/// Unread (docs/api.md, The shell): a chat not open counts on its row what
+/// came since its person saw it, as their list does; opening it marks it
+/// seen, here and in their list; and the open chat counts nothing as its
+/// messages come. The first agent's chat, while the Reader's is open.
+fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let first = own_named(api, me.session, &format!("{}-chat", me.first))?;
+    let ids = agent_ids(api, me.session, &[me.first])?;
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{first}")))));
+    let open = open_chat(b, page);
+    let before = unread_of(api, me.session, &first);
+    // a message to it from elsewhere (as the CLI or another device sends one), and its answer
+    let said = "count these for me please";
+    let r = shell(api, me.session, "POST", &format!("/api/f/{first}/channels/chat"), Some(&json!({ "id": "unread-ui-1", "body": { "text": said } })), &[])?;
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &first, &ids[0], said) == 1);
+    let want = before + 2;
+    let counted = s.eventually(wait, || unread_of(api, me.session, &first) == want);
+    let badge = b.until(page, &format!("{row}?.querySelector('.unread')?.textContent === {}", js(&want.to_string())), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-unread.png"));
+    s.ok(
+        "a chat not open counts what came since its person saw it (their own message from elsewhere, and the answer): in their list, and as a badge on its row",
+        r.status == 200 && open == reader_chat && answered && counted && badge,
+        json!({ "before": before, "now": unread_of(api, me.session, &first), "badge": b.eval(page, &format!("{row}?.querySelector('.unread')?.textContent ?? null"))? }),
+    );
+    // opened: seen, here and in their list
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{first}"))))?;
+    let gone = b.until(page, &format!("{row} && !{row}.querySelector('.unread')"), wait);
+    let cleared = s.eventually(wait, || unread_of(api, me.session, &first) == 0);
+    s.ok("opening it marks it seen: its badge goes, and their list counts nothing on it", gone && cleared, json!({ "unread": unread_of(api, me.session, &first) }));
+    // open, its messages come and count nothing
+    let more = "and one more while I look";
+    let sent = say_in(s, b, page, &first, more);
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &first, &ids[0], more) == 1);
+    let shown = s.eventually(wait, || b.eval_in_frame(page, &first, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches(more).count() >= 2)).unwrap_or(false));
+    let none = s.eventually(wait, || unread_of(api, me.session, &first) == 0) && b.eval(page, &format!("!{row}.querySelector('.unread')"))? == true;
+    s.ok("the chat open, on screen, counts nothing as its messages come (marked seen again)", sent && answered && shown && none, json!({ "unread": unread_of(api, me.session, &first) }));
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    b.until(page, &format!("document.getElementById('chat-title').textContent === 'Reader' && {}", js(reader_chat) + " === [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment"), wait);
+    Ok(())
+}
+
+/// Another chat with an agent (docs/api.md, The shell): New chat, from the
+/// agent's own chat, makes a chat with the same agent, labelled beside its
+/// own (`reader-chat-2`) and titled "New chat", and opens it, empty (the
+/// agent speaks first only in its own); asked again before anything is
+/// said there, it opens that one, not another; its first message titles it
+/// (at most 48 characters) and the agent answers there. The agent's own
+/// chat keeps its label (`fragment ask`, after, finds it). A group has no
+/// New chat.
+#[allow(clippy::too_many_arguments)]
+fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, reader_id: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let offered = b.until(page, "!document.getElementById('new-chat').hidden", wait);
+    b.click(page, "#new-chat")?;
+    let opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let fresh = own_named(api, me.session, "reader-chat-2")?;
+    let shows = open_chat(b, page);
+    let members = shell(api, me.session, "GET", &format!("/api/f/{fresh}/members"), None, &[])?;
+    let agents: Vec<(Value, Value)> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| (m["principal"].clone(), m["role"].clone())).collect();
+    let empty = s.eventually(wait, || b.eval_in_frame(page, &fresh, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
+    let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
+    s.ok(
+        "New chat, from the agent's chat: another chat with it (reader-chat-2, the Reader an editor), titled New chat, opened empty",
+        offered && opened && shows == fresh && agents == vec![(json!(reader_id), json!("editor"))] && empty,
+        json!({ "shows": shows, "fresh": fresh, "agents": agents }),
+    );
+    // asked again (from the agent's own chat's menu) before anything is said there: that one
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    b.click(page, "#agent-heading")?;
+    let picked = menu_item(b, page, "New chat")?;
+    let again = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let list = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+    let chats_with: Vec<String> = list.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(label_of)).filter(|l| l.starts_with("reader-chat")).map(str::to_string).collect();
+    s.ok(
+        "asked again before anything is said there, it opens that one, not another",
+        picked && again && open_chat(b, page) == fresh && chats_with.len() == 2,
+        json!({ "chats": chats_with }),
+    );
+    // its first message titles it, and the agent answers there
+    let said = "Plan my reading for October: three novels and one history of maps";
+    let title: String = format!("{}…", said.chars().take(47).collect::<String>().trim_end());
+    let sent = say_in(s, b, page, &fresh, said);
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &fresh, reader_id, said) == 1);
+    let titled = b.until(page, &format!("document.getElementById('chat-title').textContent === {} && document.querySelector({})?.querySelector('.label')?.textContent === {}", js(&title), js(&format!("#chats [data-key={}]", js(&format!("chat:{fresh}")))), js(&title)), wait);
+    let manifest = shell(api, me.session, "GET", &format!("/api/f/{fresh}/manifest"), None, &[])?;
+    let _ = b.screenshot(page, &shots.join("desktop-new-chat-titled.png"));
+    s.ok(
+        "its first message titles it (48 characters at most), and the agent answers there",
+        sent && answered && titled && manifest.body["meta"]["title"] == title.as_str(),
+        json!({ "title": manifest.body["meta"]["title"], "want": title }),
+    );
+    let own = own_named(api, me.session, "reader-chat")?;
+    s.ok("the agent's own chat keeps its label (reader-chat), apart from the new one", own == reader_chat && label_of(&fresh) == "reader-chat-2", json!([own, fresh]));
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// An app beside the chat (docs/api.md, The shell; docs/chat-records.md,
+/// "The page"): a link in an agent's reply to another fragment's page gets
+/// "Open", which opens that page in the viewer beside the chat, at its
+/// path, signed in as its row's window is; a link to anything else gets
+/// none, and a page that asks the shell to open a URL that is no
+/// fragment's opens nothing.
+fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let host = open_chat(b, page);
+    let ids = agent_ids(api, me.session, &["reader"])?;
+    let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key={}]", js(&format!("app:{app}")))));
+    // its window closed first, so Open is what opens it
+    b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    let closed = b.until(page, &format!("!{pane}"), wait);
+    let link = api.site_url(app, "?from=chat");
+    let said = format!("Here it is: {link}, or [open the app]({link}) and the platform: {}/settings", api.base);
+    let sent = say_in(s, b, page, &host, &said);
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &host, &ids[0], &link) == 1);
+    let offers = format!(
+        "(() => {{ const m = [...document.querySelectorAll('.msg.agent')].filter((m) => m.innerText.includes({l})).pop(); if (!m) return null; \
+         return [...m.querySelectorAll('.md a')].filter((a) => ['http:', 'https:'].includes(a.protocol)).map((a) => ({{ href: a.href, open: a.nextElementSibling?.classList.contains('open-beside') ?? false }})); }})()",
+        l = js(&link)
+    );
+    let mut links = Value::Null;
+    let _ = s.eventually(wait, || {
+        links = b.eval_in_frame(page, &host, &offers).unwrap_or(Value::Null);
+        links.as_array().is_some_and(|l| l.len() == 3)
+    });
+    let want = json!([{ "href": link, "open": true }, { "href": link, "open": true }, { "href": format!("{}/settings", api.base), "open": false }]);
+    s.ok("autolinks and markdown links in an agent's reply are offered Open for fragment pages; the platform is not", closed && sent && answered && links == want, json!({ "links": links, "want": want }));
+    let _ = b.screenshot(page, &shots.join("desktop-open-offered.png"));
+    let clicked = b.eval_in_frame(
+        page,
+        &host,
+        &format!("(() => {{ const m = [...document.querySelectorAll('.msg.agent')].filter((m) => m.innerText.includes({})).pop(); const o = m?.querySelector('.open-beside'); o?.click(); return !!o; }})()", js(&link)),
+    )?;
+    let src = js(&format!("/auth/frame?name={app}&return=%2F%3Ffrom%3Dchat"));
+    let opened = b.until(page, &format!("{pane}?.querySelector('iframe')?.dataset.src === {src} && document.getElementById('layout').classList.contains('right-open')"), wait);
+    let landed = s.eventually(wait, || b.eval_in_frame(page, app, "location.search").ok() == Some(json!("?from=chat")));
+    let _ = b.screenshot(page, &shots.join("desktop-open-beside.png"));
+    s.ok(
+        "Open opens that page beside the chat, in the viewer, at its path, signed in by the mint",
+        clicked == true && opened && landed,
+        b.eval(page, "[...document.querySelectorAll('#stack .pane')].map((p) => [p.dataset.key, p.querySelector('iframe')?.dataset.src])")?,
+    );
+    // a page that names no fragment's URL opens nothing
+    let panes = "document.querySelectorAll('#stack .pane').length";
+    let count = b.eval(page, panes)?;
+    for url in ["https://example.com/", &format!("{}/settings", api.base), &api.site_url("not-a-name", "")] {
+        b.eval_in_frame(page, &host, &format!("(parent.postMessage({{ fragment: 'open', url: {} }}, '*'), true)", js(url)))?;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let after = b.eval(page, panes)?;
+    s.ok("asked to open a URL that is no fragment's page (another site, the platform, a host that is no name), the shell opens nothing", after == count, json!([count, after]));
+    Ok(())
+}
+
 /// The person's agents (the computer's), by fragment label: their identities.
 fn agent_ids(api: &Api, session: &str, labels: &[&str]) -> Result<Vec<String>> {
     let r = shell(api, session, "GET", "/api/computers", None, &[])?;
@@ -1442,6 +1725,19 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         json!({ "listed": listed, "placeholder": placeholder }),
     );
     let _ = b.screenshot(page, &shots.join("desktop-roster.png"));
+    // the roster says each agent's computer's phase, as the platform last said it
+    let phases = b.eval_in_frame(
+        page,
+        &host,
+        "new Promise((done) => { addEventListener('message', (e) => { if (e.data?.fragment === 'agents') done(e.data.agents.map((a) => [a.identity, a.phase ?? null])); }); \
+         parent.postMessage({ fragment: 'agents?' }, '*'); setTimeout(() => done(null), 5000); })",
+    )?;
+    let phase = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["phase"].clone();
+    let mut want_phases = vec![json!([reader, phase]), json!([first, phase])];
+    let mut got_phases = phases.as_array().cloned().unwrap_or_default();
+    want_phases.sort_by_key(Value::to_string);
+    got_phases.sort_by_key(Value::to_string);
+    s.ok("the shell's roster names each agent with its computer's phase (awake)", phase == "awake" && got_phases == want_phases, json!({ "roster": phases, "computer": phase }));
 
     // a page's own add (no click in the shell) asks its person in the
     // shell's dialog, and adds no one while it waits, nor on Cancel
