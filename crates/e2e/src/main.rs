@@ -781,6 +781,13 @@ fn main() -> Result<()> {
     }
 }
 
+/// The bridge a machine paired as hands runs here (`FRAGMENT_BRIDGE_BIN`,
+/// else images/' release build, which `cargo xtask e2e` makes), if there is one.
+pub fn bridge_binary() -> Option<PathBuf> {
+    let bridge = std::env::var_os("FRAGMENT_BRIDGE_BIN").map(PathBuf::from).unwrap_or_else(|| devstack::repo_root().join("images/target/release/fragment-bridge"));
+    bridge.is_file().then_some(bridge)
+}
+
 /// The CLI the lanes drive (`FRAGMENT_BIN`, else the release build).
 fn cli_binary() -> Result<PathBuf> {
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| devstack::repo_root().join("target/release/fragment"));

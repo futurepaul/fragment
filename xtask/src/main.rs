@@ -310,13 +310,16 @@ fn build_e2e() -> Result<()> {
     built
 }
 
-/// The CLI and the suite, for this machine.
+/// The CLI, the suite, and the bridge, for this machine: the mind's
+/// section plays a machine paired as hands (`fragment hands run`), which
+/// runs the bridge here (images/, its own workspace).
 fn build_native() -> Result<()> {
     let t0 = std::time::Instant::now();
-    let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    let root = devstack::repo_root();
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     build_suite()?;
-    println!("built the CLI and the suite in {:.1?}", t0.elapsed());
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(root.join("images/Cargo.toml")).args(["-p", "fragment-bridge"]))?;
+    println!("built the CLI, the suite and the bridge in {:.1?}", t0.elapsed());
     Ok(())
 }
 

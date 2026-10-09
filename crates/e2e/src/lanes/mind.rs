@@ -49,6 +49,8 @@ use serde_json::{json, Value};
 
 use super::computers::{agent_replies, phase, told, turn_of, AGENT_JSON};
 use super::jobs::records;
+use anyhow::Context;
+
 use crate::api::{Api, Call, Socket};
 use crate::Keys;
 use crate::Suite;
@@ -398,10 +400,10 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let builder = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with("please hand it over")));
     s.ok(
-        "a turn of another persona keeps the cached prefix: the same system prompt and tools; its state names Builder and its hands, the computer awake",
+        "a turn of another persona keeps the cached prefix: the same system prompt and tools; its state names Builder and its hands, the cloud computer awake",
         builder.as_ref().is_some_and(|b| {
             first.as_ref().is_some_and(|f| b["messages"][0] == f["messages"][0] && b["tools"] == f["tools"])
-                && b["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("\nYou are Builder 🛠️ in this chat. You get things done") && t.contains("\nYour hands: ") && t.ends_with(" (its computer awake)."))
+                && b["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("\nYou are Builder 🛠️ in this chat. You get things done") && t.ends_with("\nYour hands: cloud (cloud computer, awake)."))
         }),
         format!("{builder:?}"),
     );
@@ -429,7 +431,7 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "the zoom query (the page's, an MCP client's) gives the task: what it was given, and its report; goose's run is a turn's zoom's",
         zoomed["text"].as_str().is_some_and(|t| {
-            t.starts_with(&format!("Task {task} (done) on the user's computer, from "))
+            t.starts_with(&format!("Task {task} (done) on cloud (the cloud computer), from "))
                 && t.contains("\n\nGiven:\ntidy the shed, tool by tool\n\nIts run on the computer: read by Mind's own zoom in a turn, not here.\n\nIts report (message ")
                 && t.ends_with(&format!("):\n{reply}"))
         }),
@@ -561,10 +563,200 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         with_notes.is_some_and(|e| e["attachments"][0]["name"] == "notes.txt" && e["attachments"][0]["text"] == "the spare key hangs on the third hook\n"),
         format!("{with_notes:?}"),
     );
+    // ---- a machine of the owner's paired as hands, beside the cloud computer
+    if let Err(e) = machine_hands(s, api, &owner, &mind, &identity) {
+        s.fail("a machine paired as hands", format!("{e:#}"));
+    }
+
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     // a mind on the person's own models (Claude, the vendors' fake)
     super::own_models::mind(s, api)
+}
+
+/// `fragment hands run`, stopped as Ctrl-C stops it (SIGTERM: it stops its
+/// bridge's process group, then itself) when dropped, its output in a log
+/// of the run's scratch.
+struct HandsRun {
+    child: Option<std::process::Child>,
+}
+
+impl HandsRun {
+    fn stop(&mut self) -> Option<std::process::ExitStatus> {
+        let mut child = self.child.take()?;
+        let _ = std::process::Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+        // bounded: its own stop takes at most its bridge's grace and a half second
+        for _ in 0..100 {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        child.wait().ok()
+    }
+}
+
+impl Drop for HandsRun {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// A machine of the owner's paired as hands, beside their cloud computer
+/// (docs/optchat.md, "A machine as hands"), the e2e playing the machine:
+/// `fragment hands pair` (as the owner) makes the agent `hands-e2e-box`,
+/// pairs a key kept in the CLI's config, and adds it to the mind; a
+/// request that key signs acts as the agent, and no one but the owner
+/// pairs to it. `fragment hands run` runs the bridge's scripted agent here
+/// under its loopback proxy: the machine is online (its socket here), a
+/// turn lists both hands, a task `on` it reaches it alone and its one
+/// reply comes back as the report, the task saying where it ran, and the
+/// persona's next task goes there unasked. Stopped, the machine is offline,
+/// and a task on it is refused at once. Unpaired, it leaves the mind and
+/// its key is 401 from its next request.
+fn machine_hands(s: &mut Suite, api: &Api, owner: &Keys, mind: &str, cloud: &str) -> Result<()> {
+    let Some(bridge) = crate::bridge_binary() else {
+        s.skip("a machine paired as hands", "no fragment-bridge here: `cargo xtask e2e` builds it (images/target/release), or name one in FRAGMENT_BRIDGE_BIN");
+        return Ok(());
+    };
+    let home = s.dir("hands-home");
+    // the CLI acts as the mind's owner: their key in its config (each system's place)
+    for dir in [".config/fragment", "Library/Application Support/fragment"] {
+        std::fs::create_dir_all(home.join(dir))?;
+        std::fs::write(home.join(dir).join("config.json"), json!({ "host": api.base, "secret_key": owner.secret_hex() }).to_string())?;
+    }
+    let paired = s.cli_json(api, &home, &["hands", "pair", "--name", "e2e-box", "--mind", mind, "--json"])?;
+    let agent = paired["agent"].as_str().unwrap_or("").to_string();
+    let machine = paired["identity"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "fragment hands pair makes the agent hands-e2e-box, pairs this machine's key to it, and adds it to the mind",
+        paired["paired"] == true && agent.starts_with("hands-e2e-box.") && machine.starts_with("id:") && paired["mind"] == mind,
+        &paired,
+    );
+    let keys = api.signed(owner, "GET", &format!("/api/f/{agent}/keys"), None)?;
+    s.ok(
+        "its machines' keys list it, named for the machine",
+        keys.status == 200 && keys.body["agent"] == machine.as_str() && keys.body["keys"].as_array().is_some_and(|k| k.len() == 1 && k[0]["name"] == "e2e-box" && k[0]["npub"] == paired["npub"] && k[0]["revokedAt"].is_null()),
+        &keys,
+    );
+    // the key, kept only in the CLI's config, readable by its owner alone
+    let file = [".config/fragment/hands.json", "Library/Application Support/fragment/hands.json"].iter().map(|p| home.join(p)).find(|p| p.is_file()).context("fragment hands pair keeps hands.json")?;
+    let kept: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
+    let machine_keys = Keys::from_secret_hex(kept["secretKey"].as_str().unwrap_or("")).context("hands.json holds the machine's key")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file)?.permissions().mode() & 0o777;
+        s.ok("the machine's key is in a file of its owner's alone (0600)", mode == 0o600, format!("{mode:o}"));
+    }
+    let me = api.signed(&machine_keys, "GET", "/api/identities/me", None)?;
+    s.ok("a request the machine's key signs acts as the agent, its owner's", me.status == 200 && me.body["id"] == machine.as_str() && me.body["kind"] == "agent", &me);
+    let again = s.cli_json(api, &home, &["hands", "pair", "--name", "e2e-box", "--mind", mind, "--json"])?;
+    s.ok("pairing again here is the same pairing", again["paired"] == false && again["npub"] == paired["npub"], &again);
+    let stranger = api.person()?;
+    let key = Keys::generate();
+    let route = format!("/api/f/{agent}/keys");
+    let proof = key.proof("POST", &format!("{}{route}", api.base), stranger.pubkey_hex(), crate::api::now_s());
+    let r = api.signed(&stranger, "POST", &route, Some(&json!({ "proof": proof, "name": "theirs" })))?;
+    s.ok("no one but its owner pairs a machine to it", r.status == 403, &r);
+
+    // ---- it runs: the bridge's scripted agent, here, under the proxy
+    let dir = s.dir("hands-run");
+    let log = std::fs::File::create(s.scratch.join("hands-run.log"))?;
+    let mut cmd = s.bare_cli();
+    cmd.args(["hands", "run", "--runtime", "script", "--bridge"]).arg(&bridge).arg("--dir").arg(&dir).env("HOME", &home).stdout(log.try_clone()?).stderr(log);
+    let mut run = HandsRun { child: Some(cmd.spawn().context("fragment hands run")?) };
+    let here = |want: bool| {
+        api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": mind, "op": "here", "principal": machine }))).ok().is_some_and(|r| r.body["here"] == want)
+    };
+    let online = s.eventually(WAKE, || here(true));
+    s.ok("fragment hands run brings it online: its bridge follows the mind's chat, its socket open there", online, s.scratch.join("hands-run.log").display());
+    let say = |id: &str, body: Value| api.signed(owner, "POST", &format!("/api/f/{mind}/channels/say"), Some(&json!({ "id": id, "body": body })));
+    let shop = "t_00112233445566dd";
+    let r = say("m20", json!({ "text": padded("hand it to the box [[call computer {\"task\": \"sort the screws, tool by tool\", \"on\": \"e2e-box\"}]]"), "thread": shop, "persona": "builder" }))?;
+    anyhow::ensure!(r.status == 200, "saying m20: {r}");
+    let opened = s.eventually(TURN, || op(api, owner, mind, "tasks", json!({ "thread": shop }))["tasks"].as_array().is_some_and(|t| t.len() == 1));
+    let tasks = op(api, owner, mind, "tasks", json!({ "thread": shop }));
+    let task = tasks["tasks"][0]["id"].as_str().unwrap_or("").to_string();
+    let handed = records(api, owner, mind, "chat").into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.ends_with(&format!("(task {task}, thread {shop})"))));
+    s.ok(
+        "a task on the machine is for its agent alone (to), and records where it went",
+        opened && handed.as_ref().is_some_and(|h| h["body"]["to"] == json!([machine])) && tasks["tasks"][0]["hands"] == json!({ "agent": machine, "name": "e2e-box", "kind": "machine" }),
+        json!({ "tasks": tasks, "handed": handed }),
+    );
+    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"].as_str().is_some_and(|t| t.starts_with("hand it to the box")));
+    s.ok(
+        "its turn lists both hands: the cloud computer, the default, and the paired machine, online",
+        call.as_ref().is_some_and(|c| {
+            c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("\nYour hands: cloud (cloud computer, ") && t.ends_with("; the default), e2e-box (paired machine, online)."))
+        }),
+        format!("{call:?}"),
+    );
+    let reported = s.eventually(WAKE, || messages(api, owner, mind, shop).iter().any(|m| m["kind"] == "work" && m["task"] == task.as_str()));
+    let seq = handed.as_ref().and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
+    let turn = turn_of(&agent, mind, "chat", seq);
+    let chat = records(api, owner, mind, "chat");
+    let replies: Vec<Value> = agent_replies(&chat, &machine).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect();
+    let work = records(api, owner, mind, "work");
+    let claimed: Vec<&Value> = work.iter().filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["cause"]["seq"] == seq).collect();
+    s.ok(
+        "the machine claims it (and the cloud computer does not), replies once, and the reply comes back as the report",
+        reported
+            && replies.len() == 1
+            && claimed.len() == 1
+            && claimed[0]["principal"] == machine.as_str()
+            && !chat.iter().any(|r| r["principal"] == cloud && r["body"]["turn"] == turn.as_str())
+            && messages(api, owner, mind, shop).iter().any(|m| m["kind"] == "work" && m["task"] == task.as_str() && m["text"].as_str().is_some_and(|t| t.contains("sort the screws"))),
+        json!({ "replies": replies, "claimed": claimed }),
+    );
+    let zoomed = op(api, owner, mind, "zoom", json!({ "id": task }));
+    s.ok("the task says where it ran", zoomed["text"].as_str().is_some_and(|t| t.starts_with(&format!("Task {task} (done) on e2e-box (a paired machine), from "))), &zoomed);
+    // (its report's turn ends before the next)
+    s.eventually(TURN, || messages(api, owner, mind, shop).iter().filter(|m| m["kind"] == "talk").count() >= 2);
+    // (the scripted agent's `think`: one model call through the machine's proxy)
+    let r = say("m21", json!({ "text": padded("and again [[call computer {\"task\": \"think count the screws\"}]]"), "thread": shop, "persona": "builder" }))?;
+    anyhow::ensure!(r.status == 200, "saying m21: {r}");
+    let second = s.eventually(TURN, || op(api, owner, mind, "tasks", json!({ "thread": shop }))["tasks"].as_array().is_some_and(|t| t.len() == 2));
+    let tasks = op(api, owner, mind, "tasks", json!({ "thread": shop }));
+    s.ok("the persona's next task goes to the hands it chose last, unasked", second && tasks["tasks"][0]["hands"]["name"] == "e2e-box", &tasks);
+    let thought = |m: &Value| m["kind"] == "work" && m["text"].as_str().is_some_and(|t| t.contains("thought: echo: count the screws"));
+    let done = s.eventually(WAKE, || messages(api, owner, mind, shop).iter().any(thought));
+    let modelled = s.ai.chats().iter().any(|c| c["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_str()).is_some_and(|t| t.starts_with("count the screws")));
+    s.ok(
+        "its model call goes through the proxy to the platform's model route, as the agent (its owner pays), and its report comes back",
+        done && modelled,
+        json!(messages(api, owner, mind, shop)),
+    );
+    s.eventually(TURN, || messages(api, owner, mind, shop).iter().filter(|m| m["kind"] == "talk").count() >= 4);
+
+    // ---- stopped: offline, and a task on it is refused at once
+    let stopped = run.stop();
+    s.ok("fragment hands run stops cleanly on SIGTERM", stopped.is_some_and(|st| st.success()), format!("{stopped:?}"));
+    let offline = s.eventually(WAKE, || here(false));
+    s.ok("stopped, the machine is offline", offline, "");
+    let r = say("m22", json!({ "text": padded("once more [[call computer {\"task\": \"oil the hinges\", \"on\": \"e2e-box\"}]]"), "thread": shop, "persona": "builder" }))?;
+    anyhow::ensure!(r.status == 200, "saying m22: {r}");
+    let refused = |m: &Value| m["kind"] == "echo" && m["text"].as_str().is_some_and(|t| t.contains("e2e-box is offline"));
+    let said = s.eventually(TURN, || messages(api, owner, mind, shop).iter().any(refused));
+    s.ok(
+        "a task on an offline machine is refused at once, and none is opened",
+        said && op(api, owner, mind, "tasks", json!({ "thread": shop }))["tasks"].as_array().is_some_and(|t| t.len() == 2),
+        json!(messages(api, owner, mind, shop)),
+    );
+
+    // ---- unpaired: out of the mind, its key refused
+    let out = s.cli_json(api, &home, &["hands", "unpair", "--json"])?;
+    let gone = api.signed(&machine_keys, "GET", "/api/identities/me", None)?;
+    let members = api.signed(owner, "GET", &format!("/api/f/{mind}/members"), None)?;
+    s.ok(
+        "fragment hands unpair revokes its key (401 from its next request) and takes it out of the mind",
+        out["unpaired"] == true && out["leftMind"] == true && gone.status == 401 && members.body["members"].as_array().is_some_and(|m| !m.iter().any(|x| x["principal"] == machine.as_str())),
+        json!({ "unpaired": out, "me": gone.status, "members": members.body }),
+    );
+    let status = s.cli_json(api, &home, &["hands", "status", "--json"])?;
+    s.ok("and forgets the pairing here", status["paired"] == false, &status);
+    Ok(())
 }
 
 /// A fragment with its own code that asks for the `owner` capability.
