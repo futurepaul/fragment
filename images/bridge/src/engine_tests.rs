@@ -183,7 +183,7 @@ fn steps_split_replies() {
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "look it up" }), T0)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking.".into() }, T0 + 1);
-    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new() };
+    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new(), category: crate::records::Category::Web };
     let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step.clone() }, T0 + 2);
     assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
     assert_eq!(posts(&s)[1].0, records::work_id(&turn, "1"));
@@ -1683,7 +1683,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new() } }));
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new(), category: crate::records::Category::Shell } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.

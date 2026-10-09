@@ -4,7 +4,8 @@
 //! turn is a pure function of its message:
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: a step (`search`, its args, ok, an excerpt) before the reply;
+//! - `tool`: a step (`search`, a `web` one: the message's first 40
+//!   characters its args, ok, an excerpt) before the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
@@ -68,7 +69,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::records::{Outcome, PromptOption, Step};
+use crate::records::{Category, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
 
 /// The scripted agent's commands: one of each way the bridge carries one
@@ -486,11 +487,11 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
     }
     if text.contains("tool") {
-        let step = Step { tool: "search".into(), args: format!("{{\"q\":\"{}\"}}", ts.text.chars().take(40).collect::<String>()), ok: true, excerpt: "3 results".into(), text: "Let me look.".into() };
+        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), text: "Let me look.".into(), category: Category::Web };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if text.contains("approve") || text.contains("risky") {
-        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new() } }).await;
+        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell } }).await;
         let options = vec![
             PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
             PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },

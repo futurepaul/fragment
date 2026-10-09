@@ -132,6 +132,7 @@ async fn tool_steps() {
         assert_eq!(steps.len(), 1);
         assert_eq!((steps[0]["tool"].as_str(), steps[0]["step"].as_u64(), steps[0]["ok"].as_bool(), steps[0]["turn"].as_str()), (Some("search"), Some(1), Some(true), Some(turn.as_str())));
         assert_eq!(steps[0]["text"], "Let me look.");
+        assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
         assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
     });
@@ -852,7 +853,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             let text = |turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
             let next = text(&next);
             let note = next.strip_prefix("echo: [paul] good morning\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{wakes}: the turn after the cut one is told of it: {next:?}")).to_string();
-            for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search {\"q\":\"a slow tool please\"} (ok)"] {
+            for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search a slow tool please (ok)"] {
                 assert!(note.contains(said), "{wakes}: {said:?} in {note}");
             }
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");

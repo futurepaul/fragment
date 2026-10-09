@@ -216,9 +216,13 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .step { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--chat-code); }
-.step pre { margin: 0; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); max-height: 240px; overflow-y: auto; }
-.step .step-name { color: var(--text-primary); }
-.step.error pre, .step.error .step-name { color: var(--danger-text); }
+.step pre { margin: 4px 0 0 21px; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
+/* what it does: its icon, its verb, its arguments */
+.step-name { display: flex; align-items: baseline; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; }
+.step-name svg { width: 14px; height: 14px; align-self: center; color: var(--text-icon); }
+.step-name .step-verb { flex: none; }
+.step-name .step-args { min-width: 0; font: 500 12px/1.5 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step.error pre, .step.error .step-name, .step.error .step-args { color: var(--danger-text); }
 .step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; color: var(--text-secondary); font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-text + .step { border-top: 0; }
 

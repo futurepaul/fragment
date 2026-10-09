@@ -1798,6 +1798,33 @@ fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
+/// tool name and its arguments cut at 40 characters): real Hermes' progress
+/// lines are steps that say what they do. Its terminal's fenced block, its
+/// write_file's friendly verb (`✍️ Writing <path>`) and its execute_code's
+/// (`🐍 Running code …`) are each their tool, their category, and their
+/// preview whole up to the bridge's 140 (the image's
+/// `display.tool_preview_length`), not Hermes' 40.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn steps_say_what_they_do() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let steps = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == turn).map(|s| (s["tool"].as_str().unwrap_or("").to_string(), s["category"].as_str().unwrap_or("").to_string(), s["args"].as_str().unwrap_or("").to_string())).collect::<Vec<_>>();
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    // each past Hermes' default preview of 40
+    let command = "echo a-command-that-runs-well-past-forty-characters-0123456789";
+    let path = "/data/work/juniper--k3x9/a-file-whose-path-runs-past-forty-characters.txt";
+    let code = "print('a script whose one line runs well past forty characters')";
+    // the model takes its time after each call: a quick tool's line is sent
+    // only if its turn runs on past Hermes' progress poll (the debt ledger)
+    for (said, want) in [(format!("take your time\nrun: {command}"), ("terminal", "shell", command)), (format!("take your time\nwrite: {path}"), ("write_file", "write", path)), (format!("take your time\ncode: {code}"), ("execute_code", "shell", code))] {
+        let turn = asked(&fake, &chat, &c, &said, ended).await;
+        let got = fake.with(|w| steps(w, &turn));
+        eprintln!("steps: {said:?} is {got:?}");
+        assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
+    }
+}
+
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
 // 1hr window and now it's not responding to chats") ----
 

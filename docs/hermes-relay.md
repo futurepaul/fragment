@@ -148,7 +148,7 @@ group_sessions_per_user: false     # one session per chat, "[name] …" each mes
 gateway: {multiplex_profiles: true}
 onboarding: {profile_build: "off"}
 streaming: {enabled: true, transport: "draft"}
-display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", long_running_notifications: false, interim_assistant_messages: false}
+display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", tool_preview_length: 140, long_running_notifications: false, interim_assistant_messages: false}
 platforms: {relay: {gateway_restart_notification: false}}
 approvals: {mode: "smart", timeout: 3600, destructive_slash_confirm: false}
 agent: {disabled_toolsets: ["cronjob"]}   # its routines are fragment cron (decision 38)

@@ -791,7 +791,7 @@ impl Loop {
     /// the reply part still open before it as its words (Hermes' text
     /// before the call: a reply taken back, never posted); a step while
     /// drafts stream makes the `send` ending them its words too.
-    async fn steps(&mut self, turn: &str, steps: Vec<(String, String)>) {
+    async fn steps(&mut self, turn: &str, steps: Vec<Step>) {
         if steps.is_empty() {
             return;
         }
@@ -811,9 +811,9 @@ impl Loop {
             crate::ev!("relay.narration", { "turn": turn, "after_step": false });
             self.emit(Event::Retract { turn: turn.to_string(), part }).await;
         }
-        for (tool, args) in steps {
+        for step in steps {
             let text = std::mem::take(&mut words);
-            self.emit(Event::Step { turn: turn.to_string(), step: Step { tool, args, ok: true, excerpt: String::new(), text } }).await;
+            self.emit(Event::Step { turn: turn.to_string(), step: Step { text, ..step } }).await;
         }
     }
 

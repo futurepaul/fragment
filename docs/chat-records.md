@@ -238,13 +238,22 @@ computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
-  "args": "`ls -la`", "ok": true, "excerpt": "…", "text": "…" }
+  "category": "shell", "args": "ls -la", "ok": true, "excerpt": "…", "text": "…" }
 ```
 
-Part `<step>`, from 1: one tool call. `tool` and `args` at most 140
-characters, `excerpt` (its result) and `text` (the model's words before
-it) at most 300; empty when the runtime does not say. At most 200 a
-turn.
+Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
+it) and `args` (the call's preview) at most 140 characters, `excerpt`
+(its result) and `text` (the model's words before it) at most 300; empty
+when the runtime does not say. At most 200 a turn. `category` is what it
+does, whatever the runtime calls the tool: `shell` (a command or code
+run), `web` (a search of the web), `read` (a file, page or skill read, or
+files searched), `write` (a file written or edited), `browser` (its
+browser or desktop driven), `image` (an image made), `delegate` (work
+handed to another agent), `memory` (what it remembers, changed), or
+`other`; a page shows each with its own icon and verb ("Running: ls -la",
+"Searching the web: …"), and a step with another or none (one from before
+steps said) as `other`, by its `tool`. The bridge's runtime says which
+(our Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>", "text": "Run `rm -rf x`?",
@@ -352,7 +361,9 @@ The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
-agent's consecutive steps as one card; a prompt as a card whose buttons
+agent's consecutive steps as one card (each its category's icon, verb and
+arguments; while it works, the card's head says what it does now); a
+prompt as a card whose buttons
 only `asks` may press (enabled for them alone), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a

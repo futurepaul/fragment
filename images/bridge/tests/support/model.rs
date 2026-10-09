@@ -34,6 +34,8 @@
 //! - of a message with channel context before it (`[Recent channel
 //!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
 //!   turn), only the message after `[New message]` is acted on;
+//! - a last user message saying `take your time` is answered after
+//!   `UNHURRIED_MS`, each of its calls;
 //! - a last user message saying `stall` is held `STALL_S` before any of
 //!   its answer is sent (a model that streams nothing, as Workers AI's
 //!   DeepSeek did on 2026-10-09), on any model but the route's `fallback`,
@@ -172,6 +174,17 @@ pub const STALL_S: u64 = 120;
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
     last_user.contains("stall") && body["model"] != "fallback"
+}
+
+/// How long a call waits whose last user message says `take your time`: past
+/// Hermes' 0.3 s progress poll, so a quick tool's step is sent before the
+/// turn's next call ends it (docs/technical-debt-ledger.md, "A quick tool's
+/// step can be lost in Hermes").
+pub const UNHURRIED_MS: u64 = 1_000;
+
+fn unhurried(body: &Value) -> bool {
+    let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
+    last_user.contains("take your time")
 }
 
 /// What `write: <path>` has Hermes' write_file put there.
@@ -372,6 +385,9 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     if stalls(&v) {
         // nothing at all, not even the answer's head, until the stall is over
         tokio::time::sleep(std::time::Duration::from_secs(STALL_S)).await;
+    }
+    if unhurried(&v) {
+        tokio::time::sleep(std::time::Duration::from_millis(UNHURRIED_MS)).await;
     }
     let (text, tool) = answer(&v);
     let model = v["model"].as_str().unwrap_or("cheap").to_string();

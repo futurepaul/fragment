@@ -237,10 +237,16 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
-    // a tool step, as a card
+    // a tool step, as a card: what it does, in words (its category's icon
+    // and verb), then its arguments and what came of it
     say(&mut chrome, "tool please")?;
-    let stepped = shows(&mut chrome, &page, &format!("[...document.querySelectorAll('details.tools')].some((d) => d.textContent.includes('search') && d.textContent.includes('3 results')) && {}", replied("tool please")));
-    s.ok("a tool step shows as a card before the reply", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let step = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].find((s) => s.querySelector('.step-args')?.textContent === 'tool please')";
+    let stepped = shows(&mut chrome, &page, &format!("!!{step} && {step}.querySelector('svg') && {step}.querySelector('.step-verb').textContent === 'Searching the web:' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
+    s.ok("a tool step shows as a card before the reply, saying what it does (\"Searching the web: tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    // every card open, for the screenshots: what each step says
+    let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
+    chrome.eval(&page, open_cards)?;
+    let _ = chrome.screenshot(&page, &shots.join("desktop-step.png"));
 
     // an @mention: the composer offers the chat's agents, and the message is `to` the one picked
     chrome.click(&page, "#text")?;

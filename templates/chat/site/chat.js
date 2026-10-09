@@ -99,6 +99,27 @@ const MEMO_BITS_PER_S = 64000;
 const MEMO_MAX_MS = 5 * 60 * 1000;
 const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
 
+// What a step does (its `category`, docs/chat-records.md): an icon and the
+// verb its line starts with. A step of any other (`other`, or one from before
+// steps said) is its tool's own name.
+const STEP_SAYS = {
+  shell: ["terminal", "Running"],
+  web: ["globe", "Searching the web"],
+  read: ["book-open", "Reading"],
+  write: ["pencil", "Writing"],
+  browser: ["app-window", "Browsing"],
+  image: ["image", "Making an image"],
+  delegate: ["users", "Delegating"],
+  memory: ["brain", "Updating memory"],
+};
+
+/// A step as a line reads it: `{icon, verb, args}` ("Running", `npm test`).
+export function stepSays(s) {
+  const args = typeof s.args === "string" ? s.args : "";
+  const [icon, verb] = Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category] : ["wrench", typeof s.tool === "string" && s.tool ? s.tool : "a tool"];
+  return { icon, verb, args };
+}
+
 /// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
 export function essence(type) {
   return String(type ?? "").split(";")[0].trim().toLowerCase();
@@ -880,8 +901,10 @@ export function mount(root) {
     }
   }
 
-  // A turn's steps, one card: open while it works ("Working"), folded once
-  // done ("Worked through N steps") unless someone opened it.
+  // A turn's steps, one card: open while it works, saying what it does now
+  // ("Running: npm test"), folded once done ("Worked through N steps")
+  // unless someone opened it. Each step is its icon, its verb and its
+  // arguments, then what came of it.
   function stepsNode(t, steps) {
     const key = `s:${t.id}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
@@ -898,15 +921,20 @@ export function mount(root) {
         };
         const summary = el("summary");
         summary.innerHTML = svg(live ? "loader" : "wrench", live ? "spin" : "");
-        summary.append(el("span", "grow", live ? `Working · ${plural(steps.length, "step")}` : `Worked through ${plural(steps.length, "step")}`));
+        const now = stepSays(steps[steps.length - 1]);
+        summary.append(el("span", "grow", live ? `${now.verb}${now.args ? `: ${now.args}` : ""}` : `Worked through ${plural(steps.length, "step")}`));
         summary.insertAdjacentHTML("beforeend", svg("chevron", "chev"));
         d.append(summary);
         for (const s of steps) {
           if (s.text) d.append(el("div", "step-text", s.text));
           const step = el("div", `step${s.ok === false ? " error" : ""}`);
-          const pre = el("pre");
-          pre.append(el("span", "step-name", `${s.tool ?? "tool"}${s.args ? ` ${s.args}` : ""}\n`), s.excerpt || (s.ok === false ? "failed" : "done"));
-          step.append(pre);
+          const says = stepSays(s);
+          step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+          const name = el("div", "step-name");
+          name.innerHTML = svg(says.icon);
+          name.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
+          if (says.args) name.append(el("code", "step-args", says.args));
+          step.append(name, el("pre", null, s.excerpt || (s.ok === false ? "failed" : "done")));
           d.append(step);
         }
         return d;

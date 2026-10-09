@@ -63,8 +63,10 @@ async fn a_reply_with_steps_and_drafts() {
     fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] use a tool please", "turn": turn })]);
-        let steps: Vec<(String, String)> = w.bodies(&chat, "work", "turn.step").iter().map(|s| (s["tool"].as_str().unwrap().into(), s["args"].as_str().unwrap().into())).collect();
-        assert_eq!(steps, vec![("terminal".into(), "`ls`".into()), ("web_search".into(), "\"x\"".into())]);
+        // each line its tool, what it does, and the call's preview, whether
+        // Hermes names the tool or says its friendly verb
+        let steps: Vec<(String, String, String)> = w.bodies(&chat, "work", "turn.step").iter().map(|s| (s["tool"].as_str().unwrap().into(), s["category"].as_str().unwrap().into(), s["args"].as_str().unwrap().into())).collect();
+        assert_eq!(steps, vec![("terminal".into(), "shell".into(), "`ls`".into()), ("web_search".into(), "web".into(), "x".into())]);
         let reply = "echo: [paul] use a tool please";
         let partial = w.drafts.iter().filter(|d| d.2 == turn).filter_map(|d| d.3.as_deref()).any(|t| t.len() < reply.len() && reply.starts_with(t));
         assert!(partial, "Hermes' draft frames are the chat's drafts: {:?}", w.drafts);

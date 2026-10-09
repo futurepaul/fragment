@@ -52,7 +52,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Draft {text}` | the reply so far, shown live |
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
-| `Step {tool, args, ok, excerpt, text}` | a tool call |
+| `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
@@ -412,6 +412,16 @@ get_chat_info`.
   sooner until a newer one, so a turn's last quick tool call showed no
   step; our image patches its sender to send the line once the interval
   is out (images/hermes/Dockerfile; the debt ledger).
+- A progress line names its tool (`🖥️ computer_use: "capture"`, a
+  terminal command's fenced block) or says its friendly verb (`🔍
+  Searching the web for rust`, `✍️ Writing notes.md`: Hermes' own labels
+  for its built-in tools, `display.verb` of its `locales/en.yaml`). One
+  table of Hermes' tools (`relay/wire.rs`, `TOOLS`) reads either as the
+  step's `tool` (Hermes' name for it), its `args` (the call's preview,
+  its quotes and a repeat's count dropped) and its `category`; a tool not
+  there is `other`, but for its browser's (`browser_…`). Hermes cuts a
+  preview at its `display.tool_preview_length`, 40 unless set: our image
+  sets it to 140, the most a step's `args` keeps (`hermes-boot`).
 - One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
   segment at every tool boundary with a `send` answering the message, so
   the model's text beside a tool call ("Let me check that.") arrives as

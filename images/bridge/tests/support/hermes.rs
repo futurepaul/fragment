@@ -431,7 +431,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     if text.contains("tool") {
         let sent = gw.act(json!({ "op": "send", "chat_id": chat, "content": "💻 terminal: `ls`", "reply_to": null, "metadata": {} })).await;
         let id = sent["message_id"].as_str().unwrap_or("").to_string();
-        gw.act(json!({ "op": "edit", "chat_id": chat, "message_id": id, "content": "💻 terminal: `ls`\n🔍 web_search: \"x\"", "metadata": {} })).await;
+        gw.act(json!({ "op": "edit", "chat_id": chat, "message_id": id, "content": "💻 terminal: `ls`\n🔍 Searching the web for x", "metadata": {} })).await;
     }
     if let Some(urls) = event["media_urls"].as_array() {
         let mut bytes = 0usize;
