@@ -1217,6 +1217,15 @@ and how a runtime finds them, is the image's.
   document conversion, spreadsheet recalculation and AI PDF edits that
   need those remain optional. The audit and two offline sample paths are
   in docs/skills-audit.md.
+- **Automatic review, demo 2026-10-08:** each profile's config names
+  `auxiliary.background_review: { enabled: false }`. This disables Hermes'
+  automatic per-turn skill **and memory** reviews: they try to patch loaded
+  read-only external skills and compete for the shared 50 calls/min per-model
+  account limit. Explicit skill and memory tools remain available, and the
+  separate periodic curator keeps its defaults (agent-owned skills only,
+  external skills excluded, no LLM consolidation). Revisit with a
+  managed-skills-aware setting or sufficient rate limits; the temporary
+  decision is in docs/technical-debt-ledger.md, the evidence in docs/skills-audit.md.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner

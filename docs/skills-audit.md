@@ -166,6 +166,80 @@ creator or Chromium and tells the agent to inspect rendered pages. This makes
 better output easier; it does not establish that a live GLM turn will always
 choose the better design. No paid model calls or p5 mutations were made.
 
+## p5 background review / curator evidence
+
+The coordinator supplied additional Workers Logs evidence from Paul's first p5
+chat (2026-10-08): a background patch targeted `generate-pdf-finite`, logged
+“Refusing background curator patch for skill 'generate-pdf-finite'”, then hit a
+`PermissionError` beneath `/data/hermes/managed-skills/`. There were three
+background model requests lasting 26–33 seconds each. This establishes that
+background maintenance targeted our PDF skill; it does not reveal the proposed
+patch's content or prove it would have made a better document.
+
+Read the actual pinned image's `agent/background_review.py`,
+`agent/turn_finalizer.py`, `agent/curator.py`, `run_agent.py`,
+`tools/skill_manager_guards.py`, `tools/skill_manager_tool.py`,
+`tools/skill_usage.py` and `hermes_cli/config_defaults.py`.
+[Upstream curator documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/curator)
+describes the separate periodic service; the pinned code resolves the distinction:
+
+| Mechanism | v0.21.6 default / gate | Managed external skills |
+|---|---|---|
+| Per-turn self-improvement review | `auxiliary.background_review.enabled: true`; skill trigger after 10 tool iterations (`skills.creation_nudge_interval`), or a memory trigger; up to 16 review iterations, main model/runtime by default | Prompt prioritizes patching the loaded skill regardless of author. Existing content requires a fresh review-time read, then writes are attempted even for external skills. |
+| Periodic curator | `curator.enabled: true`, weekly interval, at least two idle hours; `consolidate: false`, `prune_builtins: false`; first observation defers a run | External skills are excluded from eligibility, adoption and autonomous deletion. Default deterministic pruning makes no model calls. |
+
+The observed patch refusal matches the **read-before-write guard**, not an
+external-ownership patch guard. The review is told to reread the skill and retry
+once. `_locate_for_write` checks external ownership for **delete only**;
+`_guarded_write` then tries an atomic write. Our root-owned files correctly stop
+that write at the OS boundary. Even the periodic curator's deletion/eligibility
+protection does not provide a universal external-content-write guard for the
+per-turn review fork.
+
+Why would it try? The review prompts prioritize learning from corrections,
+complaints about formatting, and non-trivial techniques, and prefer changing the
+skill used for the task over saving a separate memory. A patch attempt is an
+incentivized learning action, not an independent quality assessment. Ours does
+have independently demonstrated weaknesses: missing libraries, wrong core-font
+Unicode claims, overlapping PDF triggers, and manual layout snippets where
+Hermes already supplies a structured renderer. Delete `generate-pdf-finite` and
+the other PDF copies; use native `pdf` with the baked dependencies and the tested
+Chromium path. Do not let a background model rewrite a shared release's bytes.
+
+Keep managed and native external views **read-only**. Making them writable would
+let one agent change every profile's shared instructions, bypass the skills
+fragment's versioned edits, and lose changes at refresh/restart. For deliberate
+customization, an agent-owned skill in its own fragment/profile can override the
+native name and retain its history.
+
+There is no v0.21.6 per-path/per-managed-skill background-review exclusion. Turning
+`curator.enabled` off alone does **not** stop the observed per-turn model calls.
+The supported automatic-review switch is `auxiliary.background_review.enabled`;
+it also controls automatic memory reviews. Explicit skill/memory tools remain
+available; an explicit `/refine` focus bypasses that automatic gate in Hermes
+(the Fragment bridge does not forward slash commands). The separate periodic
+curator can retain its safe default policy for agent-owned skills.
+
+**Demo decision, coordinator authorized 2026-10-08:** set the single profile
+config line `auxiliary.background_review: { enabled: false }`. The account shares
+a 50 calls/min per-model limit. This disables **automatic skill and memory
+reviews**, retains explicit skill/memory tools and the separate periodic
+curator, and can be reversed by removing that line in `profile_config`.
+Paul should revisit it with a managed-skills-aware setting or sufficient rate
+limits. [Debt entry](technical-debt-ledger.md#hermes-per-turn-background-review-is-off-2026-10-08-demo).
+The Docker test reads Hermes' effective setting, invokes its automatic spawn
+entrypoint without a model-capable runtime to prove it returns before model
+work, and checks explicit tools and the periodic curator remain available.
+
+The three calls represent 78–99 seconds of request duration, not necessarily an
+equal addition to first-reply wall time: v0.21.6 starts reviews after delivery and
+cancels an existing review at a subsequent live turn with a bounded two-second
+acknowledgement wait. They still spend model budget and can contend with live
+work. Without the full timing trace, do not claim all of that duration was added
+to Paul's visible wait. Deleting our PDF copy fixes the bad routing/dependencies;
+automatic review can still try to patch the now-read-only native PDF, so deletion
+alone does not eliminate that maintenance conflict.
+
 ## Changes and verification
 
 - Managed release: six Fragment contracts; 35 generic copies deleted.
@@ -183,7 +257,9 @@ choose the better design. No paid model calls or p5 mutations were made.
 - Docker test: all six real managed entrypoints, native document/code/research
   catalog entries, Google exclusion, read-only skills, actual PDF creation and
   read-back, agent-owned precedence, managed PDF shadow/removal and restoration.
-  Unit tests also cover aliases, replay and fresh-view restoration.
+  Unit tests also cover aliases, replay and fresh-view restoration. The image test
+  checks automatic review is off, explicit skill/memory tools remain available,
+  and the periodic curator retains its no-LLM-consolidation default.
 
 Required checks, recorded for this branch:
 
@@ -195,6 +271,7 @@ Required checks, recorded for this branch:
   1 passed, 16 filtered; unique tag `fragment-hermes:skills-audit-20261008-3edwyqbi`.
 - Offline PDF comparison: 2 paths, 4 pages visually inspected; both content checks passed.
 
+Paul should revisit disabling automatic memory/skill reviews (demo debt above).
 Paul/coordinator's calls: merge and deploy this image/platform release, then
 update existing computers' image pins. A platform deploy alone updates managed
 files but does not replace the pinned image of an existing computer. Specialty

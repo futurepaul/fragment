@@ -351,6 +351,10 @@ async fn the_hermes_image() {
         serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
     };
     let found = hermes_finds();
+    assert!(c.exec(&[
+        "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
+        "/opt/hermes/.venv/bin/python", "-c", "from types import SimpleNamespace; from agent.background_review import load_background_review_settings; from agent import curator; from run_agent import AIAgent; from model_tools import get_tool_definitions; assert not load_background_review_settings()[0]; assert curator.is_enabled() and not curator.get_consolidate(); names = {t['function']['name'] for t in get_tool_definitions(enabled_toolsets=['skills', 'memory'], quiet_mode=True)}; assert {'skill_manage', 'memory'} <= names, names; AIAgent._spawn_background_review(SimpleNamespace(_delegate_depth=0), [], review_memory=True, review_skills=True)",
+    ]), "automatic skill and memory review exits before any model work; explicit tools and periodic curator remain available");
     eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
     assert!(found["model-council-finite"].as_str().is_some_and(|d| d.contains("Fragment's model tiers")), "a managed skill: {found}");
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
