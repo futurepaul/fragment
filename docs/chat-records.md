@@ -350,6 +350,14 @@ chat costs one click. An add declined, refused, or unanswered for 120 s
 sends nothing and says why in the banner, the message kept in the
 composer.
 
+**An app beside the chat.** Framed, a link in an agent's reply to a page
+of another fragment of the deployment (its host the page's own with
+another fragment's name in front: an app the agent made) is followed by
+"Open", which asks the shell to open that page in its viewer beside the
+chat (`{fragment: "open", url}`; the shell checks the URL again:
+docs/api.md, The shell). The link itself still opens a tab, and nothing
+is offered on a page with no shell around it.
+
 ## Push
 
 The template's code (`templates/chat/app.mjs`) pushes an agent's reply to

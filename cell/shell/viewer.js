@@ -158,6 +158,7 @@ export function createViewer({ stack, onChange = () => {} }) {
     head.append(grow);
     for (const a of spec.actions || []) head.append(button(a.icon, a.title, a.onClick));
     const max = button("max", "Maximize", () => maximize(spec.key));
+    max.classList.add("pane-max");
     head.append(max, button("x", "Close", () => close(spec.key)));
     head.ondblclick = (e) => { if (!e.target.closest("button")) maximize(spec.key); };
     const body = document.createElement("div");

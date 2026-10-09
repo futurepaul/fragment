@@ -33,6 +33,10 @@ const ICON = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
+  // Lucide's external-link, link and square-pen
+  external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // Skyler's agent palette: a plain colored circle, no eyes
@@ -239,7 +243,9 @@ dark.addEventListener("change", () => { for (const f of document.querySelectorAl
 // A frame of a fragment the person owns may ask for their agents
 // (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
 // origin only (its status's canonical URL), `{fragment: "agents", agents:
-// [{identity, fragment, name, title}]}`, and again whenever they change.
+// [{identity, fragment, name, title, phase?}]}` (`phase` their computer's,
+// as the platform last said: `asleep`, `starting`, `awake`, `sleeping` or
+// `wont_wake`), and again whenever any of it changes.
 // It may then ask for one of them in its fragment (`{fragment: "add-agent",
 // identity, nonce}`): the shell asks its person, in its own dialog (never
 // in the frame: a page is code its author or an agent wrote, so it asks
@@ -266,7 +272,10 @@ function originOf(name) {
   }
   return origins.get(name);
 }
-const roster = () => [...state.agents.values()].map((a) => ({ identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment) }));
+const roster = () => {
+  const phase = state.computer?.phase;
+  return [...state.agents.values()].map((a) => ({ identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(phase ? { phase } : {}) }));
+};
 let rosterSent = "";
 function rosterChanged() {
   const agents = roster();
@@ -450,6 +459,7 @@ function renderHeading() {
   $("agent-heading").hidden = !open;
   $("page-title").hidden = !state.page;
   $("page-title").textContent = state.page ?? "";
+  $("new-chat").hidden = !open || state.guest || !chatAgentOf(state.current);
   if (!open) return;
   const who = identity(state.current);
   $("chat-title").textContent = who.title;
@@ -457,26 +467,58 @@ function renderHeading() {
   const frame = state.frames.get(state.current);
   if (frame) frame.title = who.title;
 }
+// A chat's unread, as its row shows them: none on the open one (it is
+// being seen), and past the count's bound "99+" (the list counts at most
+// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`).
+const UNREAD_MAX = 100;
+function unreadMark(f) {
+  const n = f.name === state.current && !state.page ? 0 : f.unread ?? 0;
+  if (!n) return [];
+  const b = el("span", "unread", n >= UNREAD_MAX ? "99+" : String(n));
+  b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
+  return [b];
+}
 function renderChats() {
   const list = shown(chats());
   patch($("chats"), list.length ? list.map((f) => {
     const who = identity(f.name);
-    const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}`);
+    const unread = unreadMark(f);
+    const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}${unread.length ? " has-unread" : ""}`);
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
     if (isGroup(f.name)) row.dataset.group = String(agentsOf(f.name).length);
     row.setAttribute("aria-current", f.name === state.current && !state.page ? "page" : "false");
     const text = el("span", "agent-copy");
     text.append(el("span", "label", who.title), el("span", "agent-preview", who.preview || (own(f) ? "Say hello" : f.role)));
-    row.append(mark(f.name), text, ...badges(f));
+    row.append(mark(f.name), text, ...badges(f), ...unread);
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
   }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your first agent starts here")]);
 }
+// The open chat, on screen, is seen (`PUT /api/fragments/{name}/seen`): its
+// row counts nothing unread, here and in the person's other tabs and
+// devices (their list tells them). Asked again whenever the list counts
+// more on it (a reply that came while it was open), never while this page
+// is hidden; one ask at a time.
+let marking = null;
+function markSeen() {
+  const f = byName(state.current);
+  if (!f || state.page || document.hidden || !f.unread || marking === f.name) return;
+  marking = f.name;
+  api("PUT", `/api/fragments/${seg(f.name)}/seen`)
+    .then(() => {
+      f.unread = 0;
+      renderChats();
+    })
+    .catch(() => {})
+    .finally(() => { marking = null; });
+}
+document.addEventListener("visibilitychange", markSeen);
 $("agent-heading").onclick = () => {
   const name = state.current;
   const group = isGroup(name);
   const agent = agentOfChat(name);
+  const mine = chatAgentOf(name);
   // a group's agents each have a profile; a direct chat's agent has one
   const profiles = group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
@@ -486,6 +528,7 @@ $("agent-heading").onclick = () => {
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
     : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
   openMenu($("agent-heading"), [
+    ...(mine && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(mine) }] : []),
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     { icon: "invite", text: "Invite…", onClick: () => share(name) },
     ...profiles,
@@ -493,13 +536,26 @@ $("agent-heading").onclick = () => {
     archiveItem(name),
   ]);
 };
-// the agent fragment a direct chat is with: the one whose title the chat
-// carries (a group's agents keep names of their own)
-function agentOfChat(name) {
-  if (isGroup(name)) return null;
+// The identity of the person's own agent a direct chat is with (its row's
+// one agent), or of the agent whose title it carries while its row names
+// none; null for a group, or a chat with someone else's agent.
+function chatAgentOf(name) {
+  if (!name || isGroup(name)) return null;
+  const id = agentsOf(name)[0];
+  if (id) return state.agents.has(id) ? id : null;
   const title = titleOf(name);
-  return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.fragment ?? null;
+  return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.identity ?? null;
 }
+// the agent fragment a direct chat is with (a group's agents keep names of their own)
+const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? null;
+// An agent's own chat: the one the shell made with it, `<label>-chat` beside
+// its `<label>` (makeAgent), which its title follows (rename), Hermes' Bot
+// Mode messages (images/hermes/boot/src/bots.rs, `bot_chat`) and `fragment
+// ask` finds; any other chat with it ("New chat") is titled on its own.
+const isAgentsOwnChat = (name) => {
+  const agent = agentOfChat(name);
+  return !!agent && labelOf(name) === `${labelOf(agent)}-chat`;
+};
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
@@ -518,6 +574,7 @@ function openChat(name, push = true) {
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
+  markSeen();
   prewake();
 }
 
@@ -609,19 +666,33 @@ function renderApps() {
     return row;
   }) : [el("div", "empty-row", apps().length ? "Every app is archived" : state.guest ? "Apps shared with you show here" : "No apps yet")]);
 }
-function openApp(name) {
+// An app's window, at `path` (a link's, from a chat). One its row has not
+// reached yet (an agent's app, just made) opens all the same, by its name:
+// the mint signs it in, or its frame says why not. Already open, it shows
+// the page asked for.
+function openApp(name, path = "/") {
   const f = byName(name);
-  if (!f) return;
-  const frame = frameOf(framed(name), titleOf(name), name);
+  const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
+  if (shown && path !== "/") shown.src = framed(name, path);
+  const frame = frameOf(framed(name, path), titleOf(name), name);
   const status = el("span", "pane-sharing");
-  status.append(...badges(f));
+  if (f) status.append(...badges(f));
+  // its own URL, for a tab of its own or the clipboard
+  const at = originOf(name).then((o) => `${o}${path}`);
+  at.catch(() => {});
   show({
-    key: `app:${name}`, title: titleOf(name), subtitle: own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
+    key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
     actions: [
-      ...(own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
+      ...(f && own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
       { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
-      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name); } },
-      { icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [archiveItem(name)]) },
+      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name, path); } },
+      { icon: ICON.external, title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
+      {
+        icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [
+          { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
+          ...(f ? [archiveItem(name)] : []),
+        ]),
+      },
     ],
   });
 }
@@ -642,20 +713,59 @@ async function setArchived(name, archived) {
     notice(archived ? "It was not archived" : "It was not unarchived", e.message);
   }
 }
-// a fragment's file viewer asks for a file as a window (only a frame of one
-// of the person's own fragments, for a file of that same origin)
-addEventListener("message", (e) => {
+// A frame asks for a page as a window (`{fragment: "open", url}`): a file of
+// its own origin (a fragment's file viewer) opens as a file's window; a page
+// of another fragment of this deployment (a link in a chat: "Open"), as that
+// fragment's window beside the chat, signed in by the mint as its row's is.
+// Anything else opens nothing: the frame names a URL, the shell decides
+// whether it is a fragment's (`fragmentAt`).
+addEventListener("message", async (e) => {
   const ask = e.data;
   if (ask?.fragment !== "open" || typeof ask.url !== "string") return;
   const from = [...document.querySelectorAll("iframe")].find((f) => f.contentWindow === e.source);
-  if (!from || new URL(ask.url, e.origin).origin !== e.origin) return;
-  const url = new URL(ask.url, e.origin);
-  const path = url.searchParams.get("path") || String(ask.title || "");
-  const frame = el("iframe");
-  frame.src = url.href;
-  frame.title = path;
-  show({ key: `file:${url.href}`, title: path.split("/").pop(), icon: paneIcon("folder"), body: frame });
+  if (!from) return;
+  let url;
+  try {
+    url = new URL(ask.url, e.origin);
+  } catch {
+    return;
+  }
+  if (url.origin === e.origin) {
+    const path = url.searchParams.get("path") || String(ask.title || "");
+    const frame = el("iframe");
+    frame.src = url.href;
+    frame.title = path;
+    show({ key: `file:${url.href}`, title: path.split("/").pop(), icon: paneIcon("folder"), body: frame });
+    return;
+  }
+  const sender = from.dataset.fragment;
+  if (!sender || !byName(sender)) return;
+  let origin;
+  try {
+    origin = await originOf(sender);
+  } catch {
+    return;
+  }
+  // the page in the frame is still its fragment's own
+  if (e.origin !== origin || from.contentWindow !== e.source) return;
+  const name = fragmentAt(url, sender, origin);
+  if (!name) return;
+  if (isChat(name)) openChat(name);
+  else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
+// A fragment's name, when `url` is a page of one on this deployment: its
+// host is the asking fragment's (`sender`, at `origin`, its status's
+// canonical URL) with another fragment's name in its place (a branch's mark
+// and the zone, the scheme and the port all the same). Else null.
+const FRAGMENT_NAME = /^[a-z0-9](?:-?[a-z0-9])*--[a-km-np-z2-9]{4}$/;
+function fragmentAt(url, sender, origin) {
+  const own = new URL(origin);
+  if (!own.hostname.startsWith(sender) || url.protocol !== own.protocol || url.port !== own.port || url.username || url.password) return null;
+  const tail = own.hostname.slice(sender.length);
+  if (!url.hostname.endsWith(tail)) return null;
+  const name = url.hostname.slice(0, url.hostname.length - tail.length);
+  return FRAGMENT_NAME.test(name) ? name : null;
+}
 
 // ---- an agent's screen: its own desktop, a port of its computer's own
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
@@ -754,6 +864,67 @@ $("new-agent-form").onsubmit = async (e) => {
   }
 };
 
+// ---- another chat with an agent: a fresh start (its context is the chat's:
+// a runtime keys an agent's session by its chat), titled from its first
+// message unless renamed. Its own chat (`<label>-chat`) stays its own. ----
+const UNTITLED = "New chat";
+// a title from a first message, as finite-mono's: at most 48 characters (the rename field's)
+const TITLE_MAX_CHARS = 48;
+// A chat's label: its agent's, `-chat` and a number (`maple-chat-2`), short
+// enough for any deployment's hosts with four digits' room.
+const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`);
+// An untitled chat with only this agent that no one has said anything in
+// yet is the one to open again, not another.
+const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
+let starting = false;
+async function newChat(identity) {
+  const agent = state.agents.get(identity);
+  if (!agent || starting) return;
+  starting = true;
+  try {
+    let name = blank(identity)?.name;
+    if (!name) {
+      const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED });
+      // adding it wakes its computer (the platform's `joined`)
+      await api("PUT", `/api/f/${seg(chat.name)}/members/${seg(identity)}`, { role: "editor" });
+      await load();
+      name = chat.name;
+    }
+    openChat(name);
+    leaveSidebar();
+  } catch (e) {
+    notice("The chat was not made", e.message);
+  } finally {
+    starting = false;
+  }
+}
+$("new-chat").onclick = () => {
+  const id = chatAgentOf(state.current);
+  if (id) newChat(id);
+};
+// A chat of the person's still titled UNTITLED that has a message is titled
+// from its first message with words (its first line's words, cut to
+// TITLE_MAX_CHARS); one renamed in the meantime keeps its name. Once per
+// chat a page, after the list says it has a message.
+const titling = new Set();
+async function titleFromFirst(name) {
+  if (titling.has(name)) return;
+  titling.add(name);
+  try {
+    const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
+    // a message is a body with text and no kind but "message" (docs/chat-records.md)
+    const said = (r.records ?? []).map((x) => (typeof x.body === "string" ? x.body : (x.body?.kind ?? "message") === "message" ? x.body?.text : null)).find((t) => typeof t === "string" && t.trim());
+    if (!said) return titling.delete(name);
+    const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
+    const title = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
+    const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
+    if (manifest.meta?.title !== UNTITLED) return;
+    await retitle(name, title, "its title, from its first message");
+  } catch {
+    titling.delete(name);
+  }
+}
+
 // ---- a group chat: several of the person's agents in one chat (decision 8) ----
 // Through public APIs only, as makeAgent: a chat fragment on the chat
 // template, titled by its name or its agents' names, and the agents added
@@ -818,13 +989,21 @@ $("new-group-form").onsubmit = async (e) => {
   }
 };
 
-// ---- renaming: the chat's title (and its agent's, so they stay one) ----
+// ---- renaming: the chat's title (and, its own chat's, its agent's, so they stay one) ----
+// A fragment's title, its fragment.json's `meta.title`, deployed.
+async function retitle(name, title, message) {
+  const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
+  manifest.meta = { ...(manifest.meta ?? {}), title };
+  await api("POST", `/api/f/${seg(name)}/files`, { message, files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
+  await api("POST", `/api/f/${seg(name)}/deploy`, {});
+}
 let renaming = null;
 function rename(name) {
   renaming = name;
-  const group = isGroup(name);
-  $("rename-title").textContent = group ? "Name this chat" : "Name your agent";
-  $("rename-label").textContent = group ? "Chat name" : "Agent name";
+  // an agent's own chat names it too; any other names only itself
+  const agent = isAgentsOwnChat(name);
+  $("rename-title").textContent = agent ? "Name your agent" : "Name this chat";
+  $("rename-label").textContent = agent ? "Agent name" : "Chat name";
   $("agent-name").value = titleOf(name);
   $("rename-error").hidden = true;
   $("rename-agent").showModal();
@@ -836,12 +1015,7 @@ $("rename-form").onsubmit = async (e) => {
   const title = $("agent-name").value.trim();
   if (!title || !renaming) return;
   try {
-    for (const name of [renaming, agentOfChat(renaming)].filter(Boolean)) {
-      const manifest = await api("GET", `/api/f/${name}/manifest`);
-      manifest.meta = { ...(manifest.meta ?? {}), title };
-      await api("POST", `/api/f/${name}/files`, { message: "rename", files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
-      await api("POST", `/api/f/${name}/deploy`, {});
-    }
+    for (const name of [renaming, isAgentsOwnChat(renaming) ? agentOfChat(renaming) : null].filter(Boolean)) await retitle(name, title, "rename");
     $("rename-agent").close();
     await load();
   } catch (err) {
@@ -1003,6 +1177,7 @@ function computerIs(v) {
   if (!v?.computer) return;
   state.computer = v;
   renderComputer();
+  rosterChanged();
 }
 
 // ---- what the person should know of their computer (docs/computers.md,
@@ -1822,6 +1997,8 @@ async function load(changed = false) {
   renderUpdate();
   renderComputer();
   rosterChanged();
+  markSeen();
+  for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
@@ -1902,6 +2079,7 @@ function setGuest(guest) {
   for (const id of ["new-agent", "new-agent-top", "new-group", "add-app"]) $(id).hidden = guest;
   renderChats();
   renderApps();
+  renderHeading();
 }
 // With no chat to show: the first app shared with them in its window, and
 // beside it what a guest may do, and what a seat gives.

@@ -5,6 +5,7 @@
 
 export const ICON = {
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  panel: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   send: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
   stop: '<rect width="18" height="18" x="3" y="3" rx="2"/>',

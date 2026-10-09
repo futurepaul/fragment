@@ -132,6 +132,23 @@ fragment.club until cutover (decisions 34–35).
   notifications on the platform's origin for the fragments it frames, or
   browsers let a frame ask.
 
+## A chat's unread count counts its person's own messages
+
+- **Observed:** 2026-10-09, unread badges (docs/api.md, `PUT
+  /api/fragments/{name}/seen`). A row's `unread` counts its person's
+  search entries after their mark, and an entry names no author (the
+  fragment's `search_log` has no column for one, and a column added to it
+  would refuse every older fragment's writes: "Objects made before a
+  column", above). The shell marks the chat it shows, so a message sent
+  there never counts.
+- **Risk:** a message the person sends from elsewhere (the CLI's `fragment
+  ask`, another device) counts as unread until they open the chat.
+- **First proof:** a chat's badge after `fragment ask`, counting the
+  question beside its answer.
+- **Delete when:** search entries carry their record's principal (the
+  fragment's log made again with the column, its lists sent again), and
+  the count leaves out the person's own.
+
 ## A busy chat's push pauses itself
 
 - **Observed:** 2026-10-03. The chat's push job runs on a channel trigger
