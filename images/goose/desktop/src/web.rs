@@ -40,8 +40,14 @@ pub const RESULTS_DEFAULT: usize = 8;
 pub const QUERY_MAX_BYTES: usize = 500;
 /// An address is at most this long.
 pub const URL_MAX_BYTES: usize = 4096;
-/// Where a file that is no page is saved.
+/// Where a file that is no page is saved: the computer's work's downloads,
+/// or `FRAGMENT_DOWNLOADS` (a paired machine's hands folder's).
 pub const DOWNLOADS: &str = "/data/work/downloads";
+
+/// Where this process saves a file that is no page.
+pub fn downloads() -> PathBuf {
+    std::env::var("FRAGMENT_DOWNLOADS").ok().filter(|d| Path::new(d).is_absolute()).map_or_else(|| PathBuf::from(DOWNLOADS), PathBuf::from)
+}
 /// A browser's agent string: some sites answer curl's with a refusal.
 pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
@@ -289,13 +295,14 @@ fn encode_query(q: &str) -> String {
     q.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// A file that is no page, saved under `DOWNLOADS` by its address's last
+/// A file that is no page, saved under `downloads()` by its address's last
 /// part.
 fn save(f: &Fetched) -> std::io::Result<PathBuf> {
     let name: String = f.url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).take(80).collect();
     let name = if name.is_empty() || name.starts_with('.') { format!("download-{}", fragment_bridge::log::now_ms()) } else { name };
-    std::fs::create_dir_all(DOWNLOADS)?;
-    let path = Path::new(DOWNLOADS).join(name);
+    let dir = downloads();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
     std::fs::write(&path, &f.body)?;
     Ok(path)
 }
@@ -393,10 +400,14 @@ pub async fn search(args: &Value) -> Value {
 }
 
 pub fn tools() -> Vec<Value> {
+    let read = format!(
+        "Read a web page as Markdown, fast, without the browser: for pages that need no clicking or login (docs, articles, wikis, lists, APIs that answer JSON). `mode` \"article\" (default) is its main text; \"page\" is everything on it (use for lists, tables, search pages, when article misses things). Long pages come in parts: pass `start` for the next. `links: true` lists the page's links (to crawl). A PDF or other file is saved to {}. If a page needs JavaScript or a login, or comes back empty, use the browser tools instead.",
+        downloads().display()
+    );
     vec![
         mcp::tool(
             "web_read",
-            "Read a web page as Markdown, fast, without the browser: for pages that need no clicking or login (docs, articles, wikis, lists, APIs that answer JSON). `mode` \"article\" (default) is its main text; \"page\" is everything on it (use for lists, tables, search pages, when article misses things). Long pages come in parts: pass `start` for the next. `links: true` lists the page's links (to crawl). A PDF or other file is saved to /data/work/downloads. If a page needs JavaScript or a login, or comes back empty, use the browser tools instead.",
+            &read,
             json!({ "type": "object", "required": ["url"], "properties": {
                 "url": { "type": "string", "description": "the http(s) address" },
                 "mode": { "type": "string", "enum": ["article", "page"] },

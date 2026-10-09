@@ -114,6 +114,8 @@ agent too: `screen_look` its `/v1/chat/completions` with `model:
 | `BRIDGE_GOOSE_BIN` | `/usr/local/bin/goose` | goose, run as `goose acp --with-builtin <BRIDGE_GOOSE_BUILTINS>` |
 | `BRIDGE_GOOSE_BUILTINS` | `developer,skills` | goose's builtins: its shell and editor, and its skills (`load_skill`) |
 | `BRIDGE_GOOSE_DESKTOP` | | the image's `fragment-desktop`: set, every session gets the agent's `browser`, `computer` and `web` MCP servers (`fragment-desktop mcp …`), and each goose runs with `DISPLAY` naming its agent's own display (`fragment-desktop display <agent>`); the goose image's `/usr/local/bin/fragment-desktop` |
+| `BRIDGE_GOOSE_TOOLS` | the place's | which of the desktop's MCP servers every session gets, commas between (`none` for none): on a computer `browser,computer,web`; on a machine `browser,web` (`computer` refused there) |
+| `BRIDGE_GOOSE_PLACE` | `computer` | `machine`: the agent's goose runs on its owner's own machine, paired as its hands (`fragment hands run`; docs/optchat.md, "A machine as hands"): every session is told so (`HANDS_MACHINE` in `HANDS`' place, the same bytes every turn), the platform skill's page is the machine's (`runtime/machine.md`), the browser is headless (`fragment-desktop mcp browser --headless`), and no display is asked for |
 | `BRIDGE_GOOSE_SKILLS` | | `1`: each turn installs its agent's skills first (below) |
 | `BRIDGE_GOOSE_WORK` | `/data/work` | each session's cwd |
 | `BRIDGE_GOOSE_HOME` | `/data/work/home` | goose's and its tools' `HOME` |
@@ -407,6 +409,13 @@ fork's two settings.
   names (`browser__browser_navigate`). They and goose's shell run on the
   agent's own display (`DISPLAY`). What they are: docs/computers.md, "Our
   images".
+- **On a paired machine** (`BRIDGE_GOOSE_PLACE=machine`): the same
+  `browser` and `web` when the machine has them (`BRIDGE_GOOSE_TOOLS`),
+  the browser a headless Chromium of Playwright MCP's, fresh each session
+  (`--isolated`), behind the same gate (no images, the same 18 tools), and
+  never `computer`: a machine's hands never drive their owner's screen.
+  Every session is told it works on its owner's own machine, in its own
+  folder (`HANDS_MACHINE`).
 - **Its skills** (`BRIDGE_GOOSE_SKILLS`, `src/runtime/skills.rs`): before
   each turn's session, the agent's skills are installed where its goose
   reads them (`<BRIDGE_GOOSE_ROOT>/<agent>/config/skills`, scratch): the

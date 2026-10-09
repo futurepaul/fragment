@@ -80,9 +80,13 @@ pub const NEEDS: [(&str, &[&str]); 12] = [
 /// The platform skill's description: in every session's prompt, what makes
 /// an agent load it.
 pub const PLATFORM_DESCRIPTION: &str = "You are an agent on your owner's Fragment computer, and the `fragment` CLI in your shell acts as you. Load this before you make, change, publish, share or look up your owner's fragments (apps, sites, pages, dashboards, brains, chats), when asked what you can do here, or to ask another of your owner's agents.";
+/// The same, on a paired machine (`Place::Machine`).
+pub const MACHINE_DESCRIPTION: &str = "You are an agent on your owner's own machine, paired as their hands, and the `fragment` CLI in your shell acts as you. Load this before you make, change, publish, share or look up your owner's fragments (apps, sites, pages, dashboards, brains, chats), when asked what you can do here, or to ask another of your owner's agents.";
 
 /// The page this computer adds before the CLI's skill.
 pub const COMPUTER_PAGE: &str = include_str!("computer.md");
+/// The page a paired machine adds in its place.
+pub const MACHINE_PAGE: &str = include_str!("machine.md");
 
 /// The skill that stands in for goose's bundled `web-search`.
 pub const WEB_SKILL: &str = "---
@@ -98,24 +102,28 @@ description: Search the web and read pages. Use your web tools (web_search, web_
   parts: `start` names the next. `links: true` lists its links.
 - When a page needs JavaScript, a login, or clicking: the browser tools
   (`browser_navigate`, then `browser_snapshot`, and act on the refs it shows
-  as `target`). Your
-  owner watches your browser on your screen.
+  as `target`).
 - To gather a list from a site: `web_read` its listing page with
   `mode: \"page\"` (and `links: true` to follow items); in the browser,
   one `browser_snapshot` of the page reads it all. Don't scroll and
   re-snapshot what one read already gave you.
 ";
 
-/// The platform skill: the computer's page before the CLI's skill (what
-/// `fragment skill` prints, a skill named `fragment`), under the computer's
-/// description. Refused unless the CLI's is a skill named `fragment`.
-pub fn platform_skill(cli_skill: &str) -> Result<String, String> {
+/// The platform skill: the computer's page (a paired machine's, there)
+/// before the CLI's skill (what `fragment skill` prints, a skill named
+/// `fragment`), under the place's description. Refused unless the CLI's is
+/// a skill named `fragment`.
+pub fn platform_skill(cli_skill: &str, place: super::goose::Place) -> Result<String, String> {
     let (front, body) = cli_skill.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")).ok_or("`fragment skill` printed no skill: no frontmatter")?;
     if !front.lines().any(|l| l.trim_end() == format!("name: {PLATFORM}")) {
         return Err(format!("`fragment skill` printed a skill not named {PLATFORM}"));
     }
-    let description = serde_json::to_string(PLATFORM_DESCRIPTION).expect("a string serializes");
-    let skill = format!("---\nname: {PLATFORM}\ndescription: {description}\n---\n\n{}\n\n{}\n", COMPUTER_PAGE.trim(), body.trim());
+    let (description, page) = match place {
+        super::goose::Place::Computer => (PLATFORM_DESCRIPTION, COMPUTER_PAGE),
+        super::goose::Place::Machine => (MACHINE_DESCRIPTION, MACHINE_PAGE),
+    };
+    let description = serde_json::to_string(description).expect("a string serializes");
+    let skill = format!("---\nname: {PLATFORM}\ndescription: {description}\n---\n\n{}\n\n{}\n", page.trim(), body.trim());
     if skill.len() > PLATFORM_MAX_BYTES {
         return Err(format!("the platform skill is {} bytes, past {PLATFORM_MAX_BYTES}", skill.len()));
     }
@@ -416,15 +424,20 @@ mod tests {
     }
 
     /// The platform skill is the computer's page and the CLI's skill, under
-    /// its own description; anything that is not the CLI's skill is refused.
+    /// its own description (a paired machine's page and description there);
+    /// anything that is not the CLI's skill is refused.
     #[test]
     fn the_platform_skill() {
+        use crate::runtime::goose::Place;
         let cli = "---\nname: fragment\ndescription: the cli\n---\n\n# fragment\n\nMake apps.\n";
-        let s = platform_skill(cli).unwrap();
+        let s = platform_skill(cli, Place::Computer).unwrap();
         assert!(s.starts_with("---\nname: fragment\ndescription: \"You are an agent on your owner's Fragment computer"), "{s}");
         assert!(s.contains("# Your computer") && s.ends_with("Make apps.\n"));
-        assert!(platform_skill("no frontmatter").is_err());
-        assert!(platform_skill("---\nname: other\n---\nx").is_err());
-        assert!(WEB_SKILL.starts_with("---\nname: web-search\n"));
+        let m = platform_skill(cli, Place::Machine).unwrap();
+        assert!(m.starts_with("---\nname: fragment\ndescription: \"You are an agent on your owner's own machine"), "{m}");
+        assert!(m.contains("# Your machine") && !m.contains("/data/work") && m.ends_with("Make apps.\n"), "{m}");
+        assert!(platform_skill("no frontmatter", Place::Computer).is_err());
+        assert!(platform_skill("---\nname: other\n---\nx", Place::Machine).is_err());
+        assert!(WEB_SKILL.starts_with("---\nname: web-search\n") && !WEB_SKILL.contains("watches"), "true on a computer and on a machine alike");
     }
 }

@@ -31,6 +31,8 @@ fn config(api: &str, dir: &std::path::Path) -> GooseConfig {
         cli: Some("/usr/local/bin/fragment".into()),
         ca: None,
         desktop: None,
+        tools: vec![],
+        place: fragment_bridge::runtime::goose::Place::Computer,
         skills: false,
     }
 }

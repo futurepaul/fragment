@@ -26,6 +26,10 @@ use crate::web;
 /// The browser's MCP server, less its CDP endpoint
 /// (`FRAGMENT_BROWSER_MCP` names another).
 pub const BROWSER_MCP: &str = "node /opt/fragment/browser/node_modules/@playwright/mcp/cli.js";
+/// The headless browser's (a paired machine's: no desktop), the same
+/// Playwright MCP the image pins, fetched by npx on first use
+/// (`FRAGMENT_BROWSER_MCP` names another).
+pub const HEADLESS_BROWSER_MCP: &str = "npx -y @playwright/mcp@0.0.83";
 /// Playwright MCP's tools the agent is offered: all of its core set but
 /// `browser_run_code_unsafe` (code in the MCP server's own process: the
 /// shell is the agent's for code), the network log's two, `browser_drop`,
@@ -96,6 +100,9 @@ pub const COMPUTER_DEFAULTS: [(&str, &str, &str); 8] = [
 
 /// What the browser's server tells the model.
 pub const BROWSER_INSTRUCTIONS: &str = "Your own Chromium, on the desktop your owner watches. browser_navigate opens a page; browser_snapshot reads it as an accessibility tree, each element with a ref ([ref=f1e5]); act on an element by passing its ref as `target` to browser_click, browser_type, browser_fill_form or browser_select_option. An action's answer does not repeat the whole page: call browser_snapshot (or browser_find, to search a long page) to see what it did. One snapshot of a list gives you all of it: do not scroll to read. If the page needs your owner (a login, a captcha, a payment), say so and ask them to take over your screen.";
+/// What the headless browser's server tells the model.
+pub const HEADLESS_INSTRUCTIONS: &str = "A headless Chromium of your own, on your owner's machine: no one sees it. browser_navigate opens a page; browser_snapshot reads it as an accessibility tree, each element with a ref ([ref=f1e5]); act on an element by passing its ref as `target` to browser_click, browser_type, browser_fill_form or browser_select_option. An action's answer does not repeat the whole page: call browser_snapshot (or browser_find, to search a long page) to see what it did. One snapshot of a list gives you all of it: do not scroll to read. Each session starts it fresh, signed in nowhere: if a page needs your owner (a login, a captcha, a payment), say so in your report.";
+
 /// What the computer's server tells the model.
 pub const COMPUTER_INSTRUCTIONS: &str = "Your desktop's keyboard, mouse, clipboard and windows, for apps and pages the browser tools cannot reach. You read no images: screen_look asks a vision model what the screen shows, and screen_click finds what you describe (Clef) and clicks it. For a window's own input, list_windows gives each window's window_id and pid: pass both to type_text, press_key, hotkey, click or scroll (x and y in the window's own pixels). In the browser, prefer the browser tools.";
 
@@ -124,6 +131,30 @@ pub fn browser(desk: Desk) -> Proxy {
         cmd.extend([k.to_string(), v.to_string()]);
     }
     Proxy { command: cmd, env: vec![("DISPLAY".into(), format!(":{display}"))], desk: Some(desk), extra: None, only: Some(&BROWSER_TOOLS), cut_note: BROWSER_CUT, defaults: &[], instructions: Some(BROWSER_INSTRUCTIONS) }
+}
+
+/// The browser tools on a headless Chromium (a paired machine's hands,
+/// with no desktop): a fresh profile in memory each session (Playwright
+/// MCP's `--isolated`), the Chromium `FRAGMENT_BROWSER_CHROME` names when
+/// it names one, else Playwright's own; images never returned; its files
+/// under `FRAGMENT_BROWSER_FILES` (else the system's temporary directory).
+pub fn headless_browser() -> Proxy {
+    let files = std::env::var("FRAGMENT_BROWSER_FILES").ok().filter(|d| std::path::Path::new(d).is_absolute()).map_or_else(|| std::env::temp_dir().join("fragment-browser"), std::path::PathBuf::from);
+    let chrome = std::env::var("FRAGMENT_BROWSER_CHROME").ok().filter(|c| !c.trim().is_empty());
+    headless_with(command("FRAGMENT_BROWSER_MCP", HEADLESS_BROWSER_MCP), &files, chrome)
+}
+
+/// `headless_browser`'s server: `mcp`, then its arguments.
+fn headless_with(mut cmd: Vec<String>, files: &std::path::Path, chrome: Option<String>) -> Proxy {
+    let files = files.display().to_string();
+    for (k, v) in [("--image-responses", "omit"), ("--codegen", "none"), ("--output-dir", files.as_str()), ("--file-paths", "absolute")] {
+        cmd.extend([k.to_string(), v.to_string()]);
+    }
+    cmd.extend(["--headless".to_string(), "--isolated".to_string()]);
+    if let Some(chrome) = chrome {
+        cmd.extend(["--executable-path".to_string(), chrome]);
+    }
+    Proxy { command: cmd, env: vec![], desk: None, extra: None, only: Some(&BROWSER_TOOLS), cut_note: BROWSER_CUT, defaults: &[], instructions: Some(HEADLESS_INSTRUCTIONS) }
 }
 
 /// The screen tools on `desk`.
@@ -185,5 +216,29 @@ impl Tools for Web {
                 other => mcp::text_result(&format!("no tool {other}"), true),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: a paired machine's browser is headless, its own each session,
+    /// on the Chromium named, behind the same gate (no images, the same
+    /// tools) and with no desktop to hold it back. Method: its server's
+    /// command line and gate, with a Chromium named and without.
+    #[test]
+    fn a_machines_browser_is_headless_and_gated() {
+        let mcp: Vec<String> = HEADLESS_BROWSER_MCP.split_whitespace().map(str::to_string).collect();
+        let p = headless_with(mcp.clone(), std::path::Path::new("/home/p/fragment-hands/browser"), Some("/usr/bin/chromium".into()));
+        let line = p.command.join(" ");
+        assert!(line.starts_with("npx -y @playwright/mcp@0.0.83 "), "{line}");
+        for part in ["--headless", "--isolated", "--image-responses omit", "--output-dir /home/p/fragment-hands/browser", "--executable-path /usr/bin/chromium"] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert!(!line.contains("--cdp-endpoint"), "no desktop's browser to attach to");
+        assert!(p.desk.is_none() && p.env.is_empty() && p.only == Some(&BROWSER_TOOLS[..]) && p.instructions == Some(HEADLESS_INSTRUCTIONS));
+        let own = headless_with(mcp, std::path::Path::new("/tmp/b"), None);
+        assert!(!own.command.iter().any(|a| a == "--executable-path"), "Playwright's own Chromium when none is named");
     }
 }

@@ -124,6 +124,57 @@ Fragments are how you make things for people: apps, sites, pages, dashboards, tr
 
 Your tools: web_search and web_read read the web fast with no browser: use them first for reading, and never curl or scrape a web page's HTML in the shell. When your task says to use the browser, use it. The browser tools drive the Chromium on your desktop: browser_snapshot reads the page as elements, each with a ref ([ref=f1e5]), and you act on one by passing its ref as `target` (browser_click, browser_type, browser_fill_form); browser_find searches a long page. The computer tools drive the whole desktop; you read no images, so screen_look asks a vision model what is on the screen and screen_click finds what you describe. If a tool answers human_has_control, your owner has taken over your screen: wait for them.";
 
+/// What a paired machine's sessions are told in `HANDS`' place: the
+/// owner's own machine, the agent's folder on it, its tools there (no
+/// desktop, a headless browser when it has one) and fragments top of mind.
+pub const HANDS_MACHINE: &str = "You work on your owner's own machine, paired as their hands: their computer, where you run as them, not a Fragment computer. Your shell starts in a folder of your own: keep your work there, and touch nothing else of theirs unless your task says to.
+
+Fragments are how you make things for people: apps, sites, pages, dashboards, trackers, brains. You make, publish and update your owner's fragments with the `fragment` CLI in your shell (it acts as you; no login). Before any app, site, page or fragment work, load the `fragment` skill, then `apps-finite`; give your owner the link to what you made.
+
+Your tools: web_search and web_read, when you have them, read the web fast with no browser: use them first for reading, and never curl or scrape a web page's HTML in the shell. When your task says to use the browser and you have it, use it: the browser tools drive a headless Chromium no one sees, fresh each task: browser_snapshot reads the page as elements, each with a ref ([ref=f1e5]), and you act on one by passing its ref as `target` (browser_click, browser_type, browser_fill_form); browser_find searches a long page. You have no screen or desktop tools here, and you read no images.";
+
+/// Where an agent's goose runs (`BRIDGE_GOOSE_PLACE`): a Fragment computer
+/// (the platform's container, our goose image), or its owner's own
+/// machine, paired as its hands (`fragment hands run`: docs/optchat.md,
+/// "A machine as hands"). It decides what every session is told (`HANDS`
+/// or `HANDS_MACHINE`), the platform skill's page, and how the desktop's
+/// tools run (the browser headless, no desktop and no display on a
+/// machine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Computer,
+    Machine,
+}
+
+impl Place {
+    pub fn parse(s: &str) -> Option<Place> {
+        match s {
+            "computer" => Some(Place::Computer),
+            "machine" => Some(Place::Machine),
+            _ => None,
+        }
+    }
+
+    /// The desktop's MCP servers every session gets by default
+    /// (`BRIDGE_GOOSE_TOOLS` names others).
+    pub fn default_tools(self) -> Vec<String> {
+        let tools: &[&str] = match self {
+            Place::Computer => &["browser", "computer", "web"],
+            Place::Machine => &["browser", "web"],
+        };
+        tools.iter().map(|t| t.to_string()).collect()
+    }
+
+    /// Whether `tool` is one of the desktop's MCP servers here: `computer`
+    /// drives a desktop, which a machine's hands have none of.
+    pub fn offers(self, tool: &str) -> bool {
+        match self {
+            Place::Computer => matches!(tool, "browser" | "computer" | "web"),
+            Place::Machine => matches!(tool, "browser" | "web"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GooseConfig {
     /// goose (`BRIDGE_GOOSE_BIN`).
@@ -152,6 +203,12 @@ pub struct GooseConfig {
     /// The image's `fragment-desktop` (`BRIDGE_GOOSE_DESKTOP`): each agent's
     /// desktop, and its browser, computer and web tools; none, no such tools.
     pub desktop: Option<PathBuf>,
+    /// Which of the desktop's MCP servers every session gets
+    /// (`BRIDGE_GOOSE_TOOLS`; `Place::default_tools`), each one the place
+    /// offers.
+    pub tools: Vec<String>,
+    /// Where it runs (`BRIDGE_GOOSE_PLACE`).
+    pub place: Place,
     /// Whether each turn installs its agent's skills (`BRIDGE_GOOSE_SKILLS`).
     pub skills: bool,
 }
@@ -254,6 +311,10 @@ pub fn environment(cfg: &GooseConfig, a: &Agent, display: Option<u32>) -> Vec<(S
 /// (`fragment-desktop display <agent>`): none when the image has no
 /// desktop, or it did not answer.
 fn display_of(cfg: &GooseConfig, a: &Agent) -> Option<u32> {
+    // a machine's hands have no desktop of their own (and never its owner's screen)
+    if cfg.place == Place::Machine {
+        return None;
+    }
     let desktop = cfg.desktop.as_ref()?;
     let out = std::process::Command::new(desktop).args(["display", &a.fragment]).stdin(std::process::Stdio::null()).output();
     match out {
@@ -695,12 +756,17 @@ async fn view_of(api: &Api, ts: &TurnStart) -> Option<String> {
     None
 }
 
-/// A session's system prompt, appended under goose's own: `HANDS`, and for
-/// a mind the framing and VIEW_DOC; the same bytes every turn.
-pub fn system_prompt(mind: bool) -> String {
+/// A session's system prompt, appended under goose's own: `HANDS` (on a
+/// paired machine, `HANDS_MACHINE`), and for a mind the framing and
+/// VIEW_DOC; the same bytes every turn.
+pub fn system_prompt(place: Place, mind: bool) -> String {
+    let hands = match place {
+        Place::Computer => HANDS,
+        Place::Machine => HANDS_MACHINE,
+    };
     match mind {
-        true => format!("{HANDS}\n\n{FRAMING}\n\n{VIEW_DOC}"),
-        false => HANDS.to_string(),
+        true => format!("{hands}\n\n{FRAMING}\n\n{VIEW_DOC}"),
+        false => hands.to_string(),
     }
 }
 
@@ -731,7 +797,14 @@ pub fn prompt(view: Option<&str>, ts: &TurnStart) -> Vec<String> {
 fn session_of(cfg: &GooseConfig, agent: &Agent, fragment: &str, title: &str, mind: bool) -> Value {
     let mut servers = Vec::new();
     if let Some(desktop) = &cfg.desktop {
-        for (name, args) in [("browser", vec!["mcp", "browser", agent.fragment.as_str()]), ("computer", vec!["mcp", "computer", agent.fragment.as_str()]), ("web", vec!["mcp", "web"])] {
+        for name in &cfg.tools {
+            let args = match (name.as_str(), cfg.place) {
+                // a machine's browser is headless: no desktop, no one watching
+                ("browser", Place::Machine) => vec!["mcp", "browser", "--headless"],
+                ("browser" | "computer", Place::Computer) => vec!["mcp", name.as_str(), agent.fragment.as_str()],
+                ("web", _) => vec!["mcp", "web"],
+                (other, place) => unreachable!("{other} is no tool a {place:?} offers (main.rs checks BRIDGE_GOOSE_TOOLS)"),
+            };
             servers.push(json!({ "name": name, "command": desktop, "args": args, "env": [] }));
         }
     }
@@ -766,7 +839,7 @@ async fn make_session(cfg: &GooseConfig, conn: &Arc<Conn>, agent: &Agent, fragme
     let made = conn.call("session/new", session_of(cfg, agent, fragment, title, mind), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
     let made = made.map_err(|e| format!("goose made no session: {e}"))?;
     let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
-    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(mind) });
+    let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt(cfg.place, mind) });
     if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
         close(conn, &session);
         return Err(format!("goose took no system prompt: {e}"));
@@ -800,7 +873,7 @@ async fn platform_skill(ctx: &Ctx) -> Option<String> {
     let made = ctx.platform.get_or_init(|| async {
         let cli = ctx.config.cli.as_ref()?;
         let out = tokio::process::Command::new(cli).arg("skill").stdin(std::process::Stdio::null()).output().await.ok()?;
-        match super::skills::platform_skill(&String::from_utf8_lossy(&out.stdout)) {
+        match super::skills::platform_skill(&String::from_utf8_lossy(&out.stdout), ctx.config.place) {
             Ok(s) => Some(s),
             Err(e) => {
                 crate::ev!("goose.no_platform_skill", { "why": e });
@@ -1309,11 +1382,16 @@ mod tests {
     /// a cut turn's note and its files are said around the text.
     #[test]
     fn the_prompt() {
-        let sys = system_prompt(true);
+        let sys = system_prompt(Place::Computer, true);
         assert!(sys.starts_with(HANDS) && sys.contains("You are a subagent of Mind, an AI agent") && sys.contains("The view: the whole chat between Mind") && !sys.contains("OptChat"), "{sys}");
-        assert_eq!(system_prompt(true), sys, "the same bytes every turn");
-        assert_eq!(system_prompt(false), HANDS, "any other turn: the computer and its tools alone");
+        assert_eq!(system_prompt(Place::Computer, true), sys, "the same bytes every turn");
+        assert_eq!(system_prompt(Place::Computer, false), HANDS, "any other turn: the computer and its tools alone");
         assert!(HANDS.contains("`fragment` CLI") && HANDS.contains("load the `fragment` skill"), "fragments, top of mind");
+        // a paired machine's sessions are told where they are, the same bytes every turn
+        let machine = system_prompt(Place::Machine, true);
+        assert!(machine.starts_with(HANDS_MACHINE) && machine.ends_with(VIEW_DOC) && machine == system_prompt(Place::Machine, true), "{machine}");
+        assert_eq!(system_prompt(Place::Machine, false), HANDS_MACHINE);
+        assert!(HANDS_MACHINE.contains("your owner's own machine") && HANDS_MACHINE.contains("load the `fragment` skill") && !HANDS_MACHINE.contains("desktop and a browser on it"), "{HANDS_MACHINE}");
         assert_eq!(prompt(Some("<chat>\n0+1|user: hi\n</chat>"), &ts("Find my notes")), vec!["<chat>\n0+1|user: hi\n</chat>", "Find my notes"]);
         assert_eq!(prompt(None, &ts("hello")), vec!["hello"]);
         let mut cut = ts("hello");
@@ -1327,7 +1405,22 @@ mod tests {
     }
 
     fn config() -> GooseConfig {
-        GooseConfig { command: "/usr/local/bin/goose".into(), args: vec![], work: "/data/work".into(), home: "/data/work/home".into(), root: "/tmp/goose".into(), api: "http://api.fragment.internal".into(), model: "http://model.fragment.internal".into(), tier: "medium".into(), cli: Some("/usr/local/bin/fragment".into()), ca: None, desktop: None, skills: false }
+        GooseConfig {
+            command: "/usr/local/bin/goose".into(),
+            args: vec![],
+            work: "/data/work".into(),
+            home: "/data/work/home".into(),
+            root: "/tmp/goose".into(),
+            api: "http://api.fragment.internal".into(),
+            model: "http://model.fragment.internal".into(),
+            tier: "medium".into(),
+            cli: Some("/usr/local/bin/fragment".into()),
+            ca: None,
+            desktop: None,
+            tools: Place::Computer.default_tools(),
+            place: Place::Computer,
+            skills: false,
+        }
     }
 
     /// Goal: a mind's session gets `fragment mcp <mind>` as the agent, any
@@ -1360,6 +1453,30 @@ mod tests {
         let env: HashMap<String, String> = environment(&cfg, &ts("x").agent, Some(12)).into_iter().collect();
         assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":12"), "its goose and tools on its own display");
         assert!(!environment(&cfg, &ts("x").agent, None).iter().any(|(k, _)| k == "DISPLAY"));
+    }
+
+    /// Goal: on a paired machine every session gets a headless browser and
+    /// the web tools (no computer: a machine's hands never drive their
+    /// owner's screen), only those `BRIDGE_GOOSE_TOOLS` names, and no
+    /// display is asked for.
+    #[test]
+    fn a_machines_session_has_a_headless_browser_and_no_screen() {
+        let mut cfg = config();
+        cfg.desktop = Some("/home/p/bin/fragment-desktop".into());
+        cfg.place = Place::Machine;
+        cfg.tools = Place::Machine.default_tools();
+        let named = |s: Value| -> Vec<(String, Vec<String>)> {
+            s["mcpServers"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect())).collect()
+        };
+        let s = named(new_session(&cfg, &ts("x"), true));
+        assert_eq!(s[..2], [("browser".to_string(), vec!["mcp".to_string(), "browser".into(), "--headless".into()]), ("web".to_string(), vec!["mcp".to_string(), "web".into()])]);
+        assert_eq!(s[2].0, "mind", "a mind's view too");
+        cfg.tools = vec!["web".into()];
+        assert_eq!(named(new_session(&cfg, &ts("x"), false)), vec![("web".to_string(), vec!["mcp".to_string(), "web".into()])], "no browser where the machine has none");
+        assert!(display_of(&cfg, &ts("x").agent).is_none(), "no desktop asked for");
+        assert!(!Place::Machine.offers("computer") && Place::Computer.offers("computer") && Place::Machine.offers("browser") && !Place::Computer.offers("screen"));
+        assert_eq!(Place::parse("machine"), Some(Place::Machine));
+        assert_eq!(Place::parse("laptop"), None);
     }
 
     /// Goal: an agent's goose calls the model as the agent, its shell's CLI

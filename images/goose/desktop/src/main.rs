@@ -10,6 +10,7 @@
 //! fragment-desktop env [<agent>]        start it; print DISPLAY and the CDP address, for a shell
 //! fragment-desktop run <agent>          the desktop's supervisor (start runs it)
 //! fragment-desktop mcp browser [<agent>]   the browser tools (MCP on stdio)
+//! fragment-desktop mcp browser --headless  the browser tools on a headless Chromium (a paired machine's)
 //! fragment-desktop mcp computer [<agent>]  the screen tools (MCP on stdio)
 //! fragment-desktop mcp web              reading and searching the web (MCP on stdio)
 //! ```
@@ -79,7 +80,10 @@ async fn main() {
         "mcp" => {
             let kind = args.next().unwrap_or_default();
             let ran = match kind.as_str() {
-                "browser" => tools::browser(agent(args.next())).run().await,
+                "browser" => match args.next() {
+                    Some(flag) if flag == "--headless" => tools::headless_browser().run().await,
+                    named => tools::browser(agent(named)).run().await,
+                },
                 "computer" => tools::computer(agent(args.next())).run().await,
                 "web" => mcp::serve("web", tools::WEB_INSTRUCTIONS, Arc::new(tools::Web::new())).await,
                 other => fail(&format!("{other:?}: mcp browser, computer or web")),

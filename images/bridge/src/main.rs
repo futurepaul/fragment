@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
-use fragment_bridge::runtime::goose::{Goose, GooseConfig};
+use fragment_bridge::runtime::goose::{Goose, GooseConfig, Place};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
 use fragment_bridge::{ev, limits, screen, screens};
@@ -41,22 +41,44 @@ fn parse_ms(name: &str, default: u64) -> u64 {
     }
 }
 
+/// `BRIDGE_GOOSE_PLACE` (`computer`, else `machine`: a paired machine's
+/// hands) and `BRIDGE_GOOSE_TOOLS` (the desktop's MCP servers every session
+/// gets, commas between; the place's own by default), each one the place
+/// offers.
+fn place_and_tools() -> (Place, Vec<String>) {
+    let place = Place::parse(&env_or("BRIDGE_GOOSE_PLACE", "computer")).unwrap_or_else(|| fail("BRIDGE_GOOSE_PLACE is computer or machine"));
+    let tools = match env("BRIDGE_GOOSE_TOOLS") {
+        None => place.default_tools(),
+        Some(t) if t.trim() == "none" => vec![],
+        Some(t) => t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+    };
+    if let Some(bad) = tools.iter().find(|t| !place.offers(t)) {
+        fail(&format!("BRIDGE_GOOSE_TOOLS names {bad:?}, which a {} does not offer (browser, web{})", if place == Place::Machine { "machine" } else { "computer" }, if place == Place::Machine { "" } else { ", computer" }));
+    }
+    (place, tools)
+}
+
 fn runtime() -> Box<dyn Runtime> {
     match env_or("BRIDGE_RUNTIME", "goose").as_str() {
-        "goose" => Box::new(Goose::new(GooseConfig {
-            command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
-            args: vec!["acp".into(), "--with-builtin".into(), env_or("BRIDGE_GOOSE_BUILTINS", "developer,skills")],
-            work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
-            home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
-            root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
-            api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
-            model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
-            tier: env_or("BRIDGE_GOOSE_TIER", "cheap"),
-            cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
-            ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
-            desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),
-            skills: env("BRIDGE_GOOSE_SKILLS").is_some_and(|v| v == "1"),
-        })),
+        "goose" => {
+            let (place, tools) = place_and_tools();
+            Box::new(Goose::new(GooseConfig {
+                command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
+                args: vec!["acp".into(), "--with-builtin".into(), env_or("BRIDGE_GOOSE_BUILTINS", "developer,skills")],
+                work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
+                home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
+                root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
+                api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
+                model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
+                tier: env_or("BRIDGE_GOOSE_TIER", "cheap"),
+                cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
+                ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+                desktop: env("BRIDGE_GOOSE_DESKTOP").map(PathBuf::from),
+                tools,
+                place,
+                skills: env("BRIDGE_GOOSE_SKILLS").is_some_and(|v| v == "1"),
+            }))
+        }
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),
     }
