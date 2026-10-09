@@ -163,6 +163,7 @@ export function mount(root) {
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
     <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
+    <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
     <div class="composer-wrap">
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
       <div class="here" id="here" hidden></div>
@@ -397,6 +398,8 @@ export function mount(root) {
     const turn = typeof body.turn === "string" ? body.turn : null;
     const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
     state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", turn, to, attachments: attachmentsOf(body) });
+    if (caughtUp && !stuck && !history.loading && record.seq > latestSeq) newMessages++;
+    latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
       const t = turnOf(turn);
       if (t.agent === null || t.agent === record.principal) touch(t, record.at, n);
@@ -565,6 +568,7 @@ export function mount(root) {
     renderHere();
     if (stuck) toEnd();
     else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+    showLatest();
   }
 
   // The chat's color (its lead's), its name, Stop, and the placeholder.
@@ -926,16 +930,31 @@ export function mount(root) {
   // loads) moves nothing back, so it never does ----
   let stuck = true;
   let lastTop = 0;
+  let caughtUp = false;
+  let latestSeq = 0;
+  let newMessages = 0;
+  function showLatest() {
+    $("latest").hidden = stuck;
+    $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+  }
   const toEnd = () => {
     const s = $("scroll");
     s.scrollTop = s.scrollHeight;
     lastTop = s.scrollTop;
+    newMessages = 0;
+    showLatest();
+  };
+  $("latest").onclick = () => {
+    stuck = true;
+    toEnd();
   };
   $("scroll").addEventListener("scroll", () => {
     const s = $("scroll");
     if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
     lastTop = s.scrollTop;
+    if (stuck) newMessages = 0;
+    showLatest();
   });
 
   // ---- the composer's edge: a subtle glow that follows the cursor near it ----
@@ -1472,7 +1491,7 @@ export function mount(root) {
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: historyReady });
+  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); } });
   readMembers();
   fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
