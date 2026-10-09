@@ -84,7 +84,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the cheap tier's since 2026-10-09; GLM-5.3 Flash is its fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -107,11 +107,11 @@ to the defaults reaches every ledger at its next call.
 
 A model call that fell back (docs/api.md, Models) keeps its one hold,
 reserved at its tier's model's worst case, and is settled from the
-fallback's usage at the fallback's prices. The cheap tier's hold, at
-DeepSeek V4 Flash's prices (the request's bytes as tokens, the capped
-`max_tokens` out), covers its GLM-5.3 Flash fallback's worst case whole.
-A fallback dearer than its tier's model (the medium tier's GLM-5.3 is
-not) could be charged past its hold, in full, as any usage that
+fallback's usage at the fallback's prices. The hold (the request's
+bytes as tokens, the capped `max_tokens` out, at the tier's model's
+prices) covers a fallback call of an agent's usual size; DeepSeek V4
+Flash is dearer than the cheap tier's GLM-5.3 Flash, so a fallback call
+near its worst case is charged in full past its hold, as any usage that
 happened is.
 
 ## The state machine

@@ -67,8 +67,8 @@ pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
 pub const NO_WORDS: &str = "(no words)";
 
 /// The chat models the platform calls that read images: those Workers AI's
-/// catalog marks "Vision: Yes" (GLM-5.3 Flash, the default vision model
-/// and the fallback; DeepSeek V4 Flash, the cheap tier's, and GLM-5.3, the
+/// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
+/// default vision model; DeepSeek V4 Flash, the fallback, and GLM-5.3, the
 /// medium tier's, have none).
 pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
 /// What a model is told of an image it was shown: `describe_image`'s
