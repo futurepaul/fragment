@@ -148,8 +148,15 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
         k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
     });
     s.ok(
-        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
-        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
+        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, own keys not set (one signed in to, with its models)",
+        status(&r) == Some(json!("not_connected"))
+            && row(crate::SWAP_CONNECTION)["kind"] == "connection"
+            && keys
+            && row(crate::SWAP_OWN)["state"] == "not_set"
+            && row(crate::SWAP_ROUTER)["state"] == "not_set"
+            && row(crate::SWAP_ROUTER)["signIn"]["manage"].is_string()
+            && row(crate::SWAP_ROUTER)["models"].as_array().is_some_and(|m| !m.is_empty())
+            && rows.len() == crate::SWAP_KEYS.len() + 3,
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
