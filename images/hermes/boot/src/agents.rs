@@ -123,7 +123,7 @@ mod tests {
     fn a_change_of_credentials_rewrites_the_profile_alone() {
         let with = |label: &str, placeholder: &str| {
             let mut a = agent(label);
-            a.credentials = vec![fragment_bridge::runtime::Credential { provider: "google".into(), kind: "connection".into(), env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: placeholder.into(), hosts: vec!["www.googleapis.com".into()] }];
+            a.credentials = vec![fragment_bridge::runtime::Credential { provider: "google".into(), kind: "connection".into(), env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: placeholder.into(), hosts: vec!["www.googleapis.com".into()], model_base: None }];
             a
         };
         let c = diff(&[agent("juniper"), agent("maple")], &[with("juniper", "fcx_google_a"), agent("maple")]);

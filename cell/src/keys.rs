@@ -236,6 +236,13 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     Ok((a.status, answer))
 }
 
+/// An own key's sign-in code exchanged at its provider for the person's
+/// key (`fragment_core::own_signin`): (status, the provider's answer). No
+/// secret of the deployment's goes with it.
+pub async fn own_key_exchange(url: &str, body: &Value, host: &str) -> CellResult<(u16, Value)> {
+    post_json(url, Method::Post, None, Some(body), host).await
+}
+
 /// WorkOS's code exchange with the API key added: (status, WorkOS's
 /// answer, its refresh token dropped: the platform keeps its own session).
 pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {

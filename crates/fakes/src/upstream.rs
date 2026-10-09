@@ -3,7 +3,8 @@
 //! with what arrived (its host, from `x-fragment-upstream-host`, its
 //! method, path, query and auth headers, and any platform header that
 //! leaked), so a test reads what the provider would have seen, and each is
-//! recorded.
+//! recorded. A vendor faked in full (`start_with`: OpenRouter's) answers
+//! its own host's requests, each still recorded here.
 
 use std::sync::{Arc, Mutex};
 
@@ -40,11 +41,19 @@ fn seen_of(req: &Request) -> Value {
 
 impl Upstream {
     pub fn start() -> std::io::Result<Upstream> {
+        Upstream::start_with(vec![])
+    }
+
+    /// With `vendors`: each a host and the fake that answers for it.
+    pub fn start_with(vendors: Vec<(String, Handler)>) -> std::io::Result<Upstream> {
         let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
         let log = Arc::clone(&seen);
         let handler: Handler = Arc::new(move |req: &Request| {
             let v = seen_of(req);
             log.lock().expect("upstream log").push(v.clone());
+            if let Some((_, vendor)) = vendors.iter().find(|(host, _)| req.header("x-fragment-upstream-host") == Some(host.as_str())) {
+                return vendor(req);
+            }
             // a redirect, for the test that the swap never follows one
             if req.path == "/redirect" {
                 return Response::bytes(302, "text/plain", b"elsewhere".to_vec()).with_header("location", "https://elsewhere.test/");

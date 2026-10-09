@@ -25,7 +25,8 @@
 //!   decisions 22 and 37);
 //! - `credentials`: what the agent's guest is given now (`GET
 //!   /api/computer`): each credential's provider, its environment variables
-//!   and its placeholder, `; ` between;
+//!   and its placeholder (and `models at <base>` for a provider that serves
+//!   models), `; ` between;
 //! - `write <path> <text>`: the text in the file `<path>` under the data
 //!   root (`/data`), and `read <path>`: that file's text, or `none` (what a
 //!   save kept, and left out);
@@ -393,7 +394,10 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if text.trim() == "credentials" {
         reply = match credentials_of(&ts.agent.fragment).await {
             Ok(all) if all.is_empty() => "credentials: none".to_string(),
-            Ok(all) => format!("credentials: {}", all.iter().map(|c| format!("{} {} {}", c.provider, c.env.join(","), c.placeholder)).collect::<Vec<_>>().join("; ")),
+            Ok(all) => format!(
+                "credentials: {}",
+                all.iter().map(|c| format!("{} {} {}{}", c.provider, c.env.join(","), c.placeholder, c.model_base.as_ref().map(|b| format!(" models at {b}")).unwrap_or_default())).collect::<Vec<_>>().join("; ")
+            ),
             Err(e) => format!("credentials failed: {e}"),
         };
     }

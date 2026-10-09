@@ -2,7 +2,9 @@
 
 The blessed agent template (docs/cloudflare-v1.md, decisions 14–16 and
 40). An agent is a fragment: its repo holds its job (`SOUL.md`), its
-settings (`agent.json`: `{"tier", "color"}`), and what its runtime keeps
+settings (`agent.json`: `{"tier", "color", "model"?}`, `model` a model of a
+provider its owner connected, `{provider, id}`: docs/computers.md, "An
+agent's own model"), and what its runtime keeps
 (`memories/`, `skills/`); the platform serves this template's manifest and
 page from its release. A fragment on it names it in its own
 `fragment.json`: `{"template": "agent", "meta": {"title": "Juniper"}}`.

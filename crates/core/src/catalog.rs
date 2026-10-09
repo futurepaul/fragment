@@ -13,7 +13,13 @@
 //! - the environment variables a guest finds its placeholder in, the
 //!   names the vendor's own SDK reads where it has one;
 //! - an operator key's price per call (`price`, or the price book's list
-//!   price for it: `fragment_core::price::DEFAULT_KEYS`).
+//!   price for it: `fragment_core::price::DEFAULT_KEYS`);
+//! - an own key's sign-in (`oauth`): the person connects it from settings,
+//!   through the provider's own page, instead of pasting it (Paul,
+//!   2026-10-08; `own_signin`);
+//! - an own key's models (`models`): the chat-completions base URL a guest
+//!   sends its model calls to, and the few models a person is offered for
+//!   an agent (its `agent.json`'s `model`).
 //!
 //! Adding a provider is a catalog row (and, for a connection, the provider
 //! enabled in the WorkOS environment): nothing in code names one.
@@ -34,6 +40,14 @@ pub const FORMAT_MAX_BYTES: usize = 64;
 pub const PLACE_NAME_MAX_BYTES: usize = 64;
 /// An environment variable's name, at most.
 pub const ENV_NAME_MAX_BYTES: usize = 64;
+/// A URL a row names (its sign-in's, its models' base), at most.
+pub const URL_MAX_BYTES: usize = 512;
+/// The most models one provider offers a person to pick from.
+pub const MODELS_OFFERED_MAX: usize = 16;
+/// A model's id as its provider names it, at most (`anthropic/claude-…`).
+pub const MODEL_ID_MAX_BYTES: usize = 128;
+/// A model's name for people, at most.
+pub const MODEL_NAME_MAX_BYTES: usize = 64;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -121,6 +135,46 @@ pub struct Price {
     pub per: u64,
 }
 
+/// An own key the person connects through the provider's own sign-in,
+/// never pasted (Paul, 2026-10-08: "I don't want the user to need to use
+/// the cli or paste an api key though, they should be able to connect them
+/// from settings ideally"): an authorization with PKCE (S256) whose code
+/// the platform exchanges for a key the person owns, OpenRouter's shape
+/// (`own_signin`). On the wire: `{"authorize", "exchange", "manage"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyOAuth {
+    /// Where the person's browser goes; `callback_url`, `code_challenge`,
+    /// `code_challenge_method`, `state` and `key_label` are added to its
+    /// query.
+    pub authorize: String,
+    /// Where the code is exchanged for the key: `POST {code,
+    /// code_verifier, code_challenge_method}` → `{key}`.
+    pub exchange: String,
+    /// The provider's page where the person sees and revokes their keys.
+    pub manage: String,
+}
+
+/// A model a person may pick for an agent: its id as the provider names it,
+/// and its name for people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfferedModel {
+    pub id: String,
+    pub name: String,
+}
+
+/// The models an own key's provider serves in OpenAI's chat-completions
+/// shape: where a guest sends their calls (`base_url`, on one of the row's
+/// hosts, so the swap adds the key), and the few a person is offered for
+/// an agent (any of the provider's may be named in `agent.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Models {
+    pub base_url: String,
+    pub offer: Vec<OfferedModel>,
+}
+
 /// One provider a deployment offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +189,12 @@ pub struct Provider {
     /// never on another kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<Price>,
+    /// An own key's sign-in: connected from settings, never pasted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<KeyOAuth>,
+    /// An own key's models, which a person may pick for their agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Models>,
 }
 
 /// Why a catalog is refused (the deploy checks it first; a node with a
@@ -161,6 +221,12 @@ pub enum CatalogError {
     Price { provider: String, why: String },
     /// An operator key with no price, named or by default.
     NoPrice(String),
+    /// A sign-in on a row that is no own key, or one whose URLs are not
+    /// https (or a local fleet's loopback).
+    OAuth { provider: String, why: String },
+    /// Models on a row that is no own key, a base URL not on its hosts, or
+    /// an offer that is empty, too long, or names a model badly or twice.
+    Models { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -176,6 +242,8 @@ impl std::fmt::Display for CatalogError {
             CatalogError::DuplicateEnv(n) => write!(f, "two providers name the environment variable {n}"),
             CatalogError::Price { provider, why } => write!(f, "{provider}'s price: {why}"),
             CatalogError::NoPrice(n) => write!(f, "the operator key {n} has no price: name one (micro-dollars per calls at list), since the price book has none for it"),
+            CatalogError::OAuth { provider, why } => write!(f, "{provider}'s oauth: {why}"),
+            CatalogError::Models { provider, why } => write!(f, "{provider}'s models: {why}"),
         }
     }
 }
@@ -283,6 +351,71 @@ fn check_placements(p: &Provider) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `host` is this machine's own loopback, by name or address.
+pub fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// A URL a row names, checked: https on a host name (no port), or with
+/// `loopback`, a local fleet's fake at `http://127.0.0.1:<port>` (the
+/// cell refuses one but on a fleet whose egress may reach local addresses).
+/// No user, no fragment. Answers its host.
+pub fn row_url(u: &str, loopback: bool) -> Result<String, String> {
+    if u.len() > URL_MAX_BYTES {
+        return Err(format!("a URL is at most {URL_MAX_BYTES} bytes"));
+    }
+    let parsed = url::Url::parse(u).map_err(|e| format!("{u:?} is not a URL: {e}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(format!("{u:?} names a user or a fragment"));
+    }
+    let host = parsed.host_str().unwrap_or_default().to_string();
+    match parsed.scheme() {
+        "https" if valid_host(&host) && parsed.port().is_none() => Ok(host),
+        "http" if loopback && is_loopback(&host) && parsed.port().is_some() => Ok(host),
+        _ => Err(format!("{u:?} is not https on a host name{}", if loopback { " (nor a local fleet's http://127.0.0.1:<port>)" } else { "" })),
+    }
+}
+
+/// Whether `id` is a model's id as a provider names one: 1 to
+/// `MODEL_ID_MAX_BYTES` of letters, digits and `.`, `_`, `-`, `:`, `/`, `@`.
+pub fn valid_model_id(id: &str) -> bool {
+    (1..=MODEL_ID_MAX_BYTES).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'/' | b'@'))
+}
+
+fn check_oauth(o: &KeyOAuth) -> Result<(), String> {
+    row_url(&o.authorize, true).map_err(|e| format!("authorize: {e}"))?;
+    row_url(&o.exchange, true).map_err(|e| format!("exchange: {e}"))?;
+    row_url(&o.manage, false).map_err(|e| format!("manage: {e}"))?;
+    Ok(())
+}
+
+fn check_models(m: &Models, hosts: &[String]) -> Result<(), String> {
+    let host = row_url(&m.base_url, false).map_err(|e| format!("base_url: {e}"))?;
+    if !hosts.contains(&host) {
+        return Err(format!("base_url's host {host} is none of its hosts, so its key would never be added"));
+    }
+    if m.base_url.ends_with('/') || m.base_url.contains('?') {
+        return Err("base_url is named without a query or a trailing /: a guest adds /chat/completions".into());
+    }
+    if m.offer.is_empty() || m.offer.len() > MODELS_OFFERED_MAX {
+        return Err(format!("it offers 1 to {MODELS_OFFERED_MAX} models, not {}", m.offer.len()));
+    }
+    let mut ids = vec![];
+    for o in &m.offer {
+        if !valid_model_id(&o.id) {
+            return Err(format!("{:?} is not a model's id", o.id));
+        }
+        if !(1..=MODEL_NAME_MAX_BYTES).contains(&o.name.len()) || !o.name.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            return Err(format!("{}'s name is 1 to {MODEL_NAME_MAX_BYTES} printable characters", o.id));
+        }
+        if ids.contains(&o.id.as_str()) {
+            return Err(format!("{} is offered twice", o.id));
+        }
+        ids.push(o.id.as_str());
+    }
+    Ok(())
+}
+
 /// A deployment's providers, checked: each is offered as its row says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -346,6 +479,18 @@ impl Catalog {
                 }
                 (_, Some(_)) => return Err(CatalogError::Price { provider, why: format!("a {} has no price: only an operator key is metered", p.kind.name()) }),
                 (_, None) => {}
+            }
+            if let Some(o) = &p.oauth {
+                if p.kind != Kind::Own {
+                    return Err(CatalogError::OAuth { provider, why: format!("a {} is not signed in to: only an own key is", p.kind.name()) });
+                }
+                check_oauth(o).map_err(|why| CatalogError::OAuth { provider: provider.clone(), why })?;
+            }
+            if let Some(m) = &p.models {
+                if p.kind != Kind::Own {
+                    return Err(CatalogError::Models { provider, why: format!("a {} offers no models: only an own key does, its owner's credit paying", p.kind.name()) });
+                }
+                check_models(m, &p.hosts).map_err(|why| CatalogError::Models { provider: provider.clone(), why })?;
             }
         }
         Ok(Catalog { providers: rows })
@@ -478,6 +623,64 @@ mod tests {
         assert!(matches!(parse(zero), Err(CatalogError::Price { .. })));
         let many: Vec<serde_json::Value> = (0..=PROVIDERS_MAX).map(|i| json!({ "name": format!("p{i}"), "kind": "connection", "hosts": ["a.test"], "placements": [{ "header": "x-api-key" }], "env": [format!("P{i}_KEY")] })).collect();
         assert!(matches!(parse(json!(many)), Err(CatalogError::TooMany(_))));
+    }
+
+    /// An own key connected through its provider's sign-in, with models: OpenRouter's row.
+    pub(crate) fn router() -> serde_json::Value {
+        json!({
+            "name": "openrouter", "kind": "own", "hosts": ["openrouter.ai"],
+            "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+            "env": ["OPENROUTER_API_KEY"],
+            "oauth": { "authorize": "https://openrouter.ai/auth", "exchange": "https://openrouter.ai/api/v1/auth/keys", "manage": "https://openrouter.ai/settings/keys" },
+            "models": { "base_url": "https://openrouter.ai/api/v1", "offer": [{ "id": "anthropic/claude-sonnet-5.5", "name": "Claude Sonnet 5.5" }, { "id": "z-ai/glm-5.3", "name": "GLM-5.3" }] },
+        })
+    }
+
+    /// Valid: an own key's sign-in and models, read back as written; a
+    /// local fleet's fake may be signed in to over loopback http.
+    #[test]
+    fn an_own_key_signed_in_to_with_models() {
+        let c = parse(json!([router()])).unwrap();
+        let p = c.get("openrouter").unwrap();
+        assert_eq!(p.oauth.as_ref().unwrap().exchange, "https://openrouter.ai/api/v1/auth/keys");
+        assert_eq!(p.models.as_ref().unwrap().offer[0], OfferedModel { id: "anthropic/claude-sonnet-5.5".into(), name: "Claude Sonnet 5.5".into() });
+        assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
+        let mut local = router();
+        local["oauth"]["authorize"] = json!("http://127.0.0.1:4810/auth");
+        local["oauth"]["exchange"] = json!("http://localhost:4810/api/v1/auth/keys");
+        assert!(parse(json!([local])).is_ok(), "a local fleet's fake");
+        assert_eq!(row_url("https://openrouter.ai/auth", false).unwrap(), "openrouter.ai");
+    }
+
+    /// Invalid: a sign-in or models on a row that is no own key, a URL that
+    /// is not https (or loopback where it may be), a base URL off its hosts,
+    /// and an offer that is empty, too long, or names a model badly or twice.
+    #[test]
+    fn a_sign_in_or_models_that_break_a_rule_are_refused() {
+        let with = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut r = router();
+            f(&mut r);
+            parse(json!([r]))
+        };
+        assert!(matches!(with(&|r| r["kind"] = json!("connection")), Err(CatalogError::OAuth { .. })));
+        assert!(matches!(with(&|r| { r["kind"] = json!("connection"); r.as_object_mut().unwrap().remove("oauth"); }), Err(CatalogError::Models { .. })));
+        for bad in ["http://openrouter.ai/auth", "https://openrouter.ai:8443/auth", "https://user@openrouter.ai/auth", "https://openrouter.ai/auth#x", "ftp://openrouter.ai/auth", "http://10.0.0.1:80/auth", "http://127.0.0.1/auth", "not a url"] {
+            assert!(matches!(with(&|r| r["oauth"]["authorize"] = json!(bad)), Err(CatalogError::OAuth { .. })), "{bad}");
+        }
+        assert!(matches!(with(&|r| r["oauth"]["manage"] = json!("http://127.0.0.1:4810/keys")), Err(CatalogError::OAuth { .. })), "a page for people is https");
+        assert!(matches!(with(&|r| r["oauth"]["extra"] = json!(1)), Err(CatalogError::Shape(_))));
+        assert!(matches!(with(&|r| r["oauth"]["authorize"] = json!(format!("https://openrouter.ai/{}", "a".repeat(URL_MAX_BYTES)))), Err(CatalogError::OAuth { .. })));
+        for bad in ["https://api.openrouter.ai/v1", "https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1?x=1", "http://127.0.0.1:4810/v1"] {
+            assert!(matches!(with(&|r| r["models"]["base_url"] = json!(bad)), Err(CatalogError::Models { .. })), "{bad}");
+        }
+        assert!(matches!(with(&|r| r["models"]["offer"] = json!([])), Err(CatalogError::Models { .. })));
+        let many: Vec<serde_json::Value> = (0..=MODELS_OFFERED_MAX).map(|i| json!({ "id": format!("m/{i}"), "name": format!("M{i}") })).collect();
+        assert!(matches!(with(&|r| r["models"]["offer"] = json!(many)), Err(CatalogError::Models { .. })));
+        for bad in [json!({ "id": "a b", "name": "A" }), json!({ "id": "", "name": "A" }), json!({ "id": "a", "name": "" }), json!({ "id": "a", "name": "tab\there" }), json!({ "id": "x".repeat(MODEL_ID_MAX_BYTES + 1), "name": "X" })] {
+            assert!(matches!(with(&|r| r["models"]["offer"] = json!([bad.clone()])), Err(CatalogError::Models { .. })), "{bad}");
+        }
+        assert!(matches!(with(&|r| r["models"]["offer"] = json!([{ "id": "a", "name": "A" }, { "id": "a", "name": "B" }])), Err(CatalogError::Models { .. })), "named twice");
+        assert!(valid_model_id("anthropic/claude-sonnet-5.5") && valid_model_id("deepseek/deepseek-v4.1-flash:floor") && !valid_model_id("a\"b"));
     }
 
     #[test]

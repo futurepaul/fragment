@@ -110,7 +110,10 @@
   // price book's list price for its name (fragment_core::price
   // DEFAULT_KEYS) unless it names `"price": {"micros", "per"}`
   // (micro-dollars per calls, at list; the margin is added). An `own` row
-  // takes the person's own key instead.
+  // takes the person's own key instead: pasted in settings, or, with an
+  // `oauth` sign-in, made by the provider when the person connects it there
+  // (`fragment_core::own_signin`); its `models` are what their agents may
+  // run on, paid by their account at the provider.
   "providers": [
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
@@ -127,7 +130,27 @@
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" }
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+    // The person's own OpenRouter account (Paul, 2026-10-08): connected from
+    // settings through OpenRouter's own page (its PKCE key exchange: no key
+    // pasted), and paid by their OpenRouter credit, never metered here. An
+    // agent runs on one of its models when its agent.json names it
+    // (`model: {provider, id}`); settings offers these, each one that calls
+    // tools (OpenRouter's /api/v1/models, read 2026-10-08).
+    { "name": "openrouter", "kind": "own", "hosts": ["openrouter.ai"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["OPENROUTER_API_KEY"],
+      "oauth": { "authorize": "https://openrouter.ai/auth",
+                 "exchange": "https://openrouter.ai/api/v1/auth/keys",
+                 "manage": "https://openrouter.ai/settings/keys" },
+      "models": { "base_url": "https://openrouter.ai/api/v1", "offer": [
+        { "id": "anthropic/claude-sonnet-5.5", "name": "Claude Sonnet 5.5" },
+        { "id": "anthropic/claude-haiku-5.5", "name": "Claude Haiku 5.5" },
+        { "id": "anthropic/claude-opus-5.5", "name": "Claude Opus 5.5" },
+        { "id": "openai/gpt-6.1-sol", "name": "GPT-6.1 Sol" },
+        { "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
+        { "id": "z-ai/glm-5.3", "name": "GLM-5.3" }
+      ] } }
   ],
   // A branch deployment's test levers, for the hosted e2e (`cargo xtask
   // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A

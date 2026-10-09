@@ -110,15 +110,25 @@ pub const SWAP_KEYS: [(&str, &str, &str); 4] = [
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
+/// The person's own OpenRouter (deploy/e2e.jsonc's row): connected through
+/// its sign-in, which a local run makes at the OpenRouter fake; its models'
+/// calls go to the fake through the swap's upstream.
+pub const SWAP_ROUTER: &str = "openrouter";
+pub const SWAP_ROUTER_HOST: &str = "openrouter.ai";
+pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 
 /// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its keys' store
-/// names dropped (the deploy's), and the own key's provider.
-pub fn swap_providers() -> Result<Value> {
+/// names dropped (the deploy's), and the own key's provider; OpenRouter's
+/// sign-in at `router_oauth` (the fake's) when one is named.
+pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
     let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
     for r in &mut rows {
         r.as_object_mut().context("a provider is an object")?.remove("key");
+        if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
+            r["oauth"] = o.clone();
+        }
     }
     rows.push(json!({ "name": SWAP_OWN, "kind": "own", "hosts": [SWAP_OWN_HOST], "placements": [{ "basic": "password" }], "env": [SWAP_OWN_ENV] }));
     fragment_core::catalog::Catalog::parse(&Value::Array(rows.clone()).to_string()).map_err(|e| anyhow!("the e2e's catalog: {e}"))?;
@@ -236,6 +246,9 @@ pub struct Suite {
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
+    /// OpenRouter: an own key's sign-in (the browser's and the cell's
+    /// own calls), and its models (a guest's, through `upstream`).
+    pub openrouter: Fake<fragment_fakes::openrouter::OpenRouter>,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
@@ -510,7 +523,7 @@ impl Suite {
             computer_image: Some("stub".into()),
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
-            providers: Some(swap_providers()?.to_string()),
+            providers: Some(swap_providers(Some(self.openrouter.node().oauth()))?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
@@ -851,6 +864,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         }
     };
     let hidden = rehearse.is_some();
+    let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let mut s = Suite {
         only,
         except,
@@ -883,7 +897,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
-        upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
+        upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start_with(vec![(SWAP_ROUTER_HOST.into(), openrouter.handler())])?),
+        openrouter: Fake::of(hidden, "OpenRouter", openrouter),
         operator: Keys::generate(),
         wiper: Some(Keys::generate()),
         cli,
