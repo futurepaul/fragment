@@ -293,7 +293,27 @@ words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a
 reply; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft shows after the turn's last record, and while
-a turn runs with no draft nor open card, a working line does. It posts:
+a turn runs with no draft nor open card, a working line does.
+
+Load earlier messages reads older pages of both channels, keeping the
+visible message in place and the live cursor at its end. When scrolled
+up, Jump to latest counts new messages and returns to the end. Replies
+use DOM-only markdown (strikethrough, tasks, nested lists, tables with
+their own horizontal scroll, autolinks, quotes, headings, rules, and
+fenced code with a language label and Copy). Share reply uses the native
+share sheet where available, otherwise copies the reply. Cancelling a
+share sheet copies nothing. Video and PDFs show inline beside open,
+download and share actions; PDFs retain those actions when a browser
+cannot embed them.
+
+A channel post that fails has its error and Retry on the message itself.
+Retry keeps its id and body so a lost answer cannot write it twice. Until
+a turn starts, the waiting line uses the shell roster's optional `phase`:
+`asleep` or `starting` says the agent is starting up, and `wont_wake`
+says its computer could not start. Without a phase it uses presence and
+waits plainly. After 90 seconds without a turn it says the agent has not
+started a reply yet; a later `turn.start` replaces the line. No transport
+state is persisted as a chat record. It posts:
 
 - a message with a fresh id of its own (`crypto.randomUUID()`), the same
   id again only for the same body sent again after a failure; its `to`

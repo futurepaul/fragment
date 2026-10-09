@@ -355,7 +355,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a reply's file: a chip that downloads it
     say(&mut chrome, "draw me something")?;
-    let chip = "[...document.querySelectorAll('.msg.agent a.attachment-chip')].find((a) => a.textContent.includes('drawing.txt'))";
+    let chip = "[...document.querySelectorAll('.msg.agent a.attachment-name')].find((a) => a.textContent.includes('drawing.txt'))";
     s.ok("a reply's file shows as a chip", shows(&mut chrome, &page, chip), "");
     // no chip is no text: a FAIL below, the checks after it still made
     let drawing = chrome.eval(&page, &format!("(() => {{ const a = {chip}; return a ? fetch(a.getAttribute('href')).then((r) => r.text()) : null; }})()"))?;
@@ -522,7 +522,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &by_hand,
     );
 
-    polish::check(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())

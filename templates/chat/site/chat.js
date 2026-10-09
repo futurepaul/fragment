@@ -38,7 +38,7 @@
 import * as fragment from "./__fragment.js";
 import { svg } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
-import { renderAttachments } from "./media.js";
+import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 
@@ -50,9 +50,9 @@ const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // for their turns (each turn writes two records or more there).
 const CHAT_LAST = 400;
 const WORK_LAST = 1000;
-// After a message of one's own, a working line shows until the agent's
-// turn starts (or this long passes: an agent may not be listening).
-const PENDING_MS = 15000;
+// After a message of one's own, wait for the agent's turn. Past this long
+// the line says plainly that no reply has started; a wake can be slow.
+const PENDING_MS = 90000;
 // Typing shows to others until this long after the last keystroke.
 const TYPING_MS = 4000;
 // A draft no word came for in this long is let go (its writer went away).
@@ -205,13 +205,32 @@ export function mount(root) {
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
+    failed: new Map(), // post id -> the message and its transport error
   };
+  fragment.observePosts(({ channel, id, body, status, record, error }) => {
+    if (channel !== "chat" || !body || body.kind && body.kind !== "message") return;
+    if (status === "failed") {
+      state.failed.set(id, { id, body, seq: `failed:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal, text: body.text ?? "", attachments: attachmentsOf(body), error: error.message, retrying: false });
+    } else if (status === "posting") {
+      const message = state.failed.get(id);
+      if (message) message.retrying = true;
+    } else {
+      const retried = state.failed.delete(id);
+      onChat(record);
+      if (retried) {
+        $("banner").hidden = true;
+        expectTurn(record, body.to ?? [], body.text ?? "");
+      }
+    }
+    schedule();
+  });
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
   // Each channel's seq keeps history ordered even when a page arrives
   // backwards and several records have the same timestamp.
   const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false };
   const workSeen = new Set();
+  const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
     const first = history.first[channel];
     history.first[channel] = first === null ? record.seq : Math.min(first, record.seq);
@@ -228,6 +247,16 @@ export function mount(root) {
       $("earlier").hidden = false;
     }
   }
+  async function earlierWork() {
+    const oldest = Math.min(...state.chat.map((m) => m.at));
+    // Both postable channels retain at most 10,000 records. Include every
+    // work record tied at the boundary time before considering it caught up.
+    for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
+      const page = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
+      for (const record of page.records) onWork(record);
+      history.workDone = page.records.length < WORK_LAST;
+    }
+  }
   $("earlier").onclick = async () => {
     if (history.loading) return;
     history.loading = true;
@@ -238,17 +267,9 @@ export function mount(root) {
     stuck = false;
     try {
       const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
-      for (const record of page.records) onChat(record);
+      for (const record of page.records) onChat(record, true);
       button.hidden = page.records.length < CHAT_LAST;
-      const oldest = Math.min(...state.chat.map((m) => m.at));
-      // Work is paged independently: one turn can write many records, and
-      // a page boundary must not leave its earlier progress behind. Both
-      // postable channels retain at most 10,000 records (ten work pages).
-      for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
-        const work = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
-        for (const record of work.records) onWork(record);
-        history.workDone = work.records.length < WORK_LAST;
-      }
+      await earlierWork();
     } catch (err) {
       button.hidden = false;
       $("history-error").textContent = `Could not load earlier messages: ${err.message}. Try again.`;
@@ -380,7 +401,7 @@ export function mount(root) {
   // a turn waiting on a person: its open card says so, not a working line
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
 
-  function onChat(record) {
+  function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
     state.seen.add(record.seq);
     remember("chat", record);
@@ -399,7 +420,7 @@ export function mount(root) {
     const turn = typeof body.turn === "string" ? body.turn : null;
     const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
     state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", turn, to, attachments: attachmentsOf(body) });
-    if (caughtUp && !stuck && !history.loading && record.seq > latestSeq) newMessages++;
+    if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
       const t = turnOf(turn);
@@ -418,6 +439,9 @@ export function mount(root) {
     remember("work", record);
     const b = record.body;
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
+    const field = `${b.turn}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
+    if ((workLatest.get(field) ?? 0) > record.seq) return;
+    workLatest.set(field, record.seq);
     const n = record.seq;
     const t = turnOf(b.turn);
     t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
@@ -489,8 +513,8 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: "working", t });
     }
-    if (state.pending && now - state.pending.since > PENDING_MS) state.pending = null;
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
+    for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
     items.sort((a, b) => a.at - b.at || a.n - b.n);
     const out = [];
     for (const it of items) {
@@ -598,7 +622,7 @@ export function mount(root) {
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", m.error ?? "", m.retrying ?? false].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine)))];
   }
 
@@ -613,6 +637,19 @@ export function mount(root) {
       wrap.append(bubble);
     }
     wrap.append(el("div", "time", time(m.at)));
+    if (m.error) {
+      const error = el("div", "message-error");
+      error.setAttribute("role", "status");
+      const retry = el("button", "message-retry", m.retrying ? "Retrying…" : "Retry");
+      retry.type = "button";
+      retry.disabled = m.retrying;
+      retry.onclick = async () => {
+        try { await fragment.post("chat", m.body, { id: m.id }); }
+        catch { /* the post observer updates this message's error */ }
+      };
+      error.append(el("span", null, `Could not post: ${m.error}`), retry);
+      wrap.append(error);
+    }
     return wrap;
   }
 
@@ -642,7 +679,7 @@ export function mount(root) {
     return wrap;
   }
 
-  const attachmentsNode = renderAttachments;
+  const attachmentsNode = renderMessageAttachments;
 
   // A turn's steps, one card: open while it works ("Working"), folded once
   // done ("Worked through N steps") unless someone opened it.
@@ -823,7 +860,15 @@ export function mount(root) {
   function workingNode(t) {
     const agent = t ? t.agent : state.pending?.target;
     const forWhom = t?.asker && t.asker !== state.me?.principal ? ` for ${who(t.asker).name}` : "";
-    const said = `${agent ? who(agent).name : "The agent"} is working${forWhom}`;
+    const name = agent ? who(agent).name : "The agent";
+    const phase = inRoster(agent)?.phase;
+    const present = state.here.some((p) => p.principal === agent);
+    const late = !t && state.pending && Date.now() - state.pending.since >= PENDING_MS;
+    const said = t ? `${name} is working${forWhom}`
+      : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
+      : late ? `${name} has not started a reply yet.`
+      : phase === "starting" || phase === "asleep" ? `${name} is starting up…`
+      : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.id : "pending"}`;
     return [
       key,
@@ -832,7 +877,8 @@ export function mount(root) {
         const hint = el("span", "hint");
         const dots = el("span", "dots");
         dots.append(el("i"), el("i"), el("i"));
-        hint.append(dots, said);
+        if (!late && phase !== "wont_wake") hint.append(dots);
+        hint.append(said);
         line.append(hint);
         return line;
       }),
@@ -1259,7 +1305,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name) }));
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "wont_wake"].includes(a.phase) ? a.phase : null }));
       schedule();
       if (picking) updateMentions();
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
@@ -1510,7 +1556,11 @@ export function mount(root) {
     state.me = hello;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
-    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: () => { history.workReady = true; } });
+    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
+      history.workReady = true;
+      try { await earlierWork(); }
+      catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
+    } });
     const note = $("note");
     note.replaceChildren();
     if (!canPost()) {

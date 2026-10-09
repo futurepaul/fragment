@@ -98,7 +98,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 @media (max-width: 760px) { .agent-heading { max-width: calc(100% - 16px); } }
 
 /* ---- the column ---- */
-.scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; overflow-anchor: none; }
+.scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+.history, .latest-wrap { overflow-anchor: none; }
 .history { text-align: center; padding-top: 12px; }
 .history:has(button[hidden]) { display: none; }
 .history button { font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
@@ -191,13 +192,15 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .attachment-audio audio { display: block; flex: 1; min-width: 0; height: 32px; }
 .attachment { min-width: 0; max-width: 100%; width: fit-content; }
 .attachment-video, .attachment-pdf { width: 440px; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface-muted); }
-.attachment-video video { display: block; width: 100%; max-height: 360px; }
+.attachment-video video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 360px; object-fit: contain; }
 .attachment-pdf { display: block; height: 420px; }
 .attachment-actions { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 6px 2px; }
 .attachment-actions a, .attachment-actions button { color: var(--text-secondary); }
 .attachment-actions .attachment-name { flex: 1; }
 .attachment-actions button { border: 0; background: none; font: inherit; padding: 0; cursor: pointer; }
 .attachment-actions a:hover, .attachment-actions button:hover { color: var(--text-primary); }
+.message-error { display: flex; align-items: baseline; gap: 10px; max-width: 100%; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.message-retry { border: 0; background: none; color: var(--accent-blue); font: inherit; padding: 2px; }
 
 /* a turn's steps */
 details.tools { margin: 18px 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); overflow: hidden; }

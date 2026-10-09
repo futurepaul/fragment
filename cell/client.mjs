@@ -78,8 +78,32 @@ export function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
 /// returns that record and appends nothing (another body under it throws,
 /// 409). A post spends a public call when the page holds only the public
 /// role, as a call does.
-export function post(channel, body, { id = crypto.randomUUID() } = {}) {
-  return request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
+export async function post(channel, body, { id = crypto.randomUUID() } = {}) {
+  reportPost({ channel, id, body, status: "posting" });
+  try {
+    const record = await request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
+    reportPost({ channel, id, body, status: "posted", record });
+    return record;
+  } catch (error) {
+    reportPost({ channel, id, body, status: "failed", error });
+    throw error;
+  }
+}
+
+const postHandlers = new Set();
+function reportPost(event) {
+  // An observer's rendering error must never turn a successful write into
+  // a failed post, or prevent the caller seeing the transport's error.
+  for (const handler of postHandlers) {
+    try { handler(event); } catch (error) { console.error(error); }
+  }
+}
+
+/// Observes this page's posts: {channel, id, body, status, record?, error?}.
+/// Retry with the same body and id to replay a write whose answer was lost.
+export function observePosts(handler) {
+  postHandlers.add(handler);
+  return () => postHandlers.delete(handler);
 }
 
 /// Reads one page without changing a live subscription's cursor. With

@@ -1599,7 +1599,10 @@ with records in ascending order and `next` the cursor for an older page),
 `blob(file, {name?, type?})` (a File or Blob uploaded as one of the
 fragment's blobs, its SHA-256 computed in the page, as an editor; answers
 `{sha256, size, type, name}`, a chat attachment's shape, read at
-`./__blob/<sha256>`), `me()`, `closed(fn)`. The page's
+`./__blob/<sha256>`), `observePosts(fn)` (this page's post attempts:
+`{channel, id, body, status: "posting" | "posted" | "failed", record?, error?}`;
+a page may render an error on its message and retry the same id and body),
+`me()`, `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
 half times a backoff that doubles from 1 to 30 seconds), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
