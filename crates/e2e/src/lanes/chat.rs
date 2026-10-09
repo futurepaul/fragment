@@ -477,6 +477,15 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "visibility": looked, "received": s.push.received(&owner_push), "last": last["output"] }),
     );
 
+    // Native sharing is absent in headless Chrome; only the clipboard
+    // boundary is captured so the actual reply button and fallback run.
+    chrome.eval(&page, "(() => { Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }); window.__copied = null; navigator.clipboard.writeText = async (text) => { window.__copied = text; }; const b = document.querySelector('.msg.agent .share'); window.__shareText = b.closest('.msg').querySelector('.md').textContent; b.click(); return true; })()")?;
+    s.ok("sharing a reply falls back to copying its words in headless Chrome", shows(&mut chrome, &page, "typeof window.__copied === 'string' && window.__copied.length > 0 && document.querySelector('.msg.agent .share').getAttribute('aria-label') === 'Copied'"), chrome.eval(&page, "window.__copied")?);
+    let cancelled = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { window.__copied = null; Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new DOMException('Cancelled', 'AbortError'); } }); const result = await a.share({text: 'cancelled', title: 'Chat'}); return result === null && window.__copied === null; })")?;
+    s.ok("cancelling a native share sheet is quiet and copies nothing", cancelled == true, "");
+    let failed = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new Error('Unavailable'); } }); const result = await a.share({text: 'fallback', title: 'Chat'}); delete navigator.share; return result === 'Copied' && window.__copied === 'fallback'; })")?;
+    s.ok("a failed native share falls back to copy too", failed == true, "");
+
     // away from the chat (its page closed), a reply reaches each of its people once
     chrome.close(page)?;
     let member_push = s.name("chat-member-push");

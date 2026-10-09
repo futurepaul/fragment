@@ -39,6 +39,7 @@ import * as fragment from "./__fragment.js";
 import { svg } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments } from "./media.js";
+import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 
 // A message's text and files (docs/chat-records.md).
@@ -627,9 +628,16 @@ export function mount(root) {
     const copy = el("button", "icon-button copy");
     copy.type = "button";
     copy.title = "Copy";
+    copy.setAttribute("aria-label", "Copy reply");
     copy.innerHTML = svg("copy");
     copy.onclick = () => copyText(m.text, copy);
-    actions.append(copy, el("span", "time", time(m.at)));
+    const shareButton = el("button", "icon-button share");
+    shareButton.type = "button";
+    shareButton.title = "Share reply";
+    shareButton.setAttribute("aria-label", "Share reply");
+    shareButton.innerHTML = svg("share");
+    shareButton.onclick = () => feedback(shareButton, () => share({ text: m.text, title: document.title }));
+    actions.append(copy, shareButton, el("span", "time", time(m.at)));
     wrap.append(actions);
     return wrap;
   }
