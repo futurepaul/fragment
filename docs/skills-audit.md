@@ -1,7 +1,7 @@
 # Bundled skills audit — 2026-10-08
 
 41 managed skills (747,818 bytes including helpers/references) before the audit;
-**six kept and updated, zero upstream skills vendored/replaced, 35 deleted**.
+**12 kept and updated, zero upstream skills vendored/replaced, 29 deleted**.
 The runtime's own skills and helpers now supply generic workflows. Apps' generic
 design/game references also go; its four Fragment references stay.
 
@@ -14,8 +14,9 @@ built 2026-10-08. Read `/opt/hermes/skills`, `/opt/hermes/optional-skills`,
 `agent/skill_utils.py`, `tools/skills_tool.py`, `tools/skills_hub_github.py`,
 `tools/skills_hub_official.py`, `tools/web_tools.py` and `tools/image_generation_tool.py`
 from it. The current p5 image (`cde979a27a22`) confirms the pre-audit removal and
-missing document dependencies. This is an environment audit, not a replay of
-Paul's original model turn; it cannot identify which skill that turn loaded.
+missing document dependencies. This is an environment audit, not a replay of Paul's full model turn. The
+coordinator's later p5 logs identify the skill the reviewer targeted, but do not
+establish which rendering code produced the PDF.
 
 All old managed skills were imported from the Finite skills snapshot in
 `3ebc63e6` on 2026-10-03 (five days before this audit), then locally ported.
@@ -62,15 +63,15 @@ skill; this PR makes those visible. Optional skills stay opt-in.
 | Skill | Purpose | Source / declared version | Bytes | Hermes / newer upstream capability | Overlap or platform issue; decision |
 |---|---|---|---:|---|---|
 | meme-from-template-finite | Pillow meme composition | Finite local, unpinned | 5,235 | Optional meme-generation 2.0.0; not identical to manual composition | Meme triggers; false blanket Cairo/runtime claims; delete generic copy |
-| cocod-finite | Cashu/Lightning wallet | cocod 0.0.16 metadata | 6,158 | No bundled Cashu equivalent; use vendor skill when requested | Wallet/payment triggers; obsolete exact npm pin; delete generic copy |
-| trading-agent-finite | Market research and charts | Finite local, unpinned | 6,430 | Optional stocks 0.1.0 / finance skills; not a full equivalent | Charts/market triggers; not a Fragment contract; delete generic copy |
+| cocod-finite | Cashu/Lightning wallet | cocod published 0.0.16 (latest, 2026-03-29) | 6,158 | No bundled Cashu equivalent; upstream 0.0.17 is private/unpublished | Keep/update per Paul: pin published 0.0.16, verified CLI; wallet credentials/funds prerequisite; Cashu-only trigger |
+| trading-agent-finite | Market research and charts | Finite local; current six-package chart stack pinned 2026-10-09 | 6,430 | Optional stocks/finance skills; native web research replaces deleted Perplexity helper | Keep/update per Paul: multi-source analysis/charts; tested current imports/render; public data keyless, authenticated actions need credentials |
 | grill-me | Stress-test a plan | Finite snapshot, original revision unknown | 635 | Optional grill-me 2.0.0 | Same name if optional installed; planning triggers; delete generic copy |
 | image-generation-finite | Metered Fragment image job | Fragment rewrite, unversioned | 5,652 | Native image_generate uses FAL/Nous, not our Workers AI step | Image triggers; remove edit trigger and deleted meme reference; keep/update |
 | inference-sh-cli-finite | External AI apps via infsh | okaris 1.0.0 | 14,753 | Optional inference-sh-cli 1.0.0 | Broad AI/image/video triggers; own login, outside platform; delete generic copy |
 | find-nearby-finite | Keyless nearby-place lookup | Finite local 1.0.0 | 10,311 | Bundled maps 1.2.0 has geocoding/nearby/routing | Places triggers with goplaces/maps; delete generic copy |
 | goplaces-finite | Google Places API lookup | Finite local 1.0.0 | 9,868 | Bundled maps 1.2.0 is keyless; no identical Google ratings helper | Places triggers; vendor API, not Fragment-specific; delete generic copy |
-| music-generation-finite | ElevenLabs/FAL music | Finite local 1.0.0 | 5,000 | Bundled songwriting-and-ai-music; native audio generation is not an identical provider | Music triggers; optional vendor credentials; delete generic copy |
-| nostr-agent-interface-cli-finite | Nostr external CLI | Finite port, original revision unknown | 11,056 | No identical bundled skill; use vendor instructions/hub | No name collision; external CLI unrelated to Fragment; delete generic copy |
+| music-generation-finite | ElevenLabs/FAL music | Finite REST examples 1.0.0; ElevenLabs music_v2_5 | 5,000 | Bundled songwriting-and-ai-music covers composition; official ElevenLabs skill recommends v2.5 | Keep/update per Paul: direct provider execution only; explicit credential check and current model; no general songwriting competition |
+| nostr-agent-interface-cli-finite | Nostr external CLI | AustinKelsay skill 0.1.0; CLI source 3.1.0 at f19c8478 | 11,056 | No bundled equivalent; npm package absent, current upstream source builds | Keep/update per Paul: pinned source build verified; signer prerequisite, public npub is not a private key; CLI-specific trigger |
 | generate-pdf-finite | Create PDFs with fpdf2/ReportLab | Community 1.1.0 | 7,402 | Bundled pdf 1.1.0 has JSON creator and validation helpers | PDF creation triggers; dependencies absent; Unicode claim wrong; delete generic copy |
 | google-workspace-finite | Connected Google APIs/gws | Nous-derived Fragment rewrite 2.1.0 | 28,748 | Bundled google-workspace 1.2.0 uses local OAuth; wrong auth here | Same task trigger; deliberately omit native; keep/update to 2.2.0 |
 | linear-finite | Linear GraphQL helper | Hermes-derived 1.1.0 | 20,381 | No identical bundled skill; vendor/hub when needed | No default Linear connection; optional third-party integration; delete generic copy |
@@ -88,9 +89,9 @@ skill; this PR makes those visible. Optional skills stay opt-in.
 | model-council-finite | Panel through Fragment model tiers | Fragment rewrite, unversioned | 13,367 | Native delegate_task is not a multi-tier metered panel | Narrow to explicit tier opinions; not multiple frontier vendors; keep/update |
 | parallel-cli-finite | Parallel research CLI | Hermes-derived 1.1.0 | 10,946 | Optional parallel-cli 1.1.0; native Parallel web backend | Research triggers; external credentials/login; delete generic copy |
 | perplexity-research-finite | Perplexity research/Firecrawl | Finite local, unpinned | 12,143 | Native web_search supports PERPLEXITY_API_KEY; grounded-citations | Research triggers; native standard env works with swap; Firecrawl absent; delete generic copy |
-| polymarket-finite | Prediction-market data | Hermes Agent + Teknium 1.1.0 | 17,267 | Optional polymarket 1.0.0; not identical helper coverage | Prediction-market triggers; user-installed specialty; delete generic copy |
+| polymarket-finite | Prediction-market data | Hermes + Teknium helper 1.1.0; current public data contract | 17,267 | Optional Hermes Polymarket 1.0; official Polymarket agent-skills confirms token history | Keep/update per Paul: tested read-only stdlib helper; fix history token ID and fidelity units; authenticated trading needs a separate operator signer |
 | research-paper-writing-finite | ML paper pipeline | Orchestra Research 1.0.0 | 176,722 | Optional research-paper-writing 1.1.0; grounded-citations | Paper-writing triggers; 176,722 bytes, old conference links; delete generic copy |
-| x-api-finite | X API v2 lookups | Finite local, unpinned | 13,653 | Bundled xurl; not identical credential contract | X triggers; X bearer provider absent from default catalog; delete generic copy |
+| x-api-finite | X API v2 lookups | Finite stdlib helper, X API v2 | 13,653 | Bundled xurl covers OAuth/posting; direct app-bearer reads are distinct | Keep/update per Paul: operator bearer prerequisite, 30s timeout; narrow to read-only direct API data |
 | x-search-finite | Grok X search | waffledog-bot/paul-and-waffle / OpenUniverse, unpinned | 13,722 | Native web tools can use xAI backend; not identical analysis modes | Search triggers; standard XAI_API_KEY swap needs no duplicate skill; delete generic copy |
 | apps-finite | Build/publish/share Fragment apps | Fragment rewrite + Finite design references, unversioned | 190,413 | Native popular-web-designs/design-md; optional impeccable 4.1.2 lack Fragment runtime API | Web-design triggers; remove generic references, fix names and private QA; keep/update |
 | code-review-finite | Generic code review | Finite local, unpinned | 2,218 | Bundled requesting-code-review 2.1.0 / sdlc-review | Code-review triggers duplicate guidance; delete generic copy |
@@ -220,16 +221,42 @@ available; an explicit `/refine` focus bypasses that automatic gate in Hermes
 (the Fragment bridge does not forward slash commands). The separate periodic
 curator can retain its safe default policy for agent-owned skills.
 
-**Demo decision, coordinator authorized 2026-10-08:** set the single profile
-config line `auxiliary.background_review: { enabled: false }`. The account shares
-a 50 calls/min per-model limit. This disables **automatic skill and memory
-reviews**, retains explicit skill/memory tools and the separate periodic
-curator, and can be reversed by removing that line in `profile_config`.
-Paul should revisit it with a managed-skills-aware setting or sufficient rate
-limits. [Debt entry](technical-debt-ledger.md#hermes-per-turn-background-review-is-off-2026-10-08-demo).
-The Docker test reads Hermes' effective setting, invokes its automatic spawn
-entrypoint without a model-capable runtime to prove it returns before model
-work, and checks explicit tools and the periodic curator remain available.
+**Paul's revised decision, 2026-10-09:** automatic memory review is on.
+Automatic skill review is on too, with the image-owned `fragment-skill-fork`
+plugin enabled in each profile. The single review setting is now
+`auxiliary.background_review: { enabled: true }`; both scheduling intervals
+retain Hermes' defaults. The periodic curator and explicit tools stay available.
+
+The plugin uses Hermes' supported `pre_tool_call` extension point. Before a flat
+`skill_manage` patch/edit/write_file/remove_file on either of our external roots,
+it copies the complete category/name package into the active profile's `skills/`.
+Local names rank above external names. It transfers only exact-file fresh-read
+marks, preserving the background review read-before-write rule and native
+validation/security scanning. Copies are bounded, reject links/special files,
+are writable, and are published under an interprocess lock without replacing
+existing local content. External batch writes are refused with guidance to fork
+via a single write first; deletes retain native ownership guards. Other external
+roots keep native behavior. No Hermes source file is changed for this feature.
+A failed subsequent patch can leave an unchanged local fork; removing that fork
+restores the current managed baseline. Later managed releases never overwrite it.
+
+Pinned `/opt/hermes` references: `hermes_cli/config_defaults.py:811` (global review
+switch), `agent/agent_init.py:1325` (memory interval), `:1382` (skill interval),
+`agent/turn_finalizer.py:760` (skill scheduling), `:784` (review spawn),
+`agent/background_review.py:1081` (memory-triggered reviews still allow skill tools),
+`tools/skill_manager_tool.py:384` (external lookup before writes), `:395` (in-place
+write), `tools/skill_manager_guards.py:211` (fresh-read guard), and
+`hermes_cli/plugins.py:1971` (supported pre-tool hook). There is no per-managed-skill
+switch or native/configured fork-to-local facility. Setting only
+`skills.creation_nudge_interval: 0` would suppress skill-triggered forks but would
+not remove skill tools from memory-triggered reviews; it cannot guarantee no
+read-only failures. The image plugin resolves the write target instead.
+
+The Docker lane runs a scripted background-origin fresh-read/patch through real
+plugin dispatch: the initial unread patch is refused, then a complete local copy
+is patched, helpers remain intact, native resolution selects the copy, and the
+baseline remains unchanged. An unread helper is still refused after forking.
+[Debt entry](technical-debt-ledger.md#hermes-external-skills-need-an-image-copy-on-write-plugin).
 
 The three calls represent 78–99 seconds of request duration, not necessarily an
 equal addition to first-reply wall time: v0.21.6 starts reviews after delivery and
@@ -237,12 +264,12 @@ cancels an existing review at a subsequent live turn with a bounded two-second
 acknowledgement wait. They still spend model budget and can contend with live
 work. Without the full timing trace, do not claim all of that duration was added
 to Paul's visible wait. Deleting our PDF copy fixes the bad routing/dependencies;
-automatic review can still try to patch the now-read-only native PDF, so deletion
-alone does not eliminate that maintenance conflict.
+automatic review can still improve the read-only native PDF by forking it locally.
+Deleting the duplicate alone would not have resolved the ownership conflict.
 
 ## Changes and verification
 
-- Managed release: six Fragment contracts; 35 generic copies deleted.
+- Managed release: six Fragment contracts plus six operator integrations Paul retains; 29 generic copies deleted.
   Generic apps references replaced with routes to Hermes' own design skills.
 - Image: pinned Hermes skills exposed via a read-only temporary view outside saved
   profiles. A managed name or alias suppresses its native counterpart; removal
@@ -254,11 +281,11 @@ alone does not eliminate that maintenance conflict.
 - Stale facts: `<label>--<suffix>`, emails for people, narrowed image/council
   triggers, no references to deleted skills, private browser QA without widening
   sharing, and container Chromium flags / detached QA servers.
-- Docker test: all six real managed entrypoints, native document/code/research
+- Docker test: all twelve real managed entrypoints, native document/code/research
   catalog entries, Google exclusion, read-only skills, actual PDF creation and
   read-back, agent-owned precedence, managed PDF shadow/removal and restoration.
   Unit tests also cover aliases, replay and fresh-view restoration. The image test
-  checks automatic review is off, explicit skill/memory tools remain available,
+  checks automatic memory/skill review is on and writes fork locally; explicit tools remain available,
   and the periodic curator retains its no-LLM-consolidation default.
 
 Required checks, recorded for this branch:
@@ -268,12 +295,33 @@ Required checks, recorded for this branch:
 - Images `cargo test --workspace`: 201 passed, 15 Docker tests ignored.
 - Images `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo test -p fragment-bridge --test docker -- --ignored the_hermes_image`:
-  1 passed, 16 filtered; unique tag `fragment-hermes:skills-audit-20261008-3edwyqbi`.
+  1 passed, 16 filtered; unique tag `fragment-hermes:skills-audit-20261009-3edwyqbi-cow-final`.
 - Offline PDF comparison: 2 paths, 4 pages visually inspected; both content checks passed.
 
-Paul should revisit disabling automatic memory/skill reviews (demo debt above).
+Paul explicitly keeps automatic memory review; model-call budget tuning remains his call.
 Paul/coordinator's calls: merge and deploy this image/platform release, then
 update existing computers' image pins. A platform deploy alone updates managed
-files but does not replace the pinned image of an existing computer. Specialty
-vendor/wallet skills can be installed explicitly when needed; the generic
-managed set no longer promises them to every agent.
+files but does not replace the pinned image of an existing computer. The six restored integrations are available in the catalog, with explicit missing-credential guidance.
+
+## Restored integrations — 2026-10-09
+
+Paul retained cocod, Nostr CLI, X API, music, trading analysis and Polymarket; Linear
+and Monday remain deleted. Every restored skill distinguishes provider identities
+from Fragment `<label>--<suffix>` names and email people, and explicitly explains
+missing operator credentials. Cashu wallets, public Nostr reads, public market
+data and public Polymarket reads do not falsely require a shared API key. Signed
+or authenticated actions need separately provisioned wallet/signer/exchange material.
+
+- cocod: current published 0.0.16 installed and `--version`/`--help` ran in the pinned
+  image with Bun 1.4.2; private upstream 0.0.17 is not a compatible npm upgrade.
+- Nostr: npm 404; pinned source 3.1.0 built from its frozen lockfile and its real
+  CLI `list-tools --json` ran in the pinned image. No signing key used.
+- X: stdlib helper, current official recent-search contract, explicit missing-token
+  error and bounded network timeout; no paid API request or token used.
+- Music: current ElevenLabs `music_v2_5` explicitly selected; direct operator-backed
+  requests separated from Hermes songwriting. Provider contracts inspected; no paid generation call.
+- Trading: six current PyPI pins installed in a separate environment and imported;
+  Plotly/Kaleido rendered a real chart through the pinned Chromium offline. `uv
+  --no-config` avoids inheriting Hermes' older dependency cutoff in the user's environment.
+- Polymarket: no SDK install; history corrected to token IDs, month interval and
+  minute-spacing fidelity using the official vendor contract; deterministic helper check.
