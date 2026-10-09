@@ -476,7 +476,7 @@ function taskSig(id, fallback, report) {
   const ho = task ? handOff(task) : null;
   const draft = task ? handDraftOf(task) : null;
   const asks = (ho?.steps ?? []).filter((s) => s.kind === "turn.prompt").map((s) => [s.prompt, s.outcome, answering.get(s.prompt), Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt]);
-  return JSON.stringify([ho?.state, ho?.steps.length, ho?.steps.at(-1)?.ok, ho?.started, ho?.ended, task?.report?.length, draft?.length, task?.text ?? fallback, report, opened.has(`k:${id}`), opened.has(`r:${id}`), asks, S.me?.principal]);
+  return JSON.stringify([ho?.state, ho?.steps.length, ho?.steps.at(-1)?.ok, ho?.started, ho?.ended, task?.report?.length, draft?.length, task?.text ?? fallback, report, opened.has(`k:${id}`), opened.has(`r:${id}`), asks, S.me?.principal, task?.hands?.name]);
 }
 
 // prompts this page answered, while the agent closes them: prompt -> option
@@ -539,6 +539,9 @@ function taskNode(id, fallback, report) {
   // a question open is what it waits on; else, between steps, it works
   const asking = phase === "running" && steps.some((s) => s.kind === "turn.prompt" && typeof s.outcome !== "string" && !(Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt));
   const [label, ic] = asking ? ["Needs you", "hand"] : TASK_STATE[phase];
+  // which hands ran it: a paired machine by name, else the cloud computer
+  const machine = task?.hands?.kind === "machine";
+  const where = machine ? `On ${task.hands.name}` : task?.hands ? "On your cloud computer" : "On your computer";
   const toggle = (k) => () => {
     if (opened.has(k)) opened.delete(k);
     else opened.add(k);
@@ -550,10 +553,11 @@ function taskNode(id, fallback, report) {
     h(
       "div.task-head",
       null,
-      h("span.task-icon", null, icon("monitor")),
-      h("span.task-where", { text: "On your computer" }),
-      // in the shell, its screen opens beside the chat while it works
-      EMBED && phase === "running" ? h("button.task-watch", { type: "button", title: "Watch its screen", onclick: () => document.dispatchEvent(new CustomEvent("mind:screen")) }, icon("monitor"), "Watch") : null,
+      h("span.task-icon", null, icon(machine ? "laptop" : "monitor")),
+      h("span.task-where", { text: where }),
+      // in the shell, its screen opens beside the chat while it works (a
+      // paired machine has none to watch)
+      EMBED && phase === "running" && !machine ? h("button.task-watch", { type: "button", title: "Watch its screen", onclick: () => document.dispatchEvent(new CustomEvent("mind:screen")) }, icon("monitor"), "Watch") : null,
       h(`span.task-state${asking ? ".asking" : ""}`, null, icon(ic, phase === "running" && !asking ? "spin" : ""), label),
       elapsed ? h("span.task-time", { text: elapsed }) : null,
     ),
@@ -579,7 +583,7 @@ function taskNode(id, fallback, report) {
           phase === "running" && !asking && !draft ? h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Working…" })) : null,
         )
       : phase === "running"
-        ? h("div.task-steps", null, h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Waking your computer…" })))
+        ? h("div.task-steps", null, h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: machine ? `Waiting for ${task.hands.name}…` : "Waking your computer…" })))
         : null,
     draft && phase === "running" ? h("div.task-draft", null, md(draft)) : null,
     report

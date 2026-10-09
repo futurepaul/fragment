@@ -67,7 +67,9 @@ export const S = {
   thinking: new Map(), // thread -> { ms, at }: its model thinking, no words yet (a draft's `thinking`)
   said: new Map(), // thread -> the text of its latest `talk`, which a late draft frame repeats
   landed: new Map(), // message i -> the key of what it took the place of (a pending message's; "" for a draft)
-  tasks: new Map(), // task id -> { id, thread, text, state, steps, report, started, ended, turn? }
+  tasks: new Map(), // task id -> { id, thread, text, state, steps, report, started, ended, turn?, hands? }
+  hands: null, // [{ agent, fragment, name, kind, here }] as `hands_look` last said (`hands` on log)
+  handsAt: 0,
   handDrafts: new Map(), // bridge turn -> { text, at }: goose's words as they stream
   turnTask: new Map(), // bridge turn -> task id, known for sure
   work: new Map(), // bridge turn -> { turn, start, at, steps: [], end, endAt, seen }: goose's turn as `work` has it
@@ -150,10 +152,31 @@ export function putTask(b) {
   const next = { ...old };
   for (const k of ["thread", "text", "state", "report", "turn"]) if (typeof b[k] === "string") next[k] = b[k];
   for (const k of ["started", "ended", "i", "seq"]) if (Number.isFinite(b[k])) next[k] = b[k];
+  // which hands ran it: the cloud computer, or a paired machine
+  if (b.hands && typeof b.hands.name === "string") next.hands = { name: b.hands.name, kind: b.hands.kind === "machine" ? "machine" : "computer" };
   const st = steps(b.steps);
   if (st) next.steps = st;
   if (typeof b.turn === "string") S.turnTask.set(b.turn, b.id);
   S.tasks.set(b.id, next);
+}
+
+/// The hands as `hands_look` said them (a `hands` record on log).
+export function putHands(b) {
+  if (!Array.isArray(b?.hands)) return;
+  S.hands = b.hands
+    .filter((x) => x && typeof x.agent === "string" && typeof x.name === "string")
+    .map((x) => ({ agent: x.agent, fragment: str(x.fragment), name: x.name, kind: x.kind === "machine" ? "machine" : "computer", here: x.here === true }));
+  S.handsAt = Date.now();
+}
+
+/// Asks the mind who its hands are now (`hands_look`, a job: its answer
+/// comes as a `hands` record on log).
+export async function lookHands() {
+  try {
+    await F.call("hands_look", {});
+  } catch (e) {
+    problem(`Could not read your hands: ${e.message}`);
+  }
 }
 
 export function putThread(t) {
@@ -245,6 +268,9 @@ function onLog(record) {
       }
       break;
     }
+    case "hands":
+      putHands(b);
+      break;
     case "suggest":
       if (Array.isArray(b.names)) {
         S.suggestions = b.names.filter((n) => typeof n === "string" && n.trim());
@@ -623,8 +649,11 @@ export function start(fragment) {
 /// Wires what the settings read: the status, the about-me, and who the
 /// person is. The page alone in the shell's Settings (`?embed=settings`)
 /// follows nothing else.
-export function startSettings(fragment) {
+export function startSettings(fragment, { framed = false } = {}) {
   F = fragment;
+  // framed alone in the shell's Settings, the page follows log for its
+  // hands only (the whole page follows all of log: `start`)
+  if (framed) F.subscribe("log", (record) => record?.body?.type === "hands" && (putHands(record.body), changed()), { last: 50 });
   F.live(
     "status",
     {},

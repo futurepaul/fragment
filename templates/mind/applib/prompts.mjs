@@ -77,11 +77,14 @@ id, its title, when it began, and the ids of its last messages before this one,
 to zoom), and who you are in that chat: a persona, whose instructions you follow
 there.
 
-Your hands are agents on the user's computers. The ones you have, and whether
-each one's computer is awake, are listed at the start of each message. computer
-hands a task to them; a computer asleep wakes for it. A task that needs a
-computer when none is listed, or when the message says you hand nothing to them
-in this chat, can't be done now: tell the user.
+Your hands are agents on the user's computers: their cloud computer, and
+machines of their own paired as hands. The ones you have, and whether each is
+awake (a cloud computer) or online (a paired machine), are listed at the start
+of each message. computer hands a task to the one its "on" names, by default the
+one you chose last, else the cloud computer. A cloud computer asleep wakes for
+it; a paired machine offline takes nothing until it is back. A task that needs
+a computer when none is listed, or when the message says you hand nothing to
+them in this chat, can't be done now: tell the user.
 
 # Compactions
 
@@ -198,11 +201,15 @@ export const TOOLS = {
   ),
   computer: tool(
     "computer",
-    "Hand a task to an agent on the user's computer. It has files, a shell, code tools and the internet, and the fragment CLI and its skill: it makes the user's apps (fragments) and changes their code (to use an app, call app_call yourself). " +
+    "Hand a task to your hands: an agent on one of the user's computers (their cloud computer, or a machine of theirs paired as hands). It has files, a shell, code tools and the internet, and the fragment CLI and its skill: it makes the user's apps (fragments) and changes their code (to use an app, call app_call yourself). " +
       "It sees the view but not this turn, and gets the files attached to this turn's messages. " +
       "Say everything the task needs, and keep the user's own words about how to do it (a tool, a site, a method: \"use the browser\" stays \"use the browser\"); never suggest a method they did not ask for. " +
+      "on names which hands, as \"Your hands\" lists them; without it, the hands you chose last, else the cloud computer. A paired machine that is offline takes nothing: you are told so at once. " +
       'It answers "[id] started" at once; the report comes later as a work message starting "[id] ".',
-    { task: { type: "string", description: "what to do, whole" } },
+    {
+      task: { type: "string", description: "what to do, whole" },
+      on: { type: "string", description: "which hands, by the name \"Your hands\" gives (default: the last you chose, else the cloud computer)" },
+    },
     ["task"],
   ),
 };
@@ -249,8 +256,10 @@ const minute = (ms) => `${new Date(ms).toISOString().slice(0, 16).replace("T", "
 /// chat, `{id, title, started, recent}` (its last messages' ids); the
 /// persona, `{name, emoji, instructions, hands}`, which the system prompt
 /// leaves out so every persona shares its cached prefix; and the hands,
-/// `[{name, awake}]`, which a persona without hands is told it hands
-/// nothing to.
+/// `[{name, kind, here, default}]` (`kind` `computer`, the cloud computer's
+/// agent, awake or asleep; or `machine`, a paired machine, online or
+/// offline; `default`, where `computer` goes without `on`), which a persona
+/// without hands is told it hands nothing to.
 export function turnState({ now, chat, persona, hands }) {
   const lines = [`Now: ${minute(now)}, ${DAYS[new Date(now).getUTCDay()]}.`];
   const title = String(chat.title ?? "").trim();
@@ -259,7 +268,8 @@ export function turnState({ now, chat, persona, hands }) {
   const name = `${persona.name}${persona.emoji ? ` ${persona.emoji}` : ""}`;
   const mine = String(persona.instructions ?? "").trim();
   lines.push(`You are ${name} in this chat.${mine ? ` ${mine}` : ""}`);
-  const who = hands.map((h) => `${h.name} (its computer ${h.awake ? "awake" : "asleep"})`).join(", ");
+  const state = (h) => (h.kind === "machine" ? `paired machine, ${h.here ? "online" : "offline"}` : `cloud computer, ${h.here ? "awake" : "asleep"}`);
+  const who = hands.map((h) => `${h.name} (${state(h)}${h.default ? "; the default" : ""})`).join(", ");
   if (!hands.length) lines.push("Your hands: none.");
   else if (persona.hands) lines.push(`Your hands: ${who}.`);
   else lines.push(`Your hands: ${who}; as ${persona.name} you hand nothing to them in this chat.`);

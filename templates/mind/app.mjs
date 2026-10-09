@@ -109,6 +109,11 @@ const TASK_LOST_MS = 30 * 60_000;
 const EARLY_REPLIES_MAX = 32;
 // A turn's messages name its thread's last this many messages.
 const THREAD_RECENT = 6;
+// The hands a turn lists, at most (the mind's agent members, the first
+// added first), and how long a hands' profile a turn read is kept for the
+// next turns (a machine paired later is seen within it).
+const HANDS_MAX = 16;
+const PROFILE_KEEP_MS = 60 * 60_000;
 // A mutation publishes at most 64 records: a turn's step logs at most this
 // many pieces with a record each (a page reads the rest from `thread`).
 const RECORDS_MAX = 60;
@@ -263,6 +268,55 @@ function endedBy(text) {
   return m === null || m[1] === "idle" ? "done" : m[1] === "stopped" ? "stopped" : "error";
 }
 
+// The hands, as each turn's messages name them (docs/optchat.md, "A machine
+// as hands"): each agent member (`{agent, here}`, the first added first),
+// with its profile (`job.people`'s: its fragment, and the machine it is
+// paired to, if one is). A paired machine is named for its machine; the
+// cloud computer's agent is `cloud` when it is the only one, else its
+// fragment's label (as is a name two hands would share).
+function handsOf(agents, profiles) {
+  const computers = agents.filter((a) => !profiles[a.agent]?.machine).length;
+  const taken = new Set();
+  const out = [];
+  for (const a of agents) {
+    const p = profiles[a.agent] ?? {};
+    const label = String(p.fragment ?? "").split(".")[0] || p.username || "your agent";
+    const kind = p.machine ? "machine" : "computer";
+    let name = kind === "machine" ? String(p.machine) : computers === 1 ? "cloud" : label;
+    if (taken.has(name.toLowerCase())) name = label;
+    taken.add(name.toLowerCase());
+    out.push({ agent: a.agent, fragment: p.fragment ?? null, name, kind, here: a.here === true });
+  }
+  return out;
+}
+
+// The hands `on` names: by its name, else its fragment's label or name, in
+// any case.
+function handsNamed(hands, on) {
+  const o = on.trim().toLowerCase();
+  const fragment = (h) => String(h.fragment ?? "").toLowerCase();
+  return hands.find((h) => h.name.toLowerCase() === o) ?? hands.find((h) => fragment(h) === o || fragment(h).split(".")[0] === o) ?? null;
+}
+
+// Where `computer` goes without `on`: the hands the persona chose last
+// (`last`, an agent), while it is one still; else the cloud computer; else
+// the first.
+function handsDefault(hands, last) {
+  return hands.find((h) => h.agent === last) ?? hands.find((h) => h.kind === "computer") ?? hands[0] ?? null;
+}
+
+// A task's hands, as its row keeps them (JSON), or null for one handed off
+// before they were kept.
+function taskHands(t) {
+  if (typeof t?.hands !== "string") return null;
+  try {
+    const h = JSON.parse(t.hands);
+    return h && typeof h.name === "string" ? { agent: h.agent ?? null, name: h.name, kind: h.kind === "machine" ? "machine" : "computer" } : null;
+  } catch {
+    return null;
+  }
+}
+
 // A computer task whole, as zoom("<task id>") answers it (§6's
 // zoom("Name"), an agent's whole chat): what it was given, its state and
 // times, goose's run, and its report whole. `run` is what a turn's zoom
@@ -271,7 +325,9 @@ function endedBy(text) {
 // steps, and only a job reads a channel.
 function taskText(t, run) {
   const at = (ms) => new Date(ms).toISOString();
-  const head = `Task ${t.id} (${t.state}) on the user's computer, from ${at(t.started)}${t.ended ? ` to ${at(t.ended)}` : ""}${isInt(t.i) ? `, handed off at message ${t.i}` : ""}.`;
+  const h = t.hands && typeof t.hands === "object" ? t.hands : taskHands(t);
+  const where = h ? `on ${h.name} (${h.kind === "machine" ? "a paired machine" : "the cloud computer"})` : "on the user's computer";
+  const head = `Task ${t.id} (${t.state}) ${where}, from ${at(t.started)}${t.ended ? ` to ${at(t.ended)}` : ""}${isInt(t.i) ? `, handed off at message ${t.i}` : ""}.`;
   const lines = [head, "", "Given:", t.text, ""];
   if (run === null) lines.push("Its run on the computer: read by Mind's own zoom in a turn, not here.", "");
   else lines.push(...runLines(run), "");
@@ -460,6 +516,9 @@ export class App extends DurableObject {
     sql.exec(`CREATE TABLE IF NOT EXISTS task (
       id TEXT PRIMARY KEY, thread TEXT NOT NULL, i INTEGER, text TEXT NOT NULL, seq INTEGER, turn TEXT, state TEXT NOT NULL,
       report TEXT, steps TEXT NOT NULL, started INTEGER NOT NULL, ended INTEGER)`);
+    // the hands a task went to (JSON `{agent, name, kind}`): a task table
+    // made before a mind had more than one gains the column, its tasks none
+    if (!sql.exec("SELECT * FROM task LIMIT 0").columnNames.includes("hands")) sql.exec("ALTER TABLE task ADD COLUMN hands TEXT");
     sql.exec("CREATE INDEX IF NOT EXISTS task_seq ON task (seq)");
     sql.exec("CREATE INDEX IF NOT EXISTS task_turn ON task (turn)");
     sql.exec("CREATE INDEX IF NOT EXISTS task_thread ON task (thread, started)");
@@ -876,10 +935,11 @@ export class App extends DurableObject {
       sql.exec("UPDATE task SET state = 'lost' WHERE id = ?", id);
       this.#publishTask(call, this.#task(id));
     }
-    // the hands' profile as a turn last read it (`people`, a step: read once)
-    const kept = this.#json("agent_profile", null);
-    const profile = kept && kept.agent === agent ? kept : null;
-    const begun = { took: true, thread, chat, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments, now, asked, profile };
+    // the hands' profiles as turns last read them (`people`, a step: read
+    // once an hour), and the hands this persona chose last (`computer`'s default)
+    const profiles = this.#json("hands_profiles", {});
+    const handsLast = this.#json("hands_last", {})[persona.id] ?? null;
+    const begun = { took: true, thread, chat, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments, now, asked, profiles, handsLast };
     // nothing to wait for: the view is rendered now, as turn_view would (a step saved)
     if (settled) begun.view = this.turn_view({ upto: tail });
     return begun;
@@ -916,7 +976,7 @@ export class App extends DurableObject {
   logged({ run, thread, persona = null, entries, take = false, end = null }, call) {
     need(Array.isArray(entries) && entries.length <= 1 + 2 * TOOL_CALLS_ANSWERED, "logged: entries is a list");
     for (const e of entries) need(e && LOGGED_KINDS.has(e.kind) && typeof e.text === "string", "logged: each entry is {kind: talk|tool|echo, text}");
-    need(end === null || (!take && typeof end === "object"), "logged: end is {state, timing?, profile?}, for a call that asked no tools");
+    need(end === null || (!take && typeof end === "object"), "logged: end is {state, timing?, profiles?}, for a call that asked no tools");
     const sql = this.ctx.storage.sql;
     const out = this.#changing((m) => {
       const ids = [];
@@ -937,16 +997,24 @@ export class App extends DurableObject {
     const timing = end.timing && typeof end.timing === "object" ? end.timing : null;
     const calls = Array.isArray(timing?.calls) ? timing.calls : [];
     if (calls.length && calls[calls.length - 1] && typeof calls[calls.length - 1] === "object") calls[calls.length - 1].logged ??= out.at;
-    return { ...out, ended: this.turn_end({ run, thread, state: end.state, timing, profile: end.profile ?? null }, call) };
+    return { ...out, ended: this.turn_end({ run, thread, state: end.state, timing, profiles: end.profiles ?? null }, call) };
   }
 
   // The lock let go, and what ended published. `requeue` puts a turn's
   // messages ({i, n}) back first in line (a turn handed on to a fresh run).
-  turn_end({ run, thread, state, error = null, requeue = [], timing = null, profile = null }, call) {
+  turn_end({ run, thread, state, error = null, requeue = [], timing = null, profiles = null }, call) {
     need(["done", "stopped", "error", "settling"].includes(state), "turn_end: state is done, stopped, error or settling");
-    // the hands' profile a turn read (`people`): kept for the next turns
-    if (profile && typeof profile === "object" && typeof profile.agent === "string") {
-      this.#setJson("agent_profile", { agent: profile.agent, fragment: typeof profile.fragment === "string" ? profile.fragment : null, username: typeof profile.username === "string" ? profile.username : null });
+    // the hands' profiles a turn read (`people`): kept for the next turns,
+    // the newest HANDS_MAX
+    if (profiles && typeof profiles === "object") {
+      const kept = this.#json("hands_profiles", {});
+      const text = (v) => (typeof v === "string" ? v : null);
+      for (const [id, p] of Object.entries(profiles)) {
+        if (typeof id !== "string" || !p || typeof p !== "object") continue;
+        kept[id] = { fragment: text(p.fragment), username: text(p.username), machine: text(p.machine), at: Number.isSafeInteger(p.at) ? p.at : Date.now() };
+      }
+      const newest = Object.entries(kept).sort((a, b) => (b[1].at ?? 0) - (a[1].at ?? 0)).slice(0, HANDS_MAX);
+      this.#setJson("hands_profiles", Object.fromEntries(newest));
     }
     let queue = this.#json("queue", []);
     if (Array.isArray(requeue) && requeue.length) {
@@ -1133,17 +1201,25 @@ export class App extends DurableObject {
   // A hand-off opened: its task, published on `chat` at `seq`, recorded
   // with the turn the agent's bridge gives that record. A reply that came
   // first (this a step behind it) is its report at once.
-  task_open({ id, thread, text, seq, turn }, call) {
+  task_open({ id, thread, text, seq, turn, hands = null, persona = null, chose = false }, call) {
     need(typeof id === "string" && /^w\d+-\d+$/.test(id), "task_open: id is a task's");
-    need(typeof thread === "string" && typeof text === "string" && isInt(seq), "task_open: {id, thread, text, seq, turn}");
+    need(typeof thread === "string" && typeof text === "string" && isInt(seq), "task_open: {id, thread, text, seq, turn, hands?}");
     need(typeof turn === "string" && /^[0-9a-f]{24}$/.test(turn), "task_open: turn is the bridge's, 24 hex");
+    need(hands === null || (typeof hands === "object" && typeof hands.agent === "string" && typeof hands.name === "string"), "task_open: hands is {agent, name, kind}");
     const sql = this.ctx.storage.sql;
+    const kept = hands === null ? null : JSON.stringify({ agent: hands.agent, name: hands.name.slice(0, 64), kind: hands.kind === "machine" ? "machine" : "computer" });
     return this.#changing((m) => {
       if (sql.exec("SELECT id FROM task WHERE id = ?", id).toArray().length) return { id, turn, opened: false };
       sql.exec(
-        "INSERT INTO task (id, thread, i, text, seq, turn, state, report, steps, started, ended) VALUES (?, ?, NULL, ?, ?, ?, 'running', NULL, '[]', ?, NULL)",
-        id, thread, text, seq, turn, Date.now(),
+        "INSERT INTO task (id, thread, i, text, seq, turn, state, report, steps, started, ended, hands) VALUES (?, ?, NULL, ?, ?, ?, 'running', NULL, '[]', ?, NULL, ?)",
+        id, thread, text, seq, turn, Date.now(), kept,
       );
+      // the hands a persona named are its default from now on
+      if (chose && hands !== null && typeof persona === "string") {
+        const last = this.#json("hands_last", {});
+        last[persona] = hands.agent;
+        this.#setJson("hands_last", Object.fromEntries(Object.entries(last).slice(-PERSONAS_MAX)));
+      }
       const early = this.#json("early", {});
       if (turn in early) {
         const { text: said, attachments = [] } = early[turn];
@@ -1164,7 +1240,7 @@ export class App extends DurableObject {
   }
 
   #publishTask(call, t) {
-    const body = { type: "task", id: t.id, thread: t.thread, state: t.state, text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX), turn: t.turn };
+    const body = { type: "task", id: t.id, thread: t.thread, state: t.state, text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX), turn: t.turn, hands: taskHands(t) };
     if (t.report !== null && t.report !== undefined) body.report = M.cutBytes(t.report, TASK_RECORD_REPORT_MAX);
     call.publish("log", body);
   }
@@ -1258,7 +1334,7 @@ export class App extends DurableObject {
     const t = this.#task(id);
     if (!t) return { task: null };
     const reported = this.ctx.storage.sql.exec("SELECT i FROM log WHERE task = ? AND kind IN ('work', 'user') AND cont IS NULL ORDER BY i LIMIT 1", t.id).toArray()[0]?.i ?? null;
-    return { task: { id: t.id, thread: t.thread, i: t.i, turn: t.turn, text: t.text, state: t.state, report: t.report, started: t.started, ended: t.ended, reported } };
+    return { task: { id: t.id, thread: t.thread, i: t.i, turn: t.turn, text: t.text, state: t.state, report: t.report, started: t.started, ended: t.ended, reported, hands: taskHands(t) } };
   }
 
   date({ id }) {
@@ -1520,6 +1596,8 @@ export class App extends DurableObject {
         report: t.report === null ? null : M.cutBytes(t.report, TASK_RECORD_REPORT_MAX),
         started: t.started,
         ended: t.ended,
+        // where it ran: `{agent, name, kind}`, or null (handed off before hands were kept)
+        hands: taskHands(t),
       };
       bytes += sizeOf(one);
       if (tasks.length && bytes > RESULT_SOFT_BYTES) break;
@@ -1688,35 +1766,47 @@ export class App extends DurableObject {
   // Turns while messages are queued (§6, docs/optchat.md "Turns"), each
   // ended and its thread classified, then the compactor behind them. Past
   // a run's budget, the rest go to a fresh run.
-  // The mind's lead agent (its first agent member: the hands), and whether
-  // its computer is awake (its bridge holds a live socket here): one step.
+  // The mind's agents (its hands, the first added first, at most
+  // HANDS_MAX), each with whether it is here (its bridge holds a live socket
+  // here: a cloud computer awake, a paired machine online), and the lead
+  // among them (the first): one step.
   async #lead(s) {
     const members = await s.members();
-    const lead = members.filter((m) => m.kind === "agent").sort((a, b) => (a.addedAt ?? 0) - (b.addedAt ?? 0))[0] ?? null;
-    return { agent: lead?.principal ?? null, here: lead?.here === true };
+    const agents = members
+      .filter((m) => m.kind === "agent")
+      .sort((a, b) => (a.addedAt ?? 0) - (b.addedAt ?? 0))
+      .slice(0, HANDS_MAX)
+      .map((m) => ({ agent: m.principal, here: m.here === true }));
+    return { agent: agents[0]?.agent ?? null, here: agents[0]?.here === true, agents };
   }
 
-  // The hands, as each turn's messages name them: the lead agent by its
-  // fragment's label, and whether its computer is awake. Its profile is the
-  // one a turn kept (`kept`, turn_begin's), else read (`people`, a step) and
-  // `fresh`, for turn_end to keep.
-  async #hands(s, lead, kept) {
-    const agent = lead.agent;
-    if (agent === null) return { agent, profiles: {}, hands: [], fresh: null };
-    let profile = kept && kept.agent === agent ? kept : null;
+  // The hands, as each turn's messages name them (`handsOf`): each agent
+  // by its name, its kind (the cloud computer's, or a paired machine), and
+  // whether it is here. Their profiles are those a turn kept within
+  // PROFILE_KEEP_MS (`kept`, turn_begin's), the rest read (`people`, one
+  // step) and `fresh`, for turn_end to keep.
+  async #hands(s, lead, kept, now) {
+    if (!lead.agents.length) return { agent: null, profiles: {}, hands: [], fresh: null };
+    const profiles = {};
+    for (const a of lead.agents) {
+      const k = kept?.[a.agent];
+      if (k && now - (k.at ?? 0) < PROFILE_KEEP_MS) profiles[a.agent] = k;
+    }
+    const missing = lead.agents.map((a) => a.agent).filter((id) => !(id in profiles));
     let fresh = null;
-    if (!profile) {
+    if (missing.length) {
       let read = {};
       try {
-        read = (await s.people([agent])) ?? {};
+        read = (await s.people(missing)) ?? {};
       } catch {
         read = {};
       }
-      if (read[agent]) profile = fresh = { agent, fragment: read[agent].fragment ?? null, username: read[agent].username ?? null };
+      fresh = {};
+      for (const id of missing) {
+        if (read[id]) profiles[id] = fresh[id] = { fragment: read[id].fragment ?? null, username: read[id].username ?? null, machine: read[id].machine ?? null, at: now };
+      }
     }
-    const named = String(profile?.fragment ?? "").split(".")[0] || profile?.username || "your agent";
-    const profiles = profile ? { [agent]: { fragment: profile.fragment, username: profile.username } } : {};
-    return { agent, profiles, hands: [{ name: named, awake: lead.here }], fresh };
+    return { agent: lead.agent, profiles, hands: handsOf(lead.agents, profiles), fresh };
   }
 
   async #turns(job, s, lead = null, first = null) {
@@ -1737,12 +1827,12 @@ export class App extends DurableObject {
         return { turns, why: b.why };
       }
       turns++;
-      h ??= await this.#hands(s, lead, b.profile);
+      h ??= await this.#hands(s, lead, b.profiles, b.now);
       // what the turn's steps took (docs/optchat.md, "Latency"), filled by #turn
       const timing = { asked: b.asked ?? null, begun: b.now, view: null, calls: [] };
       const end = await this.#turn(job, s, b, h, timing);
       // its last call's step ended it (`logged`'s end), else a step of its own
-      const e = end.ended ?? (await s.call("turn_end", { run: job.run, thread: b.thread, state: end.state, error: end.error ?? null, requeue: end.requeue ?? [], timing, profile: h.fresh }));
+      const e = end.ended ?? (await s.call("turn_end", { run: job.run, thread: b.thread, state: end.state, error: end.error ?? null, requeue: end.requeue ?? [], timing, profiles: h.fresh }));
       if (end.handOn) {
         await s.call("heard", { resume: true });
         return { turns, continued: true };
@@ -1791,11 +1881,15 @@ export class App extends DurableObject {
         hands: b.persona.hands === true && h.agent !== null,
         agent: h.agent,
         profiles: h.profiles,
+        // every hands, and the one this persona chose last (`computer`'s default)
+        handsList: h.hands,
+        last: b.handsLast ?? null,
         web,
         attachments: Array.isArray(b.attachments) ? [...b.attachments] : [],
         apps: null,
       };
-      const state = turnState({ now: b.now, chat: b.chat, persona: b.persona, hands: h.hands });
+      const preferred = h.hands.length > 1 ? handsDefault(h.hands, b.handsLast ?? null) : null;
+      const state = turnState({ now: b.now, chat: b.chat, persona: b.persona, hands: h.hands.map((x) => ({ ...x, default: preferred !== null && x.agent === preferred.agent })) });
       const messages = [
         { role: "system", content: system(b.about) },
         { role: "user", content: [{ type: "text", text: v.text, cache: "blocks" }, { type: "text", text: state }, { type: "text", text: b.texts.join("\n\n") }] },
@@ -1856,7 +1950,7 @@ export class App extends DurableObject {
         const timed = { first: t.first_ms ?? null, ms: t.ms ?? null, model: a?.model ?? null, calls: t.calls ?? null, thought: t.thought ?? null, tokens: [u.prompt_tokens ?? null, u.prompt_tokens_details?.cached_tokens ?? null, u.completion_tokens ?? null], tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: null };
         if (timing.calls.length < CALLS_MAX) timing.calls.push(timed);
         // the last call (no tools): its log ends the turn in the same step
-        const end = asked.length ? null : { state: "done", timing, profile: h.fresh };
+        const end = asked.length ? null : { state: "done", timing, profiles: h.fresh };
         const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries, take: asked.length > 0, end });
         timed.logged = lg.at ?? null;
         if (lg.pump) await s.call("pump", {});
@@ -2095,22 +2189,41 @@ export class App extends DurableObject {
       }
       case "computer": {
         // offered to every persona (the tools are every call's), used by those with hands
-        if (ctx.agent === null) return { text: "Error: the user has no agent on a computer to hand work to; answer yourself, and tell them." };
+        if (ctx.agent === null) return { text: "Error: the user has no hands (an agent on their cloud computer, or a machine of theirs paired as hands) to hand work to; answer yourself, and tell them." };
         if (!ctx.hands) return { text: `Error: as ${ctx.persona.name} you hand nothing to the computer in this chat; answer yourself, or tell the user a persona with hands can.` };
         const task = String(args.task ?? "").trim();
         if (!task) return { text: "Error: computer needs the task, in words." };
+        // which hands: those `on` names, else this persona's last, else the cloud computer
+        const on = typeof args.on === "string" ? args.on.trim() : "";
+        const chosen = on ? handsNamed(ctx.handsList, on) : handsDefault(ctx.handsList, ctx.last);
+        const names = ctx.handsList.map((x) => x.name).join(", ");
+        if (!chosen) return { text: on ? `Error: no hands named ${JSON.stringify(on)}: yours are ${names}.` : "Error: the user has no hands to hand work to; tell them." };
+        // a paired machine takes a task only while it runs: asked now, not
+        // as the turn began, and an offline one is said at once
+        if (chosen.kind === "machine") {
+          const present = (await this.#lead(s)).agents.find((a) => a.agent === chosen.agent);
+          if (!present) return { text: `Error: ${chosen.name} is no longer one of the user's hands (yours: ${names}).` };
+          if (!present.here) {
+            const others = ctx.handsList.filter((x) => x.agent !== chosen.agent).map((x) => x.name);
+            const instead = others.length ? `Hand it to ${others.join(" or ")} instead (on), or tell the user.` : "Tell the user.";
+            return { text: `Error: ${chosen.name} is offline: a paired machine takes tasks only while \`fragment hands run\` runs on it. ${instead}` };
+          }
+        }
         // the agent's fragment names the turn its bridge gives the task
-        const agentFragment = ctx.profiles?.[ctx.agent]?.fragment ?? (await s.people([ctx.agent]))?.[ctx.agent]?.fragment;
-        if (typeof agentFragment !== "string" || !agentFragment) return { text: "Error: the computer's agent has no fragment to hand work to." };
+        const agentFragment = chosen.fragment ?? (await s.people([chosen.agent]))?.[chosen.agent]?.fragment;
+        if (typeof agentFragment !== "string" || !agentFragment) return { text: `Error: ${chosen.name}'s agent has no fragment to hand work to.` };
         // the run and this step: the same id on every re-run
         const id = `w${job.run}-${s.n}`;
-        // the turn's files go with it: goose's bridge downloads them (docs/chat-records.md)
-        const handed = { text: `${M.cutBytes(task, TASK_TEXT_MAX)}\n\n(task ${id}, thread ${ctx.thread})`, to: [ctx.agent] };
+        // the turn's files go with it: goose's bridge downloads them
+        // (docs/chat-records.md); `to` names the one agent that answers
+        const handed = { text: `${M.cutBytes(task, TASK_TEXT_MAX)}\n\n(task ${id}, thread ${ctx.thread})`, to: [chosen.agent] };
         if (ctx.attachments.length) handed.attachments = ctx.attachments.slice(0, F.FILES_MAX);
         const posted = await s.publish("chat", handed);
         const turn = await turnOf(agentFragment, job.fragment, "chat", posted.seq);
-        await s.call("task_open", { id, thread: ctx.thread, text: task, seq: posted.seq, turn });
-        return { text: `[${id}] started`, task: id };
+        const hands = { agent: chosen.agent, name: chosen.name, kind: chosen.kind };
+        await s.call("task_open", { id, thread: ctx.thread, text: task, seq: posted.seq, turn, hands, persona: ctx.persona.id, chose: on !== "" });
+        if (on) ctx.last = chosen.agent;
+        return { text: `[${id}] started on ${chosen.name}`, task: id };
       }
       default:
         return { text: `Error: there is no tool ${JSON.stringify(name)}.` };
@@ -2202,6 +2315,19 @@ export class App extends DurableObject {
     const names = namesOf(a?.text ?? "", have);
     await s.publish("log", { type: "suggest", names });
     return { names };
+  }
+
+  // The hands, for the page's Settings (docs/optchat.md, "A machine as
+  // hands"): each agent member by name and kind, and whether it is here now
+  // (a cloud computer awake, a paired machine online), read fresh (two
+  // steps), published on `log` as `{type: "hands", hands}`.
+  async hands_look(input, job) {
+    const s = new Steps(job);
+    const lead = await this.#lead(s);
+    const h = await this.#hands(s, lead, {}, 0);
+    const hands = h.hands.map(({ agent, fragment, name, kind, here }) => ({ agent, fragment, name, kind, here }));
+    await s.publish("log", { type: "hands", hands });
+    return { hands };
   }
 
   // `chat`'s trigger, for goose's records there: a hand-off's one reply,

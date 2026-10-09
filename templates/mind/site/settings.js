@@ -7,7 +7,7 @@
 
 import { mountImport } from "./import.js";
 import { platformOrigin } from "./sheets.js";
-import { EMBED, F, S, changed, onChange, startSettings } from "./store.js";
+import { EMBED, F, S, changed, lookHands, onChange, startSettings } from "./store.js";
 import { copyButton, h, icon, plural } from "./ui.js";
 import { topBar } from "./thread.js";
 
@@ -59,6 +59,65 @@ async function exportMemory(button, note) {
   button.disabled = false;
 }
 
+/// How long the shell is given to answer an unpairing (its person reads
+/// its dialog first).
+const UNPAIR_WAIT_MS = 120_000;
+
+/// A machine unpaired through the shell that frames this page (it holds
+/// the person's session: a page never does): `{fragment: "unpair-hands",
+/// agent, nonce}`, its answer `{fragment: "hands-unpaired", nonce, ok,
+/// error?}` (docs/api.md, "The mind in the shell").
+function unpairInShell(agent) {
+  return new Promise((resolve) => {
+    const nonce = crypto.randomUUID();
+    const done = (v) => {
+      clearTimeout(timer);
+      removeEventListener("message", heard);
+      resolve(v);
+    };
+    const heard = (event) => {
+      const d = event.data;
+      if (event.source === window.top && d && d.fragment === "hands-unpaired" && d.nonce === nonce) done(d.ok === true ? { ok: true } : { ok: false, error: String(d.error ?? "not unpaired") });
+    };
+    const timer = setTimeout(() => done({ ok: false, error: "not answered" }), UNPAIR_WAIT_MS);
+    addEventListener("message", heard);
+    window.top.postMessage({ fragment: "unpair-hands", agent, nonce }, platformOrigin());
+  });
+}
+
+/// One hands: its name and kind, whether it is here now, and, for a paired
+/// machine, how to unpair it (through the shell when framed by it; else the
+/// CLI, on the machine).
+function handsRow(x, inShell, note) {
+  const where = x.kind === "machine" ? "Paired machine" : "Cloud computer";
+  const state = x.kind === "machine" ? (x.here ? "online" : "offline") : x.here ? "awake" : "asleep";
+  let action = null;
+  if (x.kind === "machine" && x.fragment) {
+    if (inShell) {
+      const b = h("button.pill", { type: "button" }, "Unpair");
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        note.textContent = `Unpairing ${x.name}…`;
+        const r = await unpairInShell(x.fragment);
+        note.textContent = r.ok ? `${x.name} is unpaired: its key stops at once, and it left this mind.` : r.error === "declined" ? "" : `Not unpaired: ${r.error}`;
+        b.disabled = false;
+        if (r.ok) lookHands();
+      });
+      action = b;
+    } else {
+      action = h("small.quiet", { text: "Unpair on it: fragment hands unpair" });
+    }
+  }
+  return h(
+    `div.hands-row.hands-${x.kind}`,
+    null,
+    icon(x.kind === "machine" ? "laptop" : "monitor"),
+    h("span.hands-name", null, h("b", { text: x.name }), h("small", { text: ` ${where}` })),
+    h(`span.hands-state.${x.here ? "on" : "off"}`, { text: state }),
+    action,
+  );
+}
+
 /// One way to connect: what it is, the line to give it, and what then.
 const way = (name, line, then) => h("div.cmd", null, h("span.cmd-label", { text: name }), h("div.cmd-line", null, h("code", { text: line }), copyButton(line)), then ? h("small.cmd-then", { text: then }) : null);
 
@@ -94,6 +153,15 @@ export function settingsScreen({ framed = false } = {}) {
   const importing = h("div.import-slot");
   mountImport(importing);
 
+  // the hands: the cloud computer's agent, and machines paired as hands
+  const handsList = h("div.hands-list");
+  const handsNote = h("span.quiet", { "aria-live": "polite" });
+  const lookAgain = h("button.pill", { type: "button" }, "Look again");
+  lookAgain.addEventListener("click", () => lookHands());
+  const inShell = EMBED || framed;
+  let handsSaid = "";
+  lookHands();
+
   // the mind's own MCP server (`__mcp`), at its origin
   const url = `${location.origin}/__mcp`;
   const name = label();
@@ -114,6 +182,14 @@ export function settingsScreen({ framed = false } = {}) {
           h("p.quiet", { text: "Which model runs your chats, your memory and your agents' work: Fragment's own, or Claude or ChatGPT on your own account." }),
           h("a.pill", { href: `${platformOrigin()}/settings#models`, target: "_top", "data-models": "settings" }, "Choose in Settings"),
         ),
+    h(
+      "section",
+      null,
+      h("h3", { text: "Hands" }),
+      h("p.quiet", { text: "Who does computer work for your mind: your cloud computer, and machines of yours paired as hands. Pair one by running fragment hands pair, then fragment hands run, on it; Mind hands it tasks while it runs." }),
+      handsList,
+      h("div.row", null, lookAgain, handsNote),
+    ),
     h("section", null, h("h3", { text: "Import chats" }), importing),
     h(
       "section",
@@ -137,8 +213,13 @@ export function settingsScreen({ framed = false } = {}) {
     render() {
       if (!typed && S.about !== null && about.value !== S.about) about.value = S.about;
       const st = S.status;
-      const now = st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt.toLocaleString()} still being summarized` : ", all summarized"}. ${st.hands ? "Your computer is connected." : "No computer is connected yet."}` : "…";
+      const now = st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt.toLocaleString()} still being summarized` : ", all summarized"}.` : "…";
       if (now !== said) memory.textContent = said = now;
+      const hands = JSON.stringify(S.hands);
+      if (hands !== handsSaid) {
+        handsSaid = hands;
+        handsList.replaceChildren(...(S.hands === null ? [h("p.quiet", { text: "…" })] : S.hands.length ? S.hands.map((x) => handsRow(x, inShell, handsNote)) : [h("p.quiet", { text: "No hands yet: your cloud computer's agent joins at your first run, and fragment hands pair adds a machine." })]));
+      }
     },
   };
 }
@@ -173,6 +254,6 @@ export function mountSettings(root, fragment) {
     screen.render();
     tell();
   }, SETTLE_MS);
-  startSettings(fragment);
+  startSettings(fragment, { framed: true });
   changed();
 }

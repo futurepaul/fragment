@@ -459,6 +459,19 @@ const MUTATIONS = {
     if (turnNow?.thread === thread) turnNow.stop = true;
     return {};
   },
+  hands_look: () => {
+    setTimeout(() => {
+      publish("log", {
+        type: "hands",
+        hands: [
+          { agent: "id:mock-goose", fragment: "goose.you", name: "cloud", kind: "computer", here: true },
+          { agent: "id:mock-box", fragment: "hands-box.you", name: "box", kind: "machine", here: false },
+        ],
+      });
+      changed();
+    }, 300);
+    return { run: `run_${hex(8)}`, status: "running" };
+  },
   topic_suggest: () => {
     setTimeout(() => {
       publish("log", { type: "suggest", names: ["Health", "Sam", "Home repairs", "Coffee", "Work trips"] });

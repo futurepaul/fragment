@@ -382,6 +382,85 @@ $("add-agent-form").onsubmit = (e) => {
 };
 $("add-agent-cancel").onclick = () => addDialog.close();
 
+// ---- a machine unpaired, for a page of the person's that asks (a mind's Settings) ----
+// A frame of a fragment the person owns may ask to unpair one of their
+// agents' machines (`{fragment: "unpair-hands", agent: <agent fragment>,
+// nonce}`; docs/api.md, "A machine's keys"): the shell asks its person in
+// its own dialog, "Unpair <machine>?", and only on Unpair revokes every
+// key paired to that agent (`DELETE /api/f/<agent>/keys/<npub>`) and takes
+// the agent out of the asking fragment. It answers `{fragment:
+// "hands-unpaired", nonce, ok, error?}` (`error` "declined", "not
+// answered", "busy", as an add's). A page asks, never grants; only the
+// person's own agent fragments are named, and only in their own fragment.
+const unpairDialog = $("unpair-dialog");
+let unpairing = null; // { resolve, timer, arm, outcome }
+function confirmUnpair(who, where) {
+  if (unpairing) return Promise.resolve("busy");
+  return new Promise((resolve) => {
+    $("unpair-title").textContent = `Unpair ${who}?`;
+    $("unpair-text").textContent = `${who} stops being your hands at once: its key signs nothing from its next request, and it leaves ${where}. Pair it again on that machine with fragment hands pair.`;
+    $("unpair-go").disabled = true;
+    unpairing = {
+      resolve,
+      outcome: "declined",
+      arm: setTimeout(() => { $("unpair-go").disabled = false; }, ADD_ARM_MS),
+      timer: setTimeout(() => {
+        if (unpairing) unpairing.outcome = "not answered";
+        unpairDialog.close();
+      }, ADD_CONFIRM_MS),
+    };
+    unpairDialog.showModal();
+    $("unpair-cancel").focus();
+  });
+}
+unpairDialog.addEventListener("close", () => {
+  if (!unpairing) return;
+  const { resolve, timer, arm, outcome } = unpairing;
+  unpairing = null;
+  clearTimeout(timer);
+  clearTimeout(arm);
+  resolve(outcome);
+});
+$("unpair-form").onsubmit = (e) => {
+  e.preventDefault();
+  if ($("unpair-go").disabled || !unpairing) return;
+  unpairing.outcome = "unpaired";
+  unpairDialog.close();
+};
+$("unpair-cancel").onclick = () => unpairDialog.close();
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== "unpair-hands") return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || byName(name)?.role !== "owner") return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  if (typeof d.nonce !== "string" || d.nonce.length > 64 || typeof d.agent !== "string") return;
+  const asker = event.source;
+  const answer = (ok, error) => asker.postMessage({ fragment: "hands-unpaired", nonce: d.nonce, ok, ...(error ? { error } : {}) }, origin);
+  const agent = byName(d.agent);
+  if (!agent || agent.role !== "owner" || agent.kind !== "agent") return answer(false, "that is not one of your agents");
+  const said = await confirmUnpair(titleOf(d.agent), titleOf(name));
+  if (said !== "unpaired") return answer(false, said);
+  if (frame.contentWindow !== asker || !frame.isConnected) return;
+  try {
+    const paired = await api("GET", `/api/f/${seg(d.agent)}/keys`);
+    for (const k of paired.keys ?? []) {
+      if (!k.revokedAt) await api("DELETE", `/api/f/${seg(d.agent)}/keys/${seg(k.npub)}`);
+    }
+    if (paired.agent) await api("DELETE", `/api/f/${seg(name)}/members/${seg(paired.agent)}`);
+    answer(true);
+  } catch (e) {
+    answer(false, e.message);
+  }
+});
+
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
   const out = [];

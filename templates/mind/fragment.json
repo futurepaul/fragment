@@ -173,6 +173,7 @@
       "input": { "type": "object", "required": ["thread"], "additionalProperties": false, "properties": { "thread": { "type": "string", "minLength": 1, "maxLength": 64 } } }
     },
     "topic_suggest": { "kind": "job", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
+    "hands_look": { "kind": "job", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
     "import": {
       "kind": "mutation",
       "input": {

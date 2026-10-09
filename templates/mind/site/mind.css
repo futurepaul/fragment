@@ -607,6 +607,12 @@ button.did-row:hover { background: var(--hover); color: var(--text); }
 .settings p { margin: 0; font-size: 14px; }
 .settings .field { align-self: stretch; background: var(--composer); }
 .settings .import-slot, .settings .cmd { align-self: stretch; }
+.settings .hands-list { align-self: stretch; display: flex; flex-direction: column; gap: 6px; }
+.hands-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px; background: var(--code); font-size: 14px; }
+.hands-row .hands-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hands-row .hands-name small { color: var(--text-3); }
+.hands-state { font-size: 12px; color: var(--text-3); }
+.hands-state.on { color: var(--text-2); font-weight: 600; }
 .saved { font-size: 13px; color: var(--sage); }
 .saved.bad { color: var(--rose); }
 .cmd { display: flex; flex-direction: column; gap: 5px; }
