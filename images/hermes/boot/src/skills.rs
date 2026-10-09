@@ -9,6 +9,10 @@
 //!   means no managed skills, and what was installed goes: the skills a
 //!   person's settings list are their agents' (the shell reads the same
 //!   fragment).
+//! - Hermes' pinned bundled skills, except its Google OAuth skill (the
+//!   managed google-workspace-finite uses the platform's connection).
+//!   Read-only copies in PLATFORM_VIEW, withheld when a managed skill takes
+//!   the same name or alias: Hermes' external dirs share one rank.
 //! - The platform skill, `fragment`, unless a managed skill takes its name:
 //!   the `fragment` CLI's own skill (`fragment skill`) after a page of what
 //!   the computer adds (`computer.md`), written at the image's build into
@@ -61,6 +65,8 @@ pub const ABSENT_EVERY_MS: u64 = 60_000;
 
 /// Where the platform skill is: in the image, read-only to the agents.
 pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
+/// Hermes' skills, moved out of its sync source at the image's build.
+pub const BUNDLED_DIR: &str = "/opt/fragment/bundled-skills";
 /// Where the profiles find it: a copy of it while no managed skill takes
 /// its name (`settle_platform`), the boot's, read-only to the agents. In
 /// the boot's run directory: made at each start, never saved.
@@ -228,6 +234,75 @@ pub fn settle_platform(dir: &Path, manifest: &Path, platform: &Path, view: &Path
         write_file(view, PLATFORM_PATH, &skill)?;
     }
     Ok(true)
+}
+
+/// Expose the image's bundled skills without copying them into a saved
+/// profile. Upstream's pinned tree is category/name/SKILL.md, at most
+/// FILES_MAX directories. Managed names and aliases win by withholding the
+/// corresponding copy; removal restores it on the next settle. Agent-owned
+/// skills win through Hermes' own higher profile tier.
+pub fn settle_bundled(dir: &Path, manifest: &Path, bundled: &Path, view: &Path) -> std::io::Result<()> {
+    let mut managed = BTreeSet::new();
+    for rel in load_manifest(manifest).keys().filter(|p| *p == "SKILL.md" || p.ends_with("/SKILL.md")) {
+        let parent = Path::new(rel).parent().expect("a skill has a directory");
+        let alias = parent.file_name().or_else(|| dir.file_name()).expect("a skill has a name").to_string_lossy();
+        let text = std::fs::read_to_string(dir.join(rel))?;
+        managed.extend([skill_name(&text, &alias), alias.into_owned(), parent.to_string_lossy().into_owned()]);
+    }
+    let mut count = 0;
+    for category in std::fs::read_dir(bundled)? {
+        let category = category?;
+        if !category.file_type()?.is_dir() { continue; }
+        for skill in std::fs::read_dir(category.path())? {
+            let skill = skill?;
+            if !skill.file_type()?.is_dir() || !skill.path().join("SKILL.md").is_file() { continue; }
+            count += 1;
+            assert!(count <= FILES_MAX, "the pinned bundled tree is bounded");
+            let alias = skill.file_name().to_string_lossy().into_owned();
+            let name = skill_name(&std::fs::read_to_string(skill.path().join("SKILL.md"))?, &alias);
+            let rel = PathBuf::from(category.file_name()).join(&alias);
+            let target = view.join(&rel);
+            if [name, alias, rel.to_string_lossy().into_owned()].iter().any(|n| managed.contains(n)) {
+                if target.exists() { std::fs::remove_dir_all(&target)?; }
+            } else if !target.join("SKILL.md").is_file() {
+                // The source is immutable for this image's life and the
+                // view is rebuilt at every boot, so copy once. Copies keep
+                // Hermes' resolved-path trust check inside its search root;
+                // symlinks outside it warn on every skill_view call.
+                copy_bundled_skill(&skill.path(), &target)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A bounded, iterative copy of one immutable skill into the temporary
+/// view. Publish the directory whole, so a failed copy is retried and a
+/// profile never loads a skill before its helpers are present.
+fn copy_bundled_skill(source: &Path, target: &Path) -> std::io::Result<()> {
+    let scratch = target.with_file_name(format!(".{}.fragment-tmp", target.file_name().expect("a skill has a name").to_string_lossy()));
+    if scratch.exists() { std::fs::remove_dir_all(&scratch)?; }
+    let mut pending = vec![(source.to_path_buf(), scratch.clone(), 0)];
+    let mut count = 0;
+    while let Some((from, to, depth)) = pending.pop() {
+        assert!(depth <= DEPTH_MAX, "the pinned skill's tree is bounded");
+        std::fs::create_dir_all(&to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            count += 1;
+            assert!(count <= FILES_MAX, "the pinned skill's files are bounded");
+            let dest = to.join(entry.file_name());
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push((entry.path(), dest, depth + 1));
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), dest)?;
+            } else {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bundled skill has a non-file: {}", entry.path().display())));
+            }
+        }
+    }
+    std::fs::rename(scratch, target)
 }
 
 pub fn load_manifest(path: &Path) -> Installed {
@@ -537,6 +612,50 @@ mod tests {
         assert_eq!(skill_name("\u{feff}---\r\nname: 'fragment'\r\n---\r\n", "other"), "fragment");
         assert_eq!(skill_name("---\ndescription: no name\n---\n", "fragment"), "fragment");
         assert_eq!(skill_name("# no frontmatter\nname: fragment\n", "notes"), "notes", "a body's line is no name");
+    }
+
+    /// Bundled skills are visible without a skills fragment, managed
+    /// names/aliases suppress them, agent-owned skills win, and removing a
+    /// managed override restores the image's unchanged skill. Replay and a
+    /// fresh view (a restart) produce the same catalog.
+    #[test]
+    fn bundled_skills_yield_to_managed_aliases_and_return_when_removed() {
+        let root = std::env::temp_dir().join(format!("hermes-bundled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bundled, managed, manifest, view, own) = (root.join("bundled"), root.join("managed"), root.join("manifest.json"), root.join("view"), root.join("own"));
+        write_file(&bundled, "productivity/pdf/SKILL.md", b"---\nname: pdf\n---\nThe image's PDF.\n").unwrap();
+        write_file(&bundled, "productivity/pdf/scripts/create.py", b"print('pdf')\n").unwrap();
+        let settle = || settle_bundled(&managed, &manifest, &bundled, &view).unwrap();
+        settle();
+        settle();
+        assert_eq!(hermes_finds(&own, &[managed.clone(), view.clone()]).get("pdf"), Some(&view.join("productivity/pdf/SKILL.md")));
+        assert!(view.join("productivity/pdf/scripts/create.py").is_file(), "helpers travel with the skill");
+        write_file(&managed, "pdf/SKILL.md", b"---\nname: custom-pdf\n---\nThe owner's PDF.\n").unwrap();
+        save_manifest(&manifest, &BTreeMap::from([("pdf/SKILL.md".into(), "release:1".into())])).unwrap();
+        assert!(!hermes_finds(&own, &[managed.clone(), view.clone()]).contains_key("pdf"), "same-rank alias is ambiguous before settling");
+        settle();
+        settle();
+        assert!(!view.join("productivity/pdf").exists(), "a managed alias with a different declared name also wins");
+        assert!(hermes_finds(&own, &[managed.clone(), view.clone()]).contains_key("custom-pdf"));
+        remove_file(&managed, "pdf/SKILL.md");
+        save_manifest(&manifest, &BTreeMap::new()).unwrap();
+        settle();
+        assert!(hermes_finds(&own, &[managed.clone(), view.clone()]).contains_key("pdf"));
+        write_file(&managed, "SKILL.md", b"---\nname: pdf\n---\nA root-level managed PDF.\n").unwrap();
+        save_manifest(&manifest, &BTreeMap::from([("SKILL.md".into(), "release:2".into())])).unwrap();
+        settle();
+        assert!(!view.join("productivity/pdf").exists(), "Hermes also discovers SKILL.md directly at a search root");
+        remove_file(&managed, "SKILL.md");
+        save_manifest(&manifest, &BTreeMap::new()).unwrap();
+        settle();
+        assert!(view.join("productivity/pdf/scripts/create.py").is_file(), "removing the root-level override restores helpers too");
+        write_file(&own, "pdf/SKILL.md", b"---\nname: pdf\n---\nThe agent's PDF.\n").unwrap();
+        assert_eq!(hermes_finds(&own, &[managed.clone(), view.clone()]).get("pdf"), Some(&own.join("pdf/SKILL.md")));
+        std::fs::remove_dir_all(&view).unwrap();
+        settle();
+        assert!(view.join("productivity/pdf/SKILL.md").is_file(), "a fresh boot rebuilds the view");
+        assert!(std::fs::read_to_string(bundled.join("productivity/pdf/SKILL.md")).unwrap().contains("image's PDF"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Hermes' skill guard: a skill whose text holds one of these is

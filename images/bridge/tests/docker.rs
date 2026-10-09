@@ -236,6 +236,7 @@ async fn the_hermes_image() {
         f.files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap"}"#));
         // its own skills: one of its own, and one a managed skill also names
         f.files.insert("skills/garden-notes/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: garden-notes\ndescription: Juniper's own notes on the garden.\n---\n# Garden notes\n"));
+        f.files.insert("skills/systematic-debugging/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: systematic-debugging\ndescription: Juniper's own debugging, which wins.\n---\n"));
         f.files.insert("skills/grill-me/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: grill-me\ndescription: Juniper's own grilling, which wins.\n---\n# Grill\n"));
     });
     // paul's skills fragment: the managed set (the blessed template's release, served as its files)
@@ -243,9 +244,14 @@ async fn the_hermes_image() {
         "skills",
         &[
             ("fragment.json", r#"{"template":"skills"}"#),
-            ("skills/research/arxiv-finite/SKILL.md", "---\nname: arxiv-finite\ndescription: Search arXiv.\n---\n# arXiv\n"),
-            ("skills/research/arxiv-finite/scripts/search.py", "print('search')\n"),
+            ("skills/research/model-council-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/model-council-finite/SKILL.md")),
+            ("skills/research/model-council-finite/scripts/model_council.py", include_str!("../../../templates/skills/skills/research/model-council-finite/scripts/model_council.py")),
             ("skills/grill-me/SKILL.md", "---\nname: grill-me\ndescription: The managed grilling.\n---\n# Grill\n"),
+            ("skills/software-development/apps-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/apps-finite/SKILL.md")),
+            ("skills/software-development/git-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/git-finite/SKILL.md")),
+            ("skills/research/brain-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/brain-finite/SKILL.md")),
+            ("skills/productivity/google-workspace-finite/SKILL.md", include_str!("../../../templates/skills/skills/productivity/google-workspace-finite/SKILL.md")),
+            ("skills/image-editing/image-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/image-editing/image-generation-finite/SKILL.md")),
         ],
     );
     let model = Model::start("0.0.0.0:0").await;
@@ -320,13 +326,13 @@ async fn the_hermes_image() {
     let (managed, view) = ("/data/hermes/managed-skills", "/var/lib/fragment-run/platform-skills");
     let installed = |path: &str| c.exec(&["test", "-f", &format!("{managed}/{path}")]);
     let t_skills = Instant::now();
-    while !(installed("research/arxiv-finite/SKILL.md") && installed("grill-me/SKILL.md")) {
+    while !(installed("research/model-council-finite/SKILL.md") && installed("grill-me/SKILL.md")) {
         assert!(t_skills.elapsed() < Duration::from_secs(60), "the managed skills never installed; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert!(installed("research/arxiv-finite/scripts/search.py") && !installed("fragment.json"), "the managed set is the fragment's skills/, nothing else of it");
+    assert!(installed("research/model-council-finite/scripts/model_council.py") && !installed("fragment.json"), "the managed set is the fragment's skills/, nothing else of it");
     assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "true"]), "a command runs as Hermes' user");
-    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo x > {managed}/research/arxiv-finite/SKILL.md")]), "the managed set is read-only to the agents");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo x > {managed}/research/model-council-finite/SKILL.md")]), "the managed set is read-only to the agents");
     fake.with(|w| {
         let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills--k3x9/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
         assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=npub1paul") && r.2.as_deref() == Some("juniper--k3x9") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
@@ -346,10 +352,25 @@ async fn the_hermes_image() {
     };
     let found = hermes_finds();
     eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
-    assert!(found["arxiv-finite"].as_str().is_some_and(|d| d.contains("Search arXiv")), "a managed skill: {found}");
+    assert!(found["model-council-finite"].as_str().is_some_and(|d| d.contains("Fragment's model tiers")), "a managed skill: {found}");
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
+    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite"] {
+        assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
+    }
+    for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {
+        assert!(found[name].is_string(), "Hermes' bundled {name} is visible to this agent profile: {found}");
+    }
+    assert!(found["systematic-debugging"].as_str().is_some_and(|d| d.contains("Juniper's own")), "agent-owned skills win over bundled names: {found}");
+    assert!(c.exec(&[
+        "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
+        "/opt/hermes/.venv/bin/python", "-c", "import json, pathlib; from tools.skills_tool import skill_view; s = json.loads(skill_view('pdf')); assert s['success'], s; assert pathlib.Path(s['skill_dir']).resolve().is_relative_to('/var/lib/fragment-run/platform-skills'); helper = json.loads(skill_view('pdf', file_path='scripts/pdf_create.py')); assert helper['success'], helper",
+    ]), "Hermes can load the native PDF and helper inside its trusted view");
+    assert!(found["google-workspace"].is_null(), "local OAuth must not compete with the platform's Google connection: {found}");
+    assert!(!c.exec(&["test", "-d", "/opt/hermes/skills"]), "no upstream sync source to copy into versioned profiles");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /var/lib/fragment-run/platform-skills/productivity/pdf/SKILL.md"]), "bundled skills are read-only");
+    assert!(c.exec(&["/opt/hermes/.venv/bin/python", "-c", "import reportlab, pypdf, pdfplumber, pypdfium2, pymupdf, docx, pptx, openpyxl; from reportlab.pdfgen import canvas; c = canvas.Canvas('/tmp/document-check.pdf'); c.drawString(72, 720, 'Hermes PDF check'); c.save(); assert 'Hermes PDF check' in pypdf.PdfReader('/tmp/document-check.pdf').pages[0].extract_text()"]), "the installed PDF libraries create and read real content");
     let platform = c.exec_out(&["cat", "/opt/fragment/skills/platform/fragment/SKILL.md"]);
     assert_eq!(c.exec_out(&["cat", &format!("{view}/platform/fragment/SKILL.md")]), platform, "the view shows the image's platform skill");
     let cli = c.exec_out(&["fragment", "skill"]);
@@ -367,18 +388,31 @@ async fn the_hermes_image() {
     // name in its external dirs)
     fake.with(|w| {
         let f = w.fragments.get_mut(&skills).unwrap();
-        f.files.insert("skills/research/arxiv-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: arxiv-finite\ndescription: Search arXiv, again.\n---\n"));
-        f.files.remove("skills/research/arxiv-finite/scripts/search.py");
+        f.files.insert("skills/research/model-council-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: model-council-finite\ndescription: Consult model tiers, again.\n---\n"));
+        f.files.remove("skills/research/model-council-finite/scripts/model_council.py");
         f.files.insert("skills/fragment/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: fragment\ndescription: The managed fragment, which wins.\n---\n"));
+        f.files.insert("skills/pdf/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: pdf\ndescription: The managed PDF, which wins.\n---\n"));
     });
     let t_follow = Instant::now();
     let shown = || c.exec(&["test", "-e", &format!("{view}/platform/fragment/SKILL.md")]);
-    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py") && installed("fragment/SKILL.md") && !shown()) {
+    while !(c.exec_out(&["cat", &format!("{managed}/research/model-council-finite/SKILL.md")]).contains("again") && !installed("research/model-council-finite/scripts/model_council.py") && installed("fragment/SKILL.md") && !shown()) {
         assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let found = hermes_finds();
     assert!(found["fragment"].as_str().is_some_and(|d| d.contains("which wins")), "a managed `fragment` shadows the platform skill: {found}");
+
+    let pdf_override = Instant::now();
+    while !hermes_finds()["pdf"].as_str().is_some_and(|d| d.contains("managed PDF")) {
+        assert!(pdf_override.elapsed() < Duration::from_secs(60), "the managed PDF never won over the bundled skill");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    fake.with(|w| { w.fragments.get_mut(&skills).unwrap().files.remove("skills/pdf/SKILL.md"); });
+    let pdf_restore = Instant::now();
+    while !hermes_finds()["pdf"].as_str().is_some_and(|d| d.contains("create, read")) {
+        assert!(pdf_restore.elapsed() < Duration::from_secs(60), "the bundled PDF never returned");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));
