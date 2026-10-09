@@ -155,6 +155,30 @@ each with its reason. Everything else in the gist holds as it says.
     log at its first load (the gist: never rebuild): it has no saved view
     to load. It is folded with the new order and sawtooth, and never
     again.
+16. **An import not summarized yet is passed, not waited for** (Paul,
+    2026-10-09: "a turn would skip the not-yet-summarized imported
+    history rather than wait for it"; the gist: a turn waits until every
+    message before it is summarized, and a view stops at its first
+    unbuilt line). An import lands after the live history and takes
+    hours to summarize (Paul's ~1,000 messages, about an hour), and every
+    live message waited for all of it. Now, while an import's messages
+    are unbuilt, they are transparent to live work: a turn waits only for
+    the live chat's unbuilt messages; a view (the chat's, and a
+    compaction's) shows each stretch of imported messages, from its
+    first unbuilt line to its last, as one line, `(messages a–b:
+    imported chats, not summarized yet; zoom(id, 1) gives one whole)`
+    (`(message a: imported, …)` for one), never an `id+n|` line, and
+    goes on after it; and the compactor takes the live chat's work first
+    (its messages and the merges whose last message is live), a live
+    message's node starting once fewer than 8 live messages before it are
+    unbuilt (the import's not counted), then the import's. The prompt's
+    view paragraph says what the marker means. Merges, the saved views
+    and their sawtooths are unchanged: a merge is binary and of built
+    halves only (asserted), so no line holds an unbuilt part. Once the
+    import is built, every rule is the gist's again. The cost: while an
+    import is unsummarized, its lines change inside the view as they are
+    built (the marker moves, built lines appear before it), so the cache
+    hits less, from there on, until it is done.
 
 ## The shape
 
@@ -244,11 +268,11 @@ goose agent, an editor. The shell makes it `members` (private).
 ### The log, the tree, the views: UniiChat's design, in SQLite
 
 ```sql
-log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT, cont INTEGER)  -- attachments: JSON, null with none; cont: 1 when it goes on from i - 1
+log(i INTEGER PRIMARY KEY, kind TEXT, text TEXT, at INTEGER, thread TEXT, persona TEXT, task TEXT, attachments TEXT, cont INTEGER, imported INTEGER)  -- attachments: JSON, null with none; cont: 1 when it goes on from i - 1; imported: 1 for an import's
 node(l INTEGER, i INTEGER, text TEXT, PRIMARY KEY (l, i))     -- the tree; never rewritten
 vline(s INTEGER PRIMARY KEY, l INTEGER)                        -- the chat's view: a line a row, by its first message
 cline(s INTEGER PRIMARY KEY, l INTEGER)                        -- the compaction view
-ready(l INTEGER, i INTEGER, e INTEGER, run INTEGER, until INTEGER, PRIMARY KEY (l, i))  -- the nodes ready to build: e their last message; run/until a lease, or (run null) a failed one's wait
+ready(l INTEGER, i INTEGER, e INTEGER, run INTEGER, until INTEGER, imp INTEGER, PRIMARY KEY (l, i))  -- the nodes ready to build: e their last message; run/until a lease, or (run null) a failed one's wait; imp 1 when e is an import's
 thread(id TEXT PRIMARY KEY, title TEXT, persona TEXT, started INTEGER, last INTEGER, first_i INTEGER, last_i INTEGER)
 topic(id TEXT PRIMARY KEY, name TEXT, description TEXT, made INTEGER)
 thread_topic(thread TEXT, topic TEXT, p REAL, PRIMARY KEY (thread, topic))
@@ -293,14 +317,17 @@ app.mjs keeps one on the App instance and writes what each change did
   `id+n|text` and newline; an unbuilt line counts none (no call sees one).
   The view is also fitted, as at a new message, just before a turn renders
   it after its wait (`turn_view`): after an import, the lines built since
-  its last message would otherwise reach the turn unmerged.
+  its last message would otherwise reach the turn unmerged. An import not
+  summarized yet renders as a marker line per stretch, and the view goes
+  on after it ("Where we differ from the gist", 16).
 - **The compaction view (§4).** Every compaction sees it: the chat's view
   merged further, by the same sawtooth from past 32 000 bytes down to
   16 000. The chat's new lines are appended to it; whenever the chat's view
   merges, it is made again from the chat's and merged down to 16 000.
   A compaction sees its lines up to the node (for a message, the lines
   before it; for a merge, the lines up to its last message), stopping at
-  the first unbuilt one.
+  the first unbuilt one that is not an import's (an import's stretch is
+  its marker line, as in the chat's view).
 - **Saved, never rebuilt (§3.2).** Both views (`vline`, `cline`), the
   sawtooths' state (kv `vshrink`, `cshrink`) and the nodes ready (`ready`)
   are written as they change, in the mutation that changes them, and
@@ -316,6 +343,13 @@ app.mjs keeps one on the App instance and writes what each change did
   would have grown), finds the nodes ready by one scan of the tree, saves
   all of it in one transaction (kv `saved`; `folds` 1), and never folds
   again. Old leases go; a node a pump was building is ready again.
+- **An import's messages are marked** (`log.imported`; `ready.imp` for a
+  node ready whose last message is one; the memory keeps them as ranges,
+  loaded from the log's partial index). A mind made before the marks
+  gains them in place at its next start, in one transaction each: its
+  imported threads' (the `import` table's) `user` and `talk` messages
+  with no persona (a live message always has its persona), then the
+  nodes ready that end with one.
 - **The node's own message is whole.** A compaction's task carries its
   message whole (its words and its files, a small text file read whole,
   as `zoom(id, 1)` gives it); a merge's carries its two lines.
@@ -334,7 +368,9 @@ differ from the gist"): the kinds' `work` and `note` lines; zoom's lines
 (files instead of images; `zoom("<task id>")`, a computer task's whole
 run, instead of an agent's whole chat); in Turns, the web's, the apps' and `computer` lines
 instead of "Use subagents only when the user asks for them."; a paragraph
-on what starts each message (the chat and the persona); and the computers
+on what starts each message (the chat and the persona); in the view's
+paragraph, after "(not summarized yet: zoom it)", how an import not
+summarized yet shows (16); and the computers
 paragraph, rewritten for the hands. Nothing in it changes from call to
 call, for any persona or thread: no date, no state, no persona.
 
@@ -387,9 +423,10 @@ The gist's §6, as a job:
    the gist renders the view before it logs the message), the turn's time
    and its chat (the thread's title, start and last 6 message ids).
 3. **The wait (§6: "wait until every message before m is summarized"):**
-   while a message before `tail` is unbuilt, the turn builds one itself
-   when it may (`pump_step` with `upto`: a message among the first 8
-   unbuilt, leased as a pump leases one) and starts pumps for the rest
+   while a message before `tail` is unbuilt (an import's is not waited
+   for: "Where we differ from the gist", 16), the turn builds one itself
+   when it may (`pump_step` with `upto`: a live message among the first 8
+   live ones unbuilt, leased as a pump leases one) and starts pumps for the rest
    (its `spawn`); otherwise it sleeps (1 to 5 s) while the pumps build
    them. It is normally a no-op: the pumps ran during and after the last
    turn. A message whose node failed 3 times ends the turn with an error,
@@ -397,7 +434,8 @@ The gist's §6, as a job:
    puts the messages back first in line and hands them to a fresh run.
 4. `turn_view`, a mutation: the views fitted, as at a new message (the
    lines built since the last one, an import's, merge here before the
-   turn sees them), then the chat's view rendered up to `tail`, frozen as
+   turn sees them), then the chat's view rendered up to `tail` (an import
+   not summarized yet a marker line per stretch), frozen as
    the step's answer so every call of the turn sees the same one. Then
    the calls, at most 40 a turn:
    - `job.ai.text({model: "cheap", messages, tools: CALL_TOOLS,
@@ -604,7 +642,10 @@ a time:
   those, a run takes the one whose last message is the oldest (a merge
   before the message it ends with), leased to it for 5 minutes, while
   fewer than 8 are leased. Every query is by index: the window's 8 rows,
-  the oldest merge, the count leased.
+  the oldest merge, the count leased. An import's work (`imp`: a node
+  whose last message is imported) comes after the live chat's: a run
+  takes the live chat's first, and a live message's 8 count only live
+  messages ("Where we differ from the gist", 16).
 - **`pump_step`, a mutation, is a pump's one step:** it writes the node
   the run built (the first write wins; or keeps its failure), then takes
   the next and answers it, and how many more pumps to start (`spawn`: as
@@ -736,12 +777,18 @@ builds the tree over them like any other.
   in the page by the same rules, sent the same way, then the compactor
   followed through `status`, started again (`pump`) as the CLI starts it,
   at most once a minute.
-- **While an import compacts**, a turn waits (`settling`): no call sees a
-  placeholder (§4), and the imported messages come before it. Its wait
-  builds alongside the pumps; past its budget it hands on (a chain of at
-  most 16 runs), and the next message resumes it. Then its view is
-  fitted (the lines built since the import's last message merge), so it
-  is within its budget.
+- **While an import compacts**, live chat passes it ("Where we differ
+  from the gist", 16; until 2026-10-09 a turn waited, `settling`, for
+  the whole import, about an hour for Paul's ~1,000 messages). A turn
+  waits only for the live chat's unbuilt messages (normally the last
+  turn's, which the compactor takes before the import's); its view shows
+  the import's unbuilt stretch as one line, `(messages a–b: imported
+  chats, not summarized yet; zoom(id, 1) gives one whole)`, its lines
+  built so far before it, and the live chat after it; a compaction's view
+  shows the same. As the import is built the marker moves on (the cache
+  hits less meanwhile), and once it is built every rule is the gist's
+  again: the view is fitted before a turn (the lines built since the
+  import's last message merge), so it is within its budget.
 - **The archive on the build box (2026-10-07, dry run, on the first
   version):** Paul's Claude Code and Codex sessions from his Mac and this
   box, 377 conversations, 15 437 messages, 12.2 MB: 6 839 messages over
@@ -833,7 +880,7 @@ membership, which only its owner and the agent hold. Operations with a
 
 | op | kind | input → result |
 |---|---|---|
-| `view` | query (described) | `{upto?}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>`, the parts that start before `upto` (all by default) up to the first not summarized yet (no call sees a placeholder); `settled` says none was left out |
+| `view` | query (described) | `{upto?}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>`, the parts that start before `upto` (all by default) up to the first not summarized yet (no call sees a placeholder; an import not summarized yet is a marker line per stretch, and the view goes on after it); `settled` says none was left out |
 | `zoom` | query (described) | `{id, n?, page?}` → `{text}`: §6's zoom (`n` 1 unless named; a message in pages of 24 000 characters); `{id: "<task id>", page?}`, a computer task whole but for goose's run, which a turn's zoom reads ("Hand-offs", 6) |
 | `date` | query (described) | `{id}` → `{text}`: ISO time of message `id`, in UTC (the mind knows no time zone) |
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |

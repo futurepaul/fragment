@@ -125,6 +125,24 @@ spec, with every detail.
 - **Ours:** also fits the view before a turn renders it.
 - **Why:** an import builds thousands of lines between messages.
 
+**An import not summarized yet**
+- **Victor:** a turn waits until every message before it is summarized,
+  and a view stops at its first unbuilt line.
+- **Ours:** an import's messages are passed while unbuilt. A turn waits
+  only for the live chat's; a view (the chat's or a compaction's) shows
+  each stretch of the import, from its first unbuilt line to its last,
+  as one line, "(messages a–b: imported chats, not summarized yet;
+  zoom(id, 1) gives one whole)", and goes on after it; the compactor
+  takes live work first, and counts no imported message in a live one's
+  8. Merges are his: binary, of built halves. Once the import is built,
+  everything is his again.
+- **Why:** an import lands after the live history and takes hours to
+  summarize (Paul's ~1,000 messages, about an hour): with his rule every
+  live message waited for all of it (Paul, 2026-10-09: "a turn would skip
+  the not-yet-summarized imported history rather than wait for it"). The
+  cost: until the import is built, its lines change inside the view as
+  they are built, so the cache hits less.
+
 **`zoom("Name")`**
 - **Victor:** gives a subagent's whole chat.
 - **Ours:** a turn's `zoom("<task id>")` gives a hand-off's whole run
