@@ -179,8 +179,12 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     // `_load_gateway_config`, under the profile's scope).
     y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
-    // Approvals default to Hermes' `smart` mode (decision 16); a card waits as long as
-    // the bridge's prompt does. Slash confirmations stay off: a person's leading `/`
+    // Approvals default to Hermes' `smart` mode (decision 16): a terminal command
+    // Hermes flags, or an execute_code script, goes first to its guardian (the
+    // agent's own model, through the route, as the agent), and only one it
+    // escalates is a card. The agent's desktop is never asked about
+    // (`DESKTOP_ACTIONS`, each profile's own config). A card waits as long as the
+    // bridge's prompt does. Slash confirmations stay off: a person's leading `/`
     // never reaches Hermes as a command.
     y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
@@ -224,6 +228,43 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
         }
     }
     y
+}
+
+/// Every `computer_use` action Hermes v0.21.6 asks a person about, and its
+/// `bring_to_front` scope (`tools/computer_use/tool.py`: each `_ACTIONS`
+/// entry marked `destructive`, which is every one but `capture`, `wait`,
+/// `list_apps` and `list_windows`; `handle_computer_use` asks for each scope
+/// in turn). Its gate (`_request_approval`, through `tools/approval.py`'s
+/// `_run_approval_gate`) never consults the smart guardian: only `/yolo`,
+/// `approvals.mode: off`, or a standing grant pass it, so in `smart` mode
+/// every scroll and every focus change was a card (Paul on p5, 2026-10-09:
+/// "asking me for permission for silly things like changing focus in
+/// computer use and scrolling").
+///
+/// The desktop these drive is the agent's own (an Xvnc of its own in the
+/// computer; Take over is the person's way onto it), so each profile holds
+/// them all granted (`desktop_grants`), in both delivery modes: what the
+/// agent does there is what its browser tools do in the same Chromium, which
+/// Hermes never asks about. What still asks: Hermes' dangerous commands in
+/// its terminal and its execute_code scripts, after the smart guardian
+/// (`managed_config`), and the writes Hermes always asks about (an SSH
+/// config; a project's `AGENTS.md`, `SOUL.md`, `CLAUDE.md`, `.cursorrules`).
+/// Hermes' hard blocks on the desktop (a log-out key, `curl … | sh` typed)
+/// stand: they come before the gate.
+pub const DESKTOP_ACTIONS: [&str; 11] = ["click", "double_click", "right_click", "middle_click", "drag", "scroll", "type", "key", "set_value", "focus_app", "bring_to_front"];
+
+/// `computer_use`'s delivery modes: a grant is per action and mode
+/// (`cua:<action>:<mode>`), foreground (it raises the window) apart.
+pub const DELIVERY_MODES: [&str; 2] = ["background", "foreground"];
+
+/// The standing grants each profile holds: one `command_allowlist` key
+/// (`cua:<action>:<mode>`, Hermes' own, as its "always" answer would store
+/// it) for each of `DESKTOP_ACTIONS` in each of `DELIVERY_MODES`. Hermes
+/// reads a profile's list as its gate's first answer (`is_approved`). No
+/// key is a terminal command's pattern, and none a glob, so the terminal's
+/// commands are flagged and reviewed as before.
+pub fn desktop_grants() -> Vec<String> {
+    DESKTOP_ACTIONS.iter().flat_map(|a| DELIVERY_MODES.iter().map(move |m| format!("cua:{a}:{m}"))).collect()
 }
 
 /// An agent's profile config: its model, through the model intercept, as
@@ -334,9 +375,13 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     if offered("BROWSER_USE_API_KEY") {
         // Without this Hermes auto-detects the offered key and sends the
         // built-in browser tools to the cloud. Cloud browsing is opt-in
-        // through browser-harness -s remote; the desktop stays local.
+        // through BU_NAME=remote browser-harness; the desktop stays local.
         y.push_str("  cloud_provider: \"local\"\n");
     }
+    // Its approvals: its own desktop is never asked about (`DESKTOP_ACTIONS`
+    // says why, and what still asks). Hermes reads the list from the
+    // config of the profile whose turn it runs (`_permanent_set`).
+    y.push_str(&format!("command_allowlist: [{}]\n", desktop_grants().iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
     // only to the commands of this profile's turns. Its shell's start files are
@@ -887,6 +932,48 @@ mod tests {
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         assert!(env.contains("HERMES_GATEWAY_MAX_STARTS=0\n"), "no start is slept for the starts before it");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper--k3x9"), PathBuf::from("/data/hermes/profiles/juniper--k3x9"));
+    }
+
+    /// Goal (Paul on p5, 2026-10-09): an agent's own desktop never asks its
+    /// owner, and its terminal's dangerous commands still do. Method: every
+    /// profile's config, on every model, holds each desktop action granted
+    /// in each delivery mode, and nothing that would pass a terminal
+    /// command; the overlay keeps the smart guardian for those. (Run against
+    /// the real Hermes in the bridge's tests/docker.rs: a scroll and a focus
+    /// change with no card, and `rm -rf` still a card.)
+    #[test]
+    fn an_agents_own_desktop_never_asks() {
+        let grants = desktop_grants();
+        assert_eq!(grants.len(), DESKTOP_ACTIONS.len() * DELIVERY_MODES.len());
+        for action in ["scroll", "focus_app", "click", "type", "key", "bring_to_front"] {
+            for mode in ["background", "foreground"] {
+                assert!(grants.contains(&format!("cua:{action}:{mode}")), "{action} in {mode}: {grants:?}");
+            }
+        }
+        // only computer_use's keys: no terminal pattern's, no command, no glob
+        for g in &grants {
+            assert!(g.starts_with("cua:") && !g.contains(['*', '?', '[', ' ']), "{g}");
+        }
+        // the actions that read, never asked, are not granted
+        for read in ["capture", "wait", "list_apps", "list_windows"] {
+            assert!(!DESKTOP_ACTIONS.contains(&read), "{read}");
+        }
+        let line = format!("command_allowlist: [{}]\n", grants.iter().map(|g| format!("\"{g}\"")).collect::<Vec<_>>().join(", "));
+        assert!(line.starts_with("command_allowlist: [\"cua:click:background\", \"cua:click:foreground\", \"cua:double_click:background\""), "{line}");
+        let creds = Path::new("/c.sh");
+        let mut own = agent();
+        own.credentials.push(fragment_bridge::runtime::Credential { model_base: Some("https://openrouter.ai/api/v1".into()), ..credential("openrouter", &[], "fcx_openrouter_a1") });
+        let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() }));
+        assert!(matches!(own_main, MainModel::Own { .. }));
+        for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
+            let p = profile_config(&a, &main, "http://model.fragment.internal", &[], creds);
+            assert_eq!(p.matches("command_allowlist:").count(), 1, "{p}");
+            assert!(p.contains(&format!("\n{line}")), "a top-level key of the {} profile: {p}", main.name());
+        }
+        let m = managed_config(&[], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert!(m.contains("approvals:\n  mode: \"smart\"\n"), "a flagged command still goes to the guardian, then a person: {m}");
+        assert!(!m.contains("command_allowlist") && !m.contains("yolo") && !m.contains("mode: \"off\""), "nothing passes the terminal's commands: {m}");
+        assert!(!default_config("http://model.fragment.internal").contains("command_allowlist"), "the gateway's own profile runs no turns");
     }
 
     /// The image's Chromium starts Hermes' pinned one with the container's

@@ -754,7 +754,8 @@ the provider's own hosts.
   is by design: the call is that agent's, and a narrowed list is an agent's
   specialization, never a wall. Walls stand between people (decision 36).
 - **Approvals** are Hermes' own (Paul, 2026-10-04): a person who connected
-  something lets their agents use it, with no approval of the platform's.
+  something lets their agents use it, with no approval of the platform's
+  (what Hermes asks about: "Approvals in our Hermes image").
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
 - What the catalog cannot express is never swapped: a key in a path is
@@ -1132,6 +1133,44 @@ settings and state):
   (`--ipc=none`, no marker). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
+
+### Approvals in our Hermes image
+
+Hermes asks before some actions, and the bridge makes each ask a card in
+the chat that only the agent's owner answers (docs/bridge.md; decision
+42). What asks is `hermes-boot`'s to set (images/hermes/boot/src/
+hermes.rs), against Hermes v0.21.6:
+
+- **Its terminal: Hermes' `smart` mode** (`approvals.mode`, the managed
+  overlay; decision 16). An ordinary command runs. One that matches
+  Hermes' dangerous-command patterns (`rm -rf`, `chmod 777`, `curl … |
+  sh`, a write to a system file, …), and each `execute_code` script, goes
+  first to its guardian: one call to the agent's own model
+  (`auxiliary.approval`, left `auto`, is the main model's), through the
+  route as the agent (`x-fragment-agent`), metered to its owner as its
+  other calls are. It approves (the command runs), denies (blocked; its
+  owner may still allow it once), or escalates: a card. Hermes' hard
+  floors (`rm -rf /`, `mkfs`, a fork bomb) are blocked whatever anyone
+  answers.
+- **Its desktop: never asked.** Hermes' `computer_use` asks about every
+  action but `capture`, `wait`, `list_apps` and `list_windows` (a click,
+  a scroll, a focus change, typing, a key, raising a window), and its
+  gate never consults the guardian: only `/yolo`, `approvals.mode: off`
+  or a standing grant pass it. So in `smart` mode every kind of action
+  was a card (Paul on p5, 2026-10-09: "asking me for permission for silly
+  things like changing focus in computer use and scrolling"). The desktop
+  is the agent's own, so each profile's own config holds them all
+  granted, in both delivery modes (`command_allowlist`:
+  `cua:<action>:<background|foreground>`, `hermes::DESKTOP_ACTIONS`).
+  What it does there is what its browser tools, which Hermes never asks
+  about, do in the same Chromium. Hermes' hard blocks on the desktop come
+  first and stand (a log-out or lock key, `curl … | sh` typed).
+- **What else asks:** a write to an SSH config, and a write through
+  Hermes' file tools to a project's `AGENTS.md`, `CLAUDE.md`, `SOUL.md` or
+  `.cursorrules` (Hermes asks for these even under `/yolo`).
+- Not used: `approvals.mode: off`, which also runs every flagged command
+  unreviewed, and `/yolo` (the bridge keeps a leading `/` from reading as
+  a command; it would also run the desktop's driver unrestricted).
 
 ### Bot Mode in our Hermes image
 
@@ -1589,6 +1628,10 @@ for a host) and finds the same `HOME`, `~` and modes.
   unused desktop stops after the bound (30 s there:
   `HERMES_BOOT_SCREEN_IDLE_MS`), a watched one does not, and the next
   viewer starts it again with its browser's profile kept.
+  Approvals (`an_agents_own_desktop_never_asks`): a scroll, a focus
+  change that raises its window, and a foreground click each run with no
+  card; then `rm -rf` goes to the guardian, once, as the agent on its
+  tier, and (its scripted answer `ESCALATE`) is a card.
 - The platform's side, with the stub: the `computers` lane's ticket that
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on
