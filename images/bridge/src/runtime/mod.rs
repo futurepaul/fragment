@@ -62,6 +62,11 @@ pub struct Credential {
     pub placeholder: String,
     /// The only hosts it is swapped for.
     pub hosts: Vec<String>,
+    /// An own key's provider that serves models: its chat-completions base
+    /// URL, where an agent whose `agent.json` names one of its models sends
+    /// its calls, the placeholder its key.
+    #[serde(default, rename = "modelBase", skip_serializing_if = "Option::is_none")]
+    pub model_base: Option<String>,
 }
 
 /// The most credentials one agent is given (the platform's catalog holds

@@ -383,7 +383,10 @@ speaking Cloudflare's APIs) returns once this product works.
     Opus limit** (about 2 calls a minute per edge machine; spike S4).
     Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no
     sharding. Ask Cloudflare with the production account's limits
-    request.
+    request. (The "no BYOK" is amended by decision 60, 2026-10-08: a
+    person may connect their own OpenRouter account, whose models their
+    agents may run on, paid by that account. The platform's own tiers
+    are unchanged.)
 
     Status, 2026-10-05 (branch `claude/vision-model`; Paul: "yes, vision
     model for computer_use. deepseek flash is apparently pretty good"):
@@ -794,6 +797,74 @@ recommendations"). Nothing below is built yet.
     browser session: people, invites, trial codes, orgs, billing
     health, and an audit log of every write. The wipe stays a signed
     CLI call.
+
+### A person's own models (Paul, 2026-10-08)
+
+Paul, asking for ChatGPT and Claude accounts: "I don't want the user to
+need to use the cli or paste an api key though, they should be able to
+connect them from settings ideally."
+
+60. **A person may connect their own OpenRouter account from settings,
+    and pick one of its models for each agent.** This amends decision
+    23's "no BYOK" (2026-10-02).
+    - **Connecting.** It is one press. OpenRouter's own page makes a key
+      that is the person's (its PKCE key exchange). The key is never
+      pasted and never on the person's machine, and no CLI is involved.
+    - **Where the key lives.** Their computer keeps it sealed, as any own
+      key (docs/secrets.md). An agent's guest holds only a placeholder,
+      and the swap adds the key toward `openrouter.ai` alone
+      (docs/computers.md, "An agent's own model").
+    - **Picking a model.** Settings offers a short list for each agent:
+      Claude Sonnet, Haiku and Opus 5.5, GPT-6.1 Sol, DeepSeek V4.1 Flash
+      and GLM-5.3, each of which calls tools. The pick is the agent's
+      `agent.json` `model: {provider, id}`, beside its `tier`. Its next
+      turn runs on it, with nothing restarted. Vision and voice notes
+      stay on the platform's route.
+    - **Who pays.** The person's OpenRouter credit pays for those calls.
+      The platform counts them by agent and month and charges nothing:
+      no platform fee (Paul).
+    - **Disconnecting.** The key goes from their computer. Revoking it is
+      done at OpenRouter's keys page, which settings links to.
+
+    The catalog row carries it: an own key's `oauth` (authorize, exchange,
+    manage) and its `models` (a chat-completions base URL on its hosts,
+    and the models offered). Nothing in code names OpenRouter
+    (`fragment_core::catalog`, `fragment_core::own_signin`).
+
+    **ChatGPT and Claude subscriptions are not offered** (Paul,
+    2026-10-08: "ChatGPT: waitlist, nothing on master"; "Claude
+    subscription: dropped", Claude only through OpenRouter). What the
+    vendors say, read 2026-10-08:
+    - **OpenAI** (developers.openai.com/cookbook/articles/sign-in-with-chatgpt):
+      "ChatGPT plan usage is available to open-source projects, personal
+      projects that run locally, and selected private apps. If you're
+      building a paid or remotely hosted app, join the waitlist to
+      request access before offering it to users."
+      - Sign in with ChatGPT's redirect is a loopback on `127.0.0.1`
+        only (developers.openai.com/siwc/token-sharing-open-source/sign-in),
+        so a hosted settings page cannot finish one.
+      - Hermes' own ChatGPT sign-in is the Codex CLI's client and its
+        device code (hermes-agent v0.21.6, `hermes_cli/auth_codex.py`).
+        That is no route for a hosted app.
+      - Fragment is on the waitlist's side. The optchat spike (draft PR
+        #250) kept Sign in with ChatGPT for Paul's own testing, through
+        its CLI.
+    - **Anthropic** (code.claude.com/docs/en/legal-and-compliance,
+      "Authentication and credential use"): "Anthropic does not permit
+      third-party developers to offer Claude.ai login into their own
+      applications, or to route requests through Free, Pro, or Max plan
+      credentials on behalf of their users. Moreover, developers may not
+      collect, store, or intermediate Claude.ai credentials or session
+      tokens."
+      - The routes it allows are API keys (Claude Console, or a cloud
+        provider), and a person signing in to the unmodified Claude Code
+        binary that a platform hosts, under its Commercial Terms.
+      - Hermes' native Anthropic OAuth poses as Claude Code (Claude Code's
+        client, its headers and system prompt). Hermes' own docs say it
+        draws only on a Max plan's purchased extra usage.
+      - Nous' `claude-subscription-directsdk` plugin runs each turn
+        through the `claude` CLI.
+      - Neither is for a hosted product.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

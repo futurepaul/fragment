@@ -285,6 +285,12 @@ mark sends the same batch again, which answers as before.
   charge (docs/computers.md). A call the provider did not answer is
   released. A settle or release that does not land is charged by the
   sweep.
+- **Not metered: a person's own keys** (decisions 37 and 60). Their own
+  key's calls, an agent's model calls on their own OpenRouter account
+  among them, are paid by their account at the provider. The computer
+  counts them by agent and month (`uses`, charge 0), and nothing reaches
+  the ledger: no reservation, no charge, no platform fee (Paul,
+  2026-10-08).
 - **Compute** (the Computer DO). It meters each awake interval at sleep,
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The

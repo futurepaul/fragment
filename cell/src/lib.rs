@@ -1088,6 +1088,12 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let person = person.to_string();
             wipe::route(req, env, cfg, &url, &person).await
         }
+        // the person's browser, back from an own key's sign-in: its state
+        // names their computer, so it is signed by nothing (connections.rs)
+        (Method::Get, ["api", "connections", provider, "callback"]) => {
+            let provider = provider.to_string();
+            connections::callback(env, &url, &provider).await
+        }
         (method, ["api", "connections", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let who = signer(env, &req, &url, &body).await?;

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::ledger::{end_of, entries};
 use crate::api::Api;
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST};
+use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -236,5 +236,149 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         capped.status == 200 && uncapped.status == 200 && refused.starts_with("fetched 402") && refused.contains("perplexity's call is not made") && s.upstream.seen().len() == seen_before && held().len() == keyed.len(),
         json!({ "refused": refused, "capped": capped.body }),
     );
+    Ok(turns)
+}
+
+/// The checks `model_checks` makes, as a run without the stub or the fakes
+/// skips them.
+pub(super) const MODEL_CHECKS: &[&str] = &[
+    "an own key signed in to is listed with its provider's page to revoke it and the models it offers, not set; its guest is given none",
+    "connecting sends the person's browser to the provider with the platform's callback, an S256 challenge, a state that names their computer, and the key's label",
+    "a person who declines at the provider comes back to a page that says so; nothing is exchanged or set",
+    "back from the provider with a code, the platform exchanges it with the sign-in's verifier, and the computer seals the key the provider made: connected, the key in no answer",
+    "the guest is given a placeholder in OPENROUTER_API_KEY, with its models' base URL, and never the key",
+    "its call to the provider with the placeholder reaches the provider with the person's key, counted as the agent's, never charged",
+    "a sign-in comes back once: replayed, or a state that names none here, it is refused and nothing is exchanged",
+    "sign-ins under way are bounded: past eight, another is refused until one ends",
+    "disconnected, the guest is given it no more",
+];
+
+/// The path and query of `url` (the platform's callback, as the provider
+/// sends the browser to it), for the API's base.
+fn path_of(url: &str) -> String {
+    reqwest::Url::parse(url).map(|u| format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default())).unwrap_or_default()
+}
+
+/// Where the provider's page sent the browser (its 302's `location`).
+fn sent_back(api: &Api, page: &str) -> Result<String> {
+    let r = api.external(page)?;
+    Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+}
+
+/// An own key signed in to, through its provider's own page (Paul,
+/// 2026-10-08; fragment_core::own_signin): OpenRouter's, at its fake. The
+/// person connects it, the platform exchanges the code for a key the
+/// provider makes, their computer seals it, and their agent's guest is
+/// given only its placeholder, which the swap replaces on the way to the
+/// provider. Answers how many turns of the agent's it took.
+pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let mut turns = 0;
+    let mut say = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        turns += 1;
+        fetched(s, n, text)
+    };
+    let row = |r: &crate::api::Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == SWAP_ROUTER)).cloned().unwrap_or(Value::Null);
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let given = say(s, 201, "credentials")?;
+    let r = row(&listed);
+    s.ok(
+        MODEL_CHECKS[0],
+        r["kind"] == "own" && r["state"] == "not_set" && r["signIn"]["manage"] == "https://openrouter.ai/settings/keys" && r["models"].as_array().is_some_and(|m| m.len() >= 2 && m.iter().all(|x| x["id"].is_string() && x["name"].is_string())) && !given.contains(SWAP_ROUTER_ENV),
+        json!({ "row": r, "given": given }),
+    );
+
+    // the person declines at the provider: nothing set, the sign-in let go
+    let authorize = || api.signed(w.owner, "POST", &format!("/api/connections/{SWAP_ROUTER}/authorize"), Some(&json!({})));
+    s.openrouter.decline_next();
+    let declined = authorize()?;
+    let back = sent_back(api, declined.body["url"].as_str().unwrap_or_default())?;
+    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let exchanges = s.openrouter.exchanges().len();
+    s.ok(
+        MODEL_CHECKS[2],
+        declined.status == 200 && !back.contains("code=") && page.status == 400 && page.text.contains("sent no key back") && exchanges == 0 && row(&api.signed(w.owner, "GET", "/api/connections", None)?)["state"] == "not_set",
+        json!({ "back": back, "page": page.to_string(), "exchanges": exchanges }),
+    );
+
+    // connecting: the browser goes to the provider's page
+    let asked = authorize()?;
+    let url = asked.body["url"].as_str().unwrap_or_default().to_string();
+    let q: std::collections::BTreeMap<String, String> = reqwest::Url::parse(&url).map(|u| u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()).unwrap_or_default();
+    let state = q.get("state").cloned().unwrap_or_default();
+    s.ok(
+        MODEL_CHECKS[1],
+        asked.status == 200
+            && url.starts_with(&format!("{}/auth?", s.openrouter.url))
+            && q.get("callback_url") == Some(&format!("{}/api/connections/{SWAP_ROUTER}/callback", api.base))
+            && q.get("code_challenge_method").map(String::as_str) == Some("S256")
+            && q.get("code_challenge").is_some_and(|c| c.len() == 43)
+            && fragment_core::own_signin::parse_state(&state).is_some_and(|(computer, _)| computer == w.id)
+            && q.get("key_label").map(String::as_str) == Some(fragment_core::own_signin::KEY_LABEL),
+        json!({ "authorize": asked.body, "query": q }),
+    );
+
+    // back with a code: exchanged, the key sealed by the computer
+    let back = sent_back(api, &url)?;
+    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let keys = s.openrouter.keys();
+    let key = keys.last().cloned().unwrap_or_default();
+    let exchanged = s.openrouter.exchanges();
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    s.ok(
+        MODEL_CHECKS[3],
+        page.status == 200
+            && page.text.contains("is connected")
+            && keys.len() == 1
+            && exchanged.last().is_some_and(|(_, status)| *status == 200)
+            && row(&listed)["state"] == "set"
+            && !page.text.contains(&key)
+            && !listed.text.contains(&key),
+        json!({ "page": page.to_string(), "exchanges": exchanged, "listed": row(&listed) }),
+    );
+
+    // the guest: a placeholder, its models' base, never the key
+    let given = say(s, 202, "credentials")?;
+    let placeholder = format!("fck_{SWAP_ROUTER}_");
+    s.ok(
+        MODEL_CHECKS[4],
+        given.contains(&format!("{SWAP_ROUTER} {SWAP_ROUTER_ENV} {placeholder}")) && given.contains(&format!("models at https://{SWAP_ROUTER_HOST}/api/v1")) && !given.contains(&key),
+        &given,
+    );
+
+    // its call reaches the provider with the person's key
+    let calls_before = s.openrouter.calls().len();
+    let said = say(s, 203, &format!("fetch http://{SWAP_ROUTER_HOST}/api/v1/key with ${SWAP_ROUTER_ENV}"))?;
+    let calls = s.openrouter.calls();
+    let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
+    let counted = s.eventually(Duration::from_secs(20), || uses()["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == SWAP_ROUTER && x["agent"] == w.agent && x["calls"] == 1 && x["micros"] == 0)));
+    s.ok(
+        MODEL_CHECKS[5],
+        said.starts_with("fetched 200") && calls.len() == calls_before + 1 && calls.last().is_some_and(|(auth, path)| *auth == format!("Bearer {key}") && path == "/api/v1/key") && counted,
+        json!({ "said": said, "calls": calls, "uses": uses() }),
+    );
+
+    // once only: a replay, and a state naming no sign-in here
+    let again = api.unsigned("GET", &path_of(&back), None)?;
+    let forged = format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state={}", fragment_core::own_signin::state(w.id, &"A".repeat(43)));
+    let none = api.unsigned("GET", &forged, None)?;
+    let garbled = api.unsigned("GET", &format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope"), None)?;
+    s.ok(
+        MODEL_CHECKS[6],
+        again.status == 400 && none.status == 400 && garbled.status == 400 && s.openrouter.exchanges().len() == exchanged.len() && s.openrouter.keys().len() == 1,
+        json!({ "replay": again.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
+    );
+
+    // bounded: eight under way, the ninth refused
+    let pending: Vec<u16> = (0..fragment_core::own_signin::SIGNINS_PENDING_MAX + 1).map(|_| authorize().map(|r| r.status).unwrap_or(0)).collect();
+    s.ok(
+        MODEL_CHECKS[7],
+        pending[..fragment_core::own_signin::SIGNINS_PENDING_MAX].iter().all(|st| *st == 200) && pending[fragment_core::own_signin::SIGNINS_PENDING_MAX] == 429,
+        json!(pending),
+    );
+
+    // disconnected
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_ROUTER}/key"), None)?;
+    let given = say(s, 204, "credentials")?;
+    s.ok(MODEL_CHECKS[8], gone.status == 200 && !given.contains(SWAP_ROUTER_ENV), json!({ "gone": gone.body, "given": given }));
     Ok(turns)
 }

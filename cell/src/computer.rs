@@ -51,6 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{notices, Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
+use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, PORT_PATH_MAX_BYTES};
@@ -90,7 +91,9 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 /// it is made (`computer/assign`), so the column's default is never read.
 /// `uses` counts each agent's calls to each provider a month (`Month`'s
 /// index) and what they were charged; `own_keys` holds the owner's own
-/// keys, sealed for this object.
+/// keys, sealed for this object; `own_signins` the sign-ins to an own key's
+/// provider under way (`fragment_core::own_signin`): each nonce's hash, its
+/// provider, its verifier sealed, until it expires or is finished, once.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
@@ -99,6 +102,7 @@ CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
 CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL);
 ";
 /// The one row a wiped computer keeps: when it was wiped. Apart from
 /// `SCHEMA`, whose tables the wipe drops.
@@ -415,6 +419,21 @@ struct UsesAsk {
 struct OwnKeyAsk {
     provider: String,
     key: Option<String>,
+}
+
+/// `computer/sign-in`'s body: a sign-in to `provider`, an own key's
+/// provider with a sign-in, begun.
+#[derive(Deserialize)]
+struct SignInAsk {
+    provider: String,
+}
+
+/// `computer/signed-in`'s body: the sign-in `nonce` names, back from
+/// `provider`, finished (once).
+#[derive(Deserialize)]
+struct SignedInAsk {
+    provider: String,
+    nonce: String,
 }
 
 /// `computer/own-keys`' body: the owner's connections' states, as their
@@ -1255,6 +1274,7 @@ impl ComputerCell {
                     env: p.env.clone(),
                     placeholder: Placeholder::new(p.kind, &p.name, &tag).text(),
                     hosts: p.hosts.clone(),
+                    model_base: p.models.as_ref().map(|m| m.base_url.clone()),
                 });
             }
         }
@@ -1327,6 +1347,48 @@ impl ComputerCell {
         }
         let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
         Ok(Some(key))
+    }
+
+    /// A sign-in to an own key's provider, begun (`fragment_core::
+    /// own_signin`): a nonce and a verifier made, the verifier kept sealed
+    /// under the nonce's hash until it expires; answers the nonce and the
+    /// verifier's challenge. Expired ones go first; with
+    /// `SIGNINS_PENDING_MAX` under way, another is refused.
+    async fn sign_in(&self, provider: &str) -> CellResult<Value> {
+        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Own || p.oauth.is_none()) {
+            return Err(CellError::invalid(format!("{provider:?} is no own key signed in to here")));
+        }
+        let now = js::now_ms();
+        self.exec("DELETE FROM own_signins WHERE expires_at <= ?", vec![now.into()])?;
+        let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+        if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
+        }
+        let nonce = own_signin::b64url(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+        let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
+        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), verifier.as_bytes()).await?;
+        self.exec(
+            "INSERT INTO own_signins (nonce, provider, sealed, expires_at) VALUES (?, ?, ?, ?)",
+            vec![own_signin::nonce_key(&nonce).into(), provider.into(), sealed.into(), (now + own_signin::SIGNIN_TTL_MS).into()],
+        )?;
+        Ok(json!({ "nonce": nonce, "challenge": own_signin::challenge(&verifier) }))
+    }
+
+    /// The sign-in `nonce` names, finished: gone at once (a replay finds
+    /// nothing), and its verifier answered if it was `provider`'s and is
+    /// unexpired. Its key is set by `computer/own-key` once exchanged.
+    async fn signed_in(&self, provider: &str, nonce: &str) -> CellResult<String> {
+        let key = own_signin::nonce_key(nonce);
+        let rows = self.rows("SELECT provider, sealed, expires_at FROM own_signins WHERE nonce = ?", vec![key.as_str().into()])?;
+        self.exec("DELETE FROM own_signins WHERE nonce = ?", vec![key.into()])?;
+        let unknown = || CellError::invalid("this sign-in is not one under way here (finished already, expired, or never made): connect again from settings");
+        let row = rows.first().ok_or_else(unknown)?;
+        if row["provider"] != provider || row["expires_at"].as_i64().is_none_or(|t| t <= js::now_ms()) {
+            return Err(unknown());
+        }
+        let sealed = row["sealed"].as_str().ok_or_else(|| CellError::host("a sign-in kept with no verifier"))?;
+        let opened = crate::keys::open(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), sealed).await?;
+        String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
     /// A month's uses: each agent's calls to each provider and their charges.
@@ -1690,6 +1752,16 @@ impl ComputerCell {
                     None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
+            }
+            "computer/sign-in" => {
+                let b: SignInAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                json_response(&self.sign_in(&b.provider).await?)
+            }
+            "computer/signed-in" => {
+                let b: SignedInAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                json_response(&json!({ "verifier": self.signed_in(&b.provider, &b.nonce).await? }))
             }
             "computer/own-keys" => {
                 let b: OwnKeysAsk = body_json(&mut req).await?;

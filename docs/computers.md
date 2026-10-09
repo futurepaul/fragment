@@ -437,7 +437,7 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, credentials: [{provider, kind,
-    env, placeholder, hosts}]}], credentialEnv}`: the agents to run, and
+    env, placeholder, hosts, modelBase?}]}], credentialEnv}`: the agents to run, and
     each one's credentials (below, Connections and operator keys). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
@@ -621,7 +621,15 @@ the provider's own hosts.
     placeholder in, the vendor SDK's names where it has one;
   - an operator key's `price` per call at list, or by default the price
     book's for its name (`fragment_core::price::DEFAULT_KEYS`, each with its
-    source); a row with none is refused before a deploy.
+    source); a row with none is refused before a deploy;
+  - an own key's `oauth` sign-in, `{authorize, exchange, manage}`, all
+    https (a local fleet's fake may be `http://127.0.0.1:<port>`): the
+    person connects it from settings through the provider's own page
+    instead of pasting it (below, "An agent's own model");
+  - an own key's `models`, `{base_url, offer}`: the provider's
+    chat-completions base URL (https, on one of its `hosts`, so the swap
+    adds the key), and the 1 to 16 models settings offers for an agent,
+    each `{id, name}`.
 
   Adding a provider is a catalog row (and, for a connection, the provider
   enabled in the WorkOS environment); nothing in code names one. The
@@ -634,6 +642,7 @@ the provider's own hosts.
   | `google-places` | operator | `places.googleapis.com` | `X-Goog-Api-Key: {}`, or `?key=` | `GOOGLE_PLACES_API_KEY` (no Google SDK reads one; the goplaces skill's helper does) | $0.035 |
   | `xai` | operator | `api.x.ai` | `Authorization: Bearer {}` | `XAI_API_KEY` (xAI's SDK) | $0.12 |
   | `elevenlabs` | operator | `api.elevenlabs.io` | `xi-api-key: {}` | `ELEVENLABS_API_KEY` (ElevenLabs' SDKs) | $0.15 |
+  | `openrouter` | own, signed in to, with models | `openrouter.ai` | `Authorization: Bearer {}` | `OPENROUTER_API_KEY` (OpenRouter's and Hermes' name) | none: the person's OpenRouter credit pays |
 
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key. `<tag>` is 32 hex of HMAC-SHA256 over
@@ -645,7 +654,8 @@ the provider's own hosts.
   image may write it once.
 - **The guest learns its credentials** from its own view (`GET
   /api/computer`, below): each agent's `credentials`, `[{provider, kind,
-  env, placeholder, hosts}]`, those it may use now:
+  env, placeholder, hosts, modelBase?}]` (`modelBase` an own key's models'
+  base URL, below, "An agent's own model"), those it may use now:
   - a connection its owner has connected (Pipes says `connected`: the
     connected account's state, read with no token minted, believed for a
     minute; the owner's own read of their connections, and each swap's
@@ -724,6 +734,70 @@ the provider's own hosts.
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
   key needs more than a placement.
+
+### An agent's own model
+
+Paul, 2026-10-08 (decision 60): "I don't want the user to need to use the
+cli or paste an api key though, they should be able to connect them from
+settings ideally." A person connects their own OpenRouter account from
+settings, and picks one of its models for an agent; their OpenRouter
+credit pays for those calls. ChatGPT and Claude subscriptions are not
+offered (decision 60 says why, with the vendors' words).
+
+- **Connecting** (`fragment_core::own_signin`, OpenRouter's PKCE key
+  exchange; docs/api.md, Connections):
+  1. Settings' Connect calls `POST /api/connections/{provider}/authorize`.
+     The person's computer makes a nonce and a verifier and keeps them for
+     10 minutes, the verifier sealed (at most 8 sign-ins under way; past
+     that, 429). The answer is the provider's page, which the shell opens
+     in a window: the row's `authorize`, with the platform's callback, the
+     verifier's S256 challenge, the state (`<computer's 24 hex>.<nonce>`)
+     and the key's label (`Fragment`).
+  2. OpenRouter asks the person and makes a key that is theirs. It sends
+     the browser back to `GET /api/connections/{provider}/callback?code=…
+     &state=…` on the platform's host.
+  3. The state names the computer and the sign-in it began, once. No
+     session is needed, and the key can reach no one else's computer. A
+     state replayed, expired, made for another provider, or never made is
+     a page that says to connect again, and nothing is exchanged. A
+     person who declined comes back with no code: the sign-in is let go
+     and nothing is set.
+  4. The platform exchanges the code with the verifier at the row's
+     `exchange`. Their computer seals the key as `PUT …/key` does, and the
+     page says it is connected. No answer ever holds the key.
+- **The guest** is given the provider as any own key: its placeholder
+  (`fck_openrouter_<tag>`) in `OPENROUTER_API_KEY`. The credential also
+  carries `modelBase`, its models' base URL (`https://openrouter.ai/api/v1`).
+  The swap adds the key only toward `openrouter.ai`. Its calls are counted
+  as the agent's in the computer's `uses` and charged nothing (no platform
+  fee: Paul).
+- **Picking a model.** Settings' Agents section offers each agent the
+  connected provider's models beside "Workers AI (included)". The pick
+  is written to the agent fragment's `agent.json`: `"model": {"provider":
+  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
+  "Workers AI" removes `model`. Any model the provider serves may be named
+  by hand; settings offers the catalog's `offer`.
+- **Our Hermes image** reads each agent's `agent.json` again every 10 s
+  while awake, and whenever its credentials change. When the agent's
+  credentials hold the named provider with a `modelBase`, its profile's
+  main model becomes that provider's:
+  - `provider: custom`, `base_url` the `modelBase`, `default` the model's
+    id;
+  - its key is the placeholder;
+  - no `context_length`: Hermes reads OpenRouter's.
+
+  Otherwise the agent runs on its tier, through the route, and
+  `profile.model_unused` says why: not connected, or narrowed from it. The
+  config is rewritten only when it changes. Hermes reads it at the next
+  turn and rebuilds the agent on the new model, with nothing restarted.
+  Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
+  `vision` and `whisper`, metered to the owner as before.
+- **Disconnecting** (`DELETE /api/connections/{provider}/key`, settings'
+  Disconnect) takes the key from the computer. The agent's next turn is
+  its tier's again. The key itself is revoked at OpenRouter
+  (`https://openrouter.ai/settings/keys`, which settings links to).
+- The platform holds no Hermes code for this. The catalog row says what a
+  provider offers, and the guest view says where its models are.
 
 ### Ports
 
@@ -814,7 +888,11 @@ settings and state):
   (`profile.tier_unread`), and the profile's config stays as the last boot
   wrote it, its tier with it; a profile with none yet takes the cheap
   tier (GLM-5.3 Flash, Paul, 2026-10-08). The shell writes `cheap` for
-  both the first agent and each new agent.
+  both the first agent and each new agent. Its `model: {provider, id}`,
+  beside the tier, is a model of a provider its owner connected, which it
+  runs on while its credentials hold that provider (above, "An agent's
+  own model"); the image reads `agent.json` again every 10 s while awake
+  (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory

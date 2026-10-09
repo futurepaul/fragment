@@ -58,6 +58,77 @@ impl Tier {
     }
 }
 
+/// A model of a provider an agent's owner connected, which their account
+/// there pays for: its `agent.json`'s `model: {provider, id}` beside its
+/// `tier` (docs/computers.md, "An agent's own model").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnModel {
+    pub provider: String,
+    pub id: String,
+}
+
+/// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
+/// catalog holds its offer to the same).
+pub const MODEL_ID_MAX_BYTES: usize = 128;
+/// A model base URL the platform names, at most.
+pub const MODEL_BASE_MAX_BYTES: usize = 512;
+
+impl OwnModel {
+    /// The model `agent.json` names, if it names one well: a provider's
+    /// name (`[a-z0-9-]`, 1 to 32) and an id of 1 to `MODEL_ID_MAX_BYTES`
+    /// letters, digits and `.`, `_`, `-`, `:`, `/`, `@`.
+    pub fn of(agent_json: &[u8]) -> Option<OwnModel> {
+        let v: serde_json::Value = serde_json::from_slice(agent_json).ok()?;
+        let (provider, id) = (v["model"]["provider"].as_str()?, v["model"]["id"].as_str()?);
+        let provider_ok = (1..=32).contains(&provider.len()) && provider.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        let id_ok = (1..=MODEL_ID_MAX_BYTES).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'/' | b'@'));
+        (provider_ok && id_ok).then(|| OwnModel { provider: provider.into(), id: id.into() })
+    }
+}
+
+/// What an agent's main model is: a tier through the platform's model
+/// route, or its own (`OwnModel`), sent to its provider's base URL with
+/// the provider's placeholder as its key, which the computer's swap
+/// replaces with its owner's key on the way out (the guest never holds it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MainModel {
+    Tier(Tier),
+    Own { provider: String, base: String, id: String, placeholder: String },
+}
+
+impl From<Tier> for MainModel {
+    fn from(t: Tier) -> MainModel {
+        MainModel::Tier(t)
+    }
+}
+
+impl MainModel {
+    /// The model `agent` runs on: `own` where its credentials now hold that
+    /// provider's placeholder with a model base (its owner connected it and
+    /// did not narrow the agent from it), else `tier`; and, when it names
+    /// its own and that is not used, why.
+    pub fn of(agent: &Agent, tier: Tier, own: Option<&OwnModel>) -> (MainModel, Option<String>) {
+        let Some(own) = own else { return (MainModel::Tier(tier), None) };
+        let Some(c) = agent.credentials.iter().find(|c| c.provider == own.provider) else {
+            return (MainModel::Tier(tier), Some(format!("its owner has not connected {} (or narrowed the agent from it)", own.provider)));
+        };
+        let base = c.model_base.as_deref().map(|b| b.trim_end_matches('/')).unwrap_or_default();
+        let base_ok = (base.starts_with("https://") || base.starts_with("http://")) && base.len() <= MODEL_BASE_MAX_BYTES && base.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\');
+        if !base_ok {
+            return (MainModel::Tier(tier), Some(format!("{} serves no models here", own.provider)));
+        }
+        (MainModel::Own { provider: own.provider.clone(), base: base.into(), id: own.id.clone(), placeholder: c.placeholder.clone() }, None)
+    }
+
+    /// How events name it: a tier, or `<provider>:<id>`.
+    pub fn name(&self) -> String {
+        match self {
+            MainModel::Tier(t) => t.name().into(),
+            MainModel::Own { provider, id, .. } => format!("{provider}:{id}"),
+        }
+    }
+}
+
 /// The model route's name for the deployment's vision model
 /// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it.
 pub const VISION_MODEL: &str = "vision";
@@ -166,18 +237,32 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
 /// (`PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY`, …: its
 /// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
 /// profile's credentials file (`credentials_sh`) as its shell starts.
-pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_env: &[String], credentials_file: &Path) -> String {
+pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credential_env: &[String], credentials_file: &Path) -> String {
     let base = model_base.trim_end_matches('/');
-    let (provider, url) = match tier {
-        // The high tier is Anthropic's Messages shape, passed through.
-        Tier::High => ("anthropic", format!("{base}/anthropic")),
-        Tier::Cheap | Tier::Medium => ("custom", format!("{base}/v1")),
-    };
     let mut y = String::new();
-    y.push_str(&format!("# Written by hermes-boot for {} (tier {}) at every boot.\n", agent.fragment, tier.name()));
-    y.push_str(&format!("model:\n  provider: {}\n  base_url: {}\n  default: {}\n", q(provider), q(&url), q(tier.name())));
-    // The guest holds no credential: the intercept strips auth and adds its own.
-    y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
+    y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model changes.\n", agent.fragment, main.name()));
+    match main {
+        MainModel::Tier(tier) => {
+            let (provider, url) = match tier {
+                // The high tier is Anthropic's Messages shape, passed through.
+                Tier::High => ("anthropic", format!("{base}/anthropic")),
+                Tier::Cheap | Tier::Medium => ("custom", format!("{base}/v1")),
+            };
+            y.push_str(&format!("model:\n  provider: {}\n  base_url: {}\n  default: {}\n", q(provider), q(&url), q(tier.name())));
+            // The guest holds no credential: the intercept strips auth and adds its own.
+            y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
+        }
+        // Its owner's model, at its provider (OpenAI's chat-completions
+        // shape): its key the provider's placeholder, which the swap
+        // replaces on the way out. Its context length is Hermes' to find
+        // (the provider's own metadata).
+        MainModel::Own { base, id, placeholder, .. } => {
+            y.push_str(&format!("model:\n  provider: \"custom\"\n  base_url: {}\n  default: {}\n", q(base), q(id)));
+            y.push_str(&format!("  api_key: {}\n", q(placeholder)));
+        }
+    }
+    // On every call, the main model's and the auxiliary ones': the route
+    // reads it, and the swap sends no `x-fragment-` header to a provider.
     y.push_str(&format!("  default_headers:\n    x-fragment-agent: {}\n", q(&agent.fragment)));
     // The managed skills and the platform skill's view (skills.rs), below
     // the profile's own `skills/`: an agent's own wins, and a managed one
@@ -687,7 +772,7 @@ mod tests {
     #[test]
     fn a_new_agents_profile_defaults_to_cheap() {
         let tier = Tier::of(None, false);
-        let config = profile_config(&agent(), tier, "http://model.fragment.internal", &[], Path::new("/c.sh"));
+        let config = profile_config(&agent(), &tier.into(), "http://model.fragment.internal", &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n"), "{config}");
     }
 
@@ -737,15 +822,15 @@ mod tests {
         assert!(managed_config(&[], 20, crate::desktop::IDLE_STOP_MS).contains("timeout: 20\n"));
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
+        let p = profile_config(&agent(), &Tier::Medium.into(), "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
         assert!(p.contains("default: \"medium\""));
         assert!(p.contains("x-fragment-agent: \"juniper--k3x9\""), "every model call names its agent");
-        let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
+        let h = profile_config(&agent(), &Tier::High.into(), "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
-        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), Tier::Cheap, "http://model.fragment.internal", &[], creds))] {
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), &Tier::Cheap.into(), "http://model.fragment.internal", &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
             assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
@@ -819,7 +904,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), Tier::Medium, "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), &Tier::Medium.into(), "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
@@ -890,7 +975,45 @@ mod tests {
             env: env.iter().map(|e| e.to_string()).collect(),
             placeholder: placeholder.into(),
             hosts: vec!["api.perplexity.ai".into()],
+            model_base: None,
         }
+    }
+
+    /// Valid: an agent.json that names a model of a provider its owner
+    /// connected runs on it: the provider's base, the model's id, the
+    /// provider's placeholder as its key (the swap adds the key), and its
+    /// eyes and ears stay on the route. Invalid: a model named badly, or of
+    /// a provider its credentials do not hold (not connected, narrowed) or
+    /// that serves none, is its tier, saying why.
+    #[test]
+    fn an_agent_runs_on_its_owners_model_when_it_holds_it() {
+        let tag = "0123456789abcdef0123456789abcdef";
+        let json = br#"{"tier":"cheap","model":{"provider":"openrouter","id":"anthropic/claude-sonnet-5.5"},"color":"blue"}"#;
+        let own = OwnModel::of(json).unwrap();
+        assert_eq!(own, OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() });
+        for bad in [&br#"{"model":{"provider":"OpenRouter","id":"x"}}"#[..], br#"{"model":{"provider":"openrouter","id":"a b"}}"#, br#"{"model":{"provider":"openrouter"}}"#, br#"{"model":"openrouter:x"}"#, b"{}", b"not json"] {
+            assert_eq!(OwnModel::of(bad), None, "{}", String::from_utf8_lossy(bad));
+        }
+        let mut a = agent();
+        let (main, why) = MainModel::of(&a, Tier::Cheap, Some(&own));
+        assert_eq!(main, MainModel::Tier(Tier::Cheap));
+        assert!(why.unwrap().contains("not connected openrouter"));
+        let mut c = credential("openrouter", &["OPENROUTER_API_KEY"], &format!("fck_openrouter_{tag}"));
+        a.credentials = vec![c.clone()];
+        let (main, why) = MainModel::of(&a, Tier::Cheap, Some(&own));
+        assert!(main == MainModel::Tier(Tier::Cheap) && why.unwrap().contains("serves no models"), "a provider with no model base");
+        c.model_base = Some("https://openrouter.ai/api/v1/".into());
+        a.credentials = vec![c];
+        let (main, why) = MainModel::of(&a, Tier::Medium, Some(&own));
+        assert_eq!(why, None);
+        assert_eq!(main.name(), "openrouter:anthropic/claude-sonnet-5.5");
+        assert_eq!(MainModel::of(&a, Tier::Medium, None), (MainModel::Tier(Tier::Medium), None), "none named: its tier");
+        let p = profile_config(&a, &main, "http://model.fragment.internal", &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
+        let want = format!("model:\n  provider: \"custom\"\n  base_url: \"https://openrouter.ai/api/v1\"\n  default: \"anthropic/claude-sonnet-5.5\"\n  api_key: \"fck_openrouter_{tag}\"\n  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n");
+        assert!(p.contains(&want), "{p}");
+        assert!(!p.contains("context_length"), "its provider says its context: {p}");
+        assert!(p.contains("    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n"), "its eyes stay the route's: {p}");
+        assert!(p.contains("    model: \"whisper\"\n"), "its ears too: {p}");
     }
 
     /// Valid: each credential's placeholder is in its environment
@@ -910,7 +1033,7 @@ mod tests {
         let s = credentials_sh(&a);
         assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
         let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
-        let p = profile_config(&a, Tier::Medium, "http://model.fragment.internal", &env, Path::new("/c.sh"));
+        let p = profile_config(&a, &Tier::Medium.into(), "http://model.fragment.internal", &env, Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"PERPLEXITY_API_KEY\", \"XAI_API_KEY\"]"), "{p}");
     }
 
@@ -928,7 +1051,7 @@ mod tests {
             credential("d", &["A_KEY"], &format!("fck_d_{tag}")),
         ];
         assert_eq!(credential_vars(&a), vec![("A_KEY".to_string(), format!("fck_a_{tag}"))]);
-        let p = profile_config(&a, Tier::Medium, "http://m", &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
+        let p = profile_config(&a, &Tier::Medium.into(), "http://m", &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"A_KEY\"]"), "{p}");
         assert!(!credentials_sh(&a).contains("rm -rf"));
     }
