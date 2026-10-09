@@ -169,7 +169,7 @@ function table(header, alignment, rows, depth) {
   return wrap;
 }
 
-const INLINE = /(?<escape>\\[\\`*{}\[\]()#+.!_>~|\-])|(?<code>(?<ticks>`+)([^`]|(?!\k<ticks>)`)+\k<ticks>)|(?<strong>\*\*[^*]+\*\*|__[^_]+__)|(?<strike>~~[^~]+~~)|(?<em>\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(?<image>!\[(?<alt>[^\]]*)\]\((?<src>(?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(?<link>\[(?<label>[^\]]+)\]\((?<href>https?:\/\/[^)\s]+|mailto:[^)\s]+)\))|<(?<auto>https?:\/\/[^<>\s]+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})>|(?<url>https?:\/\/[^\s<>()]+[^\s<>().,;:!?'\"])|(?<email>\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b)/g;
+const INLINE = /(?<escape>\\[\\`*{}\[\]()#+.!_>~|\-])|(?<code>(?<ticks>`+)([^`]|(?!\k<ticks>)`)+\k<ticks>)|(?<strong>\*\*[^*]+\*\*|__[^_]+__)|(?<strike>~~[^~]+~~)|(?<em>\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(?<image>!\[(?<alt>[^\]]*)\]\((?<src>(?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(?<link>\[(?<label>[^\]]+)\]\((?<href>https?:\/\/[^)\s]+|mailto:[^)\s]+)\))|<(?<auto>https?:\/\/[^<>\s]+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})>|(?<html><[^>\n]*>)|(?<url>https?:\/\/[^\s<>()]+[^\s<>().,;:!?'\"])|(?<email>\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b)/g;
 
 export function inline(parent, text, depth = 0) {
   text = String(text);
@@ -185,6 +185,7 @@ export function inline(parent, text, depth = 0) {
     else if (g.em) parent.append(inline(el("em"), g.em.slice(1, -1), depth + 1));
     else if (g.image) parent.append(image(g.src, g.alt));
     else if (g.link) parent.append(link(g.href, g.label));
+    else if (g.html) parent.append(g.html);
     else {
       const label = g.auto ?? g.url ?? g.email;
       parent.append(link(/^https?:/.test(label) ? label : `mailto:${label}`, label));

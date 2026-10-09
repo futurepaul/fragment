@@ -230,7 +230,7 @@ export function mount(root) {
   let rosterOrigin = null;
   // Each channel's seq keeps history ordered even when a page arrives
   // backwards and several records have the same timestamp.
-  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false };
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, anchor: null };
   const workSeen = new Set();
   const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
@@ -261,6 +261,7 @@ export function mount(root) {
   }
   $("earlier").onclick = async () => {
     if (history.loading) return;
+    history.anchor = visibleAnchor();
     history.loading = true;
     const button = $("earlier");
     button.disabled = true;
@@ -569,8 +570,7 @@ export function mount(root) {
 
   function render() {
     const col = $("messages");
-    const anchor = !stuck ? [...col.children].find((node) => node.getBoundingClientRect().bottom > $("scroll").getBoundingClientRect().top) : null;
-    const top = anchor?.getBoundingClientRect().top;
+    const { node: anchor, top } = history.anchor ?? (!stuck ? visibleAnchor() : {});
     const used = new Set();
     const shown = [];
     for (const it of timeline()) {
@@ -595,6 +595,7 @@ export function mount(root) {
     renderHere();
     if (stuck) toEnd();
     else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+    if (!history.loading) history.anchor = null;
     showLatest();
   }
 
@@ -989,6 +990,14 @@ export function mount(root) {
   let caughtUp = false;
   let latestSeq = 0;
   let newMessages = 0;
+  function visibleAnchor() {
+    const top = $("scroll").getBoundingClientRect().top;
+    const node = [...$("messages").children].find((item) => item.getBoundingClientRect().bottom > top);
+    return { node, top: node?.getBoundingClientRect().top };
+  }
+  // A reader who moves while an older page is in flight chooses a new
+  // position. Automatic scroll events from restoring the anchor do not.
+  for (const event of ["wheel", "touchmove", "keydown"]) $("scroll").addEventListener(event, () => { history.anchor = null; }, { passive: true });
   function showLatest() {
     $("latest").hidden = stuck;
     $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
