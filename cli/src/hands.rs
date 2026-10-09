@@ -199,19 +199,27 @@ pub fn pair(c: &Client, name: Option<String>, mind: &str, j: bool) -> Result<()>
     let label = label_for(&machine).ok_or_else(|| crate::usage(format!("{machine:?} makes no agent's label: give another (--name)")))?;
     // paired here already: the same pairing, its mind joined again
     if let Some(p) = load()? {
-        if p.host == c.host && p.owner == me.id {
-            let keys: PairedKeys = c.call_as(c.get(&format!("/api/f/{}/keys", p.agent))?)?;
-            if keys.keys.iter().any(|k| k.npub == p.npub && k.revoked_at.is_none()) {
-                let joined = join_mind(c, mind, &p.identity)?;
-                let p = Pairing { mind: joined.or(p.mind), ..p };
-                save(&p)?;
-                crate::json_exit(j, &paired_json(&p, false));
-                println!("this machine is paired already: {} is {}'s hands ({})", p.name, p.agent, p.npub);
-                print_next(&p);
-                return Ok(());
-            }
+        // another host's or another person's pairing is theirs to end: this
+        // file holds its only key
+        if p.host != c.host || p.owner != me.id {
+            return Err(crate::usage(format!(
+                "this config holds a pairing on {} of {}'s already ({}): `fragment hands unpair` it there first, or pair with another config (XDG_CONFIG_HOME)",
+                p.host,
+                p.owner,
+                path().display()
+            )));
         }
-        // unpaired since (or another host's, or another person's): forgotten here
+        let keys: PairedKeys = c.call_as(c.get(&format!("/api/f/{}/keys", p.agent))?)?;
+        if keys.keys.iter().any(|k| k.npub == p.npub && k.revoked_at.is_none()) {
+            let joined = join_mind(c, mind, &p.identity)?;
+            let p = Pairing { mind: joined.or(p.mind), ..p };
+            save(&p)?;
+            crate::json_exit(j, &paired_json(&p, false));
+            println!("this machine is paired already: {} is {}'s hands ({})", p.name, p.agent, p.npub);
+            print_next(&p);
+            return Ok(());
+        }
+        // unpaired since (from the mind's Settings, say): forgotten here, and paired anew
         forget()?;
     }
     let agent = agent_fragment(c, &label, &username, &machine)?;
