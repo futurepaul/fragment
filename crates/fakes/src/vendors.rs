@@ -254,7 +254,10 @@ impl State {
         }
         for (i, m) in messages.iter().enumerate() {
             let blocks = m["content"].as_array().cloned().unwrap_or_default();
-            if m["role"] == "assistant" && THINKS.contains(&model.as_str()) && blocks.iter().any(|b| b["type"] == "tool_use") {
+            // a model thinks unless the call turns thinking off; only then
+            // must a tool use carry its thinking back
+            let thinks = THINKS.contains(&model.as_str()) && body["thinking"]["type"] != "disabled";
+            if m["role"] == "assistant" && thinks && blocks.iter().any(|b| b["type"] == "tool_use") {
                 let signed = blocks.first().is_some_and(|b| b["type"] == "thinking" && b["signature"].as_str().is_some_and(|s| self.signatures.contains(s)));
                 if !signed {
                     return anthropic_error(400, "invalid_request_error", &format!("messages.{i}.content.0: a turn's tool use carries back its thinking block, unchanged"));
@@ -279,7 +282,7 @@ impl State {
         let usage = json!({ "input_tokens": input, "cache_read_input_tokens": read, "cache_creation_input_tokens": write, "output_tokens": 1 });
         let mut events = vec![json!({ "type": "message_start", "message": { "id": id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": null, "usage": usage } })];
         let mut index = 0;
-        if THINKS.contains(&model.as_str()) {
+        if THINKS.contains(&model.as_str()) && body["thinking"]["type"] != "disabled" {
             let sig = self.fresh("fake-sig-");
             self.signatures.insert(sig.clone());
             events.push(json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "", "signature": "" } }));
@@ -666,6 +669,8 @@ mod tests {
             ],
             "tools": [{ "type": "function", "function": { "name": "zoom", "description": "Open a line", "parameters": { "type": "object", "properties": { "id": { "type": "integer" } } } } }],
             "tool_choice": "auto",
+            // high: a thinking model thinks (low turns thinking off)
+            "reasoning_effort": "high",
         })
     }
 

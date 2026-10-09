@@ -194,6 +194,15 @@ pub fn request(input: &Value, model: &str) -> Result<Value, Untranslatable> {
     if messages.is_empty() {
         return Err(Untranslatable("a call to Anthropic has a user's message".into()));
     }
+    // low effort (every call's unless it asks for high) thinks not at all:
+    // a model's default may think, and a compaction's thinking spent its
+    // whole budget before its line (Haiku 5.5, 2026-10-09: empty answers)
+    let think_off = input["reasoning_effort"].as_str().is_none_or(|e| e != "high");
+    if think_off {
+        for (_, blocks) in &mut messages {
+            blocks.retain(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")));
+        }
+    }
     // a conversation starts with the user's turn
     if messages[0].0 != "user" {
         messages.insert(0, ("user".into(), vec![json!({ "type": "text", "text": "(the conversation so far)" })]));
@@ -224,6 +233,9 @@ pub fn request(input: &Value, model: &str) -> Result<Value, Untranslatable> {
         out.insert("system".into(), json!(system));
     }
     out.insert("messages".into(), Value::Array(messages.into_iter().map(|(role, content)| json!({ "role": role, "content": content })).collect()));
+    if think_off {
+        out.insert("thinking".into(), json!({ "type": "disabled" }));
+    }
     let tools: Vec<Value> = input["tools"]
         .as_array()
         .into_iter()
@@ -531,7 +543,9 @@ mod tests {
     /// nothing Anthropic refuses. Method: a mind's turn translated.
     #[test]
     fn a_turn_translates() {
-        let r = request(&turn(), "claude-sonnet-5-5").unwrap();
+        let mut high = turn();
+        high["reasoning_effort"] = json!("high");
+        let r = request(&high, "claude-sonnet-5-5").unwrap();
         assert_eq!((r["model"].clone(), r["max_tokens"].clone(), r["stream"].clone()), (json!("claude-sonnet-5-5"), json!(16384), json!(true)));
         for absent in ["reasoning_effort", "stream_options", "temperature", "thinking"] {
             assert!(r.get(absent).is_none(), "{absent}");
@@ -557,6 +571,19 @@ mod tests {
         assert_eq!(r["tools"][0], json!({ "name": "zoom", "description": "Open a line", "input_schema": { "type": "object", "properties": { "id": { "type": "integer" } } } }));
         assert_eq!(r["tools"][1]["input_schema"], json!({ "type": "object", "properties": {} }));
         assert_eq!(r["tool_choice"], json!({ "type": "auto" }));
+    }
+
+    /// Goal: a call at low effort (every call's but one asking for high)
+    /// thinks not at all, and earlier thinking blocks are not sent back: a
+    /// model's default thinking spent a compaction's whole budget before its
+    /// line (Haiku 5.5 on the preview, 2026-10-09). Method: the turn at low.
+    #[test]
+    fn low_effort_thinks_not() {
+        let r = request(&turn(), "claude-haiku-5-5").unwrap();
+        assert_eq!(r["thinking"], json!({ "type": "disabled" }));
+        let m = r["messages"].as_array().unwrap();
+        assert_eq!(m[1]["content"][0]["type"], "tool_use", "no thinking block goes back");
+        assert!(!r.to_string().contains("\"signature\""));
     }
 
     /// Goal: the other shapes a caller sends translate, and what Anthropic
@@ -679,7 +706,7 @@ mod tests {
             let message = super::super::message_of(a, t.thinking_blocks());
             assert_eq!(message["thinking_blocks"][0]["signature"], "sig-1");
             // and the next call sends them back as they came
-            let next = request(&json!({ "max_tokens": 9, "messages": [{ "role": "user", "content": "q" }, message, { "role": "tool", "tool_call_id": "toolu_1", "content": "r" }, { "role": "tool", "tool_call_id": "toolu_2", "content": "d" }] }), "m").unwrap();
+            let next = request(&json!({ "max_tokens": 9, "reasoning_effort": "high", "messages": [{ "role": "user", "content": "q" }, message, { "role": "tool", "tool_call_id": "toolu_1", "content": "r" }, { "role": "tool", "tool_call_id": "toolu_2", "content": "d" }] }), "m").unwrap();
             assert_eq!(next["messages"][1]["content"][0]["signature"], "sig-1");
             assert_eq!(next["messages"][1]["content"][1], json!({ "type": "text", "text": "Let me look." }));
         }

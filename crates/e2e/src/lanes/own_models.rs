@@ -7,7 +7,7 @@
 //! - `ai`: the picker (Fragment's models, the providers offered, a choice
 //!   refused until its provider is connected); a Claude key kept by the
 //!   computer, never given back, its models listed; a job's tool turn on
-//!   Claude for chat (its thinking carried back, its prefix read from the
+//!   Claude for chat (no thinking at low effort, its prefix read from the
 //!   cache) and a step on Claude for memory, counted on the computer and
 //!   charged nothing; someone else's run in the person's fragment on
 //!   Fragment's model, as it names; Sign in with ChatGPT's tokens handed
@@ -148,13 +148,14 @@ pub(super) fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let sent = calls_since(s, from, key, "/v1/messages");
     let next = sent.get(1).map(|c| c.body.clone()).unwrap_or(Value::Null);
     s.ok(
-        "Anthropic is sent its own shape: the tool as input_schema, the turn's end marked for the cache, and the answer's thinking block carried back unchanged with its call",
+        "Anthropic is sent its own shape: the tool as input_schema, the turn's end marked for the cache, and at low effort no thinking (`thinking: disabled`, so none to carry back: a model's default thinking spent a compaction's budget on the preview)",
         sent.len() == 2
             && sent[0].body["tools"][0]["input_schema"]["required"] == json!(["word"])
             && sent[0].body["tool_choice"] == json!({ "type": "auto" })
             && marks(&sent[0].body) == 1
-            && first["message"]["thinking_blocks"][0]["type"] == "thinking"
-            && next["messages"][1]["content"][0] == first["message"]["thinking_blocks"][0]
+            && sent.iter().all(|c| c.body["thinking"] == json!({ "type": "disabled" }))
+            && first["message"].get("thinking_blocks").is_none_or(|b| b.as_array().is_none_or(|a| a.is_empty()))
+            && next["messages"][1]["content"][0]["type"] == "tool_use"
             && next["messages"][2]["content"][0]["type"] == "tool_result",
         json!(sent.iter().map(|c| c.body.clone()).collect::<Vec<_>>()),
     );
