@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use crate::http::{Handler, Request, Response, Server};
 
 /// The headers a provider takes a credential in.
-const AUTH_HEADERS: [&str; 4] = ["authorization", "x-api-key", "x-goog-api-key", "xi-api-key"];
+const AUTH_HEADERS: [&str; 5] = ["authorization", "x-api-key", "x-goog-api-key", "xi-api-key", "x-browser-use-api-key"];
 
 pub struct Upstream {
     pub url: String,

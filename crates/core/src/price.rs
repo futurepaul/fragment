@@ -267,11 +267,11 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
 ];
 /// The default book's version. A ledger takes a book only when its version
 /// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 3 since DeepSeek V4 Flash was priced
-/// (2026-10-09), past the 2 that finite.place's preview configs already
-/// carried. A deployment's `price_book_version` raises it further (its
+/// to the defaults raises it: 4 for Hermes' tool keys (2026-10-09), after
+/// 3 for DeepSeek V4 Flash, past the 2 that finite.place's preview configs
+/// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 3;
+pub const DEFAULT_BOOK_VERSION: u32 = 4;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -350,7 +350,29 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// what the vendor counts (tokens, posts, minutes), so a vendor that bills
 /// by those is priced at a typical call of the managed skill that uses it,
 /// and the estimate says what it assumes.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 4] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 8] = [
+    // X API application-bearer reads, separate from Grok's xai key:
+    // $0.005 per Post and $0.010 per User resource. The x-api-finite
+    // helper's default recent search fetches 10 posts: $0.05 assumed
+    // per request, excluding expanded users and vendor deduplication.
+    // https://docs.x.com/x-api/getting-started/pricing (2026-10-09).
+    // Variable resources per request are recorded in the debt ledger.
+    ("x", 50_000, 1),
+    // Firecrawl search: 2 credits per 10 results, Hobby PAYG $5 per
+    // 1,000 credits. One search is $0.01; a basic scrape is $0.005.
+    // https://www.firecrawl.dev/pricing (2026-10-09). The shared key is
+    // priced as a search; per-request estimates are in the debt ledger.
+    ("firecrawl", 10_000, 1),
+    // FAL FLUX.2 Klein 9B: $0.006 per megapixel, a 1 MP image assumed.
+    // https://fal.ai/models/fal-ai/flux-2/klein/9b (2026-10-09).
+    // The SDK also makes authenticated queue polls/result/upload calls;
+    // each is metered here, not only the generation (debt ledger).
+    ("fal", 6_000, 1),
+    // Browser Use: $0.02 per browser-hour, $5/GB residential proxy.
+    // https://browser-use.com/pricing (2026-10-09). A control request is
+    // estimated as a 5-minute session, excluding proxy traffic, rounded
+    // up to a micro-dollar; create and stop are separate metered calls.
+    ("browser-use", 20_000, 12),
     // Perplexity's Search API (`POST /search`, the perplexity-research
     // skill's search and Hermes' own web search): $5.00 per 1,000
     // requests. Source: docs.perplexity.ai/getting-started/pricing. A Sonar
@@ -589,7 +611,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 3);
+        assert_eq!(book.version, 4);
         assert_eq!(book.models.len(), 4);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -709,6 +731,10 @@ mod tests {
         assert_eq!(call("google-places"), Priced { list: 35_000, cost: 35_000, charge: 52_500 }, "$35 per 1,000 Enterprise text searches");
         assert_eq!(call("xai"), Priced { list: 120_000, cost: 120_000, charge: 180_000 });
         assert_eq!(call("elevenlabs"), Priced { list: 150_000, cost: 150_000, charge: 225_000 }, "a minute of music");
+        assert_eq!(call("firecrawl"), Priced { list: 10_000, cost: 10_000, charge: 15_000 }, "two Hobby PAYG credits");
+        assert_eq!(call("x"), Priced { list: 50_000, cost: 50_000, charge: 75_000 }, "ten post resources");
+        assert_eq!(call("fal"), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "one MP Klein 9B image");
+        assert_eq!(call("browser-use"), Priced { list: 1_667, cost: 1_667, charge: 2_500 }, "five browser minutes");
         assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
         assert_eq!(default_key_price("nonesuch"), None);
     }

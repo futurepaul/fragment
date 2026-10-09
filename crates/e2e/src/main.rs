@@ -93,15 +93,19 @@ pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
 /// platform's own catalog, as the hosted e2e deploys it
-/// (`deploy/e2e.jsonc`: Google, and the Perplexity, Google Places, xAI and
-/// ElevenLabs operator keys, at their real hosts, which the swap sends to
+/// (`deploy/e2e.jsonc`: Google, and all eight operator keys, at their real
+/// hosts, which the swap sends to
 /// the upstream fake), each key a test value; and an own key's provider
 /// behind basic auth, the e2e's alone.
 pub const SWAP_CONNECTION: &str = "google";
 pub const SWAP_CONNECTION_HOST: &str = "www.googleapis.com";
 pub const SWAP_CONNECTION_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
 /// The operator keys, each its test value and its environment variable.
-pub const SWAP_KEYS: [(&str, &str, &str); 4] = [
+pub const SWAP_KEYS: [(&str, &str, &str); 8] = [
+    ("x", "x-bearer-e2e-51a3", "X_API_BEARER_TOKEN"),
+    ("firecrawl", "fc-e2e-631b", "FIRECRAWL_API_KEY"),
+    ("fal", "fal-e2e-920a", "FAL_KEY"),
+    ("browser-use", "bu-e2e-a278", "BROWSER_USE_API_KEY"),
     ("perplexity", "pplx-e2e-7f3a9c", "PERPLEXITY_API_KEY"),
     ("google-places", "AIza-e2e-places-51b2", "GOOGLE_PLACES_API_KEY"),
     ("xai", "xai-e2e-0c4d22", "XAI_API_KEY"),

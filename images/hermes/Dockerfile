@@ -123,6 +123,7 @@ RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate
  && chmod 755 /usr/local/bin/computer-check
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
+COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
@@ -160,19 +161,19 @@ RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).re
 
 # What our agents use is in the image, never installed at run time (lazy
 # installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
-# text_to_speech speaks with Edge, its default provider, whose SDK is an
-# optional extra (`edge-tts`) Hermes' image leaves to a first-use install:
-# with installs off, Hermes never offers text_to_speech. Installed here into
+# keyless text_to_speech speaks with Edge; operator-backed tools also need
+# Firecrawl, FAL and ElevenLabs. Upstream leaves those extras to a first-use
+# install, which is off here. Installed here into
 # Hermes' venv by its PM's own uv, at the versions and hashes its uv.lock
-# pins (the extra's two packages; the rest are there at the same pins), its
+# pins (the existing packages remain at those same pins), its
 # environment lock removed as upstream removes it after its own builds. The
 # build fails unless Hermes' PM reads the extra available.
 RUN cd /opt/hermes \
  && uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
- && "$uv" export --frozen --no-default-groups --no-emit-project --extra edge-tts --format requirements-txt --output-file /tmp/edge-tts.txt > /dev/null \
+ && "$uv" export --frozen --no-default-groups --no-emit-project --extra edge-tts --extra firecrawl --extra fal --extra tts-premium --format requirements-txt --output-file /tmp/edge-tts.txt > /dev/null \
  && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --python /opt/hermes/.venv/bin/python --require-hashes --no-build -r /tmp/edge-tts.txt \
  && rm -rf /tmp/uv-cache /tmp/edge-tts.txt /opt/hermes/.venv/.lock \
- && /opt/hermes/.venv/bin/python -c 'from pm.extras import available; assert available("edge-tts"), "edge-tts is not in the venv"'
+ && /opt/hermes/.venv/bin/python -c 'from pm.extras import available; assert all(available(e) for e in ("edge-tts", "firecrawl", "fal", "tts-premium")), "a tool extra is not in the venv"'
 
 # Hermes' document skills carry deterministic create/read/render helpers,
 # but its desktop image leaves their Python dependencies uninstalled. Bake

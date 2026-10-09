@@ -26,8 +26,9 @@ Use this skill when:
 Your computer holds no keys: `X_API_BEARER_TOKEN` holds the operator's
 key's placeholder (it names you), the helper sends it to `api.x.com` as a
 bearer token, and the computer swaps in the real one, metered to your
-owner. Unset, this deployment does not offer the `x` key (the platform
-does not yet): say so rather than hunting for one.
+owner. Unset, this deployment does not offer the `x` key: say so rather
+than hunting for one. This is separate from `XAI_API_KEY`, which powers
+Grok's native `x_search` and the `x-search` skill.
 
 Use the local helper directly:
 

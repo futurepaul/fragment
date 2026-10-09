@@ -92,7 +92,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | `dynamic_workers` | unique dynamic workers per UTC day | $0.002 each | Dynamic Workers pricing |
 | `browser` | ms of Browser Rendering | $0.09 an hour | Browser Run pricing (developers.cloudflare.com/browser-run/pricing, updated 2026-04-21): $0.09 per browser hour past the 10 a month Workers Paid includes |
 | `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
-| `key` | calls the provider answered | per call at list: Perplexity $0.005, Google Places $0.035, xAI $0.12, ElevenLabs $0.15 (`micros` per `per` calls), or the price a catalog row names | each vendor's pricing page (`DEFAULT_KEYS` in `price.rs`, each with its source and what an estimate assumes); the book's `keys` are the deployment's catalog's operator rows |
+| `key` | calls the provider answered | per call at list: Firecrawl $0.01, FAL $0.006, Browser Use $0.02/12, Perplexity $0.005, Google Places $0.035, xAI $0.12, X API $0.05, ElevenLabs $0.15 (`micros` per `per` calls), or the price a catalog row names | each vendor's pricing page (`DEFAULT_KEYS` in `price.rs`, each with its source and what an estimate assumes); the book's `keys` are the deployment's catalog's operator rows |
 
 Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
@@ -101,9 +101,9 @@ calls. The defaults are consts in `price.rs`, each with its source. The
 operator's book comes from the deploy's configuration and is versioned:
 a ledger takes only a newer version, and a hold keeps the price it was
 held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 3 since
-DeepSeek V4 Flash was priced), so a change to the defaults reaches every
-ledger at its next call.
+`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 4 since
+Hermes' tool keys were priced, after 3 for DeepSeek V4 Flash), so a change
+to the defaults reaches every ledger at its next call.
 
 A model call that fell back (docs/api.md, Models) keeps its one hold,
 reserved at its tier's model's worst case, and is settled from the
