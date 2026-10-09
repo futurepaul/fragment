@@ -733,6 +733,17 @@ fn machine_hands(s: &mut Suite, api: &Api, owner: &Keys, mind: &str, cloud: &str
     // ---- stopped: offline, and a task on it is refused at once
     let stopped = run.stop();
     s.ok("fragment hands run stops cleanly on SIGTERM", stopped.is_some_and(|st| st.success()), format!("{stopped:?}"));
+    // goose itself on the machine, when this run is given one
+    match std::env::var_os("FRAGMENT_GOOSE_BIN").map(std::path::PathBuf::from).filter(|g| g.is_file()) {
+        None => s.skip("goose itself on a paired machine", "this run names no goose (FRAGMENT_GOOSE_BIN: a build of the fork, images/goose/Dockerfile)"),
+        Some(goose) => {
+            if s.eventually(WAKE, || here(false)) {
+                goose_on_machine(s, api, owner, mind, &machine, &home, &bridge, &goose)?;
+            } else {
+                s.fail("goose itself on a paired machine", "the scripted run's socket outlived it");
+            }
+        }
+    }
     let offline = s.eventually(WAKE, || here(false));
     s.ok("stopped, the machine is offline", offline, "");
     let r = say("m22", json!({ "text": padded("once more [[call computer {\"task\": \"oil the hinges\", \"on\": \"e2e-box\"}]]"), "thread": shop, "persona": "builder" }))?;
@@ -756,6 +767,77 @@ fn machine_hands(s: &mut Suite, api: &Api, owner: &Keys, mind: &str, cloud: &str
     );
     let status = s.cli_json(api, &home, &["hands", "status", "--json"])?;
     s.ok("and forgets the pairing here", status["paired"] == false, &status);
+    Ok(())
+}
+
+/// Processes whose working directory is under `dir` (Linux's /proc): what a
+/// stopped `hands run` must not leave behind.
+fn left_in(dir: &std::path::Path) -> Vec<String> {
+    let Ok(procs) = std::fs::read_dir("/proc") else { return vec![] };
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    procs
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+        .filter(|e| std::fs::read_link(e.path().join("cwd")).is_ok_and(|cwd| cwd.starts_with(&dir)))
+        .map(|e| format!("{} {}", e.file_name().to_string_lossy(), std::fs::read_to_string(e.path().join("comm")).unwrap_or_default().trim()))
+        .collect()
+}
+
+/// goose itself on the paired machine (`FRAGMENT_GOOSE_BIN`): the real
+/// runtime under `fragment hands run`, on the Workers AI fake through the
+/// proxy's model route. A task on the machine runs a turn whose model call
+/// is told it works on its owner's own machine, offered goose's shell and
+/// the mind's tools (and the web's, with fragment-desktop built) and no
+/// screen's or browser's; the fake asks for a shell command, goose runs it
+/// in the machine's work folder, and the report quotes it. Stopped, nothing
+/// of it is left running in that folder.
+#[allow(clippy::too_many_arguments)]
+fn goose_on_machine(s: &mut Suite, api: &Api, owner: &Keys, mind: &str, machine: &str, home: &std::path::Path, bridge: &std::path::Path, goose: &std::path::Path) -> Result<()> {
+    let dir = s.dir("hands-goose");
+    let log = std::fs::File::create(s.scratch.join("hands-goose.log"))?;
+    let desktop = bridge.with_file_name("fragment-desktop");
+    let mut cmd = s.bare_cli();
+    cmd.args(["hands", "run", "--no-browser", "--goose"]).arg(goose).arg("--bridge").arg(bridge).arg("--dir").arg(&dir).env("HOME", home).stdout(log.try_clone()?).stderr(log);
+    if desktop.is_file() {
+        cmd.arg("--desktop").arg(&desktop);
+    }
+    let mut run = HandsRun { child: Some(cmd.spawn().context("fragment hands run, goose")?) };
+    let online = s.eventually(WAKE, || {
+        api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": mind, "op": "here", "principal": machine }))).ok().is_some_and(|r| r.body["here"] == true)
+    });
+    s.ok("goose's run brings the machine online", online, s.scratch.join("hands-goose.log").display());
+    let thread = "t_00112233445566ee";
+    let say = |id: &str, body: Value| api.signed(owner, "POST", &format!("/api/f/{mind}/channels/say"), Some(&json!({ "id": id, "body": body })));
+    let text = "goose, prove it [[call computer {\"task\": \"make the proof [[call shell {\\\"command\\\": \\\"echo machine-hands > proof.txt && cat proof.txt\\\"}]]\", \"on\": \"e2e-box\"}]]";
+    let r = say("m30", json!({ "text": padded(text), "thread": thread, "persona": "builder" }))?;
+    anyhow::ensure!(r.status == 200, "saying m30: {r}");
+    let reported = |m: &Value| m["kind"] == "work" && m["text"].as_str().is_some_and(|t| t.contains("machine-hands"));
+    let done = s.eventually(Duration::from_secs(240), || messages(api, owner, mind, thread).iter().any(reported));
+    let proof = std::fs::read_to_string(dir.join("work/proof.txt")).unwrap_or_default();
+    let steps: Vec<Value> = records(api, owner, mind, "work").into_iter().filter(|r| r["principal"] == machine && r["body"]["kind"] == "turn.step").collect();
+    s.ok(
+        "goose takes the task on the machine, runs its shell in the machine's work folder, and the report quotes it",
+        done && proof == "machine-hands\n" && steps.iter().any(|r| r["body"]["tool"] == "shell" && r["body"]["ok"] == true),
+        json!({ "proof": proof, "steps": steps, "said": messages(api, owner, mind, thread) }),
+    );
+    let call = s.ai.chats().into_iter().find(|c| {
+        c["messages"].as_array().is_some_and(|m| m.iter().any(|m| m["content"].to_string().contains("make the proof")))
+            && c["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "shell"))
+    });
+    let tools: Vec<String> = call.as_ref().and_then(|c| c["tools"].as_array()).map(|t| t.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let system = call.as_ref().map(|c| c["messages"][0]["content"].to_string()).unwrap_or_default();
+    s.ok(
+        "its model call is told it works on its owner's own machine, with goose's shell and the mind's tools, and no screen's or browser's",
+        system.contains("your owner's own machine")
+            && tools.iter().any(|t| t == "mind__view")
+            && (!desktop.is_file() || tools.iter().any(|t| t == "web__web_search"))
+            && !tools.iter().any(|t| t.starts_with("computer__") || t.starts_with("browser__")),
+        json!({ "tools": tools }),
+    );
+    let stopped = run.stop();
+    std::thread::sleep(Duration::from_millis(500));
+    let left = left_in(&dir);
+    s.ok("stopped, goose and everything it started stop with it", stopped.is_some_and(|st| st.success()) && left.is_empty(), json!({ "status": format!("{stopped:?}"), "left": left }));
     Ok(())
 }
 

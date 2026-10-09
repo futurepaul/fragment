@@ -183,19 +183,37 @@ fn last_words(content: &Value) -> String {
 }
 
 /// A tool call a message asks for: `[[call NAME {json}]]`, its arguments
-/// the one JSON value after the name.
+/// the one JSON value after the name: the first that reads.
 pub fn directive(text: &str) -> Option<(String, Value)> {
-    let rest = &text[text.find("[[call ")? + "[[call ".len()..];
-    let (name, rest) = rest.split_once(' ')?;
-    let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
-    let args = values.next()?.ok()?;
-    rest[values.byte_offset()..].trim_start().starts_with("]]").then(|| (name.to_string(), args))
+    directives(text).into_iter().next()
+}
+
+/// Every tool call a text asks for, in order: each `[[call NAME {json}]]`
+/// that reads. A text that carries others' words first (an agent's prompt:
+/// a mind's view, then its task) asks for the first a call offers.
+pub fn directives(text: &str) -> Vec<(String, Value)> {
+    let mut out = vec![];
+    let mut from = 0;
+    // bounded: each pass moves past one `[[call `
+    while let Some(at) = text[from..].find("[[call ") {
+        let start = from + at + "[[call ".len();
+        from = start;
+        let rest = &text[start..];
+        let Some((name, rest)) = rest.split_once(' ') else { continue };
+        let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        let Some(Ok(args)) = values.next() else { continue };
+        if rest[values.byte_offset()..].trim_start().starts_with("]]") {
+            out.push((name.to_string(), args));
+        }
+    }
+    out
 }
 
 /// The answer a call gets when no test scripted one and no agent runtime
 /// reads it: a tool call its last message (a person's or a tool's) asks
-/// for with `[[call NAME {json}]]`, when the call offers that tool and does
-/// not say `tool_choice: "none"` (as a model calls none then); else, after
+/// for with `[[call NAME {json}]]` (the first one a call offers), when the
+/// call offers that tool and does not say `tool_choice: "none"` (as a
+/// model calls none then); else, after
 /// a tool's result, `TOOL_SAID` and the result's first `TOOL_SAID_CHARS`
 /// characters; else an echo of its last message.
 pub fn plain_reply(body: &Value) -> Reply {
@@ -203,7 +221,7 @@ pub fn plain_reply(body: &Value) -> Reply {
     let said = text_of(&last["content"]);
     let offered = |name: &str| body["tool_choice"] != "none" && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     if last["role"] == "user" || last["role"] == "tool" {
-        if let Some((name, args)) = directive(&last_words(&last["content"])).filter(|(name, _)| offered(name)) {
+        if let Some((name, args)) = directives(&last_words(&last["content"])).into_iter().find(|(name, _)| offered(name)) {
             return Reply::Tools(vec![(name, args)]);
         }
     }
@@ -677,6 +695,9 @@ mod tests {
             { "type": "text", "text": "now [[call lookup {\"word\": \"new\"}]]" },
         ] }], "tools": lookup_tools() });
         assert!(matches!(plain_reply(&parts), Reply::Tools(c) if c[0].1 == json!({ "word": "new" })), "of a message in parts, the words of its last");
+        // an agent's one prompt: a view's old asks of tools it lacks, then its own
+        let one = ask("<chat>\n3+1|user: when [[call date {\"id\": 0}]]\n</chat>\nnow [[call lookup {\"word\": \"mine\"}]]", lookup_tools());
+        assert!(matches!(plain_reply(&one), Reply::Tools(c) if c[0] == ("lookup".to_string(), json!({ "word": "mine" }))), "the first a call offers");
         let none = json!({ "messages": [{ "role": "user", "content": "[[call lookup {}]]" }], "tools": lookup_tools(), "tool_choice": "none" });
         assert!(matches!(plain_reply(&none), Reply::Text(t) if t.starts_with("echo: ")), "tools offered, none to be called (a compaction)");
     }

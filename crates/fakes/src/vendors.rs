@@ -47,7 +47,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::http::{Handler, Request, Response, Server};
-use crate::workers_ai::{directive, Reply, CHARS_PER_TOKEN, PIECES, TOOL_SAID, TOOL_SAID_CHARS};
+use crate::workers_ai::{directives, Reply, CHARS_PER_TOKEN, PIECES, TOOL_SAID, TOOL_SAID_CHARS};
 
 /// A key both vendors refuse (401).
 pub const BAD_KEY: &str = "sk-ant-refused";
@@ -136,13 +136,13 @@ fn tokens_of(s: &str) -> u64 {
     (s.len() / CHARS_PER_TOKEN).max(1) as u64
 }
 
-/// The `[[call NAME {json}]]` a text asks for, when the call offers it.
+/// The first `[[call NAME {json}]]` a text asks for that the call offers.
 fn reply_to(text: Option<&str>, result: Option<&str>, offered: &dyn Fn(&str) -> bool) -> Reply {
     if let Some(r) = result {
         return Reply::Text(format!("{TOOL_SAID}{}", r.chars().take(TOOL_SAID_CHARS).collect::<String>()));
     }
     let text = text.unwrap_or("");
-    match directive(text).filter(|(name, _)| offered(name)) {
+    match directives(text).into_iter().find(|(name, _)| offered(name)) {
         Some(call) => Reply::Tools(vec![call]),
         None => Reply::Text(format!("echo: {text}")),
     }
