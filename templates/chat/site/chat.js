@@ -471,7 +471,7 @@ export function mount(root) {
   // ---- records ----
   function turnOf(id) {
     if (!state.turns.has(id)) {
-      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), end: null });
+      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
     return state.turns.get(id);
   }
@@ -486,6 +486,9 @@ export function mount(root) {
   const expired = (p) => Number.isFinite(p.expiresAt) && Date.now() > p.expiresAt;
   // a turn waiting on a person: its open card says so, not a working line
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
+  // a turn waiting on its asker's words (`turn.asked`): until they say
+  // something to the chat after it, or the turn goes on or ends
+  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -543,7 +546,12 @@ export function mount(root) {
     const t = turnOf(b.turn);
     t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
     touch(t, record.at, n);
-    if (b.kind === "turn.start") {
+    // the turn went on past its question: it waits on no one now
+    if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
+    if (b.kind === "turn.asked" && typeof b.asks === "string") {
+      if (!t.asked || record.seq > t.asked.seq) t.asked = { asks: b.asks, at: record.at, seq: record.seq };
+      want(b.asks);
+    } else if (b.kind === "turn.start") {
       t.asker = typeof b.asker === "string" ? b.asker : null;
       t.cause = b.cause ?? null;
       t.startAt = record.at;
@@ -624,7 +632,7 @@ export function mount(root) {
       items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", turn, d });
     }
     for (const t of state.turns.values()) {
-      if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: "working", t });
+      if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -675,6 +683,8 @@ export function mount(root) {
         return noticeNode(it.t, it.x);
       case "draft":
         return draftNode(it.turn, it.d);
+      case "asked":
+        return askedNode(it.t);
       default:
         return workingNode(it.t);
     }
@@ -730,13 +740,17 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      input.placeholder = mine
-        ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
-        : !firstName
-          ? "Message"
-          : others
-            ? `Message ${firstName}, or @ someone else`
-            : `Message ${firstName}`;
+      // an agent waiting on this person's words: what they type is the answer
+      const askedMe = [...state.turns.values()].find((t) => waitsOnWords(t) && t.asked.asks === state.me?.principal);
+      input.placeholder = askedMe
+        ? `Your answer for ${who(askedMe.agent).name}`
+        : mine
+          ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
+          : !firstName
+            ? "Message"
+            : others
+              ? `Message ${firstName}, or @ someone else`
+              : `Message ${firstName}`;
     }
     refreshSend();
   }
@@ -1132,6 +1146,25 @@ export function mount(root) {
         const dots = el("span", "dots");
         dots.append(el("i"), el("i"), el("i"));
         if (!late && phase !== "wont_wake") hint.append(dots);
+        hint.append(said);
+        line.append(hint);
+        return line;
+      }),
+    ];
+  }
+
+  // A turn waiting on its asker's words, in place of its working line: whose.
+  function askedNode(t) {
+    const asks = t.asked.asks;
+    const said = asks === state.me?.principal ? "Waiting for your answer" : `Waiting for ${who(asks).name}'s answer`;
+    const key = `q:${t.id}`;
+    return [
+      key,
+      cached(key, said, () => {
+        const line = el("div", "msg working asked");
+        line.dataset.turn = t.id;
+        const hint = el("span", "hint");
+        hint.innerHTML = svg("asked");
         hint.append(said);
         line.append(hint);
         return line;

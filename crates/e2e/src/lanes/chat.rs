@@ -7,7 +7,11 @@
 //! say: an agent's name (`__people`), the members (`__members`), and an
 //! editor's upload (`PUT __blob/<sha256>`). Then the owner, signed in on
 //! the chat's page, types and presses Enter, and sees the agent's draft
-//! live, then its reply; a tool step as a card; an approval card they
+//! live, then its reply; a tool step as a card, saying what it does
+//! ("Searching the web: …"); the runtime's notices as quiet lines of the
+//! turn, the one after its end too; a question asked to be answered in
+//! words, the page waiting for their answer until they give it; an
+//! approval card they
 //! answer with its button, which another member sees but may not press;
 //! a card of choices whose last is answered in words, typed on the card
 //! and sent with Enter;
@@ -260,6 +264,23 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
     let _ = chrome.screenshot(&page, &shots.join("desktop-notices.png"));
 
+    // a question the agent asks to be answered in words (as Hermes' clarify
+    // asks one): no working line, but whose answer it waits for, and the
+    // composer says what they type is it; their next message answers it
+    say(&mut chrome, "name my plant, ask-me")?;
+    let waits = "[...document.querySelectorAll('.msg.working.asked')].some((w) => w.textContent === 'Waiting for your answer') && !document.querySelector('.msg.working:not(.asked)')";
+    let answer_here = format!("document.getElementById('text').placeholder === {}", js(&format!("Your answer for {}", capital(&label))));
+    let asked = shows(&mut chrome, &page, &format!("{} && {waits} && {answer_here}", replied("What should I call it?")));
+    s.ok(
+        "asked in words, the page says it waits for the owner's answer, and the composer that what they type answers it",
+        asked,
+        chrome.eval(&page, "[document.getElementById('messages').innerText.slice(-300), document.getElementById('text').placeholder]")?,
+    );
+    let _ = chrome.screenshot(&page, &shots.join("desktop-asked.png"));
+    say(&mut chrome, "Sprout")?;
+    let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.asked') && !({answer_here})", replied("(told: Sprout)")));
+    s.ok("their next message is the answer: the turn goes on with it, and nothing waits", answered, chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?);
+
     // an @mention: the composer offers the chat's agents, and the message is `to` the one picked
     chrome.click(&page, "#text")?;
     chrome.type_text(&page, &format!("@{}", &label[..3]))?;
@@ -447,7 +468,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn", turns.len() == 10 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn", turns.len() == 11 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 

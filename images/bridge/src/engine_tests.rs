@@ -683,10 +683,16 @@ fn a_question_is_answered_by_the_next_message() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "keep my garden notes" }), T0)).expect("started").turn;
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "What do you plant?".into() }, T0 + 1);
     let asked = ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2);
-    assert_eq!(posts(&asked), vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn }))], "the question shows at once");
+    assert_eq!(
+        posts(&asked),
+        vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn })), (records::work_id(&turn, "q1"), json!({ "kind": "turn.asked", "turn": turn, "asks": "npub1paul" }))],
+        "the question shows at once, then whose answer it waits for"
+    );
     assert!(asked.dirty);
     assert!(e.state().turns[&turn].asking);
     assert_eq!(keepalive(&asked), None, "still running: the computer stays up");
+    // replay: the runtime saying it asks again, before an answer, posts nothing more
+    assert!(posts(&ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2)).is_empty());
 
     // invalid: another person's message, an empty one, one to the other agent
     let skyler = said(&mut e, &a, &v, 2, "npub1skyler", json!({ "text": "tomatoes?" }), T0 + 3);

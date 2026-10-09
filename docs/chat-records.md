@@ -49,8 +49,9 @@ at most 16. A turn's records, in order:
 
 1. `turn.start` on `work`: its claim, posted before its runtime hears of
    it (`work`, below);
-2. any number of `turn.step`, replies on `chat`, and `turn.prompt`
-   (each `turn.prompt` followed by its `turn.prompt.closed`);
+2. any number of `turn.step`, replies on `chat`, `turn.prompt` (each
+   followed by its `turn.prompt.closed`), `turn.asked` and `turn.notice`
+   (and a notice may follow the end: `turn.notice`, below);
 3. `turn.end` on `work`.
 
 Every turn has both its start and its end, one of each: a turn refused
@@ -286,6 +287,21 @@ across a restart, and the agent's next turn is told the card was cut
 with it), or `stopped`.
 
 ```json
+{ "kind": "turn.asked", "turn": "…", "asks": "npub1…" }
+```
+
+Part `q<part>`: the turn asks `asks` (its asker) something to answer in
+words, the question being its reply part `<part>`, and waits, running,
+for their next message to the agent in the chat, which is the answer
+(above, "A person's message"). Posted once a question, after the reply
+that asks it; a runtime saying it asks again before an answer posts
+nothing more. Nothing records the answer on `work`: a page takes the
+turn as waiting on `asks` until `asks` posts a message on `chat` (no
+`turn`) at or after the record's `at`, or a later record of the turn's
+on `work` (a step, a card, a notice, its end) says it went on. A
+`turn.asked` without `asks` as a string is not one.
+
+```json
 { "kind": "turn.notice", "turn": "…", "category": "memory",
   "text": "Self-improvement review: Memory updated" }
 ```
@@ -387,7 +403,11 @@ one answered in words); a
 reply; a runtime's notice, quietly, its category's icon beside its
 words; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft shows after the turn's last record, and while
-a turn runs with no draft nor open card, a working line does.
+a turn runs with no draft nor open card, a working line does: "Waiting
+for your answer" in its place while the turn waits on the page's person's
+words (`turn.asked`), its composer saying what they type answers it
+("Your answer for Juniper"), or whose answer it waits for, to anyone
+else.
 
 Load earlier messages reads older pages of both channels, keeping the
 visible message in place and the live cursor at its end. When scrolled

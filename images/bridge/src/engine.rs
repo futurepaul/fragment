@@ -72,10 +72,11 @@
 //!   own, the chat's turns stopped, a message, or said beside the running
 //!   turn (`Command::Aside`, no turn). The menu is posted in a chat as the
 //!   agent first runs there in a life.
-//! - A turn that asks its asker something in words (`Asked`) takes their
-//!   next message in the chat as its answer (`Tell`), never as a turn
-//!   behind it. It is a running turn of this life: a restart ends it as
-//!   lost, and that message, read by the next life, is a turn of its own.
+//! - A turn that asks its asker something in words (`Asked`) says so
+//!   (`turn.asked`) and takes their next message in the chat as its answer
+//!   (`Tell`), never as a turn behind it. It is a running turn of this
+//!   life: a restart ends it as lost, and that message, read by the next
+//!   life, is a turn of its own.
 //! - The computer is kept awake while a turn waits to run, runs, or waits
 //!   on its card (at most the card's life), so a card expires with its
 //!   runtime there and its turn ends as the runtime ends it, never cut by an
@@ -1258,13 +1259,17 @@ impl Engine {
             }
             Event::Prompt { turn, prompt, text, options, ttl_ms } => self.prompt(&turn, prompt, text, options, ttl_ms),
             Event::Asked { turn } => {
-                // the question shows before the answer it waits for
+                // the question shows before the answer it waits for, and the
+                // chat is told whose answer it waits for (`turn.asked`, once
+                // a question: the part asking it is in its id)
                 self.seal(&turn);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 if !t.asking {
                     t.asking = true;
                     self.dirty = true;
                     crate::ev!("turn.asked", { "turn": turn });
+                    let (agent, fragment, id, body) = (t.agent.clone(), t.fragment.clone(), records::work_id(&turn, &format!("q{}", t.last_part)), records::turn_asked(&turn, &t.asker));
+                    self.post(&agent, &fragment, records::WORK, id, body, Vec::new());
                 }
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),

@@ -1798,6 +1798,35 @@ fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -
     move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: a question in words left
+/// the page saying "Juniper is working"): real Hermes' open clarify (no
+/// choices: `❓ <question>`) is the turn's reply, then a `turn.asked` naming
+/// its asker, once; the asker's next message is its answer, and the turn's
+/// reply after quotes it.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_question_in_words_says_whose_answer_it_waits_for() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify: What should I call the plant?" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let asked = |w: &support::fake::World| w.bodies(&chat, "work", "turn.asked").into_iter().filter(|a| a["turn"] == turn).collect::<Vec<_>>();
+    within(&fake, &chat, &c, 120_000, "the question, and whose answer it waits for", |w| !asked(w).is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(asked(w), vec![json!({ "kind": "turn.asked", "turn": turn, "asks": person("paul") })]);
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.len() == 1 && replies[0].starts_with("What should I call the plant?"), "the question is its reply, before: {replies:?}");
+    });
+    fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    fake.with(|w| {
+        let replies: Vec<String> = w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(replies.last().is_some_and(|r| r.contains("Fernando")), "the answer reached the clarify: {replies:?}");
+        assert_eq!(asked(w).len(), 1, "asked once");
+        let started = w.bodies(&chat, "work", "turn.start").len();
+        assert_eq!(started, 2, "the answer started no turn of its own (hello, then this one)");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a step read as its raw
 /// tool name and its arguments cut at 40 characters): real Hermes' progress
 /// lines are steps that say what they do. Its terminal's fenced block, its

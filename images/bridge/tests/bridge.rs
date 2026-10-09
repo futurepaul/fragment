@@ -249,6 +249,8 @@ async fn a_question_answered_in_words() {
         assert_eq!(started, vec![json!(turn), json!(turn_of("juniper", &chat, seq(&other)))], "the answer started no turn; skyler's ran after");
         assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
         assert!(w.bodies(&chat, "work", "turn.end").iter().all(|e| e["outcome"] == "idle"));
+        // the chat was told whose answer the turn waited for, once
+        assert_eq!(w.bodies(&chat, "work", "turn.asked"), vec![json!({ "kind": "turn.asked", "turn": turn, "asks": person("paul") })]);
     });
     bridge.stop().await;
 }

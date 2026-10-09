@@ -245,6 +245,11 @@ async fn other_answered_in_words_through_the_relay() {
     let p = fake.with(|w| work_of(w, &chat, &again, "turn.prompt")[0].clone());
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
     fake.until(WAIT, "Hermes' ask for words", |w| replies(w, &chat).iter().any(|r| r["turn"] == again.as_str() && r["text"] == "Type your answer:")).await;
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &chat, &again, "turn.asked"), vec![json!({ "kind": "turn.asked", "turn": again, "asks": "npub1paul" })]);
+        assert!(work_of(w, &chat, &turn, "turn.asked").is_empty(), "words given on the card ask nothing");
+    });
     fake.say(&chat, &person("paul"), json!({ "text": "green" }));
     fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
     fake.with(|w| {

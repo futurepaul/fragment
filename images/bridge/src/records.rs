@@ -453,6 +453,12 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     body
 }
 
+/// A turn asking `asks` something to answer in words: their next message
+/// to the agent in the chat is the answer.
+pub fn turn_asked(turn: &str, asks: &str) -> Value {
+    json!({ "kind": "turn.asked", "turn": turn, "asks": asks })
+}
+
 /// What a runtime's notice is about (docs/chat-records.md, `turn.notice`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeCategory {
@@ -738,6 +744,7 @@ mod tests {
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }));
+        assert_eq!(turn_asked("t", "npub1p"), json!({ "kind": "turn.asked", "turn": "t", "asks": "npub1p" }));
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
         assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);

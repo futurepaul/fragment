@@ -54,7 +54,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
-| `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
+| `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
 | `Notice {agent, fragment, category, text}` | a notice, neither a step nor a reply: a `turn.notice` of the agent's turn running in that chat, or of the last this life ran there (none: not posted) |
