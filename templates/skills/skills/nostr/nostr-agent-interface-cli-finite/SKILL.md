@@ -1,6 +1,6 @@
 ---
 name: nostr-agent-interface-cli-finite
-description: Use the Nostr Agent Interface CLI specifically for schema-discovered relay reads, NIP-19 conversion and signed events. Requires its source-built CLI; not a general social-media skill.
+description: "Use the Nostr Agent Interface CLI specifically for schema-discovered relay reads, NIP-19 conversion and signed events. Requires its source-built CLI; not a general social-media skill."
 license: MIT
 compatibility: Requires a local installation of nostr-agent-interface or a checked-out repo with build/app/index.js present.
 metadata:

@@ -1,6 +1,6 @@
 ---
 name: trading-agent-finite
-description: Build sourced stock/crypto/macro comparisons and Plotly market charts with yfinance, CCXT and public FRED data. Analysis only; no order execution.
+description: "Build sourced stock/crypto/macro comparisons and Plotly market charts with yfinance, CCXT and public FRED data. Analysis only; no order execution."
 tags: [finance, trading, charts, macro, crypto, stocks, polymarket]
 ---
 

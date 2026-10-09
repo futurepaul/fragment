@@ -1,6 +1,6 @@
 ---
 name: cocod-finite
-description: Operate the cocod Cashu wallet: ecash tokens, Lightning payments and NUT-24 HTTP 402 payment requests. Requires an initialized operator-provisioned wallet; no exchange trading.
+description: "Operate the cocod Cashu wallet: ecash tokens, Lightning payments and NUT-24 HTTP 402 payment requests. Requires an initialized operator-provisioned wallet; no exchange trading."
 compatibility: Requires cocod CLI to be installed. Supports Cashu ecash protocol, Lightning Network payments, and NUT-24 HTTP 402 X-Cashu flows.
 metadata:
   project: cocod

@@ -1,6 +1,6 @@
 ---
 name: music-generation-finite
-description: Execute direct ElevenLabs Music v2.5 or FAL MiniMax Music requests with operator credentials. Use Hermes songwriting-and-ai-music for composition and general music planning.
+description: "Execute direct ElevenLabs Music v2.5 or FAL MiniMax Music requests with operator credentials. Use Hermes songwriting-and-ai-music for composition and general music planning."
 version: 1.1.0
 metadata:
   hermes:

@@ -15,7 +15,16 @@ assert load_background_review_settings()[0]
 assert curator.is_enabled() and not curator.get_consolidate()
 names = {t['function']['name'] for t in get_tool_definitions(enabled_toolsets=['skills', 'memory'], quiet_mode=True)}
 assert {'skill_manage', 'memory'} <= names
-baseline = Path('/data/hermes/managed-skills/research/model-council-finite')
+from agent.skill_utils import parse_frontmatter
+managed = Path('/data/hermes/managed-skills')
+for relative in ['finance/cocod-finite', 'finance/trading-agent-finite', 'nostr/nostr-agent-interface-cli-finite', 'music-generation-finite', 'research/polymarket-finite', 'social-media/x-api-finite']:
+    fm, _ = parse_frontmatter((managed / relative / 'SKILL.md').read_text())
+    assert fm['name'] == Path(relative).name and fm['description'], fm
+    if 'metadata' in fm:
+        assert isinstance(fm['metadata'], dict), fm
+    if 'tags' in fm:
+        assert isinstance(fm['tags'], list), fm
+baseline = managed / 'research/model-council-finite'
 local = get_hermes_home() / 'skills/research/model-council-finite'
 before = {str(p.relative_to(baseline)): p.read_bytes() for p in baseline.rglob('*') if p.is_file()}
 args = dict(action='patch', name='model-council-finite', old_string='# Model Council', new_string='# My Model Council')

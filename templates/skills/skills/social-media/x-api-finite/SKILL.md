@@ -1,6 +1,6 @@
 ---
 name: x-api-finite
-description: Read exact X API v2 post data, recent-search results and profiles with the operator application bearer token and bundled Python helper. Use xurl for user OAuth or posting.
+description: "Read exact X API v2 post data, recent-search results and profiles with the operator application bearer token and bundled Python helper. Use xurl for user OAuth or posting."
 ---
 
 ## Deployment prerequisites

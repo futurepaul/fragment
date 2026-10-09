@@ -286,7 +286,9 @@ Deleting the duplicate alone would not have resolved the ownership conflict.
   read-back, agent-owned precedence, managed PDF shadow/removal and restoration.
   Unit tests also cover aliases, replay and fresh-view restoration. The image test
   checks automatic memory/skill review is on and writes fork locally; explicit tools remain available,
-  and the periodic curator retains its no-LLM-consolidation default.
+  and the periodic curator retains its no-LLM-consolidation default. All six restored
+  headers pass Hermes' YAML parser, and the lane asserts structured metadata
+  survives discovery rather than relying on its flat fallback parser.
 
 Required checks, recorded for this branch:
 
@@ -295,7 +297,7 @@ Required checks, recorded for this branch:
 - Images `cargo test --workspace`: 201 passed, 15 Docker tests ignored.
 - Images `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo test -p fragment-bridge --test docker -- --ignored the_hermes_image`:
-  1 passed, 16 filtered; unique tag `fragment-hermes:skills-audit-20261009-3edwyqbi-cow-final`.
+  1 passed, 16 filtered; unique tag `fragment-hermes:skills-audit-20261009-3edwyqbi-metadata`.
 - Offline PDF comparison: 2 paths, 4 pages visually inspected; both content checks passed.
 
 Paul explicitly keeps automatic memory review; model-call budget tuning remains his call.
@@ -324,4 +326,5 @@ or authenticated actions need separately provisioned wallet/signer/exchange mate
   Plotly/Kaleido rendered a real chart through the pinned Chromium offline. `uv
   --no-config` avoids inheriting Hermes' older dependency cutoff in the user's environment.
 - Polymarket: no SDK install; history corrected to token IDs, month interval and
-  minute-spacing fidelity using the official vendor contract; deterministic helper check.
+  minute-spacing fidelity using the official vendor contract; deterministic helper check
+  and live public price/month-history requests passed (1,441 history samples).

@@ -1,6 +1,6 @@
 ---
 name: polymarket-finite
-description: Fetch public Polymarket market data with the bundled deterministic Python helper: prices, books, outcome-token history and trades. Read-only; no wallet execution.
+description: "Fetch public Polymarket market data with the bundled deterministic Python helper: prices, books, outcome-token history and trades. Read-only; no wallet execution."
 version: 1.2.0
 author: Hermes Agent + Teknium
 tags: [polymarket, prediction-markets, market-data, trading]
