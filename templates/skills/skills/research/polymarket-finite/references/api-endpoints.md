@@ -139,13 +139,13 @@ Bids and asks are sorted by price. Size is in shares (USDC-denominated).
 ### Price History
 
 ```
-GET /prices-history?market=CONDITION_ID&interval=INTERVAL&fidelity=N
+GET /prices-history?market=TOKEN_ID&interval=INTERVAL&fidelity=N
 ```
 
 Parameters:
-- `market` — the conditionId (hex string with 0x prefix)
-- `interval` — time range: `all`, `1d`, `1w`, `1m`, `3m`, `6m`, `1y`
-- `fidelity` — number of data points to return
+- `market` — the decimal CLOB outcome token ID, from `clobTokenIds`
+- `interval` — time range: `1h`, `6h`, `1d`, `1w`, `1m` (one month), `max`
+- `fidelity` — minutes between data points
 
 Response:
 ```json
@@ -196,7 +196,7 @@ Response:
 
 ```
 GET /trades?limit=N
-GET /trades?market=CONDITION_ID&limit=N
+GET /trades?market=TOKEN_ID&limit=N
 ```
 
 Trade fields: `side` (BUY/SELL), `size`, `price`, `timestamp`,
@@ -205,7 +205,7 @@ Trade fields: `side` (BUY/SELL), `size`, `price`, `timestamp`,
 ### Open Interest
 
 ```
-GET /oi?market=CONDITION_ID
+GET /oi?market=TOKEN_ID
 ```
 
 ---
@@ -217,4 +217,6 @@ To go from a Gamma market to CLOB data:
 1. Get market from Gamma: has `clobTokenIds` and `conditionId`
 2. Parse `clobTokenIds` (JSON string): `["YES_TOKEN", "NO_TOKEN"]`
 3. Use YES_TOKEN with `/price`, `/book`, `/midpoint`, `/spread`
-4. Use `conditionId` with `/prices-history` and Data API endpoints
+4. Use an outcome token ID with `/prices-history`; `conditionId` identifies the market for Data API filters
+
+History: `market` is a CLOB outcome token ID; `1m` means one month; `fidelity` is minutes between samples, not a count.

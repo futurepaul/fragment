@@ -1,8 +1,17 @@
 ---
 name: trading-agent-finite
-description: Analyze stocks, crypto, macro, and event-driven markets using yfinance, CCXT, FRED, Plotly charting, and the managed Polymarket and Perplexity helpers.
+description: "Build sourced stock/crypto/macro comparisons and Plotly market charts with yfinance, CCXT and public FRED data. Analysis only; no order execution."
 tags: [finance, trading, charts, macro, crypto, stocks, polymarket]
 ---
+
+## Deployment prerequisites
+
+The deployment may have no operator exchange key or paid research key. Public yfinance/CCXT/FRED reads and this charting workflow need none. Authenticated exchange actions require separately provisioned credentials: say plainly when missing; this skill does not place orders. Use Hermes native web research for current news instead of the deleted Perplexity helper. Optional Hermes stock skills handle simple standalone quotes; use this skill for combined analysis/charts.
+
+Package versions checked 2026-10-09: Plotly 7.1.0, Kaleido 1.5.0, pandas 3.0.6, yfinance 1.7.0, CCXT 4.5.85, Pillow 12.3.0. Kaleido needs a working Chromium executable; use the image's browser via `BROWSER_PATH=/opt/fragment/bin/chromium`.
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
 
 # Trading Agent Finite
 
@@ -22,7 +31,10 @@ Keep these packages in a virtualenv of your own, made once in your home
 Python snippets:
 
 ```bash
-[ -d ~/.venvs/markets ] || { python3 -m venv ~/.venvs/markets && ~/.venvs/markets/bin/pip install -q plotly kaleido pandas yfinance ccxt Pillow; }
+MARKETS_UV="$(cd /opt/hermes && /opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')"
+[ -d ~/.venvs/markets ] || "$MARKETS_UV" --no-config venv ~/.venvs/markets
+"$MARKETS_UV" --no-config pip install --python ~/.venvs/markets/bin/python plotly==7.1.0 kaleido==1.5.0 pandas==3.0.6 yfinance==1.7.0 ccxt==4.5.85 Pillow==12.3.0
+export BROWSER_PATH=/opt/fragment/bin/chromium
 source ~/.venvs/markets/bin/activate
 ```
 
@@ -36,7 +48,7 @@ Use the lightest reliable source for the question:
 | Exchange-specific crypto OHLCV or orderbook | `ccxt` |
 | Macro series: rates, CPI, GDP, unemployment, yield curve | FRED's public CSV download (no key) |
 | Event probabilities / market sentiment / valuation odds | `polymarket-finite` |
-| Private company valuation or latest funding rounds | `perplexity-research-finite` |
+| Private company valuation or latest funding rounds | Hermes native web research |
 
 Notes:
 - FRED's API takes its key in the URL (`api_key=`), and the platform
@@ -51,7 +63,7 @@ Notes:
 3. If the user wants an image, build a Plotly chart and save it as `.jpg` under `~/charts/`.
 4. If event odds or private-company valuation matter, augment with:
    - `polymarket-finite` for prediction-market probabilities
-   - `perplexity-research-finite` for live funding and valuation research
+   - Hermes native web research for live funding and valuation research
 5. Attach the chart to your reply with `MEDIA:~/charts/<name>.jpg` (an absolute path works too).
 
 ## Core Snippets
@@ -169,7 +181,7 @@ its directory, and run its script from there.
 
 ### Prediction-market overlay
 
-Use [polymarket-finite](../research/polymarket-finite/SKILL.md) instead of ad hoc Polymarket requests.
+Use `polymarket-finite` (load with `skill_view`) instead of ad hoc Polymarket requests.
 
 Examples, from the polymarket-finite skill's directory:
 
@@ -184,16 +196,7 @@ python3 scripts/polymarket.py market \
 
 ### Private-company valuation research
 
-Use [perplexity-research-finite](../research/perplexity-research-finite/SKILL.md) for fast live valuation and funding context.
-
-From the perplexity-research-finite skill's directory:
-
-```bash
-python3 scripts/perplexity_research.py search \
-  --query "OpenAI Anthropic xAI valuation funding round 2026" \
-  --recency month \
-  --max-results 5
-```
+Use Hermes native web tools, prioritize primary filings or company announcements, and link the sources. If the configured backend needs an unavailable operator research credential, state that and use an available public source.
 
 ## Delivery Rules
 

@@ -85,5 +85,5 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
-  "price_book_version": 2
+  "price_book_version": 3
 }

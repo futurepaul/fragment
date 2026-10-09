@@ -342,17 +342,18 @@ impl FragmentCell {
         let body_bytes = body.to_string().len();
         let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, false)).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
-        let (status, bytes, log_id) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+        // its tier's model, or the fallback's when that one failed (models.rs)
+        let (status, bytes, log_id, model) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
         if status != 200 {
             return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
         }
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let usage = bounds::usage_of(bounded.model, &v["usage"]);
+        let usage = bounds::usage_of(model, &v["usage"]);
         if usage.is_none() {
             self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
         }
         let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-        let result = json!({ "text": text, "model": bounded.model, "tier": tier, "usage": v["usage"] });
+        let result = json!({ "text": text, "model": model, "tier": tier, "usage": v["usage"] });
         self.keep(&p, &result, usage.as_ref())?;
         self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;

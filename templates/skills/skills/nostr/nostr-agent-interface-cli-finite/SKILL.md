@@ -1,12 +1,30 @@
 ---
 name: nostr-agent-interface-cli-finite
-description: Use when an agent needs to inspect, discover, or invoke Nostr Agent Interface CLI tools through `nostr-agent-interface cli`. Ideal for local shell-based Nostr workflows, schema-aware discovery, machine-readable CLI output, stdin-based secret handling, and read-before-write command selection. Do not use this skill for MCP-native or HTTP API-first tasks.
+description: "Use the Nostr Agent Interface CLI specifically for schema-discovered relay reads, NIP-19 conversion and signed events. Requires its source-built CLI; not a general social-media skill."
 license: MIT
 compatibility: Requires a local installation of nostr-agent-interface or a checked-out repo with build/app/index.js present.
 metadata:
   author: AustinKelsay
   version: "0.1.0"
 ---
+
+## Deployment prerequisites
+
+The npm package `nostr-agent-interface` is not published (registry 404 as checked 2026-10-09). Build upstream **3.1.0** from the tested commit, using Bun (including its frozen lockfile), instead of `npm install -g`:
+
+```bash
+git clone https://github.com/AustinKelsay/nostr-agent-interface ~/.local/share/nostr-agent-interface
+cd ~/.local/share/nostr-agent-interface
+git checkout f19c8478ca1437ee6c29dd2793acce9efc77126c
+bun install --frozen-lockfile
+bun run build
+node build/app/index.js cli list-tools --json
+```
+
+Use `node ~/.local/share/nostr-agent-interface/build/app/index.js cli` as the command prefix if no binary is installed. Reads/schema discovery need no signing key. Signed actions require operator-provisioned Nostr signing material or a supported signer that this deployment may not have: say so plainly before attempting them. An agent's public npub and an intercepted API placeholder cannot sign a Nostr event locally. Never ask for a private key pasted into chat or expose it in command arguments/logs.
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
 
 # Nostr Agent Interface CLI
 

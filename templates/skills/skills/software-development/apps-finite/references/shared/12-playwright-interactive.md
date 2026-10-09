@@ -30,7 +30,7 @@ import { chromium } from "playwright";
 
 const browser = await chromium.launch({
   executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH || undefined,
-  args: ["--no-sandbox"],
+  args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });
 ```
 
@@ -50,7 +50,7 @@ loops.
 Use a pattern like:
 
 ```bash
-nohup npm run dev -- --host 0.0.0.0 --port 3000 \
+setsid npm run dev -- --host 0.0.0.0 --port 3000 \
   >/tmp/project-qa.log 2>&1 < /dev/null &
 echo $! >/tmp/project-qa.pid
 curl http://127.0.0.1:3000
@@ -59,7 +59,7 @@ curl http://127.0.0.1:3000
 or for a static project:
 
 ```bash
-nohup npx serve . -l 3000 --no-clipboard --single \
+setsid npx serve . -l 3000 --no-clipboard --single \
   >/tmp/project-qa.log 2>&1 < /dev/null &
 echo $! >/tmp/project-qa.pid
 curl http://127.0.0.1:3000

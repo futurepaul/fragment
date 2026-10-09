@@ -1,16 +1,23 @@
 ---
 name: polymarket-finite
-description: Query Polymarket prediction market data — search markets, inspect events, fetch prices, orderbooks, price history, and trades through the public APIs with a bundled helper script.
-version: 1.1.0
+description: "Fetch public Polymarket market data with the bundled deterministic Python helper: prices, books, outcome-token history and trades. Read-only; no wallet execution."
+version: 1.2.0
 author: Hermes Agent + Teknium
 tags: [polymarket, prediction-markets, market-data, trading]
 ---
+
+## Deployment prerequisites
+
+The bundled helper uses Python's standard library; no SDK or CLI package is installed. Public reads need **no API key**. Authenticated wallet/trading operations would require operator signing credentials that the deployment may not have; say so plainly if requested, and do not pretend this read-only helper supports them. Hermes' optional Polymarket skill and general research tools cover broader research; this skill owns the tested direct-data helper. [Current upstream data contract](https://github.com/Polymarket/agent-skills/blob/main/market-data.md).
+
+Fragment names are `<label>--<suffix>`; people are email addresses. Provider handles, wallet addresses and Nostr pubkeys are separate identities. Never interpret them as Fragment names or people.
+
 
 # Polymarket
 
 Use the bundled helper script instead of hand-assembling curl requests.
 
-No API key is needed.
+No API key is needed for these public reads. History takes a **CLOB outcome token ID**, not a condition ID; `1m` means one month, and `--fidelity` is minutes between samples.
 
 Script path:
 
@@ -70,12 +77,12 @@ Price history and trades:
 
 ```bash
 python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py history \
-  --condition-id "0xCONDITION_ID" \
+  --token-id "CLOB_OUTCOME_TOKEN_ID" \
   --interval 1m \
   --fidelity 30
 
 python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py trades \
-  --condition-id "0xCONDITION_ID" \
+  --token-id "CLOB_OUTCOME_TOKEN_ID" \
   --limit 10
 ```
 

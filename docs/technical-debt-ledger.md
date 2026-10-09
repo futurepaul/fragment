@@ -11,6 +11,30 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## Hermes external skills need an image copy-on-write plugin
+
+- **Observed:** p5's 2026-10-08 first-chat logs showed a fresh-read refusal,
+  then a PermissionError when the automatic reviewer patched managed
+  `generate-pdf-finite`; three background model requests took 26–33s each.
+  Hermes v0.21.6 has one global review switch and writes external skills in
+  place. Memory-triggered review also admits skill tools. Paul reversed the
+  temporary global-off demo setting on 2026-10-09: memory review is wanted.
+- **Shortcut:** memory and skill reviews are on. The image-owned
+  `fragment-skill-fork` plugin uses the supported pre-tool hook to copy our
+  external package to the active profile's writable `skills/` before writes,
+  preserving fresh-read guards and normal validation. Managed releases do
+  not overwrite local forks. No upstream source patch is needed.
+- **Risk:** the plugin relies on v0.21.6 skill resolver/read-mark internals;
+  an upgrade needs its Docker promotion test. External batches must fork
+  via a single write first. A failed patch can leave an unchanged local fork.
+  Reviews still consume model calls under the shared 50 calls/min limit.
+- **First proof:** the Docker lane scripts a background patch through the
+  real plugin dispatcher, checks unread-patch refusal, complete local fork,
+  writable patch, helper read guards, name shadowing and immutable baseline.
+- **Delete when:** Hermes natively supports managed-aware copy-on-write
+  with the same ownership and fresh-read guarantees; remove the plugin
+  after that behavior passes the promotion test. Budget tuning is Paul's call.
+
 ## A direct chat's label is its agent's, which a branch may lack room for
 
 - **Observed:** 2026-10-08, no usernames (decision 47) on the host label

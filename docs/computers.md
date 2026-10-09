@@ -507,7 +507,10 @@ expires within 30 days. The container application is the deployment's
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model through AI Gateway, streams its answer back, and
-  settles the final usage (lesson 7).
+  settles the final usage (lesson 7). A call whose model fails before
+  answering (not reached, 429, or a 5xx) is made once more on the
+  deployment's fallback model, DeepSeek V4 Flash unless its config names
+  another (docs/api.md, Models): the guest sees only the answer.
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
@@ -1268,11 +1271,51 @@ and how a runtime finds them, is the image's.
   the first dir's), so a managed `fragment` wins over the
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
-  lists, and the platform skill. The image carries none of Hermes' bundled
-  skills: Hermes copies them only into the home its sync runs in, the
-  gateway's default profile, which runs no turns (and stage2 and the
-  gateway then sync nothing at a boot). A managed skill a session has not
-  yet seen appears at its next session.
+  lists, the platform skill, and Hermes' pinned bundled skills. The managed
+  release has twelve workflows: apps, git, brains, connected Google,
+  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
+  market analysis and Polymarket (templates/skills/README.md). Generic skills
+  come from Hermes; optional ones remain in its hub. At build, the image
+  moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
+  and the gateway sync nothing into a saved profile. The boot copies each
+  skill and its helpers into the read-only platform view at each start
+  and after each managed install. A managed name or alias suppresses the
+  corresponding bundled copy; removing it restores the image's skill.
+  Hermes' standalone `google-workspace` is omitted: its OAuth setup and
+  token files conflict with the platform's connected-account placeholders,
+  so `google-workspace-finite` owns that workflow. A managed skill a session
+  has not yet seen appears at its next session.
+- **Documents:** Hermes' `pdf`, `docx`, `powerpoint` and `xlsx` skills and
+  their helpers are visible to every agent. Their Python dependencies are
+  baked into the image at versions and SHA-256s pinned in
+  `images/hermes/document-requirements.txt`: ReportLab, pypdf, pdfplumber,
+  PyMuPDF, pypdfium2, python-docx, python-pptx and openpyxl. For a quick
+  structured PDF, use Hermes' `pdf_create.py` with a JSON spec; for a
+  designed report, use the image's Chromium with HTML/CSS and
+  `--headless --no-pdf-header-footer --print-to-pdf=<path>` (its wrapper,
+  `/opt/fragment/bin/chromium`, adds the container flags). Render every
+  page with `pdf_page_image.py` and inspect it before delivery. No
+  WeasyPrint, Pandoc, LaTeX, LibreOffice or nano-pdf is preinstalled;
+  document conversion, spreadsheet recalculation and AI PDF edits that
+  need those remain optional. The audit and two offline sample paths are
+  in docs/skills-audit.md.
+- **Automatic learning and local forks (2026-10-09):** automatic memory and
+  skill reviews are on (`auxiliary.background_review: { enabled: true }`).
+  Managed skills stay read-only in `/data/hermes/managed-skills`; sync
+  replaces that baseline whole. Hermes and the user own each profile's
+  writable `skills/`, synced both ways to the agent fragment. The image's
+  `fragment-skill-fork` plugin intercepts a flat `skill_manage` patch, edit,
+  write_file or remove_file targeting our managed/platform external roots:
+  after Hermes' fresh-read check, it copies the whole category/name package
+  locally, then Hermes edits the copy with its normal validation and scan.
+  The copy shadows the baseline by name, and a later managed release never
+  overwrites it. Remove the local copy to follow the updated baseline again.
+  External batch writes must first fork with a single write; deletions retain
+  Hermes' ownership guards. Manual customization follows the same whole-copy
+  rule. Explicit memory/skill tools and the separate periodic curator remain
+  available. Background reviews still spend model calls; Paul's memory-review
+  decision keeps them on despite the shared account limit.
+
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner

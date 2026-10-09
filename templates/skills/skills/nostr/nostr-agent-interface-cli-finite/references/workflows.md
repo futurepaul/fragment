@@ -37,8 +37,8 @@ nostr-agent-interface cli queryEvents \
 Prefer stdin so the private key does not land in argv:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","content":"hello nostr"}' \
-  | nostr-agent-interface cli postNote --stdin --json
+# Operator-provisioned input JSON fields: privateKey, content
+nostr-agent-interface cli postNote --stdin --json < /path/to/operator-provided-input.json
 ```
 
 Read first when the user wants context before posting.
@@ -46,15 +46,15 @@ Read first when the user wants context before posting.
 ## Event Create / Sign / Publish
 
 ```bash
-printf '%s' '{"kind":1,"content":"hello nostr","privateKey":"nsec..."}' \
-  | nostr-agent-interface cli createNostrEvent --stdin --json
+# Operator-provisioned input JSON fields: kind, content, privateKey
+nostr-agent-interface cli createNostrEvent --stdin --json < /path/to/operator-provided-input.json
 ```
 
 Then sign:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","event":{"pubkey":"...","created_at":123,"kind":1,"tags":[],"content":"hello nostr"}}' \
-  | nostr-agent-interface cli signNostrEvent --stdin --json
+# Operator-provisioned input JSON fields: privateKey, event
+nostr-agent-interface cli signNostrEvent --stdin --json < /path/to/operator-provided-input.json
 ```
 
 Then publish:
@@ -69,15 +69,15 @@ printf '%s' '{"signedEvent":{"id":"...","pubkey":"...","created_at":123,"kind":1
 Send NIP-44 DM:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","recipientPubkey":"npub...","content":"hi"}' \
-  | nostr-agent-interface cli sendDmNip44 --stdin --json
+# Operator-provisioned input JSON fields: privateKey, recipientPubkey, content
+nostr-agent-interface cli sendDmNip44 --stdin --json < /path/to/operator-provided-input.json
 ```
 
 Read inbox:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","limit":10}' \
-  | nostr-agent-interface cli getDmInboxNip44 --stdin --json
+# Operator-provisioned input JSON fields: privateKey, limit
+nostr-agent-interface cli getDmInboxNip44 --stdin --json < /path/to/operator-provided-input.json
 ```
 
 ## Relay List Lookup / Update
@@ -91,8 +91,8 @@ nostr-agent-interface cli getRelayList --pubkey npub... --json
 Treat relay-list changes as confirmation-worthy because they change account behavior:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","relayList":[{"url":"wss://relay.damus.io","read":true,"write":true}]}' \
-  | nostr-agent-interface cli setRelayList --stdin --json
+# Operator-provisioned input JSON fields: privateKey, relayList
+nostr-agent-interface cli setRelayList --stdin --json < /path/to/operator-provided-input.json
 ```
 
 ## Blossom Upload / Download / List / Delete
@@ -100,8 +100,8 @@ printf '%s' '{"privateKey":"nsec...","relayList":[{"url":"wss://relay.damus.io",
 Upload:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","filePath":"/path/to/file.png"}' \
-  | nostr-agent-interface cli uploadBlob --stdin --json
+# Operator-provisioned input JSON fields: privateKey, filePath
+nostr-agent-interface cli uploadBlob --stdin --json < /path/to/operator-provided-input.json
 ```
 
 Download:
@@ -119,8 +119,8 @@ nostr-agent-interface cli listBlobs --pubkey npub... --server-url https://exampl
 Delete only after explicit confirmation:
 
 ```bash
-printf '%s' '{"privateKey":"nsec...","sha256":"<sha256>","serverUrl":"https://example.com"}' \
-  | nostr-agent-interface cli deleteBlob --stdin --json
+# Operator-provisioned input JSON fields: privateKey, sha256, serverUrl
+nostr-agent-interface cli deleteBlob --stdin --json < /path/to/operator-provided-input.json
 ```
 
 ## Error Recovery

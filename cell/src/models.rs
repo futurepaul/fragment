@@ -13,6 +13,15 @@
 //! without usage, at its worst case. Nothing of the request or its answer
 //! is kept: only the usage, on the ledger.
 //!
+//! A tier's call whose model fails before answering anything (not reached,
+//! 429, or a 5xx) is made once more, the same, on the deployment's fallback
+//! model (`FRAGMENT_FALLBACK_MODEL`, DeepSeek V4 Flash unless named;
+//! `fragment_core::models::Tries`), logged as `model.fallback`, under the
+//! same hold, and settled as the fallback's. Not a race: the fallback is
+//! called only after the model failed. An answer that began is final, and
+//! the fallback's failure is passed through as any. `vision` has none (the
+//! fallback reads no images), nor a transcription.
+//!
 //! Two transports, one input. Production calls the Worker's `AI` binding
 //! through the deployment's AI Gateway (`AI_GATEWAY_ID`), its logs off and
 //! its metadata opaque ids (`opaque`). Dev and the e2e set
@@ -43,7 +52,7 @@
 use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
-use fragment_core::models::{self as bounds, Bounded, Named, Stream};
+use fragment_core::models::{self as bounds, Bounded, Named, Stream, Tried, Tries};
 use fragment_core::price::Usage;
 use fragment_core::{multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
@@ -123,6 +132,7 @@ struct Held {
     env: Env,
     payer: String,
     reference: String,
+    /// The model whose answer the call's is (the fallback's, when it fell back).
     model: &'static str,
     /// What the call named: a tier, `vision` or `whisper`.
     name: &'static str,
@@ -183,9 +193,15 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         capped,
     };
     ledger::hold(env, call.payer, &reserve).await?;
-    let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, name: call.named.as_str() };
+    let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, name: call.named.as_str() };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
+    let fallback = match call.named {
+        Named::Tier(_) => Some(cfg.fallback_model.as_str()),
+        Named::Vision => None,
+    };
+    let (answer, model) = tried(env, cfg, &bounded, fallback, &meta).await;
+    held.model = model;
+    let mut upstream = match answer {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;
@@ -211,7 +227,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
                 return Err(e);
             }
         };
-        let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| bounds::usage_of(bounded.model, &v["usage"]));
+        let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| bounds::usage_of(model, &v["usage"]));
         held.settle(usage, log_id).await;
         let mut resp = Response::from_bytes(bytes)?;
         resp.headers_mut().set("content-type", "application/json")?;
@@ -224,7 +240,6 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     // one branch for the client, one read to its end for the meter: a
     // client that goes away mid-answer does not leave the call unsettled
     let (client, meter) = js::tee(source)?;
-    let model = bounded.model;
     after.later(Box::pin(async move {
         let mut stream = Stream::default();
         let mut bytes = ByteStream::from(meter);
@@ -250,12 +265,42 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     Ok(resp)
 }
 
-/// One bounded call, unmetered: its status, its answer (read whole), and
-/// the gateway's log id. Its caller meters it: a job's text step keeps
-/// what it bought before it settles (ai.rs).
-pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
+/// One bounded call of a tier, unmetered, falling back as `complete`'s
+/// does: its status, its answer (read whole), the gateway's log id, and
+/// the model whose answer it is. Its caller meters it, as that model's: a
+/// job's text step keeps what it bought before it settles (ai.rs).
+pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>, &'static str)> {
     assert!(!bounded.stream, "an unmetered call is read whole");
-    run(env, bounded.model, &bounded.input, payer, agent).await
+    let cfg = Config::from_env(env);
+    let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let (answer, model) = tried(env, cfg, bounded, Some(cfg.fallback_model.as_str()), &meta).await;
+    let mut resp = answer?;
+    let status = resp.status_code();
+    let log_id = resp.headers().get("cf-aig-log-id")?;
+    let bytes = read_whole(&mut resp).await?;
+    Ok((status, bytes, log_id, model))
+}
+
+/// A bounded call made on its model, then, when that one fails before
+/// answering anything, once more on `fallback` (`Tries`: at most two
+/// tries, the second only after the first failed): the answer that is the
+/// call's, its body unread, and the model whose answer it is.
+async fn tried(env: &Env, cfg: &Config, bounded: &Bounded, fallback: Option<&'static str>, meta: &Metadata) -> (CellResult<Response>, &'static str) {
+    let mut tries = Tries::new(bounded.model, fallback);
+    // bounded by `Tries`: a second try at most
+    loop {
+        let model = tries.model();
+        let t0 = js::now_ms();
+        let answer = transport(env, cfg, model, &bounded.input, meta).await;
+        let status = answer.as_ref().ok().map(Response::status_code);
+        let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model) };
+        // what the vendor said (its error, never the request's words)
+        let why = match answer {
+            Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
+            Err(e) => e.message,
+        };
+        console_log!("{}", json!({ "event": "model.fallback", "from": model, "to": next, "status": status, "ms": js::now_ms() - t0, "why": why }));
+    }
 }
 
 /// One call of a catalog model with its input, on the same transport,

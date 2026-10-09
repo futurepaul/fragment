@@ -14,8 +14,16 @@
 //! `max`, the dearest), and usage asked for when it streams. Nothing else
 //! of the client's reaches the vendor: no header, no key.
 //!
+//! A call that its model fails before answering anything (it is not
+//! reached, or it answers 429 or a 5xx) is made once more, the same, on the
+//! deployment's fallback model (`Tries`; Paul, 2026-10-08: "we def need
+//! fallback models"), DeepSeek V4 Flash unless it names another. Not a race:
+//! the second call is made only after the first has failed. An answer that
+//! began is final, and the fallback's failure is the call's.
+//!
 //! What a call may cost is reserved before it is made (`worst`); what it
-//! cost is read from its answer's usage (`usage_of`). A streamed answer
+//! cost is read from its answer's usage (`usage_of`), priced as the model
+//! that answered it. A streamed answer
 //! carries usage on every chunk, each a per-chunk delta, then a line of its
 //! own with the whole call's (spike S4): only that last, cumulative one is
 //! metered, and the client reads OpenAI's shape, usage once on a last chunk
@@ -40,6 +48,14 @@ pub const VISION: &str = "vision";
 /// DeepSeek's own API: Workers AI's DeepSeek-V4-Flash-0731 has no vision,
 /// and reaching DeepSeek's would take our own key (decision 23: no BYOK).
 pub const VISION_MODEL_DEFAULT: &str = CHEAP_MODEL;
+/// The fallback model unless the deployment names another
+/// (`FRAGMENT_FALLBACK_MODEL`; Paul, 2026-10-08): DeepSeek V4 Flash, on
+/// Workers AI, a model of its own beside the tiers' GLMs (its own replicas
+/// and its own rate limit, 50 calls a minute per account on Unified
+/// Billing), which takes the tiers' requests as they are (tools,
+/// `reasoning_effort`; checked 2026-10-09). It reads no images, so the
+/// route's `vision` has no fallback.
+pub const FALLBACK_MODEL_DEFAULT: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 /// The largest image Hermes sends for its vision call after a size
 /// refusal: it shrinks one to this many bytes of base64 data URL and tries
 /// again once (its `tools/vision_tools.py`, `_RESIZE_TARGET_BYTES`, which
@@ -162,12 +178,99 @@ pub fn capped(named: Named, vision_model: &'static str) -> Result<Capped, Refusa
 /// ledger refuses to reserve a call it cannot price, so a deployment that
 /// names another is refused before it serves a call, saying why.
 pub fn vision_model(named: Option<&str>, book: &PriceBook) -> Result<String, String> {
-    let model = named.map(str::trim).unwrap_or(VISION_MODEL_DEFAULT);
+    priced_model("vision", named, VISION_MODEL_DEFAULT, book)
+}
+
+/// The deployment's fallback model (`Tries`): the one it names
+/// (`FRAGMENT_FALLBACK_MODEL`) or `FALLBACK_MODEL_DEFAULT`, one the price
+/// book prices, as the vision model is: its calls are settled at its
+/// prices.
+pub fn fallback_model(named: Option<&str>, book: &PriceBook) -> Result<String, String> {
+    priced_model("fallback", named, FALLBACK_MODEL_DEFAULT, book)
+}
+
+/// A model a deployment names for `what`, or `default`, when the book
+/// prices it.
+fn priced_model(what: &str, named: Option<&str>, default: &str, book: &PriceBook) -> Result<String, String> {
+    let model = named.map(str::trim).unwrap_or(default);
     if book.models.iter().any(|m| m.model == model) {
         return Ok(model.to_string());
     }
     let priced: Vec<&str> = book.models.iter().map(|m| m.model.as_str()).collect();
-    Err(format!("the vision model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price) or name one of those", priced.join(", ")))
+    Err(format!("the {what} model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price) or name one of those", priced.join(", ")))
+}
+
+/// Whether an answer's status, before any of its body, sends the call on
+/// to the fallback model: the vendor's rate limit (429), or its own failure
+/// (5xx: tonight's Workers AI answered 502 "could not route request to AI
+/// model", then 500, for five minutes). A refusal of the request itself
+/// (another 4xx) would be the fallback's too, and a 200 has begun the
+/// answer, which is final.
+pub fn falls_back(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+/// What one try of a call came to, before any of its answer's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tried {
+    /// The model was not reached: the transport failed.
+    Unreached,
+    /// It answered this status.
+    Answered(u16),
+}
+
+/// A call's tries: its model, then, when that one fails before answering
+/// anything (`falls_back`, or not reached), the fallback model, once. At
+/// most two tries, and the second only after the first has failed: no
+/// race. A fallback that is the call's own model is none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tries {
+    first: &'static str,
+    fallback: Option<&'static str>,
+    fell: bool,
+    /// A try's answer was the call's: what follows (a stream that breaks
+    /// after it began) is no try.
+    done: bool,
+}
+
+impl Tries {
+    pub fn new(model: &'static str, fallback: Option<&'static str>) -> Tries {
+        Tries { first: model, fallback: fallback.filter(|f| *f != model), fell: false, done: false }
+    }
+
+    /// The model the next try calls, and, once the tries are done, the one
+    /// whose answer is the call's: its usage is priced as that model's.
+    pub fn model(&self) -> &'static str {
+        match (self.fell, self.fallback) {
+            (true, Some(f)) => f,
+            _ => self.first,
+        }
+    }
+
+    /// Whether the call fell back to the fallback model.
+    pub fn fell(&self) -> bool {
+        self.fell
+    }
+
+    /// After a try: the model to try next, or `None` when this try's
+    /// answer is the call's (it answered, it refused the request, or it
+    /// was the fallback's).
+    pub fn after(&mut self, tried: Tried) -> Option<&'static str> {
+        let failed = match tried {
+            Tried::Unreached => true,
+            Tried::Answered(status) => falls_back(status),
+        };
+        let next = match (self.done, failed, self.fell, self.fallback) {
+            (false, true, false, Some(next)) => next,
+            _ => {
+                self.done = true;
+                return None;
+            }
+        };
+        self.fell = true;
+        assert_ne!(next, self.first, "a fallback is another model");
+        Some(next)
+    }
 }
 
 /// What a guest's key says to name its agent: `agent:<label>--<suffix>`.
@@ -479,13 +582,12 @@ mod tests {
         assert_eq!(VISION_MODEL_DEFAULT, "@cf/zai-org/glm-5.3-flash");
         assert_eq!(vision_model(Some(MEDIUM_MODEL), &book).as_deref(), Ok(MEDIUM_MODEL));
         assert_eq!(vision_model(Some(" @cf/zai-org/glm-5.3-flash "), &book).as_deref(), Ok(CHEAP_MODEL));
-        let unpriced = vision_model(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"), &book).unwrap_err();
-        assert!(unpriced.contains("not in the price book") && unpriced.contains(CHEAP_MODEL), "{unpriced}");
+        let unpriced = vision_model(Some("@cf/meta/llama-4-scout-17b-16e-instruct"), &book).unwrap_err();
+        assert!(unpriced.contains("the vision model") && unpriced.contains("not in the price book") && unpriced.contains(CHEAP_MODEL), "{unpriced}");
         assert!(vision_model(Some(""), &book).is_err());
-        // priced at Flash's prices: no new row, so no new book version
+        // priced at Flash's prices
         let flash = book.models.iter().find(|m| m.model == VISION_MODEL_DEFAULT).unwrap();
         assert_eq!((flash.price.input, flash.price.cached_input, flash.price.output), (150_000, 30_000, 500_000));
-        assert_eq!(book.version, 1);
         let mut other = book.clone();
         other.models.retain(|m| m.model != CHEAP_MODEL);
         assert!(vision_model(None, &other).is_err(), "the default too, were it unpriced");
@@ -672,5 +774,104 @@ mod tests {
         long.finish(None);
         assert_eq!(out.len(), SSE_LINE_MAX + 1, "an overlong line passes through unread");
         assert_eq!(long.usage(), None, "and the call is metered at its reservation");
+    }
+
+    const DEEPSEEK: &str = FALLBACK_MODEL_DEFAULT;
+
+    /// Goal: the deployment's fallback model is DeepSeek V4 Flash unless it
+    /// names another, priced at Workers AI's list price; one the book does
+    /// not price is refused, as a vision model is. Method: the default, a
+    /// priced model named, and unpriced ones.
+    #[test]
+    fn the_fallback_model_is_one_the_book_prices() {
+        let book = PriceBook::defaults();
+        assert_eq!(fallback_model(None, &book).as_deref(), Ok("@cf/deepseek-ai/deepseek-v4-flash-0731"));
+        assert_eq!(fallback_model(Some(" @cf/zai-org/glm-5.3 "), &book).as_deref(), Ok(MEDIUM_MODEL));
+        let unpriced = fallback_model(Some("anthropic/claude-haiku-4.5"), &book).unwrap_err();
+        assert!(unpriced.contains("the fallback model \"anthropic/claude-haiku-4.5\" is not in the price book") && unpriced.contains(DEEPSEEK), "{unpriced}");
+        assert!(fallback_model(Some(""), &book).is_err());
+        let p = book.models.iter().find(|m| m.model == DEEPSEEK).unwrap().price;
+        assert_eq!((p.input, p.cached_input, p.cache_write, p.output), (440_000, 14_000, 440_000, 1_320_000));
+    }
+
+    /// Goal: what falls back is the vendor failing before it answered
+    /// anything: its rate limit (429) or its own failure (5xx). A refusal
+    /// of the request (any other 4xx) would be the fallback's too, and an
+    /// answer that began (2xx) is final. Method: every class of status.
+    #[test]
+    fn a_rate_limit_or_a_failure_falls_back() {
+        for status in [429, 500, 502, 503, 504, 520, 599] {
+            assert!(falls_back(status), "{status}");
+        }
+        for status in [100, 200, 204, 301, 400, 401, 402, 403, 404, 408, 413, 422, 428, 430, 499, 600, 0] {
+            assert!(!falls_back(status), "{status}");
+        }
+    }
+
+    /// Goal: a call is tried on its model, then, when that one failed
+    /// before answering, on the fallback model once (no race, no ladder):
+    /// the fallback's answer, or its failure, is the call's, and the model
+    /// that answered is the one whose usage is priced. Method: each path
+    /// through `Tries`, valid and invalid, and each again (a replay decides
+    /// the same).
+    #[test]
+    fn a_failed_call_falls_back_once() {
+        for _replay in 0..2 {
+            // the model is not reached: the fallback answers
+            let mut t = Tries::new(CHEAP_MODEL, Some(DEEPSEEK));
+            assert_eq!((t.model(), t.fell()), (CHEAP_MODEL, false));
+            assert_eq!(t.after(Tried::Unreached), Some(DEEPSEEK));
+            assert_eq!((t.model(), t.fell()), (DEEPSEEK, true));
+            assert_eq!(t.after(Tried::Answered(200)), None, "its answer is the call's");
+            assert_eq!(t.model(), DEEPSEEK, "priced as the fallback's");
+            // the model fails (tonight's 502), and so does the fallback: one fallback, never a third try
+            let mut t = Tries::new(CHEAP_MODEL, Some(DEEPSEEK));
+            assert_eq!(t.after(Tried::Answered(502)), Some(DEEPSEEK));
+            assert_eq!(t.after(Tried::Answered(502)), None, "the fallback's failure is the call's");
+            assert_eq!(t.after(Tried::Unreached), None);
+            assert_eq!((t.model(), t.fell()), (DEEPSEEK, true));
+            // a rate limit falls back too
+            let mut t = Tries::new(MEDIUM_MODEL, Some(DEEPSEEK));
+            assert_eq!(t.after(Tried::Answered(429)), Some(DEEPSEEK));
+            // an answer that began is final: a stream that breaks after it is no try
+            let mut t = Tries::new(CHEAP_MODEL, Some(DEEPSEEK));
+            assert_eq!(t.after(Tried::Answered(200)), None);
+            assert_eq!(t.after(Tried::Unreached), None, "a stream that began never falls back");
+            assert_eq!(t.after(Tried::Answered(502)), None);
+            assert_eq!((t.model(), t.fell()), (CHEAP_MODEL, false));
+            // a refusal of the request is the call's: the fallback would refuse it too
+            let mut t = Tries::new(CHEAP_MODEL, Some(DEEPSEEK));
+            assert_eq!(t.after(Tried::Answered(400)), None);
+            assert_eq!(t.after(Tried::Answered(502)), None, "the tries are over");
+            assert_eq!(t.model(), CHEAP_MODEL);
+            // no fallback, or one that is the call's own model: the failure is the call's
+            for fallback in [None, Some(CHEAP_MODEL)] {
+                let mut t = Tries::new(CHEAP_MODEL, fallback);
+                assert_eq!(t.after(Tried::Answered(503)), None, "{fallback:?}");
+                assert_eq!((t.model(), t.fell()), (CHEAP_MODEL, false));
+            }
+        }
+    }
+
+    /// Goal: a call that fell back is held at its own model's worst case
+    /// (its reservation, made before any try) and settled from the usage
+    /// the fallback reported, priced as the fallback's; the hold covers a
+    /// fallback's call of an agent's usual size. Method: a cheap call's
+    /// worst case and the fallback's usage for a 30,000-token turn, priced
+    /// with the default book.
+    #[test]
+    fn a_fallen_back_call_is_settled_as_the_fallbacks() {
+        let book = PriceBook::defaults();
+        let b = bound(tier(Tier::Cheap), json!({ "messages": [{ "role": "user", "content": "hi" }] }), true).unwrap();
+        let mut t = Tries::new(b.model, Some(DEEPSEEK));
+        assert_eq!(t.after(Tried::Answered(502)), Some(DEEPSEEK));
+        let held = b.worst(120_000);
+        assert_eq!(held, Usage::Tokens { model: CHEAP_MODEL.into(), input: 120_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) });
+        let used = usage_of(t.model(), &json!({ "prompt_tokens": 30_000, "completion_tokens": 400, "prompt_tokens_details": { "cached_tokens": 0 } })).unwrap();
+        assert_eq!(used, Usage::Tokens { model: DEEPSEEK.into(), input: 30_000, cached_input: 0, cache_write: 0, output: 400 });
+        let (held, used) = (book.price(&held).unwrap(), book.price(&used).unwrap());
+        // 30,000 in and 400 out at $0.44 and $1.32 a million: $0.013728
+        assert_eq!(used.list, 13_728);
+        assert!(used.charge < held.charge, "{used:?} within {held:?}");
     }
 }

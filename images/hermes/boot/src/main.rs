@@ -991,6 +991,9 @@ fn managed_dir() {
 /// The platform skill shown to the profiles unless a managed skill takes
 /// its name (skills.rs, `settle_platform`).
 fn settle_platform() -> Option<bool> {
+    if let Err(e) = skills::settle_bundled(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::BUNDLED_DIR), Path::new(skills::PLATFORM_VIEW)) {
+        ev!("skills.bundled_failed", { "error": e.to_string() });
+    }
     let shown = skills::settle_platform(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::PLATFORM_DIR), Path::new(skills::PLATFORM_VIEW));
     if let Err(e) = &shown {
         ev!("skills.platform_failed", { "view": skills::PLATFORM_VIEW, "error": e.to_string() });

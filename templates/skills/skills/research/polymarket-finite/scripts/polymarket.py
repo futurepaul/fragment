@@ -190,7 +190,7 @@ def cmd_book(args: argparse.Namespace) -> int:
 
 def cmd_history(args: argparse.Namespace) -> int:
     payload = get_json(
-        f"{CLOB}/prices-history?market={urllib.parse.quote(args.condition_id)}&interval={urllib.parse.quote(args.interval)}&fidelity={args.fidelity}"
+        f"{CLOB}/prices-history?market={urllib.parse.quote(args.token_id)}&interval={urllib.parse.quote(args.interval)}&fidelity={args.fidelity}"
     )
     history = payload.get("history") or []
     if args.json:
@@ -268,13 +268,13 @@ def build_parser() -> argparse.ArgumentParser:
     book.set_defaults(func=cmd_book)
 
     history = subparsers.add_parser(
-        "history", help="Fetch price history by condition ID"
+        "history", help="Fetch price history by outcome token ID"
     )
-    history.add_argument("--condition-id", required=True)
+    history.add_argument("--token-id", required=True, help="CLOB outcome token ID, not condition ID")
     history.add_argument(
-        "--interval", default="all", choices=["all", "1d", "1w", "1m", "3m", "6m", "1y"]
+        "--interval", default="max", choices=["max", "1h", "6h", "1d", "1w", "1m"]
     )
-    history.add_argument("--fidelity", type=int, default=50)
+    history.add_argument("--fidelity", type=int, default=60, help="Minutes between samples")
     history.add_argument("--json", action="store_true")
     history.set_defaults(func=cmd_history)
 

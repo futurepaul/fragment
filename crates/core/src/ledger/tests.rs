@@ -28,8 +28,11 @@ fn turn() -> Usage {
 
 /// The default book, plus a key that charges one micro-dollar a unit (2
 /// per 3 units, × 1.5): `spend` moves the balance by exact amounts.
+/// The defaults' prices, at version 1 (the books these tests set are
+/// numbered from there), and a key.
 fn book() -> PriceBook {
     let mut book = PriceBook::defaults();
+    book.version = 1;
     book.keys.push(KeyPrice { key: "micro".into(), micros: 2, per: 3 });
     book
 }
