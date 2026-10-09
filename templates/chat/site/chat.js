@@ -866,11 +866,12 @@ export function mount(root) {
     const name = agent ? who(agent).name : "The agent";
     const phase = inRoster(agent)?.phase;
     const present = state.here.some((p) => p.principal === agent);
-    const late = !t && state.pending && Date.now() - state.pending.since >= PENDING_MS;
+    const starting = phase === "starting" || phase === "asleep";
+    const late = !t && !starting && state.pending && Date.now() - state.pending.since >= PENDING_MS;
     const said = t ? `${name} is working${forWhom}`
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
       : late ? `${name} has not started a reply yet.`
-      : phase === "starting" || phase === "asleep" ? `${name} is starting up…`
+      : starting ? `${name} is starting up…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.id : "pending"}`;
     return [

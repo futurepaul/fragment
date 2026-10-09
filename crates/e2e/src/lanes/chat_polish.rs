@@ -134,6 +134,9 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     chrome.eval(&page, "(() => { const d = window.__frame.contentDocument; d.getElementById('text').value = 'A slow first reply'; d.getElementById('say').requestSubmit(); return true; })()")?;
     s.ok("the shell's optional starting phase quietly explains a slow first reply", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is starting up…')"), "");
     chrome.screenshot(&page, &shots.join("starting-desktop.png"))?;
+    chrome.eval(&page, &format!("new Promise(resolve => {{ const w = window.__frame.contentWindow; window.__bootNow = w.Date.now; w.Date.now = () => window.__bootNow() + 91000; w.postMessage({roster}, location.origin); w.requestAnimationFrame(() => w.requestAnimationFrame(() => resolve(true))); }})"))?;
+    s.ok("a known computer startup remains explained after ninety seconds", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is starting up…')"), "");
+    chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__bootNow; return true; })()")?;
     let absent = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob" }] });
     chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({absent}, location.origin); return true; }})()"))?;
     s.ok("without a phase the page waits plainly, without claiming the agent is working", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent === 'Waiting for Bob…'"), "");
