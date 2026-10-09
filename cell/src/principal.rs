@@ -9,11 +9,20 @@
 //! (below). So the platform's page reads this one cell and wakes no
 //! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
-//! Three things here are the person's own, not a fragment's:
+//! Four things here are the person's own, not a fragment's:
 //!
 //! - **Archived**, a flag on their row (`PUT /api/fragments/{name}/archived`):
 //!   their view of the fragment, which no fragment's change touches. It
 //!   goes when they leave the fragment, or it is made again.
+//! - **Seen** (`PUT /api/fragments/{name}/seen`): the place in a chat's
+//!   search entries (below) up to which they have seen its messages, so
+//!   its row counts the rest as `unread` (at most
+//!   `limits::LISTED_UNREAD_MAX`). A chat they never marked counts every
+//!   entry it holds. Kept beside the row, never on it (a table of its own,
+//!   which an older list gains as it starts: docs/technical-debt-ledger.md,
+//!   "Objects made before a column"), and gone with their entries when they
+//!   leave the fragment, or it is made again. An entry names no author, so a
+//!   message of their own sent from elsewhere counts too.
 //! - **Search** (docs/cloudflare-v1.md, decision 9 and lesson 12): the text
 //!   of the messages in the fragments they are in, which each fragment sends
 //!   from an outbox of its own (search.rs), in FTS5. An entry is keyed by its
@@ -56,7 +65,7 @@ use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Sharing};
+use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Seen, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -79,6 +88,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS search_entries_dropped AFTER DELETE ON search_entries BEGIN
   INSERT INTO search_text (search_text, rowid, text) VALUES ('delete', old.id, old.text);
 END;
+CREATE TABLE IF NOT EXISTS seen (fragment TEXT PRIMARY KEY, n INTEGER NOT NULL);
 ";
 
 /// The one row a wiped list keeps: when it was wiped. Apart from `SCHEMA`,
@@ -97,11 +107,16 @@ const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
 
-/// The columns `/list` and a search read of a row, and a chat's newest
-/// search entry (`said`), read by its place in its fragment's log.
+/// The columns `/list` and a search read of a row, a chat's newest search
+/// entry (`said`), read by its place in its fragment's log, and its entries
+/// after the place its person last saw (`unread`), counted up to the one
+/// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
-    THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said
+    THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
+  CASE WHEN json_extract(face, '$.kind') = 'chat'
+    THEN (SELECT COUNT(*) FROM (SELECT 1 FROM search_entries e WHERE e.fragment = m.fragment
+      AND e.n > COALESCE((SELECT n FROM seen s WHERE s.fragment = m.fragment), 0) LIMIT ?)) ELSE 0 END AS unread
   FROM memberships m WHERE role IS NOT NULL ORDER BY fragment";
 
 #[durable_object]
@@ -171,6 +186,7 @@ struct Listed {
     face: Option<String>,
     archived: i64,
     said: Option<String>,
+    unread: i64,
 }
 
 /// `PUT /archived`: the router's, for the signer (`SetArchived`, named).
@@ -178,6 +194,13 @@ struct Listed {
 struct SetArchived {
     fragment: String,
     archived: bool,
+}
+
+/// `PUT /seen`: the router's, for the signer (the fragment named).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkSeen {
+    fragment: String,
 }
 
 /// `POST /search/entries`: a fragment's messages, for this person's search
@@ -302,7 +325,7 @@ impl PrincipalCell {
             }
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
-                let rows: Vec<Listed> = self.typed(LISTED, vec![])?;
+                let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
                 let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
                 Ok(Response::from_json(&FragmentList { fragments })?)
             }
@@ -311,6 +334,14 @@ impl PrincipalCell {
                 let archived = self.archive(s)?;
                 self.tell();
                 Ok(Response::from_json(&archived)?)
+            }
+            (Method::Put, "/seen") => {
+                let s: MarkSeen = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let (seen, moved) = self.mark_seen(s)?;
+                if moved {
+                    self.tell();
+                }
+                Ok(Response::from_json(&seen)?)
             }
             (Method::Post, "/search/entries") => {
                 let b: SearchBatch = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -359,7 +390,7 @@ impl PrincipalCell {
     }
 
     /// What a wiped list answers: a change taken and kept nowhere, an empty
-    /// list, a search that finds nothing, and no socket or archiving.
+    /// list, a search that finds nothing, and no socket, archiving or seen.
     fn wiped_answer(&self, req: &Request) -> CellResult<Response> {
         assert!(self.wiped.get(), "only a wiped list answers so");
         match (req.method(), req.path().as_str()) {
@@ -500,6 +531,7 @@ impl PrincipalCell {
         )?;
         if gone {
             self.rows("DELETE FROM search_entries WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
+            self.rows("DELETE FROM seen WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
         } else if c.searched.is_some() {
             self.rows(
                 "DELETE FROM search_entries WHERE fragment = ? AND channel NOT IN (SELECT value FROM json_each(?))",
@@ -526,6 +558,36 @@ impl PrincipalCell {
         assert_eq!(changed.len(), 1, "a fragment is one row");
         assert_eq!(row["archived"].as_i64(), Some(i64::from(s.archived)), "the row says what was set");
         Ok(Archived { name: s.fragment, archived: s.archived })
+    }
+
+    /// The person has seen a fragment's messages up to its newest entry
+    /// here: only a row that names a role (404 for any other, as for a
+    /// fragment they cannot see). The place never goes back, so the same
+    /// again changes nothing. Answers what the row counts now (none), and
+    /// whether the place moved (only then are their pages told).
+    fn mark_seen(&self, s: MarkSeen) -> CellResult<(Seen, bool)> {
+        if !fragment_proto::valid_fragment_name(&s.fragment) {
+            return Err(CellError::invalid(format!("{:?} is not a fragment's name (<label>--<suffix>)", s.fragment)));
+        }
+        let held = self.count("SELECT COUNT(*) AS n FROM memberships WHERE fragment = ? AND role IS NOT NULL", vec![s.fragment.as_str().into()])?;
+        if held == 0 {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {} of yours", s.fragment)));
+        }
+        let newest = self.count("SELECT COALESCE(MAX(n), 0) AS n FROM search_entries WHERE fragment = ?", vec![s.fragment.as_str().into()])?;
+        let was = self.rows("SELECT n FROM seen WHERE fragment = ?", vec![s.fragment.as_str().into()])?.first().and_then(|r| r["n"].as_i64());
+        let moved = was.is_none_or(|n| newest > n);
+        if moved {
+            self.rows(
+                "INSERT INTO seen (fragment, n) VALUES (?, ?) ON CONFLICT (fragment) DO UPDATE SET n = MAX(seen.n, excluded.n)",
+                vec![s.fragment.as_str().into(), SqlStorageValue::Integer(newest)],
+            )?;
+        }
+        let unread = self.count(
+            "SELECT COUNT(*) AS n FROM search_entries WHERE fragment = ? AND n > (SELECT n FROM seen WHERE fragment = ?)",
+            vec![s.fragment.as_str().into(), s.fragment.as_str().into()],
+        )?;
+        assert_eq!(unread, 0, "a fragment marked seen counts nothing unread");
+        Ok((Seen { name: s.fragment, unread: 0 }, moved))
     }
 
     /// A fragment's messages, taken while this person holds a role on it
@@ -601,7 +663,7 @@ impl PrincipalCell {
         let Some(fts) = query.fts() else {
             return Ok(SearchAnswer { fragments: vec![], messages: vec![] });
         };
-        let rows: Vec<Listed> = self.typed(LISTED, vec![])?;
+        let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
         let mut fragments = Vec::with_capacity(limits::SEARCH_FRAGMENTS_MAX);
         for row in rows {
             if fragments.len() == limits::SEARCH_FRAGMENTS_MAX {
@@ -656,6 +718,11 @@ pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
     Ok(())
 }
 
+/// `LISTED`'s one bound number: the most unread a row counts.
+fn listed_binds() -> Vec<SqlStorageValue> {
+    vec![SqlStorageValue::Integer(i64::from(limits::LISTED_UNREAD_MAX))]
+}
+
 /// A row as a list shows it.
 fn listed(r: Listed) -> CellResult<ListedFragment> {
     let sharing = match r.sharing.as_deref().map(serde_json::from_str::<Sharing>) {
@@ -666,5 +733,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
     let (kind, title, agents) = face.map_or((FragmentKind::App, None, Vec::new()), |f| (f.kind, f.title, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, sharing, archived: r.archived != 0, owned: false })
+    let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
+    let unread = unread.ok_or_else(|| CellError::host(format!("{}'s unread count {} is outside its bound", r.name, r.unread)))?;
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, unread, sharing, archived: r.archived != 0, owned: false })
 }
