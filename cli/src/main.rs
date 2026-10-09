@@ -4,6 +4,7 @@ mod auth;
 mod blobs;
 mod codestorage;
 mod connect;
+mod hands;
 mod import;
 mod mcp;
 mod mind;
@@ -313,6 +314,13 @@ enum Cmd {
         #[command(subcommand)]
         sub: MindCmd,
     },
+    /// This machine as hands for your mind, beside your cloud computer:
+    /// pair it (a key of its own, kept here), run its hands (the bridge
+    /// and goose, here, in the foreground), say how it stands, or unpair it
+    Hands {
+        #[command(subcommand)]
+        sub: HandsCmd,
+    },
     /// Ask another of your agents (an agent: of its owner's) something, in
     /// a chat of the two of you and your owner, made the first time (a
     /// person: their direct chat with it), or in --chat; prints the chat
@@ -428,6 +436,60 @@ enum MindCmd {
         #[arg(long)]
         no_wait: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HandsCmd {
+    /// Pair this machine as your hands: an agent fragment `hands-<name>`
+    /// (made, or yours already), a key that lives only in this machine's
+    /// config (hands.json, 0600) paired to it, and the agent added to your
+    /// mind as an editor. Your mind then hands it tasks: computer(task,
+    /// on: "<name>")
+    Pair {
+        /// The machine's name (default: its host name)
+        #[arg(long)]
+        name: Option<String>,
+        /// The mind it works for
+        #[arg(long, default_value = "mind")]
+        mind: String,
+    },
+    /// Run this machine's hands in the foreground until Ctrl-C: the bridge
+    /// and goose under a loopback proxy that signs as the paired agent,
+    /// everything under one folder (~/fragment-hands). goose gets its shell
+    /// and editor there, your mind's MCP server, and the web tools and a
+    /// headless browser when this machine has them (fragment-desktop, npx,
+    /// a Chromium); never your screen
+    Run {
+        /// The folder its work, home and state live in (default ~/fragment-hands)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// fragment-bridge (default: beside this CLI, else on PATH)
+        #[arg(long)]
+        bridge: Option<PathBuf>,
+        /// goose (default: on PATH)
+        #[arg(long)]
+        goose: Option<PathBuf>,
+        /// fragment-desktop, for the web tools and the browser (default:
+        /// beside the bridge or this CLI, else on PATH)
+        #[arg(long)]
+        desktop: Option<PathBuf>,
+        /// No browser, even where one could run
+        #[arg(long)]
+        no_browser: bool,
+        /// goose, or the bridge's scripted agent (`script`: tests)
+        #[arg(long, default_value = "goose")]
+        runtime: String,
+    },
+    /// This machine's pairing: its name, agent and mind, whether its key
+    /// is paired still, and whether `fragment hands run` runs here
+    Status {
+        /// The folder `run` uses, when not ~/fragment-hands
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Unpair this machine: its key signs nothing from the next request,
+    /// its agent leaves your mind, and the pairing here is forgotten
+    Unpair,
 }
 
 #[derive(Subcommand)]
@@ -1012,6 +1074,18 @@ fn run(cli: Cli) -> Result<()> {
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
+        }
+        Cmd::Hands { sub: HandsCmd::Status { dir } } => return hands::status(dir, cli.verbose, j),
+        Cmd::Hands { sub: HandsCmd::Run { dir, bridge, goose, desktop, no_browser, runtime } } => {
+            return hands::run(hands::RunOptions { dir, bridge, goose, desktop, runtime, no_browser, verbose: cli.verbose });
+        }
+        Cmd::Hands { sub: HandsCmd::Pair { name, mind } } => {
+            let c = require_client(&cli.host, cli.verbose)?;
+            return hands::pair(&c, name, &mind, j);
+        }
+        Cmd::Hands { sub: HandsCmd::Unpair } => {
+            let c = require_client(&cli.host, cli.verbose)?;
+            return hands::unpair(&c, j);
         }
         Cmd::Mind { sub: MindCmd::Import { paths, from, since, limit_conversations, dry_run, show, mind, no_wait } } => {
             let from = match from.as_str() {
@@ -1747,7 +1821,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Mind { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Mind { .. } | Cmd::Hands { .. } => unreachable!(),
     }
     Ok(())
 }

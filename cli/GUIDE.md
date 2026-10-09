@@ -630,6 +630,44 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
+## A machine as hands
+
+Your own machine can be hands for your mind, beside your cloud computer:
+the same bridge and goose run here, and your mind hands them tasks with
+`computer(task, on: "<this machine>")`.
+
+```
+fragment hands pair [--name N] [--mind M]   # an agent hands-<N>, a key kept here (hands.json, 0600), in your mind
+fragment hands run                          # runs it here, in the foreground; Ctrl-C stops it
+fragment hands status                       # its pairing, whether its key works, whether it runs
+fragment hands unpair                       # its key stops at once, it leaves your mind
+```
+
+`pair` (signed as you) makes the agent fragment `hands-<name>` (the
+host's name by default), a key that lives only in this machine's
+fragment config (beside `config.json`), pairs it to the agent, and adds
+the agent to your mind as an editor. Nothing else holds that key: a
+request it signs acts as the agent, for you, as your computer's do.
+
+`run` needs the bridge, which you build from this repo's `images/`
+workspace, and goose:
+
+```
+cd images && cargo build --release -p fragment-bridge -p goose-desktop
+export PATH="$PWD/target/release:$PATH"    # fragment-bridge and fragment-desktop
+fragment hands run [--goose ~/path/to/goose] [--dir ~/fragment-hands]
+```
+
+It starts a loopback proxy that signs each of the bridge's requests (and
+goose's model calls) with the machine's key, and the bridge under it,
+everything under `~/fragment-hands` (work, home, state; never your home
+itself). goose's tools: its shell and editor in the work folder, your
+mind's view and zoom, and, when this machine has them, the web tools and
+a headless browser (`fragment-desktop`, `npx` and a Chromium or Chrome;
+`--no-browser` leaves it out). It never drives your screen. goose runs as
+you: it can read what you can, so pair only a machine whose files you
+would hand your agent.
+
 ## Secrets
 
 ```
@@ -681,6 +719,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]
+fragment hands pair [--name N] [--mind M] | run [--goose G] [--dir D] | status | unpair
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
