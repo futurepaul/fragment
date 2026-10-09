@@ -474,6 +474,27 @@ export class App extends DurableObject {
     const columns = sql.exec("SELECT * FROM log LIMIT 0").columnNames;
     if (!columns.includes("attachments")) sql.exec("ALTER TABLE log ADD COLUMN attachments TEXT");
     if (!columns.includes("cont")) sql.exec("ALTER TABLE log ADD COLUMN cont INTEGER");
+    // Whether a message is an import's (1, else null), and a node ready the
+    // import's work (`imp`: its last message is an import's, 1, else 0):
+    // docs/optchat.md, "Where we differ from the gist", 16. A mind made
+    // before them gains them, its imports' messages marked: its imported
+    // threads' `user` and `talk` messages with no persona (a live one always
+    // has its persona).
+    if (!columns.includes("imported")) {
+      ctx.storage.transactionSync(() => {
+        sql.exec("ALTER TABLE log ADD COLUMN imported INTEGER");
+        sql.exec("UPDATE log SET imported = 1 WHERE persona IS NULL AND kind IN ('user', 'talk') AND thread IN (SELECT thread FROM import)");
+      });
+    }
+    if (!sql.exec("SELECT * FROM ready LIMIT 0").columnNames.includes("imp")) {
+      ctx.storage.transactionSync(() => {
+        sql.exec("ALTER TABLE ready ADD COLUMN imp INTEGER NOT NULL DEFAULT 0");
+        sql.exec("UPDATE ready SET imp = 1 WHERE e IN (SELECT i FROM log WHERE imported = 1)");
+      });
+    }
+    sql.exec("CREATE INDEX IF NOT EXISTS log_imported ON log (i) WHERE imported = 1");
+    sql.exec("CREATE INDEX IF NOT EXISTS ready_imp ON ready (imp, l, i)");
+    sql.exec("CREATE INDEX IF NOT EXISTS ready_imp_e ON ready (imp, e, l)");
     // The seeded personas, each once: a mind made before one was seeded
     // (`seeded` counts them; three before it was kept) gains it, and one
     // its person removed stays removed.
@@ -540,7 +561,7 @@ export class App extends DurableObject {
   #migrate() {
     const sql = this.ctx.storage.sql;
     const T = this.#count();
-    const m = M.fold(T, sql.exec("SELECT l, i, text FROM node"), (i) => this.#line(i));
+    const m = M.fold(T, sql.exec("SELECT l, i, text FROM node"), (i) => this.#line(i), this.#importedIds());
     sql.exec("DELETE FROM vline");
     sql.exec("DELETE FROM cline");
     sql.exec("DELETE FROM ready");
@@ -567,9 +588,15 @@ export class App extends DurableObject {
       c: sql.exec("SELECT s, l FROM cline ORDER BY s").toArray(),
       vshrink: this.#get("vshrink") === "1",
       cshrink: this.#get("cshrink") === "1",
+      imported: this.#importedIds(),
     });
     this.#rev = rev;
     return this.#mem;
+  }
+
+  // The imported messages' ids, ascending (by the partial index).
+  #importedIds() {
+    return this.ctx.storage.sql.exec("SELECT i FROM log WHERE imported = 1 ORDER BY i");
   }
 
   // What the memory did (its journal), written: the nodes built (gone from
@@ -585,7 +612,10 @@ export class App extends DurableObject {
           sql.exec("DELETE FROM ready WHERE l = ? AND i = ?", e[1], e[2]);
           break;
         case "ready":
-          sql.exec("INSERT INTO ready (l, i, e) VALUES (?, ?, ?) ON CONFLICT (l, i) DO NOTHING", e[1], e[2], M.endOf(e[1], e[2]));
+          sql.exec(
+            "INSERT INTO ready (l, i, e, imp) VALUES (?, ?, ?, ?) ON CONFLICT (l, i) DO NOTHING",
+            e[1], e[2], M.endOf(e[1], e[2]), M.isImported(m, M.endOf(e[1], e[2])) ? 1 : 0,
+          );
           break;
         case "line":
           sql.exec(`INSERT INTO ${table(e[1])} (s, l) VALUES (?, ?) ON CONFLICT (s) DO UPDATE SET l = excluded.l`, e[2], e[3]);
@@ -653,11 +683,12 @@ export class App extends DurableObject {
   // files (`attachments`, applib/files.mjs: their text, when read, kept with
   // them); its thread touched, each piece's line appended to the memory,
   // and each published on `log` as a `msg` record (the files named, not
-  // their text), at most RECORDS_MAX a mutation. An import's message keeps
-  // its own time and publishes no record (a page reads an imported thread
-  // with `thread`). A tool's output is clipped before it comes here; no
-  // other text is cut. Answers its first id and how many it took.
-  #log(call, m, kind, text, { thread = null, persona = null, task = null, attachments = [], at = null, publish = true } = {}) {
+  // their text), at most RECORDS_MAX a mutation. An import's message
+  // (`imported`) is marked so, keeps its own time and publishes no record
+  // (a page reads an imported thread with `thread`). A tool's output is
+  // clipped before it comes here; no other text is cut. Answers its first
+  // id and how many it took.
+  #log(call, m, kind, text, { thread = null, persona = null, task = null, attachments = [], at = null, imported = false } = {}) {
     const sql = this.ctx.storage.sql;
     at ??= Date.now();
     const pieces = M.splitText(text);
@@ -666,13 +697,13 @@ export class App extends DurableObject {
       const i = m.T;
       const files = k === 0 ? attachments : [];
       sql.exec(
-        "INSERT INTO log (i, kind, text, at, thread, persona, task, attachments, cont) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        i, kind, piece, at, thread, persona, task, files.length ? JSON.stringify(files) : null, k > 0 ? 1 : null,
+        "INSERT INTO log (i, kind, text, at, thread, persona, task, attachments, cont, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        i, kind, piece, at, thread, persona, task, files.length ? JSON.stringify(files) : null, k > 0 ? 1 : null, imported ? 1 : null,
       );
       sql.exec("INSERT INTO log_fts (rowid, text) VALUES (?, ?)", i, piece);
       if (thread !== null) sql.exec("UPDATE thread SET last = ?, last_i = ? WHERE id = ?", at, i, thread);
-      M.append(m, M.line0(kind, F.rendered(piece, files)));
-      if (publish && this.#records < RECORDS_MAX) {
+      M.append(m, M.line0(kind, F.rendered(piece, files)), imported);
+      if (!imported && this.#records < RECORDS_MAX) {
         this.#records++;
         const named = F.described(files);
         const body = { type: "msg", i, kind, text: recordText(piece, RECORD_JSON_MAX - sizeOf(named)), thread, at, persona, task };
@@ -837,7 +868,8 @@ export class App extends DurableObject {
     // when its first message was logged: the turn's timing counts from there
     const asked = taken.length ? (sql.exec("SELECT at FROM log WHERE i = ?", taken[0].i).toArray()[0]?.at ?? null) : null;
     this.#setJson("turn", { run, thread, since: now, touched: now, stop: false });
-    const settled = this.#firstUnbuilt(m) >= tail;
+    // an import not summarized yet is not waited for (its view passes it)
+    const settled = this.#firstUnbuilt(m, true) >= tail;
     call.publish("log", { type: "turn", thread, state: settled ? "thinking" : "settling" });
     // hand-offs with no reply in TASK_LOST_MS are lost (a reply later still reports)
     for (const { id } of sql.exec("SELECT id FROM task WHERE state = 'running' AND started < ? LIMIT 32", now - TASK_LOST_MS).toArray()) {
@@ -936,16 +968,24 @@ export class App extends DurableObject {
   }
 
   // ---- the compactor's queue (§4, "The order"; never a scan of the tree) ----
+  //
+  // An import's work (`imp`) comes after the live chat's, and does not hold
+  // it back (docs/optchat.md, "Where we differ from the gist", 16): a live
+  // message's node starts once fewer than JOBS live messages before it are
+  // unbuilt, and a run takes live work first.
 
-  // The first message not summarized yet, or T.
-  #firstUnbuilt(m) {
-    return this.ctx.storage.sql.exec("SELECT MIN(i) AS f FROM ready WHERE l = 0").one().f ?? m.T;
+  // The first message not summarized yet, or T; with `live`, the first not
+  // an import's (what a turn waits for).
+  #firstUnbuilt(m, live = false) {
+    return this.ctx.storage.sql.exec(`SELECT MIN(i) AS f FROM ready WHERE ${live ? "imp = 0 AND " : ""}l = 0`).one().f ?? m.T;
   }
 
   // The last message whose node may start: one starts once fewer than
-  // JOBS messages before it are unbuilt.
-  #window() {
-    return this.ctx.storage.sql.exec("SELECT i FROM ready WHERE l = 0 ORDER BY i LIMIT 1 OFFSET ?", M.JOBS - 1).toArray()[0]?.i ?? Number.MAX_SAFE_INTEGER;
+  // JOBS messages before it are unbuilt, imported ones not counted for a
+  // live one (`imp` 0); for an import's (1), all of them.
+  #window(imp) {
+    const live = imp === 0 ? "imp = 0 AND " : "";
+    return this.ctx.storage.sql.exec(`SELECT i FROM ready WHERE ${live}l = 0 ORDER BY i LIMIT 1 OFFSET ?`, M.JOBS - 1).toArray()[0]?.i ?? Number.MAX_SAFE_INTEGER;
   }
 
   // Nodes leased now: compactions at work.
@@ -957,27 +997,33 @@ export class App extends DurableObject {
   #takeable(now) {
     const sql = this.ctx.storage.sql;
     const free = "(until IS NULL OR until <= ?)";
-    const merges = sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE l > 0 AND ${free} LIMIT ?)`, now, M.JOBS).one().n;
-    const messages = sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE l = 0 AND i <= ? AND ${free} LIMIT ?)`, this.#window(), now, M.JOBS).one().n;
-    return Math.min(M.JOBS, merges + messages);
+    let n = 0;
+    for (const imp of [0, 1]) {
+      n += sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE imp = ? AND l > 0 AND ${free} LIMIT ?)`, imp, now, M.JOBS).one().n;
+      n += sql.exec(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ready WHERE imp = ? AND l = 0 AND i <= ? AND ${free} LIMIT ?)`, imp, this.#window(imp), now, M.JOBS).one().n;
+    }
+    return Math.min(M.JOBS, n);
   }
 
   // The next node a run may build: of the merges whose halves are built
   // and the messages that may start, the one whose last message is the
-  // oldest (a merge before a message it ends with); with `upto` (a turn's
-  // wait), a message before it only. One this run failed (`skip`) is passed.
+  // oldest (a merge before a message it ends with), the live chat's before
+  // an import's; with `upto` (a turn's wait), a live message before it
+  // only. One this run failed (`skip`) is passed.
   #next(now, upto, skip) {
     const sql = this.ctx.storage.sql;
     const free = "(until IS NULL OR until <= ?)";
     const want = skip.length + 1;
     const skipped = new Set(skip.map(String));
     const pick = (rows) => rows.find((r) => !skipped.has(M.key(r.l, r.i))) ?? null;
-    const w = this.#window();
-    if (upto !== null) return pick(sql.exec(`SELECT l, i, e FROM ready WHERE l = 0 AND i <= ? AND i < ? AND ${free} ORDER BY i LIMIT ?`, w, upto, now, want).toArray());
-    const message = pick(sql.exec(`SELECT l, i, e FROM ready WHERE l = 0 AND i <= ? AND ${free} ORDER BY i LIMIT ?`, w, now, want).toArray());
-    const merge = pick(sql.exec(`SELECT l, i, e FROM ready WHERE l > 0 AND ${free} ORDER BY e, l LIMIT ?`, now, want).toArray());
-    if (!message || !merge) return message ?? merge;
-    return merge.e <= message.e ? merge : message;
+    if (upto !== null) return pick(sql.exec(`SELECT l, i, e FROM ready WHERE imp = 0 AND l = 0 AND i <= ? AND i < ? AND ${free} ORDER BY i LIMIT ?`, this.#window(0), upto, now, want).toArray());
+    const of = (imp) => {
+      const message = pick(sql.exec(`SELECT l, i, e FROM ready WHERE imp = ? AND l = 0 AND i <= ? AND ${free} ORDER BY i LIMIT ?`, imp, this.#window(imp), now, want).toArray());
+      const merge = pick(sql.exec(`SELECT l, i, e FROM ready WHERE imp = ? AND l > 0 AND ${free} ORDER BY e, l LIMIT ?`, imp, now, want).toArray());
+      if (!message || !merge) return message ?? merge;
+      return merge.e <= message.e ? merge : message;
+    };
+    return of(0) ?? of(1);
   }
 
   // Pumps a step started and not at work yet (each counted SPAWN_MS).
@@ -1002,9 +1048,10 @@ export class App extends DurableObject {
   // pumps to start for what else is ready, each counted as at work until
   // its first step (`first`) or SPAWN_MS. `end`: the run takes nothing more,
   // `next` with a fresh run after it. With `upto` (a turn's wait, which holds
-  // the turn lock): whether every message before it is summarized
-  // (`settled`), Stop was asked (`stopped`), or the first one that is not
-  // failed SETTLE_FAILS_MAX times (`failing`), else a message before it.
+  // the turn lock): whether every message before it is summarized, but an
+  // import's (`settled`), Stop was asked (`stopped`), or the first one that
+  // is not failed SETTLE_FAILS_MAX times (`failing`), else a message before
+  // it.
   pump_step({ run, built = null, skip = [], upto = null, first = false, end = false, next = false }) {
     need(isInt(run), "pump_step: run is the run's number");
     need(Array.isArray(skip) && skip.length <= 64, "pump_step: skip is at most 64 nodes");
@@ -1022,7 +1069,7 @@ export class App extends DurableObject {
     const out = { node: null, spawn: 0 };
     let taking = !end;
     if (upto !== null) {
-      const f = this.#firstUnbuilt(this.#memory());
+      const f = this.#firstUnbuilt(this.#memory(), true);
       out.settled = f >= upto;
       const lock = this.#json("turn", null);
       if (lock && lock.run === run) {
@@ -1185,7 +1232,8 @@ export class App extends DurableObject {
   // ---- what the page, the MCP server and goose ask ----
 
   // The rendered view, `<chat>…</chat>`: the parts that start before
-  // `upto` (all by default), up to the first not summarized yet.
+  // `upto` (all by default), up to the first not summarized yet (an
+  // import's passed, a marker line in its place).
   view({ upto = null } = {}) {
     const m = this.#memory();
     const r = M.render(m, upto ?? m.T);
@@ -1287,7 +1335,7 @@ export class App extends DurableObject {
         );
         call.publish("log", { type: "thread", id: thread, title });
       }
-      for (const msg of fresh) this.#log(call, m, msg.role === "user" ? "user" : "talk", msg.text, { thread, at: msg.at, publish: false });
+      for (const msg of fresh) this.#log(call, m, msg.role === "user" ? "user" : "talk", msg.text, { thread, at: msg.at, imported: true });
       const n = landed + fresh.length;
       sql.exec(
         "INSERT INTO import (source, conv, thread, n, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (source, conv) DO UPDATE SET n = excluded.n, at = excluded.at",
@@ -1834,7 +1882,9 @@ export class App extends DurableObject {
   }
 
   // §6: no turn sees a placeholder. The turn waits until every message
-  // before its own is summarized: it builds those it may itself, one at a
+  // before its own is summarized, but an import's (its view passes those:
+  // docs/optchat.md, "Where we differ from the gist", 16): it builds those
+  // it may itself, one at a
   // time under a lease as a pump does, and starts pumps for the rest (a
   // message whose node failed is tried again RETRY_MS later; one that
   // failed SETTLE_FAILS_MAX times ends the turn with an error). Past

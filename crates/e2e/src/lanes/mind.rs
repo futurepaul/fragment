@@ -35,7 +35,9 @@
 //! pages the raw log. The person's apps (`apps`): their todo is listed and
 //! used as them, once though its step is tried twice; a shared mind lends
 //! none; a fork asking for the capability is refused at deploy. An import
-//! is compacted by up to eight pumps at once.
+//! is compacted by up to eight pumps at once; while one is not summarized,
+//! live turns pass it (one marker line in their view) and wait for nothing
+//! of it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -723,7 +725,8 @@ fn claude_code_session() -> String {
 /// long message in a compaction of its own; a rerun sends nothing; a part
 /// ahead of what landed is refused, and one landed again changes nothing.
 /// Then a longer import, its model calls held a moment each: up to eight
-/// pumps compact it at once.
+/// pumps compact it at once. Then one held until released, passed by live
+/// turns meanwhile (`passing_an_import`).
 fn imports(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("mind-import");
     s.login(api, &home);
@@ -860,6 +863,94 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let took = began.elapsed().as_secs_f64();
     println!("      (64 imported messages compacted at the fake's latency in {took:.1} s, {:.1} calls a second{})", 64.0 / took, if quick { "" } else { ": not all" });
+
+    // an import not summarized yet, its compactions held: live chat passes it
+    s.eventually(TURN, || {
+        let st = op(api, &keys, &mind, "status", json!({}));
+        st["unbuilt"] == 0 && st["ready"] == false
+    });
+    s.ai.hold(HELD);
+    let passed = passing_an_import(s, api, &keys, &mind);
+    s.ai.release();
+    passed
+}
+
+/// Words only the held import's messages hold (`WorkersAi::hold`).
+const HELD: &str = "unsummarizedimport";
+/// The held import's messages: fewer than the compactor's eight at once,
+/// so its held calls leave room for the live chat's.
+const HELD_MESSAGES: i64 = 4;
+
+/// docs/optchat.md, "Where we differ from the gist", 16: while an import's
+/// messages are not summarized (its compactions held), a live message's
+/// turn does not wait for them, and its view shows them as one marker line;
+/// a second turn's wait is for the first turn's messages only, which the
+/// compactor summarizes ahead of the import; released, the import is
+/// summarized and the marker goes.
+fn passing_an_import(s: &mut Suite, api: &Api, keys: &Keys, mind: &str) -> Result<()> {
+    let first = op(api, keys, mind, "status", json!({}))["T"].as_i64().unwrap_or(0);
+    let last = first + HELD_MESSAGES - 1;
+    let marker = format!("(messages {first}–{last}: imported chats, not summarized yet; zoom(id, 1) gives one whole)");
+    let part: Vec<Value> = (0..HELD_MESSAGES)
+        .map(|k| json!({ "role": if k % 2 == 0 { "user" } else { "assistant" }, "text": padded(&format!("{HELD} message {k}")), "at": IMPORTED_T0 + 1_200_000 + k * 1000 }))
+        .collect();
+    let r = api.op(keys, mind, "import", &format!("import-held-{}", crate::api::now_ms()), json!({ "source": "claude-code", "conversation": { "id": "e2e-held", "title": "Held" }, "from": 0, "messages": part }))?;
+    anyhow::ensure!(r.status == 200, "importing the held conversation: {r}");
+    let r = api.op(keys, mind, "pump", &format!("pump-held-{}", crate::api::now_ms()), json!({}))?;
+    anyhow::ensure!(r.status == 200, "starting a pump: {r}");
+    let holding = s.eventually(Duration::from_secs(30), || s.ai.held() == HELD_MESSAGES as usize);
+    s.ok("the held import's compactions are all at work, held", holding, json!({ "held": s.ai.held(), "status": op(api, keys, mind, "status", json!({})) }));
+
+    let thread = "t_0f0f0f0f0f0f0f0f";
+    let say = |id: &str, text: &str| api.signed(keys, "POST", &format!("/api/f/{mind}/channels/say"), Some(&json!({ "id": id, "body": { "text": text, "thread": thread } })));
+    let asked = padded("what did I bring in today");
+    let r = say("held-1", &asked)?;
+    anyhow::ensure!(r.status == 200, "saying held-1: {r}");
+    let answered = s.eventually(TURN, || messages(api, keys, mind, thread).iter().any(|m| m["kind"] == "talk"));
+    let held = s.ai.held();
+    let said = messages(api, keys, mind, thread);
+    let turns: Vec<Value> = logged(api, keys, mind, "turn").into_iter().filter(|t| t["body"]["thread"] == thread).map(|t| t["body"]["state"].clone()).collect();
+    let view = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"] == asked.as_str()).and_then(|c| c["messages"][1]["content"][0]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    s.ok(
+        "a live message's turn answers while the import is not summarized, never settling: its view has the import as one marker line",
+        answered && held == HELD_MESSAGES as usize && !turns.contains(&json!("settling")) && view.contains(&format!("\n{marker}\n")) && !view.contains(HELD),
+        json!({ "held": held, "turns": turns, "view": view, "messages": said }),
+    );
+
+    // the first turn's own messages (long ones: compactions) come before the import's
+    let ids: Vec<i64> = said.iter().filter_map(|m| m["i"].as_i64()).collect();
+    let r = say("held-2", "and the second thing")?;
+    anyhow::ensure!(r.status == 200, "saying held-2: {r}");
+    let again = s.eventually(TURN, || messages(api, keys, mind, thread).iter().filter(|m| m["kind"] == "talk").count() == 2);
+    let held = s.ai.held();
+    let view = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][2]["text"] == "and the second thing").and_then(|c| c["messages"][1]["content"][0]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let after = view.split_once(&marker).map(|(_, rest)| rest.to_string()).unwrap_or_default();
+    let compaction = s
+        .ai
+        .chats()
+        .into_iter()
+        .find(|c| c["tool_choice"] == "none" && c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.contains("<input>\nuser: what did I bring in today")))
+        .and_then(|c| c["messages"][1]["content"][0]["text"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    s.ok(
+        "a second turn waits only for the first turn's messages, summarized ahead of the import (their compaction views pass it too)",
+        again && held == HELD_MESSAGES as usize && ids.len() == 2 && ids.iter().all(|i| after.contains(&format!("\n{i}+1|"))) && compaction.contains(&format!("\n{marker}\n")),
+        json!({ "held": held, "ids": ids, "view": view, "compaction": compaction }),
+    );
+
+    // released: the import is summarized and the marker goes
+    s.ai.release();
+    let done = s.eventually(TURN, || {
+        let st = op(api, keys, mind, "status", json!({}));
+        st["unbuilt"] == 0 && st["ready"] == false
+    });
+    let view = op(api, keys, mind, "view", json!({}));
+    let memory = op(api, keys, mind, "memory", json!({}));
+    s.ok(
+        "released, the import is summarized: every line built, and the view has no marker",
+        done && view["settled"] == true && view["text"].as_str().is_some_and(|t| !t.contains("not summarized yet")) && memory["parts"].as_array().is_some_and(|p| p.iter().all(|x| x["built"] == true)),
+        json!({ "view": view, "memory": memory }),
+    );
     Ok(())
 }
 

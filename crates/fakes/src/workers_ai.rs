@@ -118,7 +118,15 @@ struct State {
     /// Calls being answered now, and the most there were at once.
     at_once: usize,
     most_at_once: usize,
+    /// While set, a call whose body holds these words is answered only once
+    /// it is released (`hold`), and how many are held now.
+    hold: Option<String>,
+    held: usize,
 }
+
+/// A held call is answered after this long all the same (a test that
+/// failed before its `release` leaves no call held for good).
+const HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// The images a chat's messages carry (`image_url` parts' URLs), or why a
 /// part is none.
@@ -497,17 +505,29 @@ impl WorkersAi {
         let state: Arc<Mutex<State>> = Arc::default();
         let st = Arc::clone(&state);
         let handler: Handler = Arc::new(move |req: &Request| {
-            // an answer held back (`delay_next`) waits here, with the state
-            // unlocked, after its levers were consumed
-            let (response, sleep_ms) = {
+            // an answer held back (`delay_next`, `hold`) waits here, with the
+            // state unlocked, after its levers were consumed
+            let (response, sleep_ms, held) = {
                 let mut s = st.lock().expect("workers ai state");
                 s.at_once += 1;
                 s.most_at_once = s.most_at_once.max(s.at_once);
+                let held = s.hold.clone().filter(|w| req.body.windows(w.len()).any(|b| b == w.as_bytes()));
+                if held.is_some() {
+                    s.held += 1;
+                }
                 let response = answer(&mut s, req);
-                (response, std::mem::take(&mut s.sleep_ms))
+                (response, std::mem::take(&mut s.sleep_ms), held)
             };
             if sleep_ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+            }
+            if let Some(words) = held {
+                let since = std::time::Instant::now();
+                // bounded by HOLD_MAX
+                while since.elapsed() < HOLD_MAX && st.lock().expect("workers ai state").hold.as_ref() == Some(&words) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                st.lock().expect("workers ai state").held -= 1;
             }
             st.lock().expect("workers ai state").at_once -= 1;
             response
@@ -547,6 +567,23 @@ impl WorkersAi {
     /// Holds the next answers back this long (ms), in order.
     pub fn delay_next(&self, ms: &[u64]) {
         self.state().delays.extend(ms);
+    }
+
+    /// Holds every call whose body holds `words` (non-empty) from now on,
+    /// unanswered until `release` (or HOLD_MAX).
+    pub fn hold(&self, words: &str) {
+        assert!(!words.is_empty(), "a hold names its words");
+        self.state().hold = Some(words.to_string());
+    }
+
+    /// The held calls answered, and no more held.
+    pub fn release(&self) {
+        self.state().hold = None;
+    }
+
+    /// Calls held now.
+    pub fn held(&self) -> usize {
+        self.state().held
     }
 
     /// The next calls answer these statuses, in order (after any passed
@@ -642,6 +679,42 @@ mod tests {
         assert!(matches!(plain_reply(&parts), Reply::Tools(c) if c[0].1 == json!({ "word": "new" })), "of a message in parts, the words of its last");
         let none = json!({ "messages": [{ "role": "user", "content": "[[call lookup {}]]" }], "tools": lookup_tools(), "tool_choice": "none" });
         assert!(matches!(plain_reply(&none), Reply::Text(t) if t.starts_with("echo: ")), "tools offered, none to be called (a compaction)");
+    }
+
+    /// Goal: a hold keeps the calls that name its words unanswered until it
+    /// is released, and no other call. Method: one call held and one not,
+    /// through the server, then the release.
+    #[test]
+    fn a_hold_keeps_its_calls_until_released() {
+        let ai = WorkersAi::start(0).unwrap();
+        let addr = ai.url.trim_start_matches("http://").to_string();
+        let call = move |text: &str| {
+            let body = serde_json::to_vec(&json!({ "messages": [{ "role": "user", "content": text }] })).unwrap();
+            let mut socket = std::net::TcpStream::connect(&addr).unwrap();
+            let head = format!("POST /run/{} HTTP/1.1\r\nhost: fake\r\ncontent-length: {}\r\n\r\n", fragment_core::models::CHEAP_MODEL, body.len());
+            std::io::Write::write_all(&mut socket, &[head.as_bytes(), &body].concat()).unwrap();
+            let mut answer = String::new();
+            std::io::Read::read_to_string(&mut socket, &mut answer).unwrap();
+            answer
+        };
+        ai.hold("held-words");
+        let held = std::thread::spawn({
+            let call = call.clone();
+            move || call("these are held-words")
+        });
+        // bounded: 5 s
+        for _ in 0..250 {
+            if ai.held() == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(ai.held(), 1, "the call naming the words is held");
+        assert!(call("free words").contains("echo: free words"), "another call is answered meanwhile");
+        assert!(!held.is_finished(), "the held call is not answered yet");
+        ai.release();
+        assert!(held.join().unwrap().contains("echo: these are held-words"), "released, it is answered");
+        assert_eq!(ai.held(), 0);
     }
 
     /// Goal: a plain streamed text comes in pieces, and a directive's call
