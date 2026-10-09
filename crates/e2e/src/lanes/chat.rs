@@ -433,6 +433,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
+    commands_queued_and_quotes(s, api, &mut chrome, &page, Owned { owner: &owner, member_session: &member_session, chat: &chat_name, identity: &identity, label: &label }, &shots)?;
+
     // files a record names stay past the grace period; an upload none names goes
     let blob = |sha: &str| api.signed(&owner, "HEAD", &format!("/api/f/{chat_name}/blobs/{sha}"), None).map(|r| r.status).unwrap_or(0);
     // a quiet fragment's poll pass, which collects, is a day off: a test lever brings it in
@@ -525,6 +527,128 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
+    Ok(())
+}
+
+/// The chat the commands' checks run in, and who is in it.
+struct Owned<'a> {
+    owner: &'a Keys,
+    member_session: &'a str,
+    chat: &'a str,
+    identity: &'a str,
+    label: &'a str,
+}
+
+/// The owner's commands, a message that waits its turn, Steer, and Reply
+/// (docs/chat-records.md), on the owner's page against the scripted agent,
+/// whose menu has one command of each way the bridge carries one
+/// (`images/bridge`, `script::MENU`): `/` offers the agent's commands to its
+/// owner alone; one typed whole is a `{kind: "command"}` record, answered
+/// as the agent's turn; a message sent while the agent works is marked
+/// queued until its turn starts; Steer sends the typed words into the
+/// running turn as `/steer`, no turn of their own; Reply quotes a message,
+/// above what is typed and above the message sent, and the agent is handed
+/// the quoted words. Screenshots in the run's scratch (`chat/`).
+fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, o: Owned, shots: &Path) -> Result<()> {
+    chrome.viewport(page, 1280, 860, false)?;
+    chrome.color_scheme(page, "light")?;
+    let shows = |chrome: &mut Browser, cond: &str| chrome.until(page, cond, TURN);
+    let replied = |text: &str| format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js(text));
+    let typed = |chrome: &mut Browser, text: &str| -> Result<()> {
+        chrome.click(page, "#text")?;
+        chrome.type_text(page, text)
+    };
+    let chat_records = || records(api, o.owner, o.chat, "chat");
+    let starts = |seq: i64| records(api, o.owner, o.chat, "work").iter().filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["cause"]["seq"] == seq).count();
+
+    // the agent's menu, as it posted it in the chat
+    let menu = records(api, o.owner, o.chat, "work").into_iter().find(|r| r["body"]["kind"] == "commands").unwrap_or_default();
+    s.ok(
+        "the agent posted its runtime's commands in the chat, as itself (`commands` on work)",
+        menu["principal"] == o.identity && menu["body"]["agent"] == o.identity && menu["body"]["commands"].as_array().is_some_and(|c| c.iter().any(|x| x["name"] == "usage" && x["description"].is_string())),
+        &menu,
+    );
+
+    // `/` offers them to the agent's owner, as they type
+    typed(chrome, "/us")?;
+    let offered = shows(chrome, "!document.getElementById('commands').hidden && [...document.querySelectorAll('#commands button')].map((b) => b.dataset.command).join() === 'usage'");
+    let _ = chrome.screenshot(page, &shots.join("commands-picker.png"));
+    s.ok("typing / offers its owner the agent's commands whose names start so", offered, chrome.eval(page, "document.getElementById('commands').innerText")?);
+    chrome.eval(page, "(() => { const t = document.getElementById('text'); t.value = '/'; t.setSelectionRange(1, 1); t.dispatchEvent(new Event('input')); return true; })()")?;
+    let all = chrome.eval(page, "[...document.querySelectorAll('#commands button')].map((b) => b.dataset.command)")?;
+    s.ok("`/` alone, all of them, each with what it does", all.as_array().is_some_and(|a| a.len() >= 6 && a.iter().any(|c| c == "steer") && a.iter().any(|c| c == "new")), &all);
+    let _ = chrome.screenshot(page, &shots.join("commands-picker-all.png"));
+    chrome.eval(page, "(() => { const t = document.getElementById('text'); t.value = '/us'; t.setSelectionRange(3, 3); t.dispatchEvent(new Event('input')); return true; })()")?;
+    chrome.press(page, "Tab", false)?;
+    let completed = chrome.eval(page, "document.getElementById('text').value")?;
+    s.ok("Tab writes the one picked", completed == "/usage", &completed);
+    chrome.press(page, "Enter", false)?;
+    let bubble = "[...document.querySelectorAll('.msg.user.mine .bubble.command')].some((b) => b.textContent === '/usage')";
+    s.ok("Enter sends it, shown as the command it is", shows(chrome, bubble), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
+    let sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+    s.ok("its record is `{kind: \"command\", command, to}`, the agent named", sent["body"] == json!({ "kind": "command", "command": "usage", "to": [o.identity] }), &sent);
+    s.ok("and the agent answers it as a turn of its own", shows(chrome, &replied("ran /usage")), "");
+
+    // a viewer is offered none: their `/` is words
+    let elsewhere = chrome.another_context()?;
+    let base = format!("{}/", api.base);
+    chrome.set_cookie_in(&elsewhere, &base, "fragment_session", o.member_session)?;
+    let theirs = chrome.open_in(&elsewhere, &api.site_url(o.chat, "__signin?return=/"))?;
+    chrome.until(&theirs, "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.bubble.command')", TURN);
+    chrome.click(&theirs, "#text")?;
+    chrome.type_text(&theirs, "/us")?;
+    std::thread::sleep(Duration::from_millis(300));
+    s.ok("someone who is not the agent's owner is offered no command", chrome.eval(&theirs, "document.getElementById('commands').hidden")? == true, "");
+    chrome.close(theirs)?;
+
+    // a message sent while the agent works waits its turn, marked queued
+    typed(chrome, "steer-me now")?;
+    chrome.press(page, "Enter", false)?;
+    let working = format!("document.getElementById('text').placeholder === {}", js(&format!("{} is working: a message waits its turn, or Steer it now", capital(o.label))));
+    s.ok("while its agent works, the composer says a message waits its turn, or Steer it", shows(chrome, &working), chrome.eval(page, "document.getElementById('text').placeholder")?);
+    typed(chrome, "and after that")?;
+    chrome.press(page, "Enter", false)?;
+    let queued = "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'and after that' && !!m.querySelector('.queued'))";
+    let marked = shows(chrome, queued);
+    let _ = chrome.screenshot(page, &shots.join("queued.png"));
+    s.ok("a message sent while its agent works shows as queued", marked, chrome.eval(page, "document.getElementById('messages').innerText.slice(-400)")?);
+
+    // Steer: the typed words into the running turn, now
+    typed(chrome, "use blue")?;
+    let steerable = shows(chrome, "!document.getElementById('steer').hidden && !document.getElementById('steer').disabled");
+    let _ = chrome.screenshot(page, &shots.join("steer.png"));
+    s.ok("words typed while it works offer Steer beside Send", steerable, "");
+    chrome.click(page, "#steer")?;
+    s.ok("Steer tells the running turn: it goes on with them", shows(chrome, &replied("(steered: use blue)")), chrome.eval(page, "document.getElementById('messages').innerText.slice(-400)")?);
+    let steer = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "steer").unwrap_or_default();
+    s.ok(
+        "Steer is the owner's `/steer` command, no turn of its own",
+        steer["body"]["args"] == "use blue" && steer["seq"].as_i64().is_some_and(|seq| starts(seq) == 0),
+        &steer,
+    );
+    let ran = shows(chrome, &format!("{} && ![...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'and after that' && !!m.querySelector('.queued'))", replied("and after that")));
+    s.ok("the queued message runs once the turn ends, and is queued no longer", ran, chrome.eval(page, "document.getElementById('messages').innerText.slice(-400)")?);
+
+    // Reply: the composer quotes a message; the message sent shows it, and the agent is handed it
+    let reply_seq = chat_records().into_iter().find(|r| r["principal"] == o.identity && r["body"]["text"] == "ran /usage").and_then(|r| r["seq"].as_i64()).unwrap_or(0);
+    chrome.eval(page, &format!("(() => {{ document.querySelector('.msg.agent[data-seq=\"{reply_seq}\"] .actions .reply')?.click(); return true; }})()"))?;
+    let quoting = format!("!document.getElementById('quoting').hidden && document.getElementById('quoting-who').textContent === {} && document.getElementById('quoting-text').textContent === 'ran /usage'", js(&format!("Replying to {}", capital(o.label))));
+    let shown = shows(chrome, &quoting);
+    typed(chrome, "what did that mean")?;
+    let _ = chrome.screenshot(page, &shots.join("quote-composer.png"));
+    s.ok("Reply on the agent's message quotes it above what is typed", shown, chrome.eval(page, "document.getElementById('quoting').innerText")?);
+    chrome.press(page, "Enter", false)?;
+    let quoted = "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'what did that mean' && m.querySelector('.quote .quote-text')?.textContent === 'ran /usage')";
+    s.ok("the message sent shows what it quotes, and the composer quotes nothing now", shows(chrome, quoted) && chrome.eval(page, "document.getElementById('quoting').hidden")? == true, "");
+    let sent = chat_records().into_iter().find(|r| r["body"]["text"] == "what did that mean").unwrap_or_default();
+    s.ok("its record names the message it quotes (`reply_to`, its seq)", sent["body"]["reply_to"] == reply_seq, &sent);
+    s.ok("and the agent is handed the quoted words", shows(chrome, &replied("(quoting itself: ran /usage)")), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
+    let _ = chrome.screenshot(page, &shots.join("quote.png"));
+
+    // a side question: said beside, answered as a message of its own
+    typed(chrome, "/btw which file?")?;
+    chrome.press(page, "Enter", false)?;
+    s.ok("/btw is answered as a message of the agent's own", shows(chrome, &replied("aside: /btw which file?")), "");
     Ok(())
 }
 

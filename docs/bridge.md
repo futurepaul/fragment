@@ -39,11 +39,12 @@ A runtime gets commands and sends events, each naming its turn
 
 | Command | |
 |---|---|
-| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text, attachments as local files, whether it is a routine, and its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told") |
+| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text (`command`: a command of the runtime's menu, said as it is; below, "Commands"), attachments as local files, the message it quotes (`quote`: its text and whether it is the agent's own, read from the chat by the driver), whether it is a routine, and its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told") |
 | `Stop {turn}` | the asker pressed Stop |
 | `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
 | `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
 | `Tell {turn, seq, by, text}` | the asker's next message while the turn asked them in words (`Asked`): its answer, handed to the running turn, never a turn of its own; only ever to a turn this life runs |
+| `Aside {agent, fragment, turn?, id, by, text}` | a command said at once beside whatever runs in the agent's chat, no turn of its own (`/steer` into the running turn `turn`, `/btw`): below, "Commands" |
 
 | Event | |
 |---|---|
@@ -55,7 +56,11 @@ A runtime gets commands and sends events, each naming its turn
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
-| `Say {agent, fragment, text}` | said with no turn running: a turn of its own |
+| `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
+
+A runtime also names its **menu** (`Runtime::menu`): the commands it
+takes from its agents' owners, each with how the bridge carries it
+(`MenuItem`, `How`; below, "Commands"). None by default.
 
 Another runtime is another module here, or a bridge of its own.
 
@@ -75,7 +80,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {email}}}`: what to call a writer (a member's email, which its agent, a member, is shown) |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
-| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; and a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each |
+| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each; and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
 | `GET /f/{f}/__live`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
 | `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{record, replayed}` (a claim's `record.seq` is where the turn's note is read back from); retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
@@ -240,6 +245,51 @@ Why here: the platform holds no chat record (docs/cloudflare-v1.md, the
 rule), and the bridge is the one place that knows which turn an agent is
 in. A person's agents all run on one computer (decision 13), so every
 hand-off between them meets this count.
+
+## Commands
+
+An agent's owner commands its runtime from the chat (docs/chat-records.md,
+"A command"): only the runtime's menu (`Runtime::menu`), only from the
+agent's owner (`GET /api/computer`'s `owner` of the agent), for the agents
+the record's `to` names, else the lead. Anyone else's, and one off the
+menu, is passed over (`command.ignored`): nothing else reaches a runtime
+as a command, and a message's leading `/` never does (Relay: a zero-width
+space before it).
+
+- **How each is carried** is its menu item's (`How`, `engine.rs`
+  `command`): `Turn`, a turn of its own, admitted as a message is (its
+  place in the chat's queue, both its records, Stop), its text
+  `/<name> <args>` handed as it is (`TurnStart::command`, kept in the
+  state: one waiting its turn is a command in the next life too); `Stop`,
+  the agent's running turn in the chat stopped whoever asked it (its open
+  cards closed `stopped`) and its waiting ones ended unrun, each with
+  both its records; `Restart`, the same, then a turn of its own, which
+  runs once the stopped turn ends; `Message`, its words a message; `Steer`,
+  its words said into the agent's running turn in the chat at once
+  (`Command::Aside`, no turn and no record of the bridge's), or a message
+  when none runs; `Aside`, said beside whatever runs, at once. A menu
+  item's `refuse` names words of its args that refuse it: its turn's two
+  records, the end saying why (`a_refused_command_ends_saying_why`).
+- **What answers an aside is a message of its own** (`Event::Say`), never
+  the running turn's reply or step: the runtime tells the bridge which
+  sends answer it.
+- **The menu in each chat.** The agent's first turn handed in a chat in
+  a life posts the menu on `work` (`commands`, id `cm:<life>`) before the
+  runtime hears of the turn, so the page offers it to the owner
+  (`records::commands`). Kept per life in memory, never in `/data`.
+- Proven in the engine (`a_command_from_the_owner_is_a_turn_of_its_own`:
+  valid, replay, restart; `a_command_from_anyone_else_or_off_the_menu_
+  starts_nothing`; `stop_stops_the_running_turn_and_ends_the_waiting`;
+  `new_stops_then_runs_its_own_turn`; `steer_queue_and_btw`), through the
+  bridge with the scripted agent (tests/bridge.rs `commands_and_quotes`)
+  and the scripted Hermes (tests/relay.rs `commands_said_as_they_are`),
+  and with the real Hermes (tests/docker.rs
+  `commands_and_quotes_reach_hermes`).
+
+The scripted agent's menu (`script::MENU`) has one command of each way,
+so the platform's lanes run each with no agent runtime: `usage` and
+`model` (`ran /<name> <args>`), `new`, `stop`, `steer` (into a `steer-me`
+turn, which waits for one), `queue`, `btw` (`aside: /btw …`).
 
 ## A card keeps its computer awake
 
@@ -409,6 +459,45 @@ get_chat_info`.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
   waiting on words never sees it, so a Stop while the turn asks is
   followed by the words "Stop.", which let the wait go.
+- **Commands** (above, "Commands"): the menu is Hermes v0.21.6's own
+  manifest (`gateway/relay/command_manifest.py`, the names and
+  descriptions its connectors register), less what changes the install
+  or the gateway, or what the platform does its own way (`relay/menu.rs`,
+  its table: `update`, `restart`, `sethome`, `reload-mcp`,
+  `reload-skills`, `personality`, `title`, `resume`, `reset`, `help`,
+  `approve`, `deny`, `thread`, `bg`). On the menu: `new`, `stop`,
+  `steer`, `queue`, `btw`, `retry`, `undo`, `compress`, `model`,
+  `reasoning`, `voice`, `usage`, `status`, `insights`. A command turn's
+  inbound text is `/<name> <args>` as it is, which Hermes runs as its own
+  command (never its model's words): idle, bracketed as a message is
+  (`👀`, its answer as a reply, `✅`). `/stop` is never said: the bridge's
+  Stop is. `/new` resets the session under the chat's own key (Hermes'
+  `_handle_reset_command`: a new session id, the key the same; the
+  overlay's `approvals.destructive_slash_confirm: false` asks nothing).
+  In an agent's own chat the image's Bot Chat hook titles the new session
+  `Bot Chat` as the next turn starts (docs/computers.md, "Bot Mode in our
+  Hermes image"); until then the keeper holds the session before, still
+  titled and the chat's, so a teammate's message still reaches the chat.
+  `/model` and `/reasoning` change the chat's session alone: `--global`
+  (and `reasoning`'s `show`, `hide`, which write the gateway's display
+  settings) are refused.
+- An aside (`/steer`, `/btw`) is an inbound in the agent's chat beside its
+  turn, kept until acked like any: Hermes takes a command mid-run
+  (`_handle_message_while_active`: every command it resolves bypasses the
+  busy session). `/steer`'s words land in the running turn after its next
+  tool call (`_busy_steer_command`). What answers either is a `send`
+  answering the command's message id (`⏩ Steer queued …`, `💬 Side
+  question: …`), and a side question's answer comes later answering
+  nothing (`💬 /btw: "…"`, or `❌ /btw failed: …`, read by its glyph line):
+  each said as a message of its own (`Event::Say`), never the running
+  turn's. A steer that reaches Hermes just as its turn ends is queued by
+  Hermes as a turn of its own, outside the bridge's (its reply then a
+  message of its own too).
+- A message quoting another carries Hermes' quoted reply
+  (`reply_to_message_id`, the quoted record's turn id; `reply_to: {text,
+  is_own}`), which Hermes puts before the message as `[Replying to: "…"]`
+  (`[Replying to your previous message: "…"]` for the agent's own;
+  `gateway/run_inbound.py`, `_prepend_inbound_reply_context`).
 - The end: `👀` on, `👀` off, then `✅` or `❌`. A turn ends at its `❌`,
   at its `✅` once it said something, and, stopped, at its `👀` off.
   Hermes brackets a message it took while its gateway was starting

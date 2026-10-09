@@ -67,6 +67,11 @@
 //! - Only a turn's asker stops it; only an agent's owner answers its
 //!   prompts, the first answer wins, and an unanswered prompt expires
 //!   (decision 42).
+//! - Only an agent's owner commands its runtime, and only with its menu
+//!   (`MenuItem`), each carried as the menu says (`How`): a turn of its
+//!   own, the chat's turns stopped, a message, or said beside the running
+//!   turn (`Command::Aside`, no turn). The menu is posted in a chat as the
+//!   agent first runs there in a life.
 //! - A turn that asks its asker something in words (`Asked`) takes their
 //!   next message in the chat as its answer (`Tell`), never as a turn
 //!   behind it. It is a running turn of this life: a restart ends it as
@@ -83,8 +88,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::limits;
-use crate::records::{self, AttachmentRef, Cause, Closed, Message, Outcome, PromptOption, Record, Said, Task};
-use crate::runtime::{Agent, Command, Event, LocalFile, TurnStart};
+use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, Outcome, PromptOption, Record, Said, Task};
+use crate::runtime::{Agent, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
 /// The state file's format. 2: one life per turn (no `handed` phase).
 pub const STATE_VERSION: u32 = 2;
@@ -252,8 +257,29 @@ pub struct Turn {
     /// turn not queued, and a turn's end clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,
+    /// Its text is a command of the runtime's menu, said to it as it is
+    /// (`TurnStart::command`). A state from before commands holds none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub command: bool,
+    /// The seq on `chat` of the message its message quotes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
+}
+
+/// What a turn is asked (`Engine::admit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask<'a> {
+    /// A message (a person's, or an agent's hand-off).
+    Message,
+    /// A routine (its agent's cron), asked as its owner.
+    Routine,
+    /// A command of the runtime's menu, its text said as it is.
+    Command,
+    /// A command its menu refuses with these words: both its records, and
+    /// the end says why; the runtime never hears it.
+    Refused(&'a str),
 }
 
 impl Turn {
@@ -375,6 +401,12 @@ pub struct Engine {
     /// and the entry goes. Never written to `/data`: a life that restores
     /// the same old `/data` reads them again, and is told again.
     forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
+    /// The commands the runtime takes from its agents' owners (its menu).
+    menu: &'static [MenuItem],
+    /// Per agent and chat, its menu posted there in this life (at its first
+    /// turn there: `records::menu_id`). Never written to `/data`; at most
+    /// one entry per followed chat of each agent.
+    published: BTreeSet<(String, String)>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -418,10 +450,21 @@ impl Engine {
             keepalive: false,
             ended: VecDeque::new(),
             forgotten: BTreeMap::new(),
+            menu: &[],
+            published: BTreeSet::new(),
             out: Vec::new(),
             dirty: false,
             now: 0,
         })
+    }
+
+    /// The commands the runtime takes from its agents' owners
+    /// (`Runtime::menu`): the only ones a `{kind: "command"}` record carries
+    /// to it, and the menu each chat is offered.
+    pub fn with_menu(mut self, menu: &'static [MenuItem]) -> Engine {
+        assert!(menu.iter().all(|m| records::valid_command(m.name)), "a menu names its commands");
+        self.menu = menu;
+        self
     }
 
     pub fn state(&self) -> &State {
@@ -599,12 +642,74 @@ impl Engine {
                 if let Some(hop) = hop {
                     let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, false);
+                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, Ask::Message);
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
             Said::PromptResponse { prompt, option, text } => self.answer(agent, fragment, &record.principal, &prompt, &option, text, record.seq),
+            Said::Command(c) => self.command(agent, fragment, record, c),
             Said::Other => {}
+        }
+    }
+
+    /// A command of the runtime's menu (`How`), from the agent's owner alone,
+    /// for the agents its `to` names, else the lead. Anyone else's, and one
+    /// not on the menu, is passed over: nothing outside the menu reaches the
+    /// runtime as a command.
+    fn command(&mut self, agent: &Agent, fragment: &str, record: &Record, c: CommandSaid) {
+        let view = self.views.get(fragment).cloned().unwrap_or_default();
+        let for_it = if c.to.is_empty() { view.lead() == Some(agent.identity.as_str()) } else { c.to.iter().any(|t| t == &agent.identity) };
+        if !for_it {
+            return;
+        }
+        if record.principal != agent.owner {
+            crate::ev!("command.ignored", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "command": c.name, "why": "only the agent's owner sends it commands" });
+            return;
+        }
+        let Some(item) = self.menu.iter().find(|m| m.name == c.name).copied() else {
+            crate::ev!("command.ignored", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "command": c.name, "why": "not one of its runtime's commands" });
+            return;
+        };
+        let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
+        let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
+        let text = if c.args.is_empty() { format!("/{}", c.name) } else { format!("/{} {}", c.name, c.args) };
+        let as_command = Message { text: text.clone(), ..Message::default() };
+        let as_message = Message { text: c.args.clone(), ..Message::default() };
+        let refused = item.refuse.iter().find(|(word, _)| c.args.split_whitespace().any(|w| w.eq_ignore_ascii_case(word))).map(|(_, why)| *why);
+        crate::ev!("command", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "command": c.name, "refused": refused.is_some() });
+        let has_args = !c.args.is_empty();
+        let running = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.active()).map(|t| t.id.clone());
+        match item.how {
+            _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default())),
+            How::Stop => self.stop_all(&agent.fragment, fragment),
+            How::Restart => {
+                self.stop_all(&agent.fragment, fragment);
+                self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command);
+            }
+            How::Message if has_args => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
+            How::Steer if has_args && running.is_none() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
+            How::Steer | How::Aside if has_args => {
+                let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
+                let turn = running.filter(|_| item.how == How::Steer);
+                crate::ev!("command.aside", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "turn": turn });
+                self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), turn, id, by: record.principal.clone(), by_name: asker_name, text }));
+            }
+            _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command),
+        }
+    }
+
+    /// The agent's owner stopped it in this chat (`How::Stop`): its turn
+    /// running there is stopped, whoever asked it, and its waiting ones end
+    /// stopped, never run.
+    fn stop_all(&mut self, agent: &str, fragment: &str) {
+        let mut mine: Vec<(u64, String, Phase)> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended).map(|t| (t.order, t.id.clone(), t.phase)).collect();
+        mine.sort_by_key(|(order, _, _)| *order);
+        for (_, id, phase) in mine {
+            crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
+            match phase {
+                Phase::Queued => self.end_unrun(&id, Outcome::Stopped),
+                _ => self.stop_running(agent, fragment, &id),
+            }
         }
     }
 
@@ -614,7 +719,7 @@ impl Engine {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 let m = Message { text, ..Message::default() };
                 let owner = agent.owner.clone();
-                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, true);
+                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             Task::Other => {}
@@ -714,16 +819,19 @@ impl Engine {
     /// platform's time); `hop` past zero is a hand-off from another agent,
     /// which the chat's budget counts.
     #[allow(clippy::too_many_arguments)]
-    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, routine: bool) {
+    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, ask: Ask) {
         let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
         if self.state.turns.contains_key(&id) {
             // The cursor makes this impossible; a state that says otherwise
             // is not trusted to go on.
             panic!("turn {id} admitted twice: the cursor of {} is behind its turns", cursor_key(&agent.fragment, &cause.fragment, &cause.channel));
         }
-        assert!(!routine || hop == 0, "a routine is its owner's ask, no hand-off");
+        let routine = ask == Ask::Routine;
+        assert!(ask == Ask::Message || hop == 0, "a routine or a command is its owner's ask, no hand-off");
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
-        let refusal = if hop > 0 && !self.agent_turn_allowed(fragment, at) {
+        let refusal = if let Ask::Refused(why) = ask {
+            Some(why.to_string())
+        } else if hop > 0 && !self.agent_turn_allowed(fragment, at) {
             Some(refused_budget())
         } else if waiting >= limits::QUEUED_PER_CHAT_MAX {
             Some(REFUSED_QUEUED.to_string())
@@ -754,6 +862,8 @@ impl Engine {
             stop_requested: false,
             owed: Vec::new(),
             asking: false,
+            command: matches!(ask, Ask::Command | Ask::Refused(_)),
+            reply_to: m.reply_to,
             open: None,
         };
         self.dirty = true;
@@ -914,7 +1024,11 @@ impl Engine {
         let fragment = self.state.turns[id].fragment.clone();
         // what another life ran here that the runtime does not remember,
         // told once: this turn takes it
-        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment)).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
+        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment.clone())).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
+        // the menu, once a life in each chat, as the agent first runs there
+        if !self.menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
+            self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, self.menu), Vec::new());
+        }
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
@@ -935,8 +1049,11 @@ impl Engine {
             note: None,
             forgotten,
             forgotten_more,
+            command: t.command,
+            reply_to: t.reply_to,
+            quote: None,
         };
-        crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment });
+        crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));
     }
 
@@ -996,30 +1113,35 @@ impl Engine {
                 self.pump(&agent.fragment, fragment);
             }
             Phase::Ended => crate::ev!("stop.ignored", { "turn": id, "why": "it is over" }),
-            Phase::Running | Phase::Waiting => {
-                let t = self.state.turns.get_mut(&id).expect("found");
-                if t.stop_requested {
-                    return;
-                }
-                t.stop_requested = true;
-                // a Stop is its question's answer too (Relay says "Stop." to
-                // a clarify waiting on words): the next message is a turn
-                t.asking = false;
-                let open: Vec<String> = t.prompts.iter().filter(|p| !p.closed).map(|p| p.id.clone()).collect();
-                for p in t.prompts.iter_mut() {
-                    p.closed = true;
-                }
-                if t.phase == Phase::Waiting {
-                    t.phase = Phase::Running;
-                }
-                self.dirty = true;
-                crate::ev!("turn.stopping", { "turn": id });
-                for p in open {
-                    self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, &format!("pc:{p}")), records::turn_prompt_closed(&id, &p, Closed::Stopped, None), Vec::new());
-                }
-                self.out.push(Effect::Runtime(Command::Stop { turn: id }));
-            }
+            Phase::Running | Phase::Waiting => self.stop_running(&agent.fragment, fragment, &id),
         }
+    }
+
+    /// Stops a turn this life runs: its open cards close as stopped, and the
+    /// runtime is told (once).
+    fn stop_running(&mut self, agent: &str, fragment: &str, id: &str) {
+        let t = self.state.turns.get_mut(id).expect("a running turn is held");
+        assert!(t.active(), "only a running turn is stopped so: {id} is {:?}", t.phase);
+        if t.stop_requested {
+            return;
+        }
+        t.stop_requested = true;
+        // a Stop is its question's answer too (Relay says "Stop." to
+        // a clarify waiting on words): the next message is a turn
+        t.asking = false;
+        let open: Vec<String> = t.prompts.iter().filter(|p| !p.closed).map(|p| p.id.clone()).collect();
+        for p in t.prompts.iter_mut() {
+            p.closed = true;
+        }
+        if t.phase == Phase::Waiting {
+            t.phase = Phase::Running;
+        }
+        self.dirty = true;
+        crate::ev!("turn.stopping", { "turn": id });
+        for p in open {
+            self.post(agent, fragment, records::WORK, records::work_id(id, &format!("pc:{p}")), records::turn_prompt_closed(id, &p, Closed::Stopped, None), Vec::new());
+        }
+        self.out.push(Effect::Runtime(Command::Stop { turn: id.to_string() }));
     }
 
     /// An answer to a turn's prompt, from the agent's owner. Words go with

@@ -39,6 +39,12 @@ pub const TURNS_OPEN_MAX: usize = 512;
 /// 64 KiB; a message longer than this is cut, marked with `…`).
 pub const MESSAGE_TEXT_MAX_BYTES: usize = 32 * 1024;
 
+/// The text of a message a person's message quotes (`reply_to`), handed to
+/// a runtime, at most: enough for a reply's list or code whole (Hermes
+/// keeps a quote whole, "a preview silently loses later list items"), cut
+/// past it.
+pub const QUOTE_TEXT_MAX_BYTES: usize = 4096;
+
 /// A reply's text posted as one record, at most: under the platform's
 /// 64 KiB body cap with room for the turn, attachments, and `to`.
 pub const REPLY_TEXT_MAX_BYTES: usize = 56 * 1024;

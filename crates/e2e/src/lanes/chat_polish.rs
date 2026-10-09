@@ -51,7 +51,9 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
         anyhow::ensure!(r.status == 200, "posting work history {i}: {r}");
     }
     for i in 0..415 {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("history-{i}"), "body": { "text": format!("History {i:03}") } })))?;
+        let mut body = json!({ "text": format!("History {i:03}") });
+        if i == 414 { body["reply_to"] = json!(2); }
+        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("history-{i}"), "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting history {i}: {r}");
     }
     let backwards = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?before=20&limit=3"), None)?;
@@ -65,6 +67,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let page = chrome.open(&api.site_url(&name, ""))?;
     chrome.viewport(&page, 1280, 860, false)?;
     s.ok("the initial backlog is bounded to 400 and offers earlier messages", super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden"), "");
+    s.ok("a quote outside the initial history has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
     chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = 100; return true; })()")?;
     super::shows(chrome, &page, "document.getElementById('scroll').scrollTop === 100");
     let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historyAnchor = m; window.__historyTop = m.getBoundingClientRect().top; document.getElementById('earlier').click(); return m.dataset.seq; })()")?;
@@ -72,6 +75,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let position = chrome.eval(&page, "Math.abs(window.__historyAnchor.getBoundingClientRect().top - window.__historyTop)")?;
     let ordered = chrome.eval(&page, "(() => { const seqs = [...document.querySelectorAll('.msg[data-seq]')].map(m => Number(m.dataset.seq)); return seqs.every((seq, i) => !i || seq > seqs[i-1]); })()")?;
     s.ok("loading earlier messages preserves the visible message, ascending order, and no duplicates", loaded && position.as_f64().is_some_and(|n| n < 2.0) && ordered == true, json!({ "anchor": anchor, "moved": position, "ordered": ordered }));
+    s.ok("loading earlier history fills the quote above its message", super::shows(chrome, &page, "document.querySelector('.msg[data-seq=\"416\"] .quote .quote-text')?.textContent === 'History 000' && !document.querySelector('.msg[data-seq=\"416\"] .quote').disabled"), "");
     s.ok("the earlier control disappears at the beginning of retained history", chrome.eval(&page, "document.getElementById('earlier').hidden")? == true, "");
     s.ok("earlier messages also bring their older work records beyond the initial 1000", super::shows(chrome, &page, "!!document.querySelector('.notice.stopped[data-turn=\"old-progress\"]')"), "");
     chrome.screenshot(&page, &shots.join("history-desktop.png"))?;
@@ -81,6 +85,8 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
         anyhow::ensure!(r.status == 200, "posting a new message: {r}");
     }
     s.ok("new live messages are counted without moving the reader", super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('2 new messages')") && chrome.eval(&page, "Math.abs(window.__historyAnchor.getBoundingClientRect().top - window.__historyTop) < 2")? == true, "");
+    let command = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "new-command", "body": { "kind": "command", "command": "usage", "args": "", "to": [agent] } })))?;
+    s.ok("live command messages also count toward jump to latest", command.status == 200 && super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('3 new messages') && !!document.querySelector('.bubble.command .command-name')"), &command);
     chrome.click(&page, "#latest")?;
     s.ok("jump to latest reaches the end and clears the count", super::shows(chrome, &page, "document.getElementById('latest').hidden && (() => { const s = document.getElementById('scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 2; })()"), "");
     // Render the fixture through the released markdown module. This also
@@ -109,15 +115,20 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     chrome.close(page)?;
     let page = chrome.open(&api.site_url(&name, ""))?;
     anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('say')?.dataset.ready === '1'"), "the failure page is ready");
+    anyhow::ensure!(super::shows(chrome, &page, "[...document.querySelectorAll('.msg.user')].some(m => m.querySelector('.bubble')?.textContent === 'History 414' && !!m.querySelector('.reply'))"), "the quoted message has loaded");
+    let quoted_seq = chrome.eval(&page, "(() => { const m = [...document.querySelectorAll('.msg.user')].find(m => m.querySelector('.bubble')?.textContent === 'History 414'); m.querySelector('.reply').click(); return Number(m.dataset.seq); })()")?;
     chrome.offline(&page, true)?;
     chrome.eval(&page, "(() => { document.getElementById('text').value = 'Retry my message'; document.getElementById('say').requestSubmit(); return true; })()")?;
     s.ok("a failed channel write shows its error and Retry on that message", super::shows(chrome, &page, "!![...document.querySelectorAll('.msg.user.mine')].find(m => m.textContent.includes('Retry my message') && m.querySelector('.message-error .message-retry'))"), "");
+    s.ok("a failed quoted message keeps its quote and is not marked queued or offered Reply", chrome.eval(&page, "(() => { const m = document.querySelector('.message-error').closest('.msg'); return m.querySelector('.quote .quote-text')?.textContent === 'History 414' && !m.querySelector('.queued, .reply'); })()")? == true, "");
     chrome.screenshot(&page, &shots.join("post-error-desktop.png"))?;
     chrome.offline(&page, false)?;
     chrome.eval(&page, "(() => { document.querySelector('.message-retry').click(); return true; })()")?;
     s.ok("retry sends the same message successfully and clears its local error", super::shows(chrome, &page, "!document.querySelector('.message-error') && [...document.querySelectorAll('.msg.user.mine .bubble')].filter(m => m.textContent === 'Retry my message').length === 1"), "");
     let retried = super::super::jobs::records(api, owner, &name, "chat").iter().filter(|r| r["body"]["text"] == "Retry my message").count();
     s.ok("the retried message is stored once", retried == 1, retried);
+    let quote_kept = super::super::jobs::records(api, owner, &name, "chat").iter().any(|r| r["body"]["text"] == "Retry my message" && r["body"]["reply_to"] == quoted_seq);
+    s.ok("retry preserves the quoted message's reply_to", quote_kept, &quoted_seq);
 
     // A completed record fixture names an actual agent as the lead, but
     // does not join its computer to this quiet chat. The frame receives

@@ -83,6 +83,59 @@ pub struct LocalFile {
     pub size: u64,
 }
 
+/// One of the commands a runtime takes from its agent's owner (a chat's
+/// `{kind: "command"}` record, docs/chat-records.md): its menu, which the
+/// bridge publishes in each chat (`commands` on `work`), and how the
+/// bridge carries each. Nothing outside the menu reaches the runtime as a
+/// command: a person's text that starts with `/` is a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuItem {
+    /// `^[a-z0-9_-]{1,32}$`, without its `/`.
+    pub name: &'static str,
+    pub description: &'static str,
+    /// What its argument is, for the person typing it; `None`: it takes none.
+    pub args: Option<&'static str>,
+    pub how: How,
+    /// Words of its argument that refuse it, each with why: its turn ends
+    /// saying so, and the runtime never hears it.
+    pub refuse: &'static [(&'static str, &'static str)],
+}
+
+/// How the bridge carries a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// A turn of its own, queued as a message's is: the runtime is handed
+    /// `/<name> <args>` as the turn's text, said as it is
+    /// (`TurnStart::command`).
+    Turn,
+    /// Stops the agent's running turn in the chat, whoever asked it, and
+    /// ends its waiting ones there (they never run). No turn of its own.
+    Stop,
+    /// As `Stop`, then a turn of its own: a new session for the chat.
+    Restart,
+    /// Its argument is a message (a turn like any); with none, a `Turn`.
+    Message,
+    /// Its argument goes into the agent's running turn in the chat at once
+    /// (`Command::Aside`); with no turn running, it is a message.
+    Steer,
+    /// Said beside whatever runs, at once, no turn of its own
+    /// (`Command::Aside`): what the runtime answers is a message of its own.
+    Aside,
+}
+
+/// The message a person's message quotes (`reply_to`), as the runtime is
+/// handed it: read from the chat by the driver before the turn is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quote {
+    /// The quoted record's id to the runtime (its turn id, as if it were one).
+    pub id: String,
+    /// Its text, at most `limits::QUOTE_TEXT_MAX_BYTES` (a file without
+    /// words, its name).
+    pub text: String,
+    /// It is the agent's own.
+    pub own: bool,
+}
+
 /// A turn handed to a runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnStart {
@@ -128,6 +181,14 @@ pub struct TurnStart {
     /// first turn in the chat after them.
     pub forgotten: Vec<String>,
     pub forgotten_more: u32,
+    /// Its text is a command of the runtime's menu (`/<name> <args>`), said
+    /// to it as it is; a message's never is.
+    pub command: bool,
+    /// The seq on `chat` of the message the turn's message quotes, and that
+    /// message (`quote`, read by the driver before the turn is handed;
+    /// `None` when it could not be read, or is no message).
+    pub reply_to: Option<u64>,
+    pub quote: Option<Quote>,
 }
 
 /// What the bridge asks of a runtime.
@@ -148,6 +209,12 @@ pub enum Command {
     /// handed to the running turn at once, never a turn of its own. `seq`
     /// is the message's record (a fresh message id).
     Tell { turn: String, seq: u64, by: String, by_name: String, text: String },
+    /// A command of the menu said in the agent's chat at once, beside
+    /// whatever turn runs there, no turn of its own (`How::Steer` into the
+    /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the
+    /// record's (a turn id, as if it were one). What the runtime answers it
+    /// with is a message of its own (`Event::Say`).
+    Aside { agent: String, fragment: String, chat_name: String, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
 /// What a runtime tells the bridge. Every event but `Connected` and `Say`
@@ -216,6 +283,10 @@ pub type RuntimeFuture = Pin<Box<dyn Future<Output = Result<(), RuntimeError>> +
 pub trait Runtime: Send + 'static {
     /// Its name in the log and in `--runtime`.
     fn name(&self) -> &'static str;
+    /// The commands it takes from its agents' owners (none by default).
+    fn menu(&self) -> &'static [MenuItem] {
+        &[]
+    }
     /// Runs until `shutdown` turns true (then returns promptly: the whole
     /// bridge has `limits::SHUTDOWN_MS_MAX`), or fails for good.
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture;

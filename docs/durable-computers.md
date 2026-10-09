@@ -205,8 +205,9 @@ checks that each stamp it saw rewritten parses whole.
   route (`custom`, or `anthropic` for the high tier, each with a
   `base_url`). The catalogs feed Hermes' `/model` picker and reasoning
   hints for OpenRouter's and Nous' routes, nothing else. No person
-  reaches the picker: the bridge keeps a leading `/` from reading as a
-  command. In v0.21.5 no turn of such a profile reads them: their
+  reaches the picker: Relay has none, a message's leading `/` never
+  reads as a command, and the owner's `/model` (docs/bridge.md,
+  "Commands") answers in words. In v0.21.5 no turn of such a profile reads them: their
   readers (`agent/reasoning_params.py`, `agent/auxiliary_reasoning_floor.py`,
   `agent/turn_recovery.py`) are for those routes, and `gateway/run_turn.py`
   reads one only for a profile that names no model. Ours always name one.

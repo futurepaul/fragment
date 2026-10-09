@@ -4,6 +4,8 @@
 // writes these into its own <svg>s.
 
 export const ICON = {
+  reply: '<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+  navigation: '<polygon points="3 11 22 2 13 21 11 13 3 11"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   panel: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
