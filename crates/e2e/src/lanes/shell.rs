@@ -589,7 +589,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
     let host = chat.clone();
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
-    s.ok("the shell's first agent names the cheap tier (GLM-5.3 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
+    s.ok("the shell's first agent names the cheap tier (DeepSeek V4 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
     // ready is ready: its computer awake, and the agent following its chat
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;

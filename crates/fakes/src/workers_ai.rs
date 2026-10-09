@@ -67,9 +67,10 @@ pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
 pub const NO_WORDS: &str = "(no words)";
 
 /// The chat models the platform calls that read images: those Workers AI's
-/// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
-/// default vision model; GLM-5.3, the medium tier's, has none).
-pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::CHEAP_MODEL];
+/// catalog marks "Vision: Yes" (GLM-5.3 Flash, the default vision model
+/// and the fallback; DeepSeek V4 Flash, the cheap tier's, and GLM-5.3, the
+/// medium tier's, have none).
+pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
 /// What a model is told of an image it was shown: `describe_image`'s
 /// answer starts so.
 pub const SEEN: &str = "I see an image";
@@ -818,7 +819,7 @@ mod tests {
     /// are not, to each model, by the refusal and over HTTP.
     #[test]
     fn images_go_only_to_a_model_that_reads_them() {
-        let flash = fragment_core::models::CHEAP_MODEL;
+        let flash = fragment_core::models::VISION_MODEL_DEFAULT;
         let glm = fragment_core::models::MEDIUM_MODEL;
         assert_eq!(image_refusal(flash, &shown(&png_url())), None);
         assert!(image_refusal(glm, &shown(&png_url())).is_some_and(|w| w.contains("takes no image input")), "the medium tier's model reads no images");

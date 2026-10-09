@@ -25,6 +25,9 @@
     "client_id": "fragment-workos-client-id",
     "api_key": "fragment-workos-api-key"
   },
+  // Models through this gateway: the cheap tier's DeepSeek V4 Flash, its
+  // fallback GLM-5.3 Flash, and GLM-5.3 Flash for vision, each the cell's
+  // default (no `fallback_model` or `vision_model` here)
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",
   // The operators (npubs): they grant credit, set plans, release
@@ -63,5 +66,6 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
+  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 3
   "price_book_version": 3
 }

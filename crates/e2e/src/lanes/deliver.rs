@@ -277,7 +277,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
     s.ok(
         "a text step whose model answers 503 is answered by the fallback model, once, and costs the fallback's call",
-        r["output"]["text"] == "echo: again" && r["output"]["model"] == "@cf/deepseek-ai/deepseek-v4-flash-0731" && tried == ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4-flash-0731"] && cost(&r) > 0,
+        r["output"]["text"] == "echo: again" && r["output"]["model"] == "@cf/zai-org/glm-5.3-flash" && tried == ["@cf/zai-org/glm-5.3", "@cf/zai-org/glm-5.3-flash"] && cost(&r) > 0,
         json!({ "run": r, "tried": tried }),
     );
     s.ai.fail_next(&[503]);

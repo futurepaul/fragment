@@ -18,7 +18,7 @@ import { LUCIDE_ICON } from "./lucide-icons.js";
 import { billingSections, returning } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
-// New agents run on GLM-5.3 Flash (Paul, 2026-10-08).
+// New agents run on the cheap tier: DeepSeek V4 Flash since 2026-10-09 (Paul).
 const DEFAULT_AGENT_TIER = "cheap";
 const ICON = {
   rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',

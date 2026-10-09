@@ -1144,8 +1144,8 @@ charged (none when nothing was).
 
 One OpenAI-shaped chat completion on a tier's model, metered on its
 payer's ledger (cell/src/models.rs). Tiers: `cheap` (the default for
-agents and calls naming no tier; GLM-5.3 Flash,
-`@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
+agents and calls naming no tier; DeepSeek V4 Flash,
+`@cf/deepseek-ai/deepseek-v4-flash-0731`, since 2026-10-09) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
 both on Workers AI through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
 payer's and the agent's identities). `high` (Opus) is refused, 400,
@@ -1158,9 +1158,8 @@ tier an agent or a job's step may name.
 
 A tier's call whose model fails before answering anything (not reached,
 429, or a 5xx) is made once more, the same, on the deployment's fallback
-model (its config's `fallback_model`, DeepSeek V4 Flash,
-`@cf/deepseek-ai/deepseek-v4-flash-0731`, unless named; one the price
-book prices), and its answer is the call's: settled from its usage at
+model (its config's `fallback_model`, GLM-5.3 Flash,
+`@cf/zai-org/glm-5.3-flash`, unless named; one the price book prices), and its answer is the call's: settled from its usage at
 its prices, under the call's one hold. An answer that began is final; a
 refusal of the request (another 4xx) is the call's; when the fallback
 fails too, its failure is the call's, released, after two tries in all.
