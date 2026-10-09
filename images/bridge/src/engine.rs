@@ -199,6 +199,9 @@ pub enum ClaimAnswer {
 pub struct Prompt {
     pub id: String,
     pub options: Vec<String>,
+    /// Its options answered in words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
 }
@@ -600,7 +603,7 @@ impl Engine {
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
-            Said::PromptResponse { prompt, option } => self.answer(agent, fragment, &record.principal, &prompt, &option, record.seq),
+            Said::PromptResponse { prompt, option, text } => self.answer(agent, fragment, &record.principal, &prompt, &option, text, record.seq),
             Said::Other => {}
         }
     }
@@ -1019,7 +1022,11 @@ impl Engine {
         }
     }
 
-    fn answer(&mut self, agent: &Agent, fragment: &str, principal: &str, prompt: &str, option: &str, seq: u64) {
+    /// An answer to a turn's prompt, from the agent's owner. Words go with
+    /// it only for an option answered in words (the runtime asks for them
+    /// otherwise, as its question in words).
+    #[allow(clippy::too_many_arguments)]
+    fn answer(&mut self, agent: &Agent, fragment: &str, principal: &str, prompt: &str, option: &str, text: Option<String>, seq: u64) {
         let found = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.prompts.iter().any(|p| p.id == prompt)).map(|t| t.id.clone());
         let Some(id) = found else {
             crate::ev!("prompt.ignored", { "agent": agent.fragment, "prompt": prompt, "why": "no open turn asked it" });
@@ -1041,14 +1048,16 @@ impl Engine {
             return;
         }
         p.closed = true;
+        let words = text.filter(|_| p.words.iter().any(|w| w == option));
         if t.prompts.iter().all(|p| p.closed) && t.phase == Phase::Waiting {
             t.phase = Phase::Running;
         }
         t.last_ms = now;
         self.dirty = true;
-        crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option });
-        self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, &format!("pc:{prompt}")), records::turn_prompt_closed(&id, prompt, Closed::Answered, Some((option, principal))), Vec::new());
-        self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string() }));
+        crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option, "words": words.is_some() });
+        let closed = records::turn_prompt_closed(&id, prompt, Closed::Answered, Some((option, principal, words.as_deref())));
+        self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, &format!("pc:{prompt}")), closed, Vec::new());
+        self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words }));
     }
 
     // ---- the runtime ----
@@ -1198,7 +1207,7 @@ impl Engine {
             // A prompt no card can show is expired at once, so the runtime
             // never waits on it.
             crate::ev!("prompt.refused", { "turn": id, "why": "not a prompt a card can show" });
-            self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new() }));
+            self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new(), words: None }));
             return;
         }
         self.seal(id);
@@ -1211,7 +1220,7 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), expires_at, closed: false });
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words).map(|o| o.id.clone()).collect(), expires_at, closed: false });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
@@ -1278,7 +1287,7 @@ impl Engine {
             let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
             crate::ev!("prompt.expired", { "turn": id, "prompt": prompt });
             self.post(&agent, &fragment, records::WORK, records::work_id(&id, &format!("pc:{prompt}")), records::turn_prompt_closed(&id, &prompt, Closed::Expired, None), Vec::new());
-            self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt, option: None, seq: 0, by: String::new() }));
+            self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt, option: None, seq: 0, by: String::new(), words: None }));
         }
         for id in quiet {
             self.out.push(Effect::Runtime(Command::Forget { turn: id.clone() }));

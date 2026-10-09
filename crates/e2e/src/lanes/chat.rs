@@ -9,6 +9,8 @@
 //! the chat's page, types and presses Enter, and sees the agent's draft
 //! live, then its reply; a tool step as a card; an approval card they
 //! answer with its button, which another member sees but may not press;
+//! a card of choices whose last is answered in words, typed on the card
+//! and sent with Enter;
 //! Stop, which ends a slow turn; a picture they attach, in their message
 //! and as the chat's blob; a reply's file; a voice memo recorded from
 //! Chrome's fake microphone, sent as an audio attachment and shown as a
@@ -276,6 +278,27 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");
     chrome.close(theirs)?;
 
+    // choices the agent asks (as Hermes' clarify asks them), the last
+    // answered in words: typed on the card, sent with Enter (Paul on p5,
+    // 2026-10-09: "'other' type your answer for questions doesn't work very well")
+    say(&mut chrome, "choose a plant")?;
+    let field = ".prompt:not(.closed) input[data-option=\"other\"]";
+    let offered = shows(&mut chrome, &page, &format!("!!document.querySelector({0}) && !document.querySelector({0}).disabled", js(field)));
+    let _ = chrome.screenshot(&page, &shots.join("desktop-choices.png"));
+    s.ok("a card of choices offers the option answered in words as a field on the card", offered, chrome.eval(&page, "document.querySelector('.prompt:not(.closed)')?.innerText ?? null")?);
+    if offered {
+        chrome.click(&page, field)?;
+        chrome.type_text(&page, "rosemary")?;
+        chrome.press(&page, "Enter", false)?;
+    }
+    let closed = shows(&mut chrome, &page, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].some((o) => o.textContent.startsWith('rosemary'))");
+    s.ok("typed there and sent with Enter, the card closes saying what was answered", closed, chrome.eval(&page, "[...document.querySelectorAll('.prompt')].map((p) => p.innerText)")?);
+    s.ok("and the agent has the words as the answer", shows(&mut chrome, &page, &replied("(chose: rosemary)")), chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let r = records(api, &owner, &chat_name, "chat");
+    let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response" && x["body"]["option"] == "other").cloned().unwrap_or_default();
+    s.ok("the page answered with the option and its words, `{option, text}`", answer["body"]["text"] == "rosemary", &answer);
+    let _ = chrome.screenshot(&page, &shots.join("desktop-choices-answered.png"));
+
     // Stop: the send circle becomes Stop while the owner's turn runs. The
     // turn is the message's own (docs/chat-records.md): the page may still
     // show Stop for the turn before, whose end it has not heard yet, and a
@@ -403,7 +426,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn", turns.len() == 8 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn", turns.len() == 9 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 

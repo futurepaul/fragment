@@ -200,6 +200,7 @@ export function mount(root) {
     drafts: new Map(), // turn -> { principal, text, at }: a reply as it streams
     answers: new Map(), // prompt -> { option, by }: a prompt_response on `chat`
     answering: new Map(), // prompt -> the option this page posted, until its card closes
+    typed: new Map(), // prompt -> what is typed in its card's field (an option answered in words)
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
@@ -380,6 +381,7 @@ export function mount(root) {
     } else if (b.kind === "turn.prompt.closed" && typeof b.prompt === "string") {
       t.closed.set(b.prompt, b);
       state.answering.delete(b.prompt);
+      state.typed.delete(b.prompt);
     } else if (b.kind === "turn.end") {
       t.end = { outcome: b.outcome, error: typeof b.error === "string" ? b.error : "", at: record.at, n };
       state.drafts.delete(b.turn);
@@ -524,8 +526,6 @@ export function mount(root) {
     $("head-marks").replaceChildren(...(agents.length ? agents : [first]).slice(0, 3).map((a) => avatar(colorOf(a), "tiny")));
     const mine = [...state.turns.values()].filter((t) => running(t) && t.asker && t.asker === state.me?.principal).sort((a, b) => b.startAt - a.startAt)[0];
     const stop = $("stop");
-    stop.hidden = !mine;
-    $("send").hidden = !!mine;
     stop.disabled = !mine || state.stopping.has(mine.id);
     stop.dataset.turn = mine?.id ?? "";
     if (canPost()) {
@@ -675,13 +675,19 @@ export function mount(root) {
         head.append(closed || gone ? `${who(t.agent).name} asked` : `${who(t.agent).name} asks`);
         card.append(head, inline(el("div", "prompt-text"), typeof p.text === "string" ? p.text : ""));
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
-        if (closed?.outcome === "answered") card.append(outcome("answered", "check", `${label(closed.option)}${by ? ` · ${by}` : ""}`));
+        const answered = typeof closed?.text === "string" && closed.text ? closed.text : label(closed?.option);
+        if (closed?.outcome === "answered") card.append(outcome("answered", "check", `${answered}${by ? ` · ${by}` : ""}`));
         else if (closed?.outcome === "expired") card.append(outcome("expired", "clock", "Expired: no answer in time"));
         else if (closed) card.append(outcome("stopped", "stopped", "Stopped"));
         else if (gone) card.append(outcome("expired", "clock", t.end ? "Closed" : "Expired: no answer in time"));
         else {
           const options = el("div", "options");
           for (const o of p.options) {
+            if (o.words) {
+              // answered in words: typed on the card, Enter sends them with it
+              options.append(wordsField(p.prompt, o, !mayAnswer || sent !== null));
+              continue;
+            }
             const b = el("button", o.style === "primary" || o.style === "danger" ? o.style : "", o.label || o.id);
             b.type = "button";
             b.dataset.option = o.id;
@@ -697,6 +703,38 @@ export function mount(root) {
         return card;
       }),
     ];
+  }
+  // An option answered in words (a clarify's "Other"): a field on the card,
+  // its label the hint; what is typed outlives the card's redraws.
+  function wordsField(prompt, o, disabled) {
+    const form = el("form", "words");
+    const field = el("input");
+    field.type = "text";
+    field.dataset.option = o.id;
+    field.placeholder = o.label || o.id;
+    field.setAttribute("aria-label", o.label || o.id);
+    field.maxLength = TEXT_MAX_BYTES;
+    field.enterKeyHint = "send";
+    field.value = state.typed.get(prompt) ?? "";
+    field.disabled = disabled;
+    const go = el("button", "send");
+    go.type = "submit";
+    go.title = "Send answer (Enter)";
+    go.setAttribute("aria-label", "Send answer");
+    go.innerHTML = svg("send");
+    const ready = () => (go.disabled = disabled || !field.value.trim());
+    field.oninput = () => {
+      state.typed.set(prompt, field.value);
+      ready();
+    };
+    ready();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const words = cutBytes(field.value.trim(), TEXT_MAX_BYTES);
+      if (words && !disabled) answer(prompt, o.id, words);
+    };
+    form.append(field, go);
+    return form;
   }
   function outcome(kind, icon, text) {
     const line = el("div", `outcome ${kind}`);
@@ -927,7 +965,13 @@ export function mount(root) {
   let sending = false;
   let recording = null; // the voice memo being recorded (`startMemo`)
   function refreshSend() {
-    $("send").disabled = sending || (!input.value.trim() && !attachments.length && !recording) || !canPost();
+    const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
+    $("send").disabled = sending || !typed || !canPost();
+    // while their turn runs the circle is Stop, until they type: then it
+    // sends (what the agent asked them, or more for it)
+    const stops = !!$("stop").dataset.turn && !typed;
+    $("stop").hidden = !stops;
+    $("send").hidden = stops;
   }
   function grow() {
     input.style.height = "auto";
@@ -1319,11 +1363,12 @@ export function mount(root) {
   }
 
   // Answering a card: one record, its id the card's, so a second tap is the same.
-  async function answer(prompt, option) {
+  // An option answered in words carries them (`text`).
+  async function answer(prompt, option, text) {
     state.answering.set(prompt, option);
     schedule();
     try {
-      await fragment.post("chat", { kind: "prompt_response", prompt, option }, { id: `pr:${prompt}` });
+      await fragment.post("chat", { kind: "prompt_response", prompt, option, ...(text ? { text } : {}) }, { id: `pr:${prompt}` });
     } catch (err) {
       // 409: another option was sent first, from another page: the card says which once closed
       if (err.status !== 409) {

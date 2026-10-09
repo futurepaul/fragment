@@ -170,7 +170,9 @@ fn frame(line: &str) -> Result<FromGateway, String> {
     })
 }
 
-fn options(v: &Value) -> Vec<PromptOption> {
+/// A prompt's options. A clarify's "Other" (`other`: Hermes' ids are
+/// positional, `c0`… then `other`) is answered in words.
+fn options(v: &Value, clarify: bool) -> Vec<PromptOption> {
     let Some(items) = v.as_array() else { return Vec::new() };
     items
         .iter()
@@ -178,7 +180,8 @@ fn options(v: &Value) -> Vec<PromptOption> {
             let id = o["id"].as_str()?.to_string();
             let label = o["label"].as_str().unwrap_or(&id).to_string();
             let style = o["style"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-            Some(PromptOption { id, label, style })
+            let words = clarify && id == "other";
+            Some(PromptOption { id, label, style, words })
         })
         .collect()
 }
@@ -196,7 +199,13 @@ fn action(a: &Value) -> Action {
         "typing" => Action::Typing { chat: s("chat_id") },
         "react" => Action::React { chat: s("chat_id"), message_id: s("message_id"), emoji: s("emoji"), remove: a["remove"] == json!(true) },
         "draft" => Action::Draft { chat: s("chat_id"), draft_id: a["draft_id"].as_u64().unwrap_or(0), content: s("content"), done: a["final"] == json!(true) },
-        "prompt" => Action::Prompt { chat: s("chat_id"), prompt_id: s("prompt_id"), content: s("content"), options: options(&a["options"]), timeout_s: a["timeout_s"].as_u64() },
+        "prompt" => {
+            // a clarify with choices asks `❓ <question>`: the card shows the question
+            let clarify = s("prompt_kind") == "clarify";
+            let content = s("content");
+            let content = if clarify { question(&content).unwrap_or(content) } else { content };
+            Action::Prompt { chat: s("chat_id"), prompt_id: s("prompt_id"), content, options: options(&a["options"], clarify), timeout_s: a["timeout_s"].as_u64() }
+        }
         "send_media" => Action::SendMedia {
             chat: s("chat_id"),
             media_kind: s("media_kind"),
@@ -518,8 +527,15 @@ mod tests {
         let p = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.12", "options": [{ "id": "once", "label": "Allow Once", "style": "primary" }, { "id": "deny", "label": "Deny" }] }));
         let FromGateway::Outbound { action: Action::Prompt { prompt_id, options, .. }, .. } = p else { panic!("a prompt") };
         assert_eq!(prompt_id, "ab.12");
-        assert_eq!(options[0], PromptOption { id: "once".into(), label: "Allow Once".into(), style: Some("primary".into()) });
+        assert_eq!(options[0], PromptOption { id: "once".into(), label: "Allow Once".into(), style: Some("primary".into()), words: false });
         assert_eq!(options[1].style, None);
+        // a clarify's choices (Hermes' send_clarify): the question without its glyph, and "Other" answered in words
+        let c = out(json!({ "op": "prompt", "chat_id": "c", "content": "❓ Which color?", "prompt_kind": "clarify", "prompt_id": "q.1", "options": [{ "id": "c0", "label": "red" }, { "id": "other", "label": "✏️ Other (type answer)" }] }));
+        let FromGateway::Outbound { action: Action::Prompt { content, options, .. }, .. } = c else { panic!("a prompt") };
+        assert_eq!(content, "Which color?");
+        assert_eq!(options.iter().map(|o| (o.id.as_str(), o.words)).collect::<Vec<_>>(), vec![("c0", false), ("other", true)]);
+        let FromGateway::Outbound { action: Action::Prompt { options, .. }, .. } = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.13", "options": [{ "id": "other", "label": "Other" }] })) else { panic!("a prompt") };
+        assert!(!options[0].words, "only a clarify's Other takes words");
         assert_eq!(out(json!({ "op": "task_card" })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Unsupported { op: "task_card".into() } });
         assert!(frames("{\"type\":\"outbound\"}")[0].is_err(), "an outbound with no request id");
     }

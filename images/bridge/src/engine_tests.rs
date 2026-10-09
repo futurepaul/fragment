@@ -271,7 +271,7 @@ fn an_approval_answered() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None }, PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()) }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "ab12.0011".into(), text: "Run rm?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
     let (id, body) = posts(&p)[0].clone();
     assert_eq!(id, records::work_id(&turn, "p:ab12.0011"));
@@ -288,11 +288,41 @@ fn an_approval_answered() {
     let bad = said(&mut e, &a, &v, 3, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "always" }), T0 + 21);
     assert!(commands(&bad).is_empty(), "not an option of this prompt");
     let yes = said(&mut e, &a, &v, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "once" }), T0 + 22);
-    assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into() }]);
+    assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None }]);
     assert_eq!(posts(&yes)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "ab12.0011", "outcome": "answered", "option": "once", "by": "npub1paul" }));
     assert_eq!(keepalive(&yes), None, "still awake, running again");
     let second = said(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "deny" }), T0 + 23);
     assert!(commands(&second).is_empty(), "the first answer won");
+}
+
+/// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
+/// doesn't work very well"): an option answered in words (a clarify's
+/// "Other") is answered on its card: the words go to the runtime with the
+/// answer, and the card's close says them, so nothing asks for them after
+/// and the person's next message is a turn of its own. Invalid: words with
+/// an option that takes none go nowhere.
+#[test]
+fn other_answered_in_words_on_its_card() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "pick for me" }), T0)).expect("started").turn;
+    let options = vec![PromptOption { id: "c0".into(), label: "red".into(), style: None, words: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true }];
+    let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.1".into(), text: "Which color?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
+    assert_eq!(posts(&p)[0].1["options"][1], json!({ "id": "other", "label": "Other", "words": true }), "the card says which option takes words");
+    let other = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "purple" }), T0 + 20);
+    assert_eq!(commands(&other), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 2, by: "npub1paul".into(), words: Some("purple".into()) }]);
+    assert_eq!(posts(&other)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "q.1", "outcome": "answered", "option": "other", "by": "npub1paul", "text": "purple" }));
+    // the turn asks nothing after: the next message waits as a turn of its own
+    let next = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "and now?" }), T0 + 30);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "queued behind the running turn, told to it never");
+
+    // words with an option that takes none go nowhere
+    let p2 = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.2".into(), text: "Again?".into(), options, ttl_ms: None }, T0 + 40);
+    assert_eq!(posts(&p2).len(), 1);
+    let red = said(&mut e, &a, &v, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.2", "option": "c0", "text": "sneaky" }), T0 + 50);
+    assert_eq!(commands(&red), vec![Command::Answer { turn: turn.clone(), prompt: "q.2".into(), option: Some("c0".into()), seq: 4, by: "npub1paul".into(), words: None }]);
+    assert!(posts(&red)[0].1.get("text").is_none(), "{:?}", posts(&red));
 }
 
 /// Goal: an unanswered prompt expires: its card says so, and the runtime is
@@ -303,12 +333,12 @@ fn an_approval_expires() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
     ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options, ttl_ms: Some(30_000) }, T0);
     assert!(e.step(Input::Tick, T0 + 29_999).effects.is_empty(), "not yet");
     let t = e.step(Input::Tick, T0 + 30_000);
     assert_eq!(posts(&t)[0].1["outcome"], "expired");
-    assert_eq!(commands(&t), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new() }]);
+    assert_eq!(commands(&t), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None }]);
     let late = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "once" }), T0 + 40_000);
     assert!(commands(&late).is_empty());
     // a prompt no card can show is expired at once
@@ -330,7 +360,7 @@ fn an_open_card_keeps_its_computer_awake_until_it_expires() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None }];
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options, ttl_ms: None }, T0 + 10);
     assert_eq!(posts(&p)[0].1["expiresAt"], T0 + 10 + 60_000);
     assert_eq!(keepalive(&p), None, "the card holds the computer: no let-go");
@@ -341,7 +371,7 @@ fn an_open_card_keeps_its_computer_awake_until_it_expires() {
     assert!(quiet.effects.is_empty() && e.keepalive(), "held to the card's last moment");
     let x = e.step(Input::Tick, T0 + 10 + 60_000);
     assert_eq!(posts(&x), vec![(records::work_id(&turn, "pc:p1"), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "p1", "outcome": "expired" }))]);
-    assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new() }]);
+    assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None }]);
     assert_eq!((e.state().turns[&turn].phase, keepalive(&x), e.keepalive()), (Phase::Running, None, true), "running again, as its runtime goes on without the answer");
     // the runtime ends it (Hermes: its approval timed out with the card, the
     // command BLOCKED, then its reply): the message that waited is run
@@ -1398,7 +1428,7 @@ impl World {
     fn ask(&mut self, turn: &str) {
         let prompt = format!("p-{}", &turn[..12]);
         self.held.get_mut(turn).expect("held").prompted = Some(prompt.clone());
-        let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None }];
+        let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false }];
         self.step(Input::Runtime(Event::Prompt { turn: turn.into(), prompt, text: "ok?".into(), options, ttl_ms: None }));
     }
 

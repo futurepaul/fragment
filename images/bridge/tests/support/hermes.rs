@@ -17,6 +17,11 @@
 //!   `draft` frames, then one `send` answering the
 //!   message; `👀` off; `✅`. An `interrupt_inbound` mid-turn stops it: `👀`
 //!   off only;
+//! - `clarify` asks as Hermes' clarify with choices does: a `prompt` of
+//!   `prompt_kind: "clarify"` (`❓ Which color?`: `c0` red, `c1` blue,
+//!   `other`); a choice is acked `✅ <choice>`, `other` asks `✏️ Type your
+//!   answer:`, and a message in the chat while it waits is its answer (its
+//!   clarify intercept); the reply ends `(chose: <it>)`;
 //! - `fail` fails as Hermes' handler does when it raises: `👀` off, `❌`
 //!   with nothing said, then its notice as a send answering nothing;
 //! - `narrate` says text beside a tool call as Hermes' stream consumer
@@ -183,6 +188,9 @@ pub const FAILURE: &str = "Sorry, I encountered an error (RuntimeError).\nno det
 enum Heard {
     Interrupt,
     Answer(String),
+    /// A message in its chat while its clarify waits: the clarify's answer
+    /// (Hermes' clarify intercept), never a turn of its own.
+    Words(String),
 }
 
 struct Gateway {
@@ -195,6 +203,8 @@ struct Gateway {
     secret: String,
     /// Running turns by chat, and prompts by id: who to tell.
     turns: Mutex<HashMap<String, mpsc::UnboundedSender<Heard>>>,
+    /// Chats whose turn's clarify waits for an answer.
+    clarifying: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Gateway {
@@ -219,7 +229,7 @@ impl Gateway {
 async fn serve(seen: Arc<Mutex<Seen>>, ws: net::ClientWs, addr: std::net::SocketAddr, id: String, secret: String) {
     let (mut sink, mut stream) = ws.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<Message>();
-    let gw = Arc::new(Gateway { out, pending: Arc::new(Mutex::new(HashMap::new())), seen: seen.clone(), next: AtomicU64::new(1), addr, id, secret, turns: Mutex::new(HashMap::new()) });
+    let gw = Arc::new(Gateway { out, pending: Arc::new(Mutex::new(HashMap::new())), seen: seen.clone(), next: AtomicU64::new(1), addr, id, secret, turns: Mutex::new(HashMap::new()), clarifying: Mutex::new(Default::default()) });
     let writer = tokio::spawn(async move {
         while let Some(m) = out_rx.recv().await {
             if sink.send(m).await.is_err() {
@@ -278,6 +288,13 @@ async fn serve(seen: Arc<Mutex<Seen>>, ws: net::ClientWs, addr: std::net::Socket
                         // a structured answer: resolved mid-turn, never chat
                         if let Some(tx) = gw.turns.lock().unwrap().get(&chat) {
                             let _ = tx.send(Heard::Answer(pr["option_id"].as_str().unwrap_or("").to_string()));
+                        }
+                        continue;
+                    }
+                    if gw.clarifying.lock().unwrap().contains(&chat) {
+                        // its clarify intercept: the words are the clarify's answer
+                        if let Some(tx) = gw.turns.lock().unwrap().get(&chat) {
+                            let _ = tx.send(Heard::Words(event["text"].as_str().unwrap_or("").to_string()));
                         }
                         continue;
                     }
@@ -425,9 +442,42 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
                 gw.act(react("👀", true)).await;
                 return;
             }
-            None => "not approved",
+            Some(Heard::Words(_)) | None => "not approved",
         };
         reply = format!("{reply} ({said})");
+    }
+    if text.contains("clarify") {
+        // Hermes' clarify with choices over Relay (`send_clarify`): a prompt
+        // of `prompt_kind: "clarify"`, its options positional and "Other";
+        // a choice is acked `✅ <choice>`, "Other" asks `✏️ Type your
+        // answer:` and takes the chat's next message as the answer
+        let options = json!([{ "id": "c0", "label": "red" }, { "id": "c1", "label": "blue" }, { "id": "other", "label": "✏️ Other (type answer)" }]);
+        let prompt = format!("c1a.{:08x}", gw.next.fetch_add(1, Ordering::Relaxed));
+        gw.clarifying.lock().unwrap().insert(chat.clone());
+        gw.act(json!({ "op": "prompt", "chat_id": chat, "content": "❓ Which color?", "prompt_kind": "clarify", "prompt_id": prompt, "options": options, "reply_to": null, "metadata": {} })).await;
+        let mut chose = None;
+        // bounded: an answer, then at most its words
+        while chose.is_none() {
+            match rx.recv().await {
+                Some(Heard::Answer(o)) if o == "other" => {
+                    gw.act(json!({ "op": "send", "chat_id": chat, "content": "✏️ Type your answer:", "reply_to": null, "metadata": {} })).await;
+                }
+                Some(Heard::Answer(o)) => {
+                    let label = if o == "c0" { "red" } else { "blue" };
+                    gw.act(json!({ "op": "send", "chat_id": chat, "content": format!("✅ {label}"), "reply_to": null, "metadata": {} })).await;
+                    chose = Some(label.to_string());
+                }
+                Some(Heard::Words(w)) => chose = Some(w),
+                Some(Heard::Interrupt) | None => {
+                    gw.clarifying.lock().unwrap().remove(&chat);
+                    done();
+                    gw.act(react("👀", true)).await;
+                    return;
+                }
+            }
+        }
+        gw.clarifying.lock().unwrap().remove(&chat);
+        reply = format!("{reply} (chose: {})", chose.unwrap_or_default());
     }
     if gw.seen.lock().unwrap().dead {
         // cut with its container: its message stays its session's last

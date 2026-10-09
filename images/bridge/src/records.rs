@@ -65,8 +65,9 @@ pub enum Said {
     Message(Message),
     /// Stop the turn it names (or the asker's running one).
     Stop { turn: Option<String> },
-    /// An answer to a prompt: its id, and the option picked.
-    PromptResponse { prompt: String, option: String },
+    /// An answer to a prompt: its id, the option picked, and the words of
+    /// an option answered in words.
+    PromptResponse { prompt: String, option: String, text: Option<String> },
     /// Anything else: a page's own kind, or a body that is not a message.
     Other,
 }
@@ -141,8 +142,14 @@ pub fn said(body: &Value) -> Said {
         },
         Some(Value::String(k)) if k == "prompt_response" => {
             let (prompt, option) = (text_field(o, "prompt"), text_field(o, "option"));
+            let text = match o.get("text") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(t)) if t.trim().is_empty() => None,
+                Some(Value::String(t)) => Some(cut_bytes(t.trim(), limits::MESSAGE_TEXT_MAX_BYTES)),
+                Some(_) => return Said::Other,
+            };
             match (prompt, option) {
-                (Some(p), Some(opt)) if valid_token(&p, 64) && valid_token(&opt, 32) => Said::PromptResponse { prompt: p, option: opt },
+                (Some(p), Some(opt)) if valid_token(&p, 64) && valid_token(&opt, 32) => Said::PromptResponse { prompt: p, option: opt, text },
                 _ => Said::Other,
             }
         }
@@ -375,6 +382,9 @@ pub struct PromptOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
+    /// Answered in words (a clarify's "Other"): its answer carries them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub words: bool,
 }
 
 pub fn turn_prompt(turn: &str, prompt: &str, text: &str, options: &[PromptOption], asks: &str, expires_at: u64) -> Value {
@@ -402,12 +412,16 @@ impl Closed {
     }
 }
 
-pub fn turn_prompt_closed(turn: &str, prompt: &str, closed: Closed, answer: Option<(&str, &str)>) -> Value {
+/// `answer`: the option, who answered, and the words of one answered in words.
+pub fn turn_prompt_closed(turn: &str, prompt: &str, closed: Closed, answer: Option<(&str, &str, Option<&str>)>) -> Value {
     let mut body = json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": prompt, "outcome": closed.as_str() });
     match (closed, answer) {
-        (Closed::Answered, Some((option, by))) => {
+        (Closed::Answered, Some((option, by, words))) => {
             body["option"] = json!(option);
             body["by"] = json!(by);
+            if let Some(words) = words {
+                body["text"] = json!(words);
+            }
         }
         (Closed::Answered, None) => panic!("an answered prompt names its answer"),
         (_, _) => {}
@@ -487,8 +501,13 @@ mod tests {
         assert_eq!(said(&json!({ "kind": "stop" })), Said::Stop { turn: None });
         assert_eq!(said(&json!({ "kind": "stop", "turn": "t1" })), Said::Stop { turn: Some("t1".into()) });
         assert_eq!(said(&json!({ "kind": "stop", "turn": 1 })), Said::Other);
-        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once" })), Said::PromptResponse { prompt: "ab.12".into(), option: "once".into() });
-        for bad in [json!({ "kind": "prompt_response", "prompt": "ab" }), json!({ "kind": "prompt_response", "prompt": "a b", "option": "x" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "" })] {
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once" })), Said::PromptResponse { prompt: "ab.12".into(), option: "once".into(), text: None });
+        // an option answered in words carries them, trimmed; blank words are none
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": " purple \n" })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: Some("purple".into()) });
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "  " })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: None });
+        let long = said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "a".repeat(limits::MESSAGE_TEXT_MAX_BYTES + 9) }));
+        assert!(matches!(long, Said::PromptResponse { text: Some(t), .. } if t.len() == limits::MESSAGE_TEXT_MAX_BYTES), "cut as a message's text is");
+        for bad in [json!({ "kind": "prompt_response", "prompt": "ab" }), json!({ "kind": "prompt_response", "prompt": "a b", "option": "x" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "x", "text": 3 })] {
             assert_eq!(said(&bad), Said::Other, "{bad}");
         }
     }
@@ -539,7 +558,11 @@ mod tests {
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new() };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "args": "ls", "ok": true, "excerpt": "" }));
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
-        assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p"))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
+        assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p", None))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
+        assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("other", "npub1p", Some("purple"))))["text"], "purple");
+        let other = PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true };
+        let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false };
+        assert_eq!(turn_prompt("t", "p", "Which?", &[once, other], "npub1p", 9)["options"], json!([{ "id": "once", "label": "Allow once" }, { "id": "other", "label": "Other", "words": true }]));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
         assert_eq!(reply("hi", "t", &[], 0), json!({ "text": "hi", "turn": "t" }));
         assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));

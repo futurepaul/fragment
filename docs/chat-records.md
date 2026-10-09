@@ -141,13 +141,17 @@ From anyone else it is ignored. A waiting turn named by Stop never runs.
 **A prompt's answer:**
 
 ```json
-{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>" }
+{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>", "text": "purple" }
 ```
 
 Only the agent's owner answers its prompts (decision 42); anyone else's
 is ignored. The first answer on the channel wins; later ones are
 ignored. A page posts it with the id `pr:<prompt>`, so a second tap is
-the same record (or 409, for another option).
+the same record (or 409, for another option). `text`, only for an option
+answered in words (`words`, below): what was typed, trimmed, at most 32
+KiB (more is cut); with any other option it is ignored, and without it
+such an option is answered as a question in words is (its runtime asks
+for them).
 
 Any other `kind` on `chat` is the page's own and is never a message.
 
@@ -203,7 +207,10 @@ turn.
 
 Part `p:<prompt>`: a card with buttons. `prompt` and option ids are
 `^[A-Za-z0-9._-]{1,64}$` (options `{1,32}`), 1 to 8 options, `style`
-optional (`primary`, `danger`). Only `asks` may answer, until
+optional (`primary`, `danger`). An option with `"words": true` is
+answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
+on the card, whose answer carries what was typed (`text`, above), so
+nothing asks for it after. Only `asks` may answer, until
 `expiresAt` (ms). An open card keeps its computer awake until it is
 answered or expires (docs/bridge.md, "A card keeps its computer awake"),
 so it expires with its runtime there, and its turn ends as the runtime
@@ -214,7 +221,8 @@ ends it.
   "outcome": "answered", "option": "once", "by": "npub1…" }
 ```
 
-Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`),
+Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
+`text` for an option answered in words),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
 waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
 across a restart, and the agent's next turn is told the card was cut
@@ -280,7 +288,9 @@ The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000, and lays them out in time: a person's message; an
 agent's consecutive steps as one card; a prompt as a card whose buttons
-only `asks` may press (enabled for them alone), then how it closed; a
+only `asks` may press (enabled for them alone), an option answered in
+words a field there that Enter sends, then how it closed (the words, for
+one answered in words); a
 reply; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft shows after the turn's last record, and while
 a turn runs with no draft nor open card, a working line does. It posts:
@@ -292,8 +302,10 @@ a turn runs with no draft nor open card, a working line does. It posts:
   uploaded first, at most 8 of at most 25 MiB each, and its text cut to
   32 KiB;
 - Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
-  asker while it runs (the send circle is Stop then);
-- a prompt's answer with the id `pr:<prompt>`;
+  asker while it runs (the send circle is Stop then, until they type: then
+  it sends);
+- a prompt's answer with the id `pr:<prompt>`, with `text` for an option
+  answered in words;
 - a voice memo (Attachments, above): the composer's mic records until it
   is pressed again, or Send, or 5 minutes pass, then sends the clip as
   the message's audio file with whatever was typed (the x lets it go).

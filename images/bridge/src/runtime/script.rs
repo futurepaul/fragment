@@ -8,6 +8,10 @@
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
+//! - `choose`: a prompt of choices (`c0` Basil, `c1` Mint) and `other`, answered
+//!   in words, as Hermes' clarify asks it; the reply says `(chose: <the
+//!   label, or the words>)`, or `(chose: nothing)` once it expired. `other`
+//!   answered with no words asks "Type your answer:" as `ask-me` does;
 //! - `ask-me`: the reply's first part asks "What should I call it?", and the
 //!   turn waits for the asker's next message (`Event::Asked`), then ends
 //!   saying `(told: <their words>)`;
@@ -121,7 +125,8 @@ impl Runtime for Script {
 /// What a running scripted turn hears from the bridge.
 enum Heard {
     Stop,
-    Answer(Option<String>),
+    /// The option (none: expired), and the words of one answered in words.
+    Answer(Option<String>, Option<String>),
     Told(String),
 }
 
@@ -150,9 +155,9 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
                     let _ = tx.send(Heard::Stop).await;
                 }
             }
-            Command::Answer { turn, option, .. } => {
+            Command::Answer { turn, option, words, .. } => {
                 if let Some(tx) = turns.get(&turn) {
-                    let _ = tx.send(Heard::Answer(option)).await;
+                    let _ = tx.send(Heard::Answer(option, words)).await;
                 }
             }
             Command::Forget { turn } => {
@@ -363,6 +368,21 @@ async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     }
 }
 
+/// Asks the asker something to answer in words, as the reply's next part,
+/// and waits for the words (none: the turn was stopped).
+async fn ask(events: &mpsc::Sender<Event>, rx: &mut mpsc::Receiver<Heard>, turn: &str, question: &str, part: &mut u32) -> Option<String> {
+    let _ = events.send(Event::Reply { turn: turn.into(), part: *part, text: question.into() }).await;
+    let _ = events.send(Event::Asked { turn: turn.into() }).await;
+    *part += 1;
+    loop {
+        match rx.recv().await {
+            Some(Heard::Told(words)) => return Some(words),
+            Some(Heard::Answer(..)) => continue,
+            Some(Heard::Stop) | None => return None,
+        }
+    }
+}
+
 async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, events: mpsc::Sender<Event>) {
     let id = ts.turn.clone();
     let emit = |e: Event| {
@@ -426,15 +446,15 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if text.contains("approve") || text.contains("risky") {
         emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new() } }).await;
         let options = vec![
-            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()) },
-            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()) },
+            PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
+            PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
         ];
         let prompt = format!("p-{}", &id[..12]);
         emit(Event::Prompt { turn: id.clone(), prompt, text: "Run `rm -rf ./scratch`?".into(), options, ttl_ms: None }).await;
         let said = match rx.recv().await {
-            Some(Heard::Answer(Some(o))) if o == "once" => "approved",
-            Some(Heard::Answer(Some(_))) => "denied",
-            Some(Heard::Answer(None) | Heard::Told(_)) => "not approved",
+            Some(Heard::Answer(Some(o), _)) if o == "once" => "approved",
+            Some(Heard::Answer(Some(_), _)) => "denied",
+            Some(Heard::Answer(None, _) | Heard::Told(_)) => "not approved",
             Some(Heard::Stop) | None => {
                 emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
                 return;
@@ -443,19 +463,27 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         reply = format!("{reply} ({said})");
     }
     let mut part = 1;
+    if text.split_whitespace().any(|w| w == "choose") {
+        let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words });
+        let prompt = format!("c-{}", &id[..12]);
+        emit(Event::Prompt { turn: id.clone(), prompt, text: "What should I plant?".into(), options: options.to_vec(), ttl_ms: None }).await;
+        let chose = match rx.recv().await {
+            Some(Heard::Answer(Some(o), Some(words))) if o == "other" => Some(words),
+            Some(Heard::Answer(Some(o), None)) if o == "other" => ask(&events, &mut rx, &id, "Type your answer:", &mut part).await,
+            Some(Heard::Answer(Some(o), _)) => Some(options.iter().find(|x| x.id == o).map_or(o, |x| x.label.clone())),
+            Some(Heard::Answer(None, _) | Heard::Told(_)) => Some("nothing".into()),
+            Some(Heard::Stop) | None => None,
+        };
+        let Some(chose) = chose else {
+            emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+            return;
+        };
+        reply = format!("{reply} (chose: {chose})");
+    }
     if text.split_whitespace().any(|w| w == "ask-me") {
-        emit(Event::Reply { turn: id.clone(), part, text: "What should I call it?".into() }).await;
-        emit(Event::Asked { turn: id.clone() }).await;
-        part += 1;
-        let told = loop {
-            match rx.recv().await {
-                Some(Heard::Told(words)) => break words,
-                Some(Heard::Answer(_)) => continue,
-                Some(Heard::Stop) | None => {
-                    emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
-                    return;
-                }
-            }
+        let Some(told) = ask(&events, &mut rx, &id, "What should I call it?", &mut part).await else {
+            emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+            return;
         };
         reply = format!("{reply} (told: {told})");
     }
