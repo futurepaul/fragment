@@ -77,6 +77,12 @@ pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) 
     records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined" && r["body"]["fragment"] == fragment).collect()
 }
 
+/// A view's notice of `kind` (docs/computers.md, "What its owner is told"),
+/// or null.
+pub(super) fn notice(v: &Value, kind: &str) -> Value {
+    v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null)
+}
+
 /// A computer's phase, as its owner reads it.
 pub(super) fn phase(api: &Api, owner: &crate::Keys, id: &str) -> String {
     api.signed(owner, "GET", &format!("/api/computers/{id}"), None).ok().and_then(|r| r.body["phase"].as_str().map(str::to_string)).unwrap_or_default()
@@ -403,7 +409,6 @@ const RECOVERY_CHECKS: [&str; 11] = [
 fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Keys, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
-    let notice = |v: &Value, kind: &str| v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null);
     let replied = |seq: i64| {
         let turn = turn_of(c.agent, c.chat, "chat", seq);
         agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
@@ -1077,36 +1082,100 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         false => super::frames::computer_ports(s, api, &owner, &id, &origin, cookie.as_deref().unwrap_or(""))?,
     }
 
-    // its image pin: an upgrade at the next wake, then a rollback, its data kept
+    // its image pin: an upgrade its owner is told of and restarts to take,
+    // then a rollback its sleep takes, its data kept. A pin while it runs is
+    // what a deploy that changed its image is to it: its next start runs
+    // another image than the one it runs (docs/computers.md, "What its owner
+    // is told")
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "no-such-image" })))?;
     s.ok("an image the deployment does not have is refused", r.status == 400, &r);
+    const PINS: [&str; 10] = [
+        "it runs its first build, the version its next start runs: no update to tell",
+        "the next build is pinned",
+        "awake on the first, its owner is told an update is ready: the version its next start runs, not the one it runs",
+        "it keeps running the build it started with until it sleeps",
+        "not while a turn runs: its card waiting holds the keepalive, and no update is told",
+        "the turn over, the update is told again",
+        "Later puts that version off: told no more; again, the same; another version, or none, is refused; no one else's",
+        "restarted, it runs the next build (an upgrade): its version the latest, nothing to tell",
+        "with its /data restored: it answers anew, and nothing runs twice",
+        "the first build pinned again, an update is told again: a version other than the one put off",
+    ];
     if !scripted {
-        for label in ["it runs its first build", "the next build is pinned", "woken, it runs the next build (an upgrade)", "with its /data restored: it answers anew, and nothing twice", "woken, it runs the first build again (a rollback)"] {
+        for label in PINS.iter().chain(&["asleep, no update is told: its next start takes it", "woken, it runs the first build again (a rollback)"]) {
             s.skip(label, "it needs the stub's two builds (stub, stub-next) and the version its screen serves");
         }
     } else {
-        s.ok("it runs its first build", version() == "1", version());
+        let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+        // the turns before have let go of its keepalive
+        s.eventually(Duration::from_secs(15), || lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+        let first = view();
+        s.ok(PINS[0], version() == "1" && first["version"].is_string() && first["version"] == first["latest"] && notice(&first, "update").is_null(), json!({ "served": version(), "view": first }));
         let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })))?;
-        s.ok("the next build is pinned", r.status == 200 && r.body["image"] == "stub-next", &r);
-        s.ok("it keeps running the build it started with until it sleeps", version() == "1", version());
+        let latest = r.body["latest"].as_str().unwrap_or("").to_string();
+        s.ok(PINS[1], r.status == 200 && r.body["image"] == "stub-next", &r);
+        s.ok(PINS[2], !latest.is_empty() && notice(&r.body, "update") == json!({ "kind": "update", "version": latest }) && r.body["version"] == first["version"] && first["version"] != latest.as_str(), &r);
+        s.ok(PINS[3], version() == "1", version());
+        // a turn waiting on its card holds the keepalive (docs/bridge.md)
+        let said = say(14, "approve this one too, please")?;
+        let turn = turn_of(&agent_name, &chat_name, "chat", said.body["record"]["seq"].as_i64().unwrap_or(0));
+        let asked = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
+        let held = lever(api, &id, "saves").map(|r| r.body["keepalives"].clone()).unwrap_or(Value::Null);
+        let mid = view();
+        s.ok(PINS[4], asked && held.as_u64().is_some_and(|n| n > 0) && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "keepalives": held, "view": mid }));
+        let card = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
+        let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
+        let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
+        replies_so_far += 1;
+        let again = s.eventually(Duration::from_secs(15), || notice(&view(), "update")["version"] == latest.as_str());
+        s.ok(PINS[5], approved && again, view());
+        let later = |who: &crate::Keys, v: &str| api.signed(who, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({ "version": v })));
+        let (once, twice) = (later(&owner, &latest)?, later(&owner, &latest)?);
+        let (running, malformed, none) = (later(&owner, first["version"].as_str().unwrap_or(""))?, later(&owner, "not a version")?, api.signed(&owner, "POST", &format!("/api/computers/{id}/notices/later"), Some(&json!({})))?);
+        let stranger_said = later(&stranger, &latest)?;
+        s.ok(
+            PINS[6],
+            once.status == 200
+                && notice(&once.body, "update").is_null()
+                && once.body["latest"] == latest.as_str()
+                && twice.status == 200
+                && twice.body["notices"] == once.body["notices"]
+                && [running.status, malformed.status, none.status] == [400; 3]
+                && stranger_said.status == 404
+                && notice(&view(), "update").is_null(),
+            json!({ "once": once.body, "twice": twice.status, "running": running.body, "malformed": malformed.status, "none": none.status, "stranger": stranger_said.status }),
+        );
         std::thread::sleep(QUEUE_DRAIN);
         let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
-        api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-        s.ok("woken, it runs the next build (an upgrade)", version() == "2", version());
+        let generation = view()["generation"].as_u64().unwrap_or(0);
+        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": generation })))?;
+        s.ok(
+            PINS[7],
+            r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(generation + 1) && r.body["version"] == latest.as_str() && r.body["latest"] == latest.as_str() && notice(&r.body, "update").is_null() && version() == "2",
+            json!({ "served": version(), "view": r.body }),
+        );
         say(30, "after the upgrade")?;
         replies_so_far += 1;
         let kept = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
         let again = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
         s.ok(
-            "with its /data restored: it answers anew, and nothing runs twice",
+            PINS[8],
             kept && again == ran,
             format!("runs {ran:?} -> {again:?}; {} replies", agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len()),
         );
+        s.eventually(Duration::from_secs(15), || lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
         let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })))?;
-        s.ok("the first build is pinned again", r.status == 200 && r.body["image"] == "stub", &r);
+        s.ok(
+            PINS[9],
+            r.status == 200 && r.body["image"] == "stub" && r.body["latest"] == first["version"] && notice(&r.body, "update")["version"] == first["version"],
+            &r,
+        );
         std::thread::sleep(QUEUE_DRAIN);
-        api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok("asleep, no update is told: its next start takes it", r.body["phase"] == "asleep" && r.body["version"].is_null() && r.body["latest"] == first["version"] && notice(&r.body, "update").is_null(), &r);
         s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
     }
 

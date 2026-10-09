@@ -118,7 +118,8 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **Won't wake**: three failed starts in a row, three crashes, or no save left to fall back to | `Phase::Failed` | Settings' "State: wont wake" and the platform's words / messages go unanswered, nothing said; and the shell's own presence wake (an owner's) silently tried it again every minute the person was there | a `wont_wake` notice in plain words, the platform's beside them, and Restart; the shell no longer wakes it on presence; after a restart that fails again, "still won't start", and the deployment's support link, or the details to give whoever runs it |
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
-| **An image update** | its owner's pin, sleep, wake | the update pill | the same |
+| **A deploy that changes its image** (the common update: the same name, a new image) | the deploy pushes it; awake, it keeps the image it started on until its next sleep or a restart | nothing: it ran the old image until it slept, and its owner restarted it to be sure | an `update` notice while it is awake and no turn runs: an update is ready, Restart (about a minute; its chats and work kept), or Later; nothing while it sleeps or is asleep, since its next start takes it. Settings shows the version it runs and the latest |
+| **A pin to another image** (a renamed default, a canary, a rollback) | its owner's pin | the update pill (pinned to the default, then a sleep and a wake) | the same; awake on the old image, the `update` notice too |
 
 **The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
 proto's `ComputerNotice`), the most pressing first, each derived from the
@@ -138,6 +139,11 @@ whoever reads it:
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
   newest loss only.
+- `update {version}`: it is awake on another version than its next start
+  runs (`version`, the view's `latest`; the view's `version` is the one it
+  runs), and no turn runs (no keepalive open). Told until a restart or a
+  sleep takes it, or its owner puts that version off (`POST
+  …/notices/later {version}`); another version is told again.
 
 When they change, the Computer DO tells its owner's open pages through
 their list's socket (`/api/fragments/watch`'s `changed`), so the shell
@@ -171,6 +177,55 @@ nothing, so pressed twice, or in two tabs, it restarts once. It starts a
 container, so the ledger is asked first, as for a wake: at zero credit it
 is refused, and what runs runs on (decision 27). A restart asked as the
 computer starts is that start.
+
+**An update is told, never forced** (Paul, 2026-10-09: "should it be a
+notification in the shell? (new update, click to restart). that might be
+simpler than trying to ninja restart people"). A deploy that changes the
+computer image pushes it under the same name (`hermes`), so the name a
+computer is pinned to stands for the new image from then on. Asleep, a
+computer takes it at its next wake (decision 19); awake, it runs the image
+it started on until it sleeps, which one in use, or always on, may not do
+for days.
+
+- **Where the version comes from.** The runtime's own reference for the
+  pinned name (entry.mjs's `imageRef`: `ctx.container.images`, from the
+  Worker version's container config; a deployed image is the digest the
+  deploy pushed, `…@sha256:<hex>`): exactly what the computer's next start
+  runs. Beside it, the reference its running start came up on, which the
+  Computer DO already kept (the image a snapshot is of). A version is the
+  digest's first 12 hex digits (`fragment_core::computer::version_of`; a
+  reference with no digest, as `wrangler dev` tags its builds, the first
+  12 of its SHA-256). One image is one version: a deploy that rebuilt
+  nothing tells nothing, where a deploy id would after every deploy.
+- **When it is noticed.** The DO looks at the reference at every event
+  (its alarm, which fires at least every five minutes awake; a keepalive;
+  a wake) and every read of its view (the shell as it opens, and each of
+  its owner's routes), and records it (`Images`). A deploy restarts every
+  Durable Object, so its next touch looks, finds the new reference, and
+  tells its owner's open pages as any change of what they are told is told
+  (`/api/fragments/watch`'s `changed`): no reload. A start runs what it
+  looked at and records it, so a restart, or a sleep and a wake, takes the
+  update and the notice goes.
+- **Never pushy.** Not while it sleeps, is asleep, or starts: its next
+  start takes the update anyway, with nothing for its owner to do. Not
+  while a turn runs (its guest holds the keepalive while a turn is queued,
+  runs, or waits on its card): a restart would cut it; it is told as the
+  turn ends. Never restarted for it: the restart is the person's, the
+  notice's Restart, guarded by its generation as every notice's is. Later
+  puts that version off, kept by the DO, so every page and every reload
+  agrees; a version other than it (the next deploy's) is told again. An
+  always-on computer never sleeps, so its notice does not say it updates
+  by itself.
+- **What the person sees**, over every chat and Settings: "An update is
+  ready for your computer. Restart to get it — about a minute; your chats
+  and work are kept. It also updates by itself the next time your
+  computer sleeps." with Restart and Later. Settings' Computer shows the
+  version it runs (`9f86d081884c`; asleep, the one it starts on)
+  and, running an older one, the latest.
+
+The update pill stays for the deployment's default image renamed, which
+the notice does not cover: pinned to the old name, a computer's restart
+starts that one again. The pill pins it to the new name first.
 
 **Does use extend the bound? No: it never stops a computer in use.** A
 computer is stopped for its bound only at a sleep, and a sleep is tried
@@ -1596,13 +1651,19 @@ for a host) and finds the same `HOME`, `~` and modes.
   holds it, never while in use or always on; a start that went back told
   with its cause and save, pending while asleep, once until seen, a seen
   older one hiding only itself, across a restart of the DO; won't wake
-  told until a restart. The restart: a sleep that saves then a start,
+  told until a restart; an update told while awake on another version
+  than its next start runs, between turns, never asleep or starting,
+  taken by a restart or a sleep and a wake, put off for that version only,
+  one image one version wherever it is pulled from. The restart: a sleep
+  that saves then a start,
   held as an owner's wake, never cancelled by a keepalive, asked twice
   made once, an earlier start's nothing, an owner's sleep after it
   winning; its failed save stopping unsaved and told as the restart's;
   its start fresh from the image, no snapshot kept until one comes up.
-  The simulation restarts too, and checks every notice against the state
-  (a loss told is unseen and a life it had; never a stop before the bound),
+  The simulation restarts and deploys too, and checks every notice against
+  the state (a loss told is unseen and a life it had; never a stop before
+  the bound; an update told awake, between turns, never for the version it
+  runs or one put off),
   and that no meter falls in a free window. The free window: nothing
   metered from a sleep's failed save to its bound, before and after it as
   any, a late report or an alarm again metering nothing twice, the same
@@ -1621,10 +1682,16 @@ for a host) and finds the same `HOME`, `~` and modes.
   once and saying so until seen, the unsaved stop at the time it said and
   the wake after told once, a restart of a sleeping computer, one
   refused at zero credit, and no awake time on its owner's ledger in
-  either free window. The `shell-ui` lane sees the same in Chrome:
-  the warning on Settings with no reload, its Restart, the notice of what
-  it went back to and its OK (gone after a reload), and Settings' Restart
-  computer. On a preview, the hosted `agent-restart` section (by name)
+  either free window. Its image pin, which is what a deploy that changed
+  the image is to a computer: the update told awake, not while a turn
+  waits on its card, again when it ends, put off by Later (again the
+  same; another version, or none, refused), taken by a restart (the next
+  build served), and not told asleep. The `shell-ui` lane sees the same in
+  Chrome: the warning on Settings with no reload, its Restart, the notice
+  of what it went back to and its OK (gone after a reload), Settings'
+  Restart computer, and an update: shown with no reload, Settings' version
+  and the latest, its Restart taking it, its Later holding after a
+  reload. On a preview, the hosted `agent-restart` section (by name)
   restarts a real Hermes computer awake after a reply: it comes back
   running from its newest save, the restart's own and held, from the image
   and not a snapshot, with no rollback; the same press again restarts

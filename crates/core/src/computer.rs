@@ -44,7 +44,8 @@
 //! And, beside it, what the DO knows of its saves (`Saves`): the newest
 //! `SAVES_KEPT` saves of `/data`, the snapshot that caches the current one,
 //! what each start that came up restored, and whether that went back in
-//! time (a rollback). From both, what its owner is told (`notices`).
+//! time (a rollback); and of the image its next start runs (`Images`).
+//! From them, what its owner is told (`notices`).
 
 use fragment_proto::computer::{ComputerNotice, ComputerRestore, ComputerSave, LifeEnd, LossCause, RestoreSource};
 use serde::{Deserialize, Serialize};
@@ -1665,6 +1666,94 @@ impl Saves {
     }
 }
 
+/// Hex digits in an image's version (`version_of`).
+pub const VERSION_HEX: usize = 12;
+
+/// An image reference's version, as its owner is shown it and names it back
+/// ("Later": `Images::later`): the first `VERSION_HEX` hex digits of its
+/// digest when it names one (`…@sha256:<hex>`, as a deploy pins an image to
+/// what it pushed), else of the reference's own SHA-256 (a local build's
+/// tag, which every image of one build shares). One image is one version
+/// wherever it is pulled from; another reference, another.
+pub fn version_of(reference: &str) -> String {
+    let digest = reference.rsplit_once("@sha256:").map(|(_, hex)| hex).filter(|hex| hex.get(..VERSION_HEX).is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit())));
+    let version = match digest {
+        Some(hex) => hex[..VERSION_HEX].to_ascii_lowercase(),
+        None => hex::encode(Sha256::digest(reference.as_bytes()))[..VERSION_HEX].to_string(),
+    };
+    assert!(valid_version(&version), "a version is {VERSION_HEX} hex digits");
+    version
+}
+
+/// Whether `v` has a version's shape (`version_of`'s): `VERSION_HEX`
+/// lowercase hex digits.
+pub fn valid_version(v: &str) -> bool {
+    v.len() == VERSION_HEX && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// What the Computer DO knows of the image its next start runs, beside the
+/// one its running start came up on (`Saves::image_of`), for its owner's
+/// `update` notice (`notices`): the reference its pinned image's name stood
+/// for as it last looked (the runtime's own, which a deploy that changed the
+/// image changes, as does a pin), and the version its owner put off
+/// ("Later"). The DO looks at every event and every read of its view, so a
+/// deploy is a change of this state at its next touch, and its owner's open
+/// pages are told of it as of any other.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Images {
+    /// None: the deployment has no image by its pinned name, or it never looked.
+    #[serde(default)]
+    next: Option<String>,
+    #[serde(default)]
+    later: Option<String>,
+}
+
+impl Images {
+    /// It looked: its pinned image's reference now (none: the deployment
+    /// has no image by that name). Answers whether that is news.
+    pub fn looked(&mut self, next: Option<&str>) -> bool {
+        let news = self.next.as_deref() != next;
+        if news {
+            self.next = next.map(str::to_string);
+        }
+        news
+    }
+
+    /// The reference its next start runs, as it last looked.
+    pub fn next(&self) -> Option<&str> {
+        self.next.as_deref()
+    }
+
+    /// The version its next start runs (its view's `latest`).
+    pub fn latest(&self) -> Option<String> {
+        self.next().map(version_of)
+    }
+
+    /// Its owner put off the update to `version` ("Later", as an `update`
+    /// notice named it): it is told no more until its next start runs
+    /// another. Only the version its next start runs can be put off: any
+    /// other (an older notice's, read before a newer deploy) is refused
+    /// (`false`), as is any with no image to run. Again, the same.
+    pub fn later(&mut self, version: &str) -> bool {
+        let next = self.latest().filter(|v| v == version);
+        let put_off = next.is_some();
+        if put_off {
+            self.later = next;
+        }
+        put_off
+    }
+}
+
+/// The version of the image a computer runs now: its running start's, once
+/// it came up (awake, or going to sleep); none while it runs nothing.
+pub fn version_running(life: &Lifecycle, saves: &Saves) -> Option<String> {
+    match life.phase {
+        Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => saves.image_of(generation).map(version_of),
+        Phase::Asleep | Phase::Starting { .. } | Phase::Failed { .. } => None,
+    }
+}
+
 /// A support link is at most this long.
 pub const SUPPORT_URL_MAX_BYTES: usize = 512;
 
@@ -1692,9 +1781,14 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   stops it if no save works first and nothing uses it;
 /// - `went_back`: a start went back to an older save, or will as it next
 ///   starts (asleep after a crash or an unsaved stop), until its owner says
-///   they saw it (`Saves::saw`); the newest loss only.
-pub fn notices(life: &Lifecycle, saves: &Saves, rules: &Rules) -> Vec<ComputerNotice> {
-    let mut out = Vec::with_capacity(3);
+///   they saw it (`Saves::saw`); the newest loss only;
+/// - `update`: it is awake on another version than its next start runs
+///   (`Images`), with no turn running (no keepalive: never in the middle of
+///   its agents' work), until its owner puts that version off
+///   (`Images::later`). Never while it sleeps or starts: its next start
+///   takes the new version anyway.
+pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
+    let mut out = Vec::with_capacity(4);
     if let Phase::Failed { why } = &life.phase {
         out.push(ComputerNotice::WontWake { why: why.clone() });
     }
@@ -1741,7 +1835,13 @@ pub fn notices(life: &Lifecycle, saves: &Saves, rules: &Rules) -> Vec<ComputerNo
         }),
         (None, _) => {}
     }
-    assert!(out.len() <= 3, "one notice of each kind at most");
+    let awake = matches!(life.phase, Phase::Awake { .. });
+    if let (true, Some(running), Some(latest)) = (awake, version_running(life, saves), images.latest()) {
+        if running != latest && life.keepalives() == 0 && images.later.as_deref() != Some(latest.as_str()) {
+            out.push(ComputerNotice::Update { version: latest });
+        }
+    }
+    assert!(out.len() <= 4, "one notice of each kind at most");
     out
 }
 
@@ -2232,12 +2332,17 @@ mod tests {
     struct Computer {
         life: Lifecycle,
         saves: Saves,
+        /// The image its next start runs, as the DO last looked: `IMAGE`
+        /// until a test deploys another.
+        images: Images,
         now: i64,
     }
 
     impl Computer {
         fn new() -> Computer {
-            Computer { life: Lifecycle::new(), saves: Saves::default(), now: T }
+            let mut images = Images::default();
+            assert!(images.looked(Some(IMAGE)), "its first look is news");
+            Computer { life: Lifecycle::new(), saves: Saves::default(), images, now: T }
         }
 
         fn apply(&mut self, e: Event) -> Step {
@@ -2260,11 +2365,14 @@ mod tests {
             self.come_up(generation)
         }
 
+        /// The start `generation` comes up on the image the DO looked at
+        /// last (its `plan` looks, and starts what it saw).
         fn come_up(&mut self, generation: u64) -> ComputerRestore {
-            let plan = self.saves.plan(Some(IMAGE));
+            let image = self.images.next().map(str::to_string);
+            let plan = self.saves.plan(image.as_deref());
             let save = self.saves.current().map(|c| c.id.clone()).filter(|_| plan != Plan::Nothing);
             self.saves.starting(generation, plan.source());
-            let r = self.saves.came_up(generation, plan.source(), save.as_deref(), Some(IMAGE), self.now).expect("the start under way");
+            let r = self.saves.came_up(generation, plan.source(), save.as_deref(), image.as_deref(), self.now).expect("the start under way");
             self.apply(Event::Ready { generation });
             r
         }
@@ -2883,13 +2991,13 @@ mod tests {
     #[test]
     fn its_owner_is_told_while_saves_fail_and_when_it_stops() {
         let rules = Rules::default();
-        let unsaved = |c: &Computer| notices(&c.life, &c.saves, &rules).into_iter().find(|n| matches!(n, ComputerNotice::Unsaved { .. }));
+        let unsaved = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::Unsaved { .. }));
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
         let r = c.wake();
         let g = r.generation;
-        assert!(notices(&c.life, &c.saves, &rules).is_empty(), "nothing to tell");
+        assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty(), "nothing to tell");
         // a turn, and its end's save fails: once is a blip
         c.apply(Event::Opened { socket: Socket::Keepalive });
         c.apply(Event::Closed { socket: Socket::Keepalive });
@@ -2953,7 +3061,7 @@ mod tests {
     #[test]
     fn its_owner_is_told_once_what_a_start_went_back_to() {
         let rules = Rules::default();
-        let went_back = |c: &Computer| notices(&c.life, &c.saves, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        let went_back = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
@@ -3001,7 +3109,7 @@ mod tests {
         // what it knows survives a restart of its Durable Object
         let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
         assert_eq!(back, c.saves);
-        assert_eq!(notices(&c.life, &back, &rules), notices(&c.life, &c.saves, &rules));
+        assert_eq!(notices(&c.life, &back, &c.images, &rules), notices(&c.life, &c.saves, &c.images, &rules));
         // a record stored before notices reads as none told
         let mut v = serde_json::to_value(&c.saves).unwrap();
         for k in ["wentBack", "seen", "fresh"] {
@@ -3042,10 +3150,10 @@ mod tests {
                 generation = next;
             }
         }
-        assert_eq!(notices(&c.life, &c.saves, &rules), vec![ComputerNotice::WontWake { why: "the image would not pull".into() }]);
+        assert_eq!(notices(&c.life, &c.saves, &c.images, &rules), vec![ComputerNotice::WontWake { why: "the image would not pull".into() }]);
         let s = c.apply(Event::Restart { generation });
         assert!(matches!(s.actions.first(), Some(Action::Start { .. })), "{s:?}");
-        assert!(notices(&c.life, &c.saves, &rules).is_empty(), "starting again");
+        assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty(), "starting again");
     }
 
     /// Goal: a restart's start is fresh from the image and the newest good
@@ -3071,6 +3179,120 @@ mod tests {
         assert!(!c.saves.fresh());
         c.sleep(Some("b3"));
         assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into() }, "snapshots again");
+    }
+
+    /// Goal: an image's version is short, the same for one image wherever
+    /// it is pulled from (its digest), and another for another reference,
+    /// local builds' tags included (stub and stub-next share one build's
+    /// tag). Method: references as a deploy and `wrangler dev` pin them.
+    #[test]
+    fn an_image_has_one_short_version() {
+        let deployed = "registry.cloudflare.com/acct/fragment-computer-hermes@sha256:9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08";
+        assert_eq!(version_of(deployed), "9f86d081884c", "its digest's first twelve, lowercase");
+        assert_eq!(version_of(&deployed.replace("acct", "other")), version_of(deployed), "one image, wherever it is pulled from");
+        let (stub, next) = ("cloudflare-dev/computer-stub-0a1b2c3d4e5f:8c1d", "cloudflare-dev/computer-stub-next-6a7b8c9d0e1f:8c1d");
+        assert_ne!(version_of(stub), version_of(next), "two images of one build's tag are two versions");
+        assert_eq!(version_of(stub), version_of(stub));
+        assert_ne!(version_of("x@sha256:abc"), "abc", "a digest too short is no digest: the reference's own hash");
+        for v in [version_of(deployed), version_of(stub), version_of("")] {
+            assert!(valid_version(&v), "{v}");
+        }
+        for bad in ["", "9f86d081884", "9f86d081884c0", "9F86D081884C", "9f86d081884g", " 9f86d08188c"] {
+            assert!(!valid_version(bad), "{bad:?}");
+        }
+    }
+
+    /// Goal (Paul, 2026-10-09: "a notification in the shell: new update,
+    /// click to restart", not a restart behind their back): its owner is
+    /// told an update is ready while it is awake on another version than
+    /// its next start runs, never in the middle of a turn, never while it
+    /// sleeps or starts (its next start takes the new one anyway), never
+    /// for the version it runs. A restart takes it and says no more; "Later"
+    /// puts that version off, and a version other than it is told again.
+    /// Valid, invalid and replayed looks and Laters; the same across a
+    /// restart of the Durable Object. Method: one computer's history, a
+    /// deploy being a look that finds another reference.
+    #[test]
+    fn its_owner_is_told_an_update_is_ready_while_idle() {
+        let rules = Rules::default();
+        let told = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules);
+        let update = |c: &Computer| told(c).into_iter().find(|n| matches!(n, ComputerNotice::Update { .. }));
+        let ready = |reference: &str| Some(ComputerNotice::Update { version: version_of(reference) });
+        // deploys' references, each a digest
+        let at = |n: u8| format!("registry/stub@sha256:{}", format!("{n:x}").repeat(64));
+        let (next, newer, newest, fifth) = (at(2), at(3), at(4), at(5));
+        let (next, newer, newest, fifth) = (next.as_str(), newer.as_str(), newest.as_str(), fifth.as_str());
+        let mut c = Computer::new();
+        assert!(!c.images.looked(Some(IMAGE)), "the same image again is no news");
+        c.wake();
+        assert!(told(&c).is_empty(), "awake on the version its next start runs");
+        assert_eq!(version_running(&c.life, &c.saves), c.images.latest());
+        // a deploy: its next look finds another image, once
+        assert!(c.images.looked(Some(next)) && !c.images.looked(Some(next)), "news once, then the same");
+        assert_eq!(update(&c), ready(next));
+        assert_eq!(version_running(&c.life, &c.saves), Some(version_of(IMAGE)), "it runs the one it started on");
+        // never in the middle of its agents' work: a turn holds the keepalive
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        assert_eq!(update(&c), None, "not during a turn");
+        c.apply(Event::Closed { socket: Socket::Keepalive });
+        assert_eq!(update(&c), ready(next), "told again once the turn ends");
+        // a port tab open is no turn: still told
+        c.apply(Event::Opened { socket: Socket::Tab });
+        assert_eq!(update(&c), ready(next));
+        c.apply(Event::Closed { socket: Socket::Tab });
+        // its sleep: not told while it sleeps or is asleep, and its wake takes it
+        c.sleep(Some("b1"));
+        assert!(told(&c).is_empty() && version_running(&c.life, &c.saves).is_none(), "asleep: its next start takes it anyway");
+        let r = c.wake();
+        assert!(told(&c).is_empty() && version_running(&c.life, &c.saves) == Some(version_of(next)), "woken on it: {r:?}");
+
+        // a restart takes it: told no more while it sleeps, starts, or after
+        assert!(c.images.looked(Some(newer)));
+        assert_eq!(update(&c), ready(newer));
+        let g = c.life.generation();
+        c.saves.restart_fresh();
+        assert_eq!(c.apply(Event::Restart { generation: g }).actions, vec![Action::Sleep { generation: g }]);
+        assert_eq!(update(&c), None, "its restart's sleep is under way");
+        let (_, held, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
+        c.saves.saved(g, rec("b2"), c.now, held);
+        c.apply(Event::Saved { generation: g, seq });
+        let s = c.apply(Event::Asleep { generation: g });
+        let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
+        assert_eq!(update(&c), None, "starting: the start under way runs the newest");
+        c.come_up(generation);
+        assert!(told(&c).is_empty() && version_running(&c.life, &c.saves) == Some(version_of(newer)), "restarted on it: nothing to tell");
+
+        // Later: that version is told no more; another is
+        assert!(c.images.looked(Some(newest)));
+        assert_eq!(update(&c), ready(newest));
+        assert!(!c.images.later("000000000000") && !c.images.later(&version_of(newer)), "only the version its next start runs is put off");
+        assert_eq!(update(&c), ready(newest), "a refused Later changes nothing");
+        assert!(c.images.later(&version_of(newest)) && c.images.later(&version_of(newest)), "put off, and again the same");
+        assert_eq!(update(&c), None, "put off");
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        c.apply(Event::Closed { socket: Socket::Keepalive });
+        assert_eq!(update(&c), None, "a turn's end tells it no more either");
+        assert!(c.images.looked(Some(fifth)));
+        assert_eq!(update(&c), ready(fifth), "a version other than the one put off is told");
+        assert!(c.images.looked(Some(newest)));
+        assert_eq!(update(&c), None, "the one put off, back again: still put off");
+        // the same image pulled from elsewhere is no update; no image is none
+        assert!(c.images.looked(Some(&newer.replace("registry/", "elsewhere/"))));
+        assert_eq!(update(&c), None, "the version it runs, from another registry");
+        assert!(c.images.looked(None));
+        assert!(update(&c).is_none() && c.images.latest().is_none() && !c.images.later(&version_of(newer)), "the deployment has no image by its name: nothing to update to, nothing to put off");
+
+        // always on, it is told too (it never sleeps, so it never updates by itself)
+        assert!(c.images.looked(Some(next)));
+        c.apply(Event::AlwaysOn { on: true });
+        assert_eq!(update(&c), ready(next));
+        // what it knows survives a restart of its Durable Object
+        let back: Images = serde_json::from_str(&serde_json::to_string(&c.images).unwrap()).unwrap();
+        assert_eq!(back, c.images);
+        assert_eq!(notices(&c.life, &c.saves, &back, &rules), told(&c));
+        // a record stored before it looked reads as never looked: nothing told
+        let never: Images = serde_json::from_str("{}").unwrap();
+        assert!(never.next().is_none() && notices(&c.life, &c.saves, &never, &rules).is_empty());
     }
 
     /// Goal: three saves are kept, newest first, each numbered; a fourth
@@ -3208,11 +3430,15 @@ mod tests {
         }
         // the sim's bound is shorter than the default, so it is reached
         let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-        let mut reached = [0u32; 10];
+        let mut reached = [0u32; 11];
+        // the images deploys pin, one after another and back
+        let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
         for seed0 in 1..=8u64 {
             let mut seed = seed0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let mut l = Lifecycle::new();
             let mut saves = Saves::default();
+            let mut images = Images::default();
+            images.looked(Some(IMAGE));
             let mut now = T;
             let mut metered: Vec<(i64, i64)> = vec![];
             let mut generation = 0;
@@ -3301,11 +3527,12 @@ mod tests {
                 if coming_up {
                     assert!(matches!(l.phase, Phase::Awake { .. }));
                     came_up.insert(l.generation());
-                    let plan = saves.plan(Some(IMAGE));
+                    // the DO's plan looks, and starts what it saw
+                    let plan = saves.plan(images.next());
                     let from = plan.source();
                     let save = saves.current().map(|c| c.id.clone()).filter(|_| plan != Plan::Nothing);
                     saves.starting(l.generation(), from);
-                    assert!(saves.came_up(l.generation(), from, save.as_deref(), Some(IMAGE), now).is_some(), "the start that came up records what it restored");
+                    assert!(saves.came_up(l.generation(), from, save.as_deref(), images.next(), now).is_some(), "the start that came up records what it restored");
                     // a new life's /data is its save's: no work of its own yet
                     last_work_ms = i64::MIN;
                 }
@@ -3376,8 +3603,12 @@ mod tests {
                 if s.ended.is_some_and(|e| e.restart) {
                     reached[6] += 1;
                 }
+                // a deploy now and then: the DO's next look finds another image
+                if rng(&mut seed).is_multiple_of(29) {
+                    images.looked(Some(deployed[(rng(&mut seed) % 3) as usize]));
+                }
                 // what its owner is told is its state's, whatever happened
-                let told = notices(&l, &saves, &rules);
+                let told = notices(&l, &saves, &images, &rules);
                 for n in &told {
                     match n {
                         ComputerNotice::WontWake { .. } => assert!(matches!(l.phase, Phase::Failed { .. }), "won't wake is told only of one that won't (seed {seed0})"),
@@ -3394,19 +3625,33 @@ mod tests {
                             assert_eq!(*pending, at.is_none(), "a pending loss has no start yet (seed {seed0})");
                             reached[8] += 1;
                         }
+                        ComputerNotice::Update { version } => {
+                            assert!(matches!(l.phase, Phase::Awake { .. }) && l.keepalives == 0, "an update is told awake, between turns (seed {seed0}): {l:?}");
+                            assert_eq!(Some(version), images.latest().as_ref(), "the version its next start runs (seed {seed0})");
+                            assert!(version_running(&l, &saves).is_some_and(|v| v != *version), "never the version it runs (seed {seed0})");
+                            assert_ne!(images.later.as_ref(), Some(version), "never one put off (seed {seed0})");
+                            reached[10] += 1;
+                        }
+                    }
+                }
+                // its owner puts an update off, now and then
+                if let Some(ComputerNotice::Update { version }) = told.iter().find(|n| matches!(n, ComputerNotice::Update { .. })) {
+                    if rng(&mut seed).is_multiple_of(4) {
+                        assert!(images.later(version), "an update told can be put off (seed {seed0})");
+                        assert!(!notices(&l, &saves, &images, &rules).iter().any(|n| matches!(n, ComputerNotice::Update { .. })), "put off, it is told no more (seed {seed0})");
                     }
                 }
                 // its owner says they saw one, now and then
                 if let Some(ComputerNotice::WentBack { life, .. }) = told.last() {
                     if rng(&mut seed).is_multiple_of(5) {
                         assert!(saves.saw(*life), "a loss told can be seen (seed {seed0})");
-                        assert!(!notices(&l, &saves, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { .. })), "seen, it is told no more (seed {seed0})");
+                        assert!(!notices(&l, &saves, &images, &rules).iter().any(|n| matches!(n, ComputerNotice::WentBack { .. })), "seen, it is told no more (seed {seed0})");
                     }
                 }
             }
             assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
         }
         // every kind of save the lifecycle has was reached, across the seeds
-        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows: {reached:?}");
+        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told: {reached:?}");
     }
 }

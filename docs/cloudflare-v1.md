@@ -314,6 +314,10 @@ speaking Cloudflare's APIs) returns once this product works.
     first start of a new image at a location pays its pull (24–40 s).
     A canary is a per-computer pin. Rollback is the pin back, plus a
     point-in-time restore when the new image moved its data's schema.
+    An awake computer's owner is told an update is ready, between turns,
+    and restarts it to take it, or its next sleep does (Paul, 2026-10-09:
+    a notice, never a restart behind their back; docs/computers.md, "What
+    its owner is told").
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy to the dev account with one command: its own Workers, DOs,
     Workflows, Queues, containers and R2 prefix. It is routed on the dev

@@ -12,9 +12,9 @@
 //!   mints the one-time tickets that sign a browser in to its ports. Its
 //!   view tells them what they should know of it (`notices`: it won't
 //!   start, its saves are failing and when that stops it, a start went
-//!   back to an older save), and when that changes the computer tells
-//!   their open pages (`principal::tell_changed`), so the shell shows it
-//!   while there is still time.
+//!   back to an older save, an update is ready), and when that changes the
+//!   computer tells their open pages (`principal::tell_changed`), so the
+//!   shell shows it while there is still time.
 //! - **Its origin** (`<24 hex>--computer.<suffix>`: `serve_host`) serves
 //!   its ports to its owner, cross-site from the platform, so a page the
 //!   guest serves can act as no one; in a tab of its own, or in a frame of
@@ -49,12 +49,12 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
-use fragment_core::computer::{notices, Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
+use fragment_core::computer::{notices, valid_version, version_running, Action, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -214,6 +214,10 @@ enum MetaKey {
     /// The owner's WorkOS user, once the registry named it
     /// (`workos_user`): `{owner, issuer, subject}`.
     WorkosUser,
+    /// What it knows of the image its next start runs
+    /// (`fragment_core::computer::Images`): the reference its pinned name
+    /// stood for as it last looked, and the version its owner put off.
+    Images,
 }
 
 impl MetaKey {
@@ -229,6 +233,7 @@ impl MetaKey {
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
             MetaKey::WorkosUser => "workos_user",
+            MetaKey::Images => "images",
         }
     }
 }
@@ -542,6 +547,26 @@ impl ComputerCell {
         }
     }
 
+    fn images(&self) -> CellResult<Images> {
+        match self.meta(MetaKey::Images)? {
+            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored images: {e}"))),
+            None => Ok(Images::default()),
+        }
+    }
+
+    /// One fact about the image its next start runs, applied as stored
+    /// (nothing awaits between the read and the write), and written when
+    /// `f` answers true (a look that found nothing new writes nothing).
+    fn update_images(&self, f: impl FnOnce(&mut Images) -> bool) -> CellResult<bool> {
+        let mut images = self.images()?;
+        let took = f(&mut images);
+        if took {
+            let text = serde_json::to_string(&images).map_err(|e| CellError::host(e.to_string()))?;
+            self.set_meta(MetaKey::Images, &text)?;
+        }
+        Ok(took)
+    }
+
     /// One fact about its saves, applied to them as stored. `f` is not
     /// async, so nothing runs between the read and the write: a handler
     /// beside this one applies its own fact before or after, never between.
@@ -580,6 +605,8 @@ impl ComputerCell {
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
         let told = self.notices()?;
+        // a deploy since its last look is news, told as any change is
+        self.look_logged().await;
         let refused = self.drive_events(first).await;
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
@@ -591,7 +618,41 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.rules()))
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// The image its next start runs, as the deployment has it now: the
+    /// runtime's reference for its pinned name (entry.mjs's `imageRef`, the
+    /// Worker version's `containers` images, which a deploy that changed the
+    /// image changes, as a pin does), recorded (`Images::looked`), so a
+    /// deploy is a change of its state at its next touch: every event, and
+    /// every read of its view (`computer/view`, its owner's every route).
+    /// None for a computer not made, or a deployment with no image by its
+    /// pinned name.
+    async fn look(&self) -> CellResult<Option<String>> {
+        let Some(image) = self.meta(MetaKey::Image)? else { return Ok(None) };
+        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
+        if self.update_images(|i| i.looked(reference.as_deref()))? {
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "image": image, "looked": reference }));
+        }
+        Ok(reference)
+    }
+
+    /// `look`, its failure logged: what it would tell waits for the next.
+    async fn look_logged(&self) {
+        if let Err(e) = self.look().await {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "look": "image", "error": e.message }));
+        }
+    }
+
+    /// Looks (`look`) outside an event (its owner reading its view, a pin),
+    /// and tells its owner's open pages when what they are told changed.
+    async fn look_and_tell(&self) {
+        let told = self.notices();
+        self.look_logged().await;
+        if told.is_ok_and(|told| self.notices().is_ok_and(|now| now != told)) {
+            self.tell_owner().await;
+        }
     }
 
     /// Tells its owner's open pages to read it again. One that did not hear
@@ -881,7 +942,8 @@ impl ComputerCell {
     /// way. Nothing awaits between reading the saves and recording it.
     async fn plan(&self, generation: u64) -> CellResult<Planned> {
         let image = self.must(MetaKey::Image)?;
-        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
+        // what the start runs is what it looked at: the version it comes up on
+        let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
         let (plan, save) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
@@ -1455,14 +1517,17 @@ impl ComputerCell {
                 None => self.meta(MetaKey::Note)?,
             },
         };
+        let images = self.images()?;
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
+            version: version_running(&life, &saves),
+            latest: images.latest(),
             phase,
             generation: life.generation(),
             why,
-            notices: notices(&life, &saves, &self.rules()),
+            notices: notices(&life, &saves, &images, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -1624,7 +1689,11 @@ impl ComputerCell {
                 }
                 json_response(&self.view()?)
             }
-            "computer/view" => json_response(&self.view()?),
+            "computer/view" => {
+                // its owner reading it (the shell, as it opens): a deploy since its last look is news
+                self.look_and_tell().await;
+                json_response(&self.view()?)
+            }
             "computer/wipe" => json_response(&self.wipe().await?),
             "computer/wipe-view" => json_response(&self.wipe_view().await?),
             "computer/wake" => {
@@ -1649,6 +1718,19 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 if !self.update_saves(|s| s.saw(b.life))? {
                     return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            "computer/notices-later" => {
+                let b: UpdateLater = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                if !valid_version(&b.version) {
+                    return Err(CellError::invalid(format!("a version is {} hex digits, as an update notice names it", fragment_core::computer::VERSION_HEX)));
+                }
+                if !self.update_images(|i| i.later(&b.version))? {
+                    return Err(CellError::invalid(format!("no update to {} here: read the computer again", b.version)));
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
@@ -1687,8 +1769,10 @@ impl ComputerCell {
                     return Err(CellError::invalid(format!("no image {:?} on this deployment (its images: {images})", b.image)));
                 }
                 // the next start takes it: a snapshot of the old image no longer
-                // matches, so it starts from this one and restores /data (decision 19)
+                // matches, so it starts from this one and restores /data (decision
+                // 19); awake on another, its owner is told an update is ready
                 self.set_meta(MetaKey::Image, &b.image)?;
+                self.look_and_tell().await;
                 json_response(&self.view()?)
             }
             "computer/unassign" => {
@@ -2071,6 +2155,11 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
+        }
+        (Method::Post, [id, "notices", "later"]) => {
+            owned(env, who, id).await?;
+            let later: UpdateLater = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_response(&view_of(ask(env, id, "computer/notices-later", &json!(later)).await?)?)
         }
         (Method::Put, [id, "image"]) => {
             owned(env, who, id).await?;

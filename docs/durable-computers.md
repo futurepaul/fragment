@@ -160,6 +160,14 @@ file is the newer word, and decision 18 points here.
   the journal (docs/bridge.md, "What a rollback forgot").
   docs/computers.md, "What its owner is told", has every way a computer
   stops and what its person sees.
+- **An update is told, never forced (2026-10-09).** Paul: every deploy
+  needed him to restart his computer, which a person would not know to
+  do. A computer awake on another image than its next start runs (the
+  runtime's reference for its pinned name, which a deploy that changed the
+  image changes, beside the one its start came up on) tells its owner an
+  update is ready, between turns only, with Restart and Later; asleep, its
+  next wake takes it, with nothing to tell. docs/computers.md, "What its
+  owner is told".
 
 ## What changes under the hold (2026-10-07)
 
