@@ -1167,6 +1167,12 @@ fails too, its failure is the call's, released, after two tries in all.
 `vision` and transcriptions have no fallback. A job's text step falls
 back the same, and its output's `model` names the model that answered.
 
+`fallback` names the deployment's fallback model itself: a runtime's own
+switch when its model stalls, streaming nothing (our Hermes image's
+`fallback_providers`: docs/computers.md, Models). It is metered as a
+tier's call, has no fallback of its own, and is no tier an agent or a
+job's step may name.
+
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |

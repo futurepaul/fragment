@@ -446,6 +446,15 @@ speaking Cloudflare's APIs) returns once this product works.
     the same; `vision` and transcriptions do not (DeepSeek reads no
     images). Both run on Workers AI, so this survives a model's failure,
     not Workers AI's.
+
+    A call that answers nothing (no first byte, a stall) is the
+    runtime's to give up on (Paul, 2026-10-09: a time-based fallback
+    "only if time-based fallback is built into hermes, I don't want to
+    add hacks on top of hermes"; it is): our Hermes image's text-tier
+    profiles kill a call that streams nothing for 20 s, try it once more,
+    then switch to the route's `fallback` name (the deployment's fallback
+    model), about 40 s after the stall began, and start the next turn on
+    their tier again (docs/computers.md, Models).
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;

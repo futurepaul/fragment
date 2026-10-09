@@ -35,9 +35,11 @@
 //! signed by the agent (its computer's model intercept signs it), `for`
 //! naming whom it acts for and `fragment` the turn's fragment; `complete`
 //! is the call itself. The payer is the agent's owner (decision 36).
-//! A call names a tier, or `vision`: the deployment's vision model
+//! A call names a tier, `vision`: the deployment's vision model
 //! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
-//! image (Hermes' screenshots), metered the same way.
+//! image (Hermes' screenshots), or `fallback`: the deployment's fallback
+//! model (`FRAGMENT_FALLBACK_MODEL`), for a runtime's own switch when its
+//! model stalls (Hermes' `fallback_providers`), each metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 //!
@@ -171,7 +173,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let model = bounds::capped(call.named, cfg.vision_model.as_str()).map_err(refused)?;
+    let model = bounds::capped(call.named, cfg.vision_model.as_str(), cfg.fallback_model.as_str()).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     // whose cap applies: the payer's own fragment's on its ledger; another
     // owner's, asked of theirs, unless the spender is that owner's
@@ -196,9 +198,11 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     ledger::hold(env, call.payer, &reserve).await?;
     let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, name: call.named.as_str() };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
+    // a tier's call falls back; `vision`'s model reads images the fallback
+    // does not, and `fallback` is the fallback already
     let fallback = match call.named {
         Named::Tier(_) => Some(cfg.fallback_model.as_str()),
-        Named::Vision => None,
+        Named::Vision | Named::Fallback => None,
     };
     let (answer, model) = tried(env, cfg, &bounded, fallback, &meta).await;
     held.model = model;

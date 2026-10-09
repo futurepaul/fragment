@@ -20,8 +20,8 @@ pub enum Tier {
     High,
 }
 
-/// New agents run on the cheap tier: DeepSeek V4 Flash since 2026-10-09
-/// (Paul; GLM-5.3 Flash before, now its fallback).
+/// New agents run on the cheap tier (GLM-5.3 Flash, DeepSeek V4 Flash its
+/// fallback; Paul, 2026-10-09).
 pub const DEFAULT_TIER: Tier = Tier::Cheap;
 
 impl Tier {
@@ -136,6 +136,22 @@ pub const VISION_MODEL: &str = "vision";
 /// The model route's name for transcription
 /// (`fragment_core::transcribe::WHISPER`): Hermes' speech-to-text names it.
 pub const TRANSCRIBE_MODEL: &str = "whisper";
+/// The model route's name for the deployment's fallback model
+/// (`fragment_core::models::FALLBACK`): a tier agent's `fallback_providers`
+/// names it.
+pub const FALLBACK_MODEL: &str = "fallback";
+/// How long a tier agent's call may stream nothing before Hermes kills it
+/// (its `providers.<id>.models.<model>.stale_timeout_seconds`; Paul,
+/// 2026-10-09): a stalled call is tried once more (`HERMES_STREAM_RETRIES`,
+/// `gateway_env`), then the agent switches to `fallback_providers` (its
+/// `agent.api_max_retries: 1`), about 40 s after the stall began. GLM-5.3
+/// Flash's first bytes are 1 to 5 s; DeepSeek's were 11 to 61 s when
+/// Workers AI was short of it.
+pub const STALE_TIMEOUT_S: u32 = 20;
+/// Hermes' in-place retries of a stream that dropped or went stale
+/// (`HERMES_STREAM_RETRIES`, its default 2): one, so a stall reaches the
+/// fallback after two stale timeouts.
+pub const STREAM_RETRIES: u32 = 1;
 
 fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
@@ -344,6 +360,28 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
         q(&format!("agent:{}", agent.fragment)),
         q(TRANSCRIBE_MODEL)
     ));
+    // A text tier's stall (Paul, 2026-10-09: a time-based fallback "only if
+    // time-based fallback is built into hermes"; it is): Hermes' own stale
+    // detector kills a call that streams nothing for `STALE_TIMEOUT_S`
+    // (this model's alone: `vision`, whose answers are whole and slower,
+    // keeps Hermes' default), tries it once more (`STREAM_RETRIES`), then,
+    // its one retry spent (`api_max_retries`), switches to its
+    // `fallback_providers`: the route's `fallback`, the deployment's
+    // fallback model, through the intercept as the agent (its key names
+    // the agent). The next turn starts on its tier again (Hermes'
+    // `restore_primary_runtime`). The route itself falls back when a model
+    // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
+    // answers nothing. An owner's own model and the high tier have none.
+    if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
+        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(tier.name())));
+        y.push_str("agent:\n  api_max_retries: 1\n");
+        y.push_str(&format!(
+            "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
+            q(&format!("{base}/v1")),
+            q(FALLBACK_MODEL),
+            q(&format!("agent:{}", agent.fragment))
+        ));
+    }
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
     // credential_env also includes providers it cannot currently use.
@@ -676,7 +714,9 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // It counts gateway starts in the home, which a save keeps, so six wakes
     // in two minutes would sleep the seventh 10-40 s before it answers; the
     // Computer DO already paces a computer's restarts.
-    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\nHERMES_GATEWAY_MAX_STARTS=0\n")
+    // HERMES_STREAM_RETRIES: `STREAM_RETRIES`, so a stalled call reaches its
+    // fallback after two stale timeouts (`profile_config`).
+    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\nHERMES_GATEWAY_MAX_STARTS=0\nHERMES_STREAM_RETRIES={STREAM_RETRIES}\n")
 }
 
 /// A profile's directory, under the Hermes home.
@@ -913,6 +953,17 @@ mod tests {
             assert!(config.contains(ears), "the {tier} tier's voice memos go to the route's whisper, its key naming the agent, no language forced: {config}");
         }
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
+        // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
+        let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"fallback\"\n    api_key: \"agent:juniper--k3x9\"\n";
+        let c = profile_config(&agent(), &Tier::Cheap.into(), "http://model.fragment.internal", &[], creds);
+        for (tier, config) in [("cheap", &c), ("medium", &p)] {
+            assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model: {config}");
+            assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{tier}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
+            assert!(config.contains("agent:\n  api_max_retries: 1\n"), "{config}");
+            assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
+        }
+        assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
+        assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
@@ -931,6 +982,7 @@ mod tests {
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         assert!(env.contains("HERMES_GATEWAY_MAX_STARTS=0\n"), "no start is slept for the starts before it");
+        assert!(env.contains("HERMES_STREAM_RETRIES=1\n"), "a stalled stream is tried once more, then the fallback");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper--k3x9"), PathBuf::from("/data/hermes/profiles/juniper--k3x9"));
     }
 
@@ -969,6 +1021,8 @@ mod tests {
             let p = profile_config(&a, &main, "http://model.fragment.internal", &[], creds);
             assert_eq!(p.matches("command_allowlist:").count(), 1, "{p}");
             assert!(p.contains(&format!("\n{line}")), "a top-level key of the {} profile: {p}", main.name());
+            let falls_back = matches!(main, MainModel::Tier(Tier::Cheap | Tier::Medium));
+            assert_eq!(p.contains("fallback_providers:"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
         }
         let m = managed_config(&[], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert!(m.contains("approvals:\n  mode: \"smart\"\n"), "a flagged command still goes to the guardian, then a person: {m}");
