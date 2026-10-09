@@ -362,12 +362,19 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
 /// rest of the batch (other fragments' included). The queue's
 /// `max_batch_size` (wrangler.jsonc) bounds how many are in flight.
 pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
+    let mut laps = js::Laps::start();
     let cfg = Config::from_env(&env);
     // a branch deployment's queue is named for its branch after this
     let dead = batch.queue().starts_with(DEAD_QUEUE);
     let messages: Vec<RawMessage> = batch.raw_iter().collect();
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
+    // how long its messages waited on the queue, from their send to this batch
+    let waited: Vec<i64> = messages.iter().map(|m| js::now_ms() - m.timestamp().as_millis() as i64).collect();
+    let n = messages.len();
     futures_util::future::join_all(messages.into_iter().map(|raw| consume_one(raw, &env, cfg, dead))).await;
+    laps.lap("send");
+    let (least, most) = (waited.iter().min(), waited.iter().max());
+    laps.log("delivery.batch", json!({ "queue": batch.queue(), "messages": n, "queuedMs": [least, most] }));
     Ok(())
 }
 

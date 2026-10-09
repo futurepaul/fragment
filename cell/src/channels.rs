@@ -274,11 +274,12 @@ impl FragmentCell {
     /// channel's triggers start, each once per record (`fire_channel`), so
     /// a try after a failure here starts only what did not start; then the
     /// outbox is drained, whatever the triggers did. Answers the runs.
-    pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32) -> CellResult<Vec<i64>> {
+    pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32, laps: &mut js::Laps) -> CellResult<Vec<i64>> {
         // A retry finds the record appended; its deliveries are written
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
         let queued = if appended || !self.outboxed(record)? { self.outbox_record(record)? } else { false };
+        laps.lap("outbox");
         // a message logged for search is sent from the alarm, so a post
         // waits on no person's list; an alarm not armed now is armed by the
         // next thing that arms it (the cursor stays due), never failing the post
@@ -287,10 +288,13 @@ impl FragmentCell {
                 console_error!("record {}#{}: the alarm was not armed for search ({:?}): {}", record.channel, record.seq, e.code, e.message);
             }
         }
+        laps.lap("search");
         let fired = self.fire_channel(record, depth).await;
+        laps.lap("fire");
         if queued {
             self.drain_deliveries().await;
         }
+        laps.lap("drain");
         fired
     }
 
@@ -354,22 +358,27 @@ impl FragmentCell {
         if size > limits::RECORD_BODY_MAX_BYTES {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
+        // where the post waited, step by step: one line a post
+        let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
         self.writable().await?;
+        laps.lap("writable");
         let key = post_key(principal, id);
         // the append and the look for an earlier one are one step (no await between)
-
         let (record, appended) = match self.append(channel, principal, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
         };
+        laps.lap("append");
         // A retry finishes what the first try left undone for as long as a
         // mutation's effects are tried again; later, the runs it started may
         // be forgotten, and it would start them twice.
         if appended || js::now_ms() - record.at < retry_horizon_ms() {
-            self.published(&record, appended, POST_TRIGGERS_DEPTH).await?;
+            self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut laps).await?;
             self.launch_queued().await;
+            laps.lap("launch");
         }
+        laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
     }
 
@@ -388,7 +397,7 @@ impl FragmentCell {
         }
         let own = self.own_key()?;
         let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;
-        self.published(&record, appended, POST_TRIGGERS_DEPTH).await?;
+        self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
         Ok((record, appended))
     }
 
@@ -604,7 +613,7 @@ impl FragmentCell {
 
     async fn apply_record(&self, p: &Pending, key: &str, index: i64, channel: &str, kind: &str, body: &Value) -> CellResult<()> {
         let (record, appended) = self.append_once(channel, &p.principal, kind, body, key, index)?;
-        self.published(&record, appended, p.depth + 1).await?;
+        self.published(&record, appended, p.depth + 1, &mut js::Laps::start()).await?;
         Ok(())
     }
 

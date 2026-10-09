@@ -971,7 +971,7 @@ impl FragmentCell {
         fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
-        self.published(&record, appended, run.depth + 1).await.map_err(retry)?;
+        self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
 
@@ -1325,7 +1325,7 @@ impl FragmentCell {
         // unkeyed: a sender's retry is a new record, so a failure of its
         // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
-        let runs = self.published(&record, true, hops).await?;
+        let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
         self.launch_queued().await;
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }

@@ -577,6 +577,41 @@ pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }
 
+/// Where one piece of work waited, step by step, for its log line. The
+/// Workers clock moves only across I/O, so a step that waited on nothing
+/// reads 0: a line shows the work's waits, not its computing.
+pub struct Laps {
+    start: i64,
+    last: i64,
+    waits: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Laps {
+    pub fn start() -> Laps {
+        let now = now_ms();
+        Laps { start: now, last: now, waits: serde_json::Map::new() }
+    }
+
+    /// The wait since the last lap (or the start), added to `step`'s.
+    pub fn lap(&mut self, step: &'static str) {
+        let now = now_ms();
+        let waited = now - self.last + self.waits.get(step).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        self.waits.insert(step.to_string(), waited.into());
+        self.last = now;
+    }
+
+    /// One line (lesson 14): `fields`, then `event`, `at` (when the work
+    /// began, ms), its steps' `waits`, and `ms`, its whole.
+    pub fn log(self, event: &str, mut fields: serde_json::Value) {
+        assert!(fields.is_object(), "a line's fields are an object");
+        fields["event"] = event.into();
+        fields["at"] = self.start.into();
+        fields["ms"] = (now_ms() - self.start).into();
+        fields["waits"] = serde_json::Value::Object(self.waits);
+        worker::console_log!("{fields}");
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]
