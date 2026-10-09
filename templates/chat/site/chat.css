@@ -142,11 +142,21 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .msg.notice .why { color: var(--text-secondary); }
 
 /* markdown */
-.md p, .md ul, .md ol, .md pre, .md blockquote, .md .md-table { margin: 0 0 .75rem; }
+.md p, .md ul, .md ol, .md pre, .md-code, .md blockquote, .md .md-table { margin: 0 0 .75rem; }
 .md > :last-child { margin-bottom: 0; }
 .md ul, .md ol { padding-left: 1.35rem; }
 .md li::marker { color: color-mix(in srgb, var(--text-primary), transparent 38%); }
-.md h3, .md h4, .md h5, .md h6 { font-size: 1em; font-weight: 700; margin: 1rem 0 .4rem; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-size: 1em; font-weight: 700; margin: 1rem 0 .4rem; }
+.md h1 { font-size: 1.35em; }
+.md h2 { font-size: 1.15em; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
+.md li > ul, .md li > ol { margin-top: .35rem; margin-bottom: 0; }
+.md-task { list-style: none; }
+.md-task input { margin-left: -1.25rem; accent-color: var(--chat-agent-color); }
+.md-code { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.md-code-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 12px; background: var(--surface-muted); font: 12px var(--font-mono); color: var(--text-secondary); }
+.md-code-copy { font: inherit; border: 0; background: none; color: inherit; cursor: pointer; }
+.md .md-code pre { border: 0; border-radius: 0; margin: 0; }
 .md a { color: var(--accent-blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-blue), transparent 45%); text-underline-offset: 3px; }
 .md code { font: 500 .92em var(--font-mono); background: var(--chat-code); border-radius: 6px; padding: .1rem .35rem; }
 .md pre { border: 1px solid var(--border); border-radius: 12px; padding: .85rem; background: var(--chat-code); overflow-x: auto; }
