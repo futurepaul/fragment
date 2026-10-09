@@ -252,6 +252,19 @@ async fn the_hermes_image() {
             ("skills/research/brain-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/brain-finite/SKILL.md")),
             ("skills/productivity/google-workspace-finite/SKILL.md", include_str!("../../../templates/skills/skills/productivity/google-workspace-finite/SKILL.md")),
             ("skills/image-editing/image-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/image-editing/image-generation-finite/SKILL.md")),
+            ("skills/finance/cocod-finite/SKILL.md", include_str!("../../../templates/skills/skills/finance/cocod-finite/SKILL.md")),
+            ("skills/finance/trading-agent-finite/SKILL.md", include_str!("../../../templates/skills/skills/finance/trading-agent-finite/SKILL.md")),
+            ("skills/nostr/nostr-agent-interface-cli-finite/SKILL.md", include_str!("../../../templates/skills/skills/nostr/nostr-agent-interface-cli-finite/SKILL.md")),
+            ("skills/nostr/nostr-agent-interface-cli-finite/agents/openai.yaml", include_str!("../../../templates/skills/skills/nostr/nostr-agent-interface-cli-finite/agents/openai.yaml")),
+            ("skills/nostr/nostr-agent-interface-cli-finite/references/cli-essentials.md", include_str!("../../../templates/skills/skills/nostr/nostr-agent-interface-cli-finite/references/cli-essentials.md")),
+            ("skills/nostr/nostr-agent-interface-cli-finite/references/tool-groups.md", include_str!("../../../templates/skills/skills/nostr/nostr-agent-interface-cli-finite/references/tool-groups.md")),
+            ("skills/nostr/nostr-agent-interface-cli-finite/references/workflows.md", include_str!("../../../templates/skills/skills/nostr/nostr-agent-interface-cli-finite/references/workflows.md")),
+            ("skills/music-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/music-generation-finite/SKILL.md")),
+            ("skills/research/polymarket-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/polymarket-finite/SKILL.md")),
+            ("skills/research/polymarket-finite/references/api-endpoints.md", include_str!("../../../templates/skills/skills/research/polymarket-finite/references/api-endpoints.md")),
+            ("skills/research/polymarket-finite/scripts/polymarket.py", include_str!("../../../templates/skills/skills/research/polymarket-finite/scripts/polymarket.py")),
+            ("skills/social-media/x-api-finite/SKILL.md", include_str!("../../../templates/skills/skills/social-media/x-api-finite/SKILL.md")),
+            ("skills/social-media/x-api-finite/x-api.py", include_str!("../../../templates/skills/skills/social-media/x-api-finite/x-api.py")),
         ],
     );
     let model = Model::start("0.0.0.0:0").await;
@@ -353,14 +366,19 @@ async fn the_hermes_image() {
     let found = hermes_finds();
     assert!(c.exec(&[
         "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
-        "/opt/hermes/.venv/bin/python", "-c", "from types import SimpleNamespace; from agent.background_review import load_background_review_settings; from agent import curator; from run_agent import AIAgent; from model_tools import get_tool_definitions; assert not load_background_review_settings()[0]; assert curator.is_enabled() and not curator.get_consolidate(); names = {t['function']['name'] for t in get_tool_definitions(enabled_toolsets=['skills', 'memory'], quiet_mode=True)}; assert {'skill_manage', 'memory'} <= names, names; AIAgent._spawn_background_review(SimpleNamespace(_delegate_depth=0), [], review_memory=True, review_skills=True)",
-    ]), "automatic skill and memory review exits before any model work; explicit tools and periodic curator remain available");
+        "/opt/hermes/.venv/bin/python", "-c", include_str!("skill_fork.py"),
+    ]), "automatic memory/skill review stays on; background skill writes create complete local forks");
+    fake.until(30_000, "the local skill fork and its helper committed to the agent fragment", |w| {
+        let files = &w.fragments["juniper--k3x9"].files;
+        files.get("skills/research/model-council-finite/SKILL.md").is_some_and(|b| String::from_utf8_lossy(b).contains("# My Revised Council"))
+            && files.contains_key("skills/research/model-council-finite/scripts/model_council.py")
+    }).await;
     eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
     assert!(found["model-council-finite"].as_str().is_some_and(|d| d.contains("Fragment's model tiers")), "a managed skill: {found}");
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
-    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite"] {
+    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
     for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {

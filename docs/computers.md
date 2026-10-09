@@ -1191,8 +1191,9 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has six platform workflows: apps, git, brains, connected Google,
-  image steps and model tiers (templates/skills/README.md). Generic skills
+  release has twelve workflows: apps, git, brains, connected Google,
+  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
+  market analysis and Polymarket (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each
@@ -1217,15 +1218,23 @@ and how a runtime finds them, is the image's.
   document conversion, spreadsheet recalculation and AI PDF edits that
   need those remain optional. The audit and two offline sample paths are
   in docs/skills-audit.md.
-- **Automatic review, demo 2026-10-08:** each profile's config names
-  `auxiliary.background_review: { enabled: false }`. This disables Hermes'
-  automatic per-turn skill **and memory** reviews: they try to patch loaded
-  read-only external skills and compete for the shared 50 calls/min per-model
-  account limit. Explicit skill and memory tools remain available, and the
-  separate periodic curator keeps its defaults (agent-owned skills only,
-  external skills excluded, no LLM consolidation). Revisit with a
-  managed-skills-aware setting or sufficient rate limits; the temporary
-  decision is in docs/technical-debt-ledger.md, the evidence in docs/skills-audit.md.
+- **Automatic learning and local forks (2026-10-09):** automatic memory and
+  skill reviews are on (`auxiliary.background_review: { enabled: true }`).
+  Managed skills stay read-only in `/data/hermes/managed-skills`; sync
+  replaces that baseline whole. Hermes and the user own each profile's
+  writable `skills/`, synced both ways to the agent fragment. The image's
+  `fragment-skill-fork` plugin intercepts a flat `skill_manage` patch, edit,
+  write_file or remove_file targeting our managed/platform external roots:
+  after Hermes' fresh-read check, it copies the whole category/name package
+  locally, then Hermes edits the copy with its normal validation and scan.
+  The copy shadows the baseline by name, and a later managed release never
+  overwrites it. Remove the local copy to follow the updated baseline again.
+  External batch writes must first fork with a single write; deletions retain
+  Hermes' ownership guards. Manual customization follows the same whole-copy
+  rule. Explicit memory/skill tools and the separate periodic curator remain
+  available. Background reviews still spend model calls; Paul's memory-review
+  decision keeps them on despite the shared account limit.
+
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner
