@@ -868,6 +868,25 @@ async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bo
     found
 }
 
+/// The chat each agent's route names (bots.rs, `profile_routes`): its Bot
+/// Chat, else, for one with none found, a chat it is in (`route_chat`,
+/// from its own list, as the bridge lists what it follows). Bounded: one
+/// list an agent with no Bot Chat, at most `AGENTS_MAX` of them.
+async fn route_chats(api: &Api, agents: &[Agent], chats: &BotChats) -> BotChats {
+    let mut routed = chats.clone();
+    for a in agents.iter().filter(|a| !chats.contains_key(&a.fragment)) {
+        match api.fragments(&a.fragment).await {
+            Ok(list) => {
+                if let Some(chat) = bots::route_chat(&a.fragment, &list) {
+                    routed.insert(a.fragment.clone(), chat);
+                }
+            }
+            Err(e) => ev!("boot.route_unread", { "agent": a.fragment, "error": e.to_string() }),
+        }
+    }
+    routed
+}
+
 /// Hermes' own stop of `agent`'s desktop, which refuses while a person
 /// holds its lease, as the hermes user: its exit code and what it said.
 async fn stop_desktop(agent: &str, home: &Path) -> Result<(i32, String), String> {
@@ -1168,11 +1187,12 @@ async fn boot_main() {
     let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
-    // each agent's Bot Chat, found before the gateway's config: its route
-    // is there (bots.rs, `profile_routes`)
+    // each agent's Bot Chat, found before the gateway's config: the
+    // agent's route is there (bots.rs, `profile_routes`)
     let mut chats = BotChats::new();
     find_bot_chats(&api, &agents, &mut chats).await;
-    let managed = hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms) + &bots::profile_routes(&agents, &chats);
+    let routes = bots::profile_routes(&agents, &route_chats(&api, &agents, &chats).await);
+    let managed = hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));

@@ -149,23 +149,26 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
 }
 
 /// Hermes' `profile_routes`, for the gateway's config (the managed
-/// overlay, main.rs): each agent whose Bot Chat is found, that chat routed
-/// to its profile. No route picks a message's profile (the relay names it
-/// on each, which wins); a route makes its profile one the gateway reaches
-/// through the default profile's relay after a restart (v0.21.6:
-/// `gateway/authz_mixin.py`, `_is_shared_bot_satellite`). A session the
+/// overlay, main.rs): one route a profile, each agent's `routed` chat (its
+/// Bot Chat, else a chat it is in: `route_chats`) to its profile. No route
+/// picks a message's profile (the relay names it on each, which wins); a
+/// route makes its profile one the gateway reaches through the default
+/// profile's relay after a restart (v0.21.6: `gateway/authz_mixin.py`,
+/// `_is_shared_bot_satellite`, which asks only whether any route names the
+/// profile), so one reaches its sessions in every chat. A session the
 /// gateway reads back from disk holds no live adapter, and a profile has
-/// none of its own, so without one a background process's completion in
-/// it, message_agent's reply among them, was retried unsent for ever (p5,
-/// 2026-10-09). The gateway reads them as it starts: an agent come since
-/// has its route at the next start, and its sessions until then are this
-/// gateway's own, which need none.
-pub fn profile_routes(agents: &[Agent], chats: &BTreeMap<String, String>) -> String {
+/// none of its own, so without a route a background process's completion
+/// in it, message_agent's reply among them, was retried unsent for ever
+/// (p5, 2026-10-09). The gateway reads them as it starts, and only then
+/// (no verb of Hermes' reloads them): an agent come since has its route at
+/// the next start, and its sessions until then are this gateway's own,
+/// which need none.
+pub fn profile_routes(agents: &[Agent], routed: &BTreeMap<String, String>) -> String {
     let routes: Vec<String> = agents
         .iter()
         .filter_map(|a| {
             let profile = wire::profile(&a.fragment);
-            let chat = wire::chat_id(chats.get(&a.fragment)?, &a.fragment);
+            let chat = wire::chat_id(routed.get(&a.fragment)?, &a.fragment);
             Some(format!("  - name: {}\n    platform: \"relay\"\n    profile: {}\n    chat_id: {}\n", q(&profile), q(&profile), q(&chat)))
         })
         .collect();
@@ -173,6 +176,14 @@ pub fn profile_routes(agents: &[Agent], chats: &BTreeMap<String, String>) -> Str
         return String::new();
     }
     format!("profile_routes:\n{}", routes.concat())
+}
+
+/// The chat a route names for an agent with no Bot Chat found: of the
+/// fragments it is in (`fragments`, its own list), the chat first by name,
+/// not its own fragment; None when it is in no chat (then it has no
+/// session a completion could be lost in).
+pub fn route_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
+    fragments.iter().filter(|f| f.kind == "chat" && f.name != agent_fragment).map(|f| f.name.clone()).min()
 }
 
 #[cfg(test)]
@@ -301,11 +312,11 @@ mod tests {
         assert_eq!(bots_file(&[], Path::new("/data/hermes"), &chats), r#"{"bots":[]}"#);
     }
 
-    /// Valid: each agent whose Bot Chat is found, that chat (as the relay
-    /// names it to Hermes) routed to its profile. An agent with none found
-    /// has no route; with none at all, no key.
+    /// Valid: one route a profile, each agent's routed chat (as the relay
+    /// names it to Hermes) to its profile. An agent with none has no route;
+    /// with none at all, no key.
     #[test]
-    fn each_bot_chat_is_routed_to_its_profile() {
+    fn each_profile_is_routed_by_one_chat() {
         let chats: BTreeMap<String, String> = [("juniper--k3x9".to_string(), "juniper-chat--h6j7".to_string()), ("fred--k3x9".into(), "fred-chat--b3c4".into())].into();
         let agents = [agent("juniper", "Juniper"), agent("maple", "Maple"), agent("fred", "Fred")];
         assert_eq!(
@@ -314,5 +325,16 @@ mod tests {
         );
         assert_eq!(profile_routes(&agents[1..2], &chats), "", "maple, with no chat found, has none");
         assert_eq!(profile_routes(&[], &chats), "");
+    }
+
+    /// Valid: of the fragments an agent is in, the chat first by name.
+    /// Invalid: an app, its own fragment, or none: no chat.
+    #[test]
+    fn an_agent_with_no_bot_chat_is_routed_by_a_chat_it_is_in() {
+        let list = [listed("todo--p2m4", "app", false), listed("garden--r2d5", "chat", false), listed("allotment--a1b2", "chat", false), listed("fern--k3x9", "chat", false)];
+        assert_eq!(route_chat("fern--k3x9", &list).as_deref(), Some("allotment--a1b2"));
+        assert_eq!(route_chat("fern--k3x9", &list[..1]), None, "an app is no chat");
+        assert_eq!(route_chat("fern--k3x9", &list[3..]), None, "nor its own fragment");
+        assert_eq!(route_chat("fern--k3x9", &[]), None);
     }
 }
