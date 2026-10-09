@@ -258,7 +258,8 @@ Every change is checked against this table.
 | An agent's model (its tier, and a model of a provider its owner connected: `model: {provider, id}`) | the agent fragment's `agent.json` in git (docs/computers.md, "An agent's own model") | its computer's profile config, rewritten from it within seconds while awake and at each boot; used only while the agent's credentials hold that provider (else its tier) |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |
-| The agent docs | `cli/SKILL.md` and `cli/GUIDE.md` | compiled in, never edited elsewhere: the CLI's `fragment skill` and `fragment guide`, the platform's `/llms.txt` and `/llms-full.txt` (docs/api.md, Agent docs) |
+| The agent docs | `cli/SKILL.md` and `cli/GUIDE.md` | never edited elsewhere: compiled into the CLI (`fragment skill`, `fragment guide`), and the release's files on the platform (`/llms.txt`, `/llms-full.txt`; docs/api.md, Agent docs) |
+| The release's files: the templates, the shell's files, the agent docs | the repo (`templates/`, `cell/shell/`, `cli/`) | the cell's index of them (path, SHA-256, size, each template's release), made by its build; their bytes in the Worker's Static Assets, named by hash, written by the same build and uploaded with it, served only through the router (docs/api.md, The release's files); the CLI embeds the templates |
 | A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
 | A person's own view of their fragments: what they archived, and how far they have seen each chat | their list, the `Principal` cell (principal.rs; docs/api.md, Control API) | none: no fragment holds it, and it goes when they leave the fragment |
 

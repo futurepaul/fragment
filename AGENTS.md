@@ -76,7 +76,15 @@ prebuilt bundle is in the debt ledger).
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
   to the system's cache. Moving the pin: README.md, "The pinned Node".
-- `cargo xtask build`: the cell for wasm32.
+- `cargo xtask build`: the cell for wasm32, held to its budget
+  (`CELL_WASM_MAX_BYTES`, 6 MB raw, xtask/src/build.rs: it fails over
+  it, saying so), and the release's files (the templates, the shell's
+  files, the agent docs) into `cell/build/assets`, each named by its
+  SHA-256: the Worker's Static Assets, which the cell reads by the index
+  it carries (cell/src/assets.rs; docs/api.md, The release's files), a
+  deploy uploads, and the e2e's staged copy holds. `wrangler dev`'s
+  rebuild runs it too. A file the cell serves belongs there, not in an
+  `include_bytes!`.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
@@ -251,7 +259,9 @@ prebuilt bundle is in the debt ledger).
   <file> --branch <name>` removes one (irreversible: ask Paul).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
-  `crates/templates` (`templates/`, embedded),
+  `crates/templates` (the release's files: `templates/`, the shell's,
+  the agent docs; an index of them in the cell, their bytes with
+  `embed`, for the CLI and xtask),
   `crates/fakes` (code.storage, Workers AI, WorkOS, Email Sending, a push service),
 
   `crates/devstack`, `crates/e2e`.
