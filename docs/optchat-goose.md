@@ -245,6 +245,14 @@ wf_steps, platform_ms, model_ms, tools_ms}` on the turn's record.
 | 4 | the mind on goose: `templates/mind/goose/`, goose owning the conversation and loop; the same prompt and tool schemas as the computer's goose; mind-live against today's numbers | optchat |
 | 5 | #300 on top: outbound MCP (rmcp's streamable-HTTP client over host fetch, so goose in the DO gets MCP extensions), Worker tools, Summon subagents once #12792 lands, nested task views, direct goose chat | optchat |
 
+Phase 1 is built (2026-10-09): `fragment/main` is `a29b6aa9`, upstream
+main `3bd85200` plus #12659's two commits and the three switches
+(docs/optchat.md, "The goose fork"); the goose image pins it. Stop on the
+state machine answers `cancelled` at once, as v1.53.0 did. The computer
+keeps goose's `<turn-context>`: the bridge's prompt (the mind's `view`, then
+the task) carries no per-turn block, so it is goose's only clock; the
+switch waits for phase 4, where the mind's per-turn block says the time.
+
 **Upstream** (drafted by us, posted by Paul):
 - the optional catalog (#12659, open);
 - regex off the request path;

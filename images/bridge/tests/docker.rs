@@ -172,7 +172,12 @@ async fn the_stub_image() {
 /// task through its bridge and the real goose with the scripted model: its
 /// shell runs in the work directory, a step; it opens the mind's view with
 /// `fragment mcp`, as the agent; every model call names the agent and the
-/// tier; its screen port serves its page; SIGTERM ends it in under 5 s.
+/// tier, and offers goose's shell and the session's four MCP servers'
+/// tools (mind, browser, computer, web); a Stop while its shell runs ends
+/// the hand-off `stopped` at once and kills the command; each hand-off is a
+/// fresh session with one reply, the system prompt the same bytes in every
+/// call of every session, nothing compacted; its screen port serves its
+/// page; SIGTERM ends it in under 5 s.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_goose_image() {
@@ -219,15 +224,64 @@ async fn the_goose_image() {
         let zooms: Vec<_> = w.requests.iter().filter(|r| r.0 == format!("POST /api/f/{mind}/ops/zoom")).collect();
         assert!(zooms.len() == 1 && zooms[0].2.as_deref() == Some("hands.paul") && !zooms[0].3, "fragment mcp, as the agent, unsigned: {zooms:?}");
     });
+    let completions = || model.calls.lock().unwrap().iter().filter(|c| c.path == "/v1/chat/completions").cloned().collect::<Vec<_>>();
+    // where each hand-off's calls start
+    let mut firsts = vec![0];
     {
-        let calls = model.calls.lock().unwrap();
-        let completions: Vec<_> = calls.iter().filter(|c| c.path == "/v1/chat/completions").collect();
-        assert!(completions.len() >= 4, "{:?}", calls.iter().map(|c| c.path.clone()).collect::<Vec<_>>());
-        assert!(completions.iter().all(|c| c.agent.as_deref() == Some("hands.paul") && c.model == "medium"), "every call is the agent's, at its tier");
+        let completions = completions();
+        assert!(completions.len() >= 4, "{:?}", completions.iter().map(|c| c.path.clone()).collect::<Vec<_>>());
+        assert!(completions.iter().all(|c| c.agent.as_deref() == Some("hands.paul") && c.model == "cheap"), "every call is the agent's, at its tier: {:?}", completions.iter().map(|c| (&c.agent, &c.model)).collect::<Vec<_>>());
         let (system, user) = (support::model::texts(&completions[0].body, "system"), support::model::texts(&completions[0].body, "user"));
         assert!(system.contains("You are a subagent of Mind") && user.contains(view), "the framing in the system prompt, the view in the prompt:\n{system}\n---\n{user}");
         let tools = support::model::tools(&completions[0].body);
-        assert!(tools.iter().any(|t| t.ends_with("zoom")) && tools.iter().any(|t| t.ends_with("shell")), "{tools:?}");
+        eprintln!("goose: {} tools: {tools:?}", tools.len());
+        // goose's shell, and the session's four MCP servers (goose prefixes
+        // their tools with their names)
+        assert!(tools.iter().any(|t| t == "shell" || t.ends_with("__shell")), "goose's shell: {tools:?}");
+        for server in ["mind", "browser", "computer", "web"] {
+            assert!(tools.iter().any(|t| t.starts_with(&format!("{server}__"))), "{server}'s tools offered: {tools:?}");
+        }
+        assert!(tools.iter().any(|t| t == "mind__zoom") && tools.iter().any(|t| t == "web__web_search") && tools.iter().any(|t| t == "computer__screen_look"), "{tools:?}");
+        firsts.push(completions.iter().position(|c| support::model::texts(&c.body, "user").contains("zoom: 0 1")).expect("the zoom's hand-off asked"));
+    }
+
+    // Stop while its shell runs: the run ends at once, and the command with it
+    let sleeping = || c.exec_out(&["sh", "-c", "pgrep -fx 'sleep 41' | wc -l"]).trim().parse::<u32>().unwrap_or(0);
+    let before = completions().len();
+    let slow = fake.say(&mind, &person("paul"), json!({ "text": "Take your time.\n\nrun: sleep 41", "to": ["id:hands"] }));
+    let turn = fragment_bridge::records::turn_id("hands.paul", &mind, "chat", slow["seq"].as_u64().unwrap());
+    support::until(60_000, "goose's shell to run the sleep", || sleeping() > 0).await;
+    let stopped = Instant::now();
+    fake.say(&mind, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(20_000, "the stopped end", |w| ends(w).len() == 3).await;
+    let took = stopped.elapsed();
+    eprintln!("goose: stop to its end: {} ms", took.as_millis());
+    fake.with(|w| {
+        assert_eq!(ends(w)[2]["outcome"], "stopped", "{:?}", ends(w));
+        assert_eq!(replies(w)[2..], ["(ended: stopped: its asker stopped it)"], "a stopped hand-off's one reply");
+    });
+    assert!(took < Duration::from_secs(10), "Stop ends the run promptly, not when its command would have: {took:?}");
+    support::until(10_000, "the stopped command to be killed", || sleeping() == 0).await;
+    firsts.push(before);
+    let before = completions().len();
+    fake.say(&mind, &person("paul"), json!({ "text": "Still there?", "to": ["id:hands"] }));
+    fake.until(120_000, "the next answer", |w| ends(w).len() == 4).await;
+    fake.with(|w| assert_eq!((ends(w)[3]["outcome"].as_str(), replies(w)[3].as_str()), (Some("idle"), "scripted: Still there?")));
+    firsts.push(before);
+
+    // each hand-off a fresh session with one reply; one system prompt, the
+    // same bytes in every call of every session; nothing compacts
+    let calls = completions();
+    fake.with(|w| assert_eq!(replies(w).len(), ends(w).len(), "exactly one reply a hand-off"));
+    for (i, at) in firsts.iter().enumerate() {
+        let roles: Vec<&str> = calls[*at].body["messages"].as_array().unwrap().iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, ["system", "user"], "hand-off {i} is a fresh session: its first call holds its own prompt alone");
+    }
+    let prompt = support::model::texts(&calls[0].body, "system");
+    for (i, call) in calls.iter().enumerate() {
+        assert_eq!(support::model::texts(&call.body, "system"), prompt, "call {i}: the system prompt is the same bytes in every call of every session");
+        let all = call.body.to_string();
+        assert!(!all.contains("Your context was compacted") && !all.contains("context limit was reached") && !all.contains("<compaction>"), "call {i}: nothing compacts");
     }
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"), "its screen's page");
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]), "and noVNC");
@@ -516,13 +570,13 @@ async fn the_goose_desktop_and_its_tools() {
     assert!(steps.iter().any(|s| s["tool"] == "browser_navigate"), "{steps:?}");
     {
         let calls = model.calls.lock().unwrap();
-        let first = calls.iter().find(|c| c.path == "/v1/chat/completions" && c.model == "medium").unwrap();
+        let first = calls.iter().find(|c| c.path == "/v1/chat/completions" && c.model == "cheap").unwrap();
         let tools = support::model::tools(&first.body);
         for t in ["browser__browser_navigate", "computer__screen_look", "web__web_read", "load_skill"] {
             assert!(tools.iter().any(|n| n == t), "{t} among {tools:?}");
         }
         let system = support::model::texts(&first.body, "system");
-        assert!(system.contains("`fragment` CLI") && system.contains("fragment - You are an agent on your owner's Fragment computer"), "fragments top of mind, the platform skill listed:\n{system}");
+        assert!(system.contains("`fragment` CLI") && system.contains("- fragment: You are an agent on your owner's Fragment computer"), "fragments top of mind, the platform skill listed:\n{system}");
     }
     let (took, code) = c.sigterm();
     eprintln!("desktop: SIGTERM to exit with a desktop up: {} ms (code {code})", took.as_millis());

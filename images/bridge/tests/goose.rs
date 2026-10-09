@@ -283,12 +283,31 @@ async fn a_permission_goose_asks_is_refused() {
     bridge.stop().await;
 }
 
-/// Goal: the real goose (`FRAGMENT_GOOSE_BIN`, a v1.53.0 binary for this
-/// host), on this host, with the scripted model: a mind's task runs its
-/// shell and is answered, its step recorded; each model call names the
-/// agent and the tier at the intercept's path; the first carries the
-/// framing and the view; with `FRAGMENT_CLI_BIN` (the fragment CLI), the
-/// mind's zoom is a tool goose calls through `fragment mcp`, as the agent.
+/// The processes on this host whose command line is `words`, exactly
+/// (Linux's /proc).
+fn running(words: &[&str]) -> usize {
+    let Ok(procs) = std::fs::read_dir("/proc") else { return 0 };
+    let want: Vec<u8> = words.iter().flat_map(|w| w.bytes().chain([0])).collect();
+    procs.flatten().filter(|e| std::fs::read(e.path().join("cmdline")).is_ok_and(|c| c == want)).count()
+}
+
+/// Goal: the real goose (`FRAGMENT_GOOSE_BIN`, a build of our fork's
+/// `fragment/main` for this host: images/goose/Dockerfile), on this host,
+/// with the scripted model:
+/// - a mind's task runs its shell and is answered, its step recorded; each
+///   model call names the agent and the tier at the intercept's path; the
+///   first carries the framing and the view, then the task, then goose's
+///   own clock (its `<turn-context>`, after them);
+/// - a Stop while its shell runs ends the hand-off `stopped` within
+///   seconds, not when the command would have, its one reply saying so,
+///   and the command is killed; the next hand-off is answered;
+/// - each hand-off is a fresh session (its first call holds its own prompt
+///   alone) with exactly one reply; nothing of goose's own compacts;
+/// - the system prompt is the same bytes in every call of every session,
+///   though a step wrote and read a subdirectory's `AGENTS.md`;
+/// - with `FRAGMENT_CLI_BIN` (the fragment CLI), the mind's zoom is a tool
+///   goose calls through `fragment mcp`, as the agent.
+///
 /// Run: `FRAGMENT_GOOSE_BIN=… cargo test -p fragment-bridge --test goose -- --ignored`.
 #[tokio::test]
 #[ignore = "needs a goose binary: FRAGMENT_GOOSE_BIN"]
@@ -305,41 +324,93 @@ async fn the_real_goose_on_this_host() {
     cfg.cli = std::env::var("FRAGMENT_CLI_BIN").ok().map(Into::into);
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Goose::new(cfg.clone())));
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    // goose also lists the provider's models (`GET /v1/models`) as it makes
+    // a session: the intercept answers 404, unmetered (docs/computers.md,
+    // "Models"), as the scripted model does
+    let completions = || model.calls.lock().unwrap().iter().filter(|c| c.path != "/v1/models").cloned().collect::<Vec<_>>();
+    // each hand-off's calls, from where the one before ended
+    let mut handoffs: Vec<std::ops::Range<usize>> = Vec::new();
 
-    fake.say(&mind, &person("paul"), json!({ "text": "Check the shell.\n\nrun: echo tool-ran", "to": ["id:hands"] }));
+    // its shell writes a hint file in a subdirectory and reads it: goose
+    // would add that hint to its system prompt from its next call on, were
+    // the prompt not kept stable
+    let command = "mkdir -p repo && echo tool-ran > repo/AGENTS.md && cat repo/AGENTS.md";
+    fake.say(&mind, &person("paul"), json!({ "text": format!("Check the shell.\n\nrun: {command}"), "to": ["id:hands"] }));
     fake.until(60_000, "goose's answer", |w| !ends(w, &mind).is_empty()).await;
+    handoffs.push(0..completions().len());
     fake.with(|w| {
         assert_eq!(ends(w, &mind)[0]["outcome"], "idle", "{:?}", ends(w, &mind));
         assert_eq!(replies(w, &mind), vec!["scripted: the tool said: tool-ran"]);
         let steps = w.bodies(&mind, "work", "turn.step");
-        assert!(steps.len() == 1 && steps[0]["tool"] == "shell" && steps[0]["args"] == "echo tool-ran" && steps[0]["ok"] == true, "{steps:?}");
+        assert!(steps.len() == 1 && steps[0]["tool"] == "shell" && steps[0]["args"] == command && steps[0]["ok"] == true, "{steps:?}");
     });
-    // goose also lists the provider's models (`GET /v1/models`) as it makes
-    // a session: the intercept answers 404, unmetered (docs/computers.md,
-    // "Models"), as the scripted model does
-    let all = model.calls.lock().unwrap().clone();
-    eprintln!("model calls: {:?}", all.iter().map(|c| c.path.as_str()).collect::<Vec<_>>());
-    let calls: Vec<_> = all.iter().filter(|c| c.path != "/v1/models").cloned().collect();
-    assert!(!calls.is_empty());
+    let calls = completions();
+    eprintln!("model calls: {:?}", model.calls.lock().unwrap().iter().map(|c| c.path.as_str()).collect::<Vec<_>>());
+    assert_eq!(calls.len(), 2, "its shell call, then its answer");
     for c in &calls {
         assert_eq!((c.path.as_str(), c.model.as_str(), c.agent.as_deref()), ("/v1/chat/completions", "medium", Some("hands.paul")), "every call is the agent's, at the intercept's path");
     }
     let (system, user) = (support::model::texts(&calls[0].body, "system"), support::model::texts(&calls[0].body, "user"));
     assert!(system.contains(&format!("{FRAMING}\n\n{VIEW_DOC}")), "the framing in the system prompt: {system}");
     assert!(user.contains(VIEW) && !user.contains(FRAMING), "the view in the prompt: {user}");
+    let (view_at, task_at, clock_at) = (user.find(VIEW), user.find("Check the shell."), user.find("<turn-context>\n<current-time>"));
+    assert!(view_at < task_at && task_at < clock_at && view_at.is_some(), "the view, the task, then goose's clock: {user}");
     let tools = support::model::tools(&calls[0].body);
     eprintln!("tools: {tools:?}");
-    let mine = |t: &String| t.starts_with("developer__") || t.starts_with("mind__") || ["shell", "write", "edit", "tree", "read_image"].contains(&t.as_str());
-    assert!(tools.iter().all(mine), "developer's tools and the mind's alone: {tools:?}");
+    // goose's shell and editor (`developer`), its skills (`load_skill`, the
+    // state machine's own), and the mind's: nothing else of goose's
+    let mine = |t: &String| t.starts_with("developer__") || t.starts_with("mind__") || ["shell", "write", "edit", "tree", "read_image", "load_skill"].contains(&t.as_str());
+    assert!(tools.iter().all(mine), "developer's tools, its skills and the mind's alone: {tools:?}");
+
+    // Stop while its shell runs: the run ends at once, the command with it
+    let sleep = ["sleep", "41"];
+    let slow = fake.say(&mind, &person("paul"), json!({ "text": "Take your time.\n\nrun: sleep 41", "to": ["id:hands"] }));
+    let turn = records::turn_id("hands.paul", &mind, "chat", slow["seq"].as_u64().unwrap());
+    support::until(60_000, "goose's shell to run the sleep", || running(&sleep) > 0).await;
+    let stopped = std::time::Instant::now();
+    fake.say(&mind, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(20_000, "the stopped end", |w| ends(w, &mind).len() == 2).await;
+    let took = stopped.elapsed();
+    eprintln!("stop to its end: {} ms", took.as_millis());
+    handoffs.push(handoffs[0].end..completions().len());
+    fake.with(|w| {
+        assert_eq!(ends(w, &mind)[1]["outcome"], "stopped", "{:?}", ends(w, &mind));
+        assert_eq!(replies(w, &mind)[1..], ["(ended: stopped: its asker stopped it)"], "a stopped hand-off's one reply");
+    });
+    assert!(took < std::time::Duration::from_secs(10), "Stop ends the run promptly, not when its command would have: {took:?}");
+    support::until(10_000, "the stopped command to be killed", || running(&sleep) == 0).await;
+
+    fake.say(&mind, &person("paul"), json!({ "text": "Still there?", "to": ["id:hands"] }));
+    fake.until(60_000, "the next answer", |w| ends(w, &mind).len() == 3).await;
+    handoffs.push(handoffs[1].end..completions().len());
+    fake.with(|w| {
+        assert_eq!(ends(w, &mind)[2]["outcome"], "idle");
+        assert_eq!(replies(w, &mind)[2], "scripted: Still there?");
+    });
 
     if cfg.cli.is_some() {
         fake.say(&mind, &person("paul"), json!({ "text": "zoom: 0 1", "to": ["id:hands"] }));
-        fake.until(60_000, "the zoom's answer", |w| ends(w, &mind).len() == 2).await;
+        fake.until(60_000, "the zoom's answer", |w| ends(w, &mind).len() == 4).await;
+        handoffs.push(handoffs[2].end..completions().len());
         fake.with(|w| {
-            assert_eq!(replies(w, &mind)[1], "scripted: the tool said: 0+1|user: I keep my notes in ~/notes");
+            assert_eq!(replies(w, &mind)[3], "scripted: the tool said: 0+1|user: I keep my notes in ~/notes");
             let zooms: Vec<_> = w.requests.iter().filter(|r| r.0 == format!("POST /api/f/{mind}/ops/zoom")).collect();
             assert!(zooms.len() == 1 && zooms[0].2.as_deref() == Some("hands.paul") && !zooms[0].3, "as the agent, unsigned: {zooms:?}");
         });
+    }
+
+    let calls = completions();
+    fake.with(|w| assert_eq!(replies(w, &mind).len(), ends(w, &mind).len(), "exactly one reply a hand-off"));
+    for (i, h) in handoffs.iter().enumerate() {
+        let first = &calls[h.start].body["messages"];
+        let roles: Vec<&str> = first.as_array().unwrap().iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, ["system", "user"], "hand-off {i} is a fresh session: its first call holds its own prompt alone");
+    }
+    let prompt = support::model::texts(&calls[0].body, "system");
+    for (i, c) in calls.iter().enumerate() {
+        assert_eq!(support::model::texts(&c.body, "system"), prompt, "call {i}: the system prompt is the same bytes in every call of every session");
+        let all = c.body.to_string();
+        assert!(!all.contains("Your context was compacted") && !all.contains("context limit was reached") && !all.contains("<compaction>"), "call {i}: nothing compacts");
     }
     bridge.stop().await;
 }

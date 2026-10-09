@@ -120,7 +120,7 @@ agent too: `screen_look` its `/v1/chat/completions` with `model:
 | `BRIDGE_GOOSE_WORK` | `/data/work` | each session's cwd |
 | `BRIDGE_GOOSE_HOME` | `/data/work/home` | goose's and its tools' `HOME` |
 | `BRIDGE_GOOSE_ROOT` | `/tmp/goose` | each agent's goose's own state, `<root>/<agent>` (`GOOSE_PATH_ROOT`): scratch, never `/data` |
-| `BRIDGE_GOOSE_TIER` | `medium` | the model tier goose's calls name |
+| `BRIDGE_GOOSE_TIER` | `cheap` | the model tier goose's calls name (GLM-5.3 Flash: docs/optchat.md) |
 | `BRIDGE_GOOSE_CLI` | | the fragment CLI: set, a mind's sessions get `fragment mcp <mind>` (the goose image's `/usr/local/bin/fragment`) |
 | `BRIDGE_TRUST_CA` | | the interception CA, appended to `/etc/ssl/certs/ca-certificates.crt` once it appears (at most 15 s: docs/computers.md, "Connections and operator keys"); the goose image's `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
@@ -308,19 +308,19 @@ parts close it:
 ## goose, as the bridge speaks it
 
 `src/runtime/goose.rs`: goose (github.com/aaif-goose/goose), in our image
-our fork's build (futurepaul/goose `fragment/optmem` at `4cfb2d7d`:
-upstream v1.53.0 and docs/optchat.md's surgery; images/goose/Dockerfile),
-spoken to over ACP, the Agent Client Protocol (agentclientprotocol.com):
-JSON-RPC 2.0, one message a line each way, on the stdio of `goose acp
---with-builtin developer`. Upstream's v1.53.0 speaks it alike, less the
-fork's two settings.
+our fork's build (futurepaul/goose `fragment/main` at `a29b6aa9`: upstream
+main on its state-machine loop and docs/optchat.md's surgery;
+images/goose/Dockerfile), spoken to over ACP, the Agent Client Protocol
+(agentclientprotocol.com): JSON-RPC 2.0, one message a line each way, on
+the stdio of `goose acp --with-builtin developer`. Upstream's main (and
+v1.53.0 before it) speaks it alike, less the fork's settings.
 
 - **One goose per agent.** An agent's goose starts at its first turn, and
   again at the turn after it died (every turn it ran ends as an error:
   `goose: it stopped`). Its environment is the agent's, because a goose's
   provider headers and its tools' environment are per process:
   - its model is goose's OpenAI provider at `FRAGMENT_MODEL`
-    (`OPENAI_HOST`, `v1/chat/completions`), the tier `medium`, no key
+    (`OPENAI_HOST`, `v1/chat/completions`), the tier `cheap`, no key
     (`OPENAI_API_KEY` empty: goose then reads `OPENAI_CUSTOM_HEADERS` from
     the environment too), every call naming the agent
     (`OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`: docs/computers.md,
@@ -336,7 +336,9 @@ fork's two settings.
   - nothing of goose's own runs beside the turn: no compaction
     (`GOOSE_AUTO_COMPACT_THRESHOLD=0`, and the fork's `GOOSE_NO_COMPACTION=1`
     for an overflow too), a system prompt that never changes within a
-    session (the fork's `GOOSE_STABLE_SYSTEM_PROMPT=1`), no extension of
+    session (the fork's `GOOSE_STABLE_SYSTEM_PROMPT=1`; the fork's
+    `GOOSE_NO_TURN_CONTEXT` stays unset, so goose's `<turn-context>`, its
+    clock, follows each turn's prompt: docs/optchat.md), no extension of
     its config (`EXTENSIONS={}`: its builtins, `developer` and `skills`, and
     a session's own alone; no subagents, scheduler or memory of goose's),
     no session naming
@@ -379,8 +381,9 @@ fork's two settings.
   Stop, an error, or a turn that ended before goose ran it: a Stop while
   its session was made, a goose that did not start)
   `(ended: <outcome>: <why>)`, as `(ended: error: goose: it stopped)`.
-- **Stop** is `session/cancel`; a Stop before the session is made ends the
-  turn at once. The bridge's own end (`Forget`) cancels and closes it,
+- **Stop** is `session/cancel`: goose's state machine drops the running
+  step at once (a shell command it ran is killed) and the prompt answers
+  `cancelled`; a Stop before the session is made ends the turn at once. The bridge's own end (`Forget`) cancels and closes it,
   and says nothing (the engine ended the turn itself).
 - **goose asks nothing a person answers.** It shows no card, and asks no
   question in words: in `auto` mode it asks no permission, and one it asks

@@ -47,22 +47,25 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
-# goose: our fork, futurepaul/goose `fragment/optmem` (upstream v1.53.0 and
-# the surgery of docs/optchat.md, "The goose fork": GOOSE_NO_COMPACTION,
-# GOOSE_STABLE_SYSTEM_PROMPT), pinned by its commit. Its rust-toolchain.toml
-# pins its Rust (rustup fetches it). The portable features: no local
-# inference, nothing past libc, libm and libgcc_s at run time.
+# goose: our fork, futurepaul/goose `fragment/main` (upstream main on the
+# state-machine loop, and docs/optchat.md, "The goose fork": the optional
+# model catalog of upstream's #12659, GOOSE_NO_COMPACTION,
+# GOOSE_STABLE_SYSTEM_PROMPT, GOOSE_NO_TURN_CONTEXT), pinned by its commit:
+# the rev the mind's goose (docs/optchat-goose.md) pins too. Its
+# rust-toolchain.toml pins its Rust (rustup fetches it). The portable
+# features: no local inference, nothing past libc, libm and libgcc_s at run
+# time.
 FROM rust:1-trixie AS goose
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       build-essential clang cmake libclang-dev libdbus-1-dev libssl-dev libxcb1-dev pkg-config protobuf-compiler
-ADD --keep-git-dir=false https://github.com/futurepaul/goose.git#4cfb2d7dcc441e703bec0918ba8c4b71c01fd13d /src
+ADD --keep-git-dir=false https://github.com/futurepaul/goose.git#a29b6aa993f2f7fc255de5dbe71c65ae368a1911 /src
 WORKDIR /src
 RUN --mount=type=cache,id=goose-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=goose-target,target=/src/target \
     CARGO_PROFILE_RELEASE_STRIP=symbols cargo build --release --locked -p goose-cli --bin goose --no-default-features --features portable-default \
  && mkdir /out && cp target/release/goose /out/ \
- && /out/goose --version | grep -q '^ *1\.53\.0$'
+ && /out/goose --version | grep -q '^ *1\.54\.0$'
 
 # noVNC, the screen page's RFB client (pinned by hash).
 FROM alpine:3.20 AS novnc

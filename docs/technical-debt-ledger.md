@@ -885,3 +885,21 @@ fragment.club until cutover (decisions 34–35).
   (the agent's own `tasks`, which its bridge follows), and the proxy asks
   the platform to swap (a route of the computer's, signed by the machine's
   key).
+
+## The computers' goose is a fork carrying five commits
+
+- **Observed:** 2026-10-09, images/goose/Dockerfile pins futurepaul/goose
+  `fragment/main` (docs/optchat.md, "The goose fork"): upstream main plus
+  #12659's two commits (open, conflicting with main when picked) and
+  `GOOSE_NO_COMPACTION`, `GOOSE_STABLE_SYSTEM_PROMPT` and
+  `GOOSE_NO_TURN_CONTEXT`, none of them upstream's.
+- **Risk:** each move to a newer upstream is a rebase of the five, by
+  hand where upstream's loop moved under them (the state machine's
+  compaction, prompt building and turn context are all young); a rebase
+  that drops one silently changes what the computers send (a compacted
+  hand-off, a prompt that stops caching).
+- **First proof:** the goose lanes failing after a re-pin: the docker
+  and real-goose tests compare the system prompt across calls and
+  sessions and look for compaction.
+- **Delete when:** upstream merges #12659 and the three switches (drafts
+  for Paul to post), and the image pins upstream itself.

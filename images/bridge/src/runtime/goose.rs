@@ -38,7 +38,9 @@
 //!   tool call; with none, or for a turn stopped or failed, however early,
 //!   `(ended: <outcome>: <why>)`.
 //! - **Stop** is `session/cancel`; the turn ends when goose answers its
-//!   prompt. A Stop before the session is made ends the turn at once.
+//!   prompt (its state machine drops the running step at once: a shell
+//!   command it ran is killed). A Stop before the session is made ends the
+//!   turn at once.
 //! - **goose asks nothing in words** and shows no card: in `auto` mode it
 //!   asks no permission, and one it asks anyway (a security inspector's) is
 //!   refused. So no `Answer` or `Tell` ever comes for its turns.
@@ -274,7 +276,12 @@ pub fn environment(cfg: &GooseConfig, a: &Agent, display: Option<u32>) -> Vec<(S
         ("GOOSE_CONTEXT_LIMIT", "128000".to_string()),
         // a turn is a fresh session: nothing of goose's own compacts it
         // (the threshold, any goose; at an overflow too, our fork), and its
-        // system prompt never changes within it (our fork: its prefix caches)
+        // system prompt never changes within it (our fork: its prefix
+        // caches). goose's `<turn-context>` stays (our fork's
+        // GOOSE_NO_TURN_CONTEXT is unset): it is the only clock goose is
+        // given (a mind's view is its `<chat>` alone, without the mind's
+        // per-turn block), and it comes after the view and the task, so the
+        // prefix still caches
         ("GOOSE_AUTO_COMPACT_THRESHOLD", "0".to_string()),
         ("GOOSE_NO_COMPACTION", "1".to_string()),
         ("GOOSE_STABLE_SYSTEM_PROMPT", "1".to_string()),
