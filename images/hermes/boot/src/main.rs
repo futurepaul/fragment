@@ -59,6 +59,10 @@ const CA: &str = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The agents' repos sync this often while awake.
 const SYNC_EVERY_MS: u64 = 60_000;
+/// Each agent's `agent.json` is read again this often while awake: a model
+/// its owner picks in settings is its next turn's within about this
+/// (`write_config`). One small file read per agent.
+const MODEL_EVERY_MS: u64 = 10_000;
 /// The managed skills (skills.rs) are read again this often while awake: a
 /// platform release changes them, and an install fetches only what changed.
 /// While the owner has none, every `skills::ABSENT_EVERY_MS`.
@@ -679,18 +683,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-    // A tier the platform did not answer for is said, and the config the
-    // last boot wrote stays, its tier with it: never a tier the agent did
-    // not choose, but for a profile with no config yet.
-    let config = dir.join("config.yaml");
-    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
-    let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
-        ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
-        (!config.exists()).then_some(hermes::DEFAULT_TIER)
-    });
-    if let Some(tier) = tier {
-        write_whole(&config, &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
-    }
+    let main = write_config(api, a, &dir, ids, model, credential_env, high_on).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
@@ -704,9 +697,37 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         Err(e) => ev!("profile.hook_failed", { "agent": a.fragment, "error": e.to_string() }),
     }
     match synced {
-        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.map(hermes::Tier::name), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
+        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "model": main.map(|m| m.name()), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
+}
+
+/// An agent's profile config (`hermes::profile_config`), from its
+/// `agent.json` as the platform answers for it now (its tier, and its own
+/// model where its credentials hold that provider's), written only when it
+/// changed: Hermes reads it again at the agent's next turn and rebuilds the
+/// agent on a new model. A tier the platform did not answer for is said,
+/// and the config last written stays, its model with it: never one the
+/// agent did not choose, but for a profile with no config yet. Answers the
+/// model it names, or none if it was left as it was.
+async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String], high_on: bool) -> Option<hermes::MainModel> {
+    let config = dir.join("config.yaml");
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
+        ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
+        (!config.exists()).then_some(hermes::DEFAULT_TIER)
+    })?;
+    let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
+    let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
+    let text = hermes::profile_config(a, &main, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
+        write_whole(&config, &text, ids);
+        if let (Some(own), Some(why)) = (&own, &unused) {
+            ev!("profile.model_unused", { "agent": a.fragment, "provider": own.provider, "id": own.id, "why": why, "model": main.name() });
+        }
+        ev!("profile.model", { "agent": a.fragment, "model": main.name() });
+    }
+    Some(main)
 }
 
 /// An agent's Bot Mode identity (bots.rs, `profile_yaml`): its agent
@@ -933,9 +954,12 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
         write_profile(api, a, home, ids, model, credential_env).await;
     }
     // an agent's credentials changed: its next turn reads them (its `.env`),
-    // and its terminal's next session (its credentials file)
+    // and its terminal's next session (its credentials file); and its model,
+    // which is its owner's only while it holds that provider's
+    let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     for a in &change.credentials {
         write_credentials(a, home, ids);
+        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, model, credential_env, high_on).await;
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
     if !change.added.is_empty() {
@@ -1188,6 +1212,10 @@ async fn boot_main() {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_sync = Instant::now();
     let mut last_agents = Instant::now();
+    let mut last_models = Instant::now();
+    // HERMES_BOOT_MODEL_MS: a test's cadence for reading agent.json again, at least 1 s.
+    let models_every = env("HERMES_BOOT_MODEL_MS").and_then(|v| v.parse::<u64>().ok()).map_or(MODEL_EVERY_MS, |v| v.max(1_000));
+    let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     let mut agents_unread = false;
     // HERMES_BOOT_SYNC_MS: the operator's (a test's) cadence, at least 1 s.
     let sync_every = env("HERMES_BOOT_SYNC_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SYNC_EVERY_MS, |v| v.max(1_000));
@@ -1296,6 +1324,13 @@ async fn boot_main() {
                         ev!("agents.unread", { "error": e.to_string() });
                     }
                     Err(_) => {}
+                }
+            }
+            // each agent's model, as its owner last picked it (agent.json)
+            if last_models.elapsed() >= Duration::from_millis(models_every) {
+                last_models = Instant::now();
+                for a in &agents {
+                    write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &model, &credential_env, high_on).await;
                 }
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {

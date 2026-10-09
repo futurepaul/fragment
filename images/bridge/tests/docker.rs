@@ -2231,3 +2231,71 @@ async fn bots_message_each_other() {
     assert!(msaid.is_empty(), "maple's woken turn says nothing: {msaid:?}");
     assert!(fake.with(|w| seq_of(w, &jchat, "npub1maple", "pong").is_some()), "maple's message back is a hand-off in juniper's chat");
 }
+
+/// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an
+/// agent whose owner connected a provider that serves models, and picked
+/// one of them for it in settings (its `agent.json`'s `model`), runs its
+/// next turn on that model, at the provider's base URL the platform names,
+/// its key the provider's placeholder (the swap adds the person's key on
+/// the way out; the guest never holds it), with nothing restarted; and
+/// once its owner disconnects, its next turn is its tier's again, through
+/// the route. Method: the Hermes image, its owner's credential and choice
+/// set on the fake API while it runs; the scripted model answers both the
+/// route (`/v1`) and the provider (`/own/api/v1`), and records each call's
+/// path, model and key.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agent_runs_on_its_owners_model() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_MODEL_MS", "1000")]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let replied = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let calls_of = |since: usize| model.calls.lock().unwrap()[since..].iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect::<Vec<_>>();
+    let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+
+    // its tier, through the route
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello on the route", replied).await;
+    let calls = calls_of(before);
+    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == "cheap"), "its tier, through the route: {calls:?}");
+
+    // its owner connects the provider and picks one of its models
+    let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");
+    let base = format!("http://model.fragment.internal:{}/own/api/v1", model.addr.port());
+    let id = "anthropic/claude-sonnet-5.5";
+    fake.with(|w| {
+        w.computer["agents"][0]["credentials"] = json!([{ "provider": "openrouter", "kind": "own", "env": ["OPENROUTER_API_KEY"], "placeholder": placeholder, "hosts": ["openrouter.ai"], "modelBase": base }]);
+        let agent_json = format!(r#"{{"tier":"cheap","model":{{"provider":"openrouter","id":"{id}"}},"color":"blue"}}"#);
+        w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from(agent_json));
+    });
+    let t = Instant::now();
+    while !config().contains(&format!("  default: \"{id}\"\n")) {
+        assert!(t.elapsed() < Duration::from_secs(30), "the profile never named its own model; its config:\n{}\nthe container said:\n{}", config(), c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello on my own model", replied).await;
+    let calls = calls_of(before);
+    let main: Vec<_> = calls.iter().filter(|c| c.body["messages"].to_string().contains("hello on my own model")).collect();
+    assert!(!main.is_empty(), "the turn's model call: {calls:?}");
+    assert!(
+        main.iter().all(|c| c.path == "/own/api/v1/chat/completions" && c.model == id && c.authorization.as_deref() == Some(format!("Bearer {placeholder}").as_str())),
+        "its own model, at its provider, the placeholder its key: {main:?}"
+    );
+    assert!(!c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]).contains("sk-or-"), "no key of the person's anywhere in its config");
+
+    // disconnected: its tier again, through the route
+    fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
+    let t = Instant::now();
+    while !config().contains("  default: \"cheap\"\n") {
+        assert!(t.elapsed() < Duration::from_secs(30), "the profile never went back to its tier; its config:\n{}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello on the route again", replied).await;
+    let calls = calls_of(before);
+    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == "cheap"), "its tier again: {calls:?}");
+}

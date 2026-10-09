@@ -1299,12 +1299,15 @@ async function openSettings(push = true) {
   }
   const agents = section("Agents");
   const mine = [...state.agents.values()];
+  // the models a provider the person connected offers (its own credit pays)
+  const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
+  if (mine.length && modeled.length) agents.append(say("Each agent runs on Workers AI's model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
   agents.append(...(mine.length ? mine.map((a) => {
     const row = el("button", "row");
     row.type = "button";
     row.append(avatar({ color: colorOf(a.identity) }, "small"), el("span", "label", titleOf(a.fragment)));
     row.onclick = () => openApp(a.fragment);
-    return row;
+    return modeled.length ? modelPicker(a, row, modeled) : row;
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
@@ -1317,6 +1320,69 @@ async function openSettings(push = true) {
     el("pre", "command", SKILL),
   );
   page.replaceChildren(account, ...billing, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- an agent's model: its agent.json's `model` ({provider, id}), a model
+// of a provider the person connected, or none (Workers AI's, its `tier`).
+// Its computer reads agent.json again within seconds and runs its next
+// turn on it. Vision and voice notes stay on the platform's own models.
+const modelValue = (provider, id) => `${provider} ${id}`;
+function modelOption(value, text) {
+  const o = el("option", null, text);
+  o.value = value;
+  return o;
+}
+const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
+function modelPicker(a, row, modeled) {
+  const box = el("div", "agent-setting");
+  box.dataset.agent = a.fragment;
+  const pick = el("select", "agent-model");
+  pick.dataset.modelFor = a.fragment;
+  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
+  pick.append(modelOption("", "Workers AI (included)"));
+  for (const p of modeled) {
+    const group = el("optgroup");
+    group.label = `${providerName(p.provider)} (your account)`;
+    for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
+    pick.append(group);
+  }
+  const said = el("span", "muted agent-model-said");
+  pick.disabled = true;
+  agentJson(a.fragment)
+    .then((j) => {
+      const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
+      // one named by hand, not offered here, is shown as it is
+      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
+      pick.value = v;
+    })
+    .catch(() => {})
+    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
+  pick.onchange = async () => {
+    pick.disabled = true;
+    said.textContent = "Saving…";
+    try {
+      // what agent.json holds now (its tier, its colour), the model changed
+      const now = await agentJson(a.fragment).catch(() => ({}));
+      const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
+      const [provider, id] = pick.value ? pick.value.split(" ") : [];
+      if (provider) next.model = { provider, id };
+      else delete next.model;
+      await api("POST", `/api/f/${seg(a.fragment)}/files`, {
+        message: provider ? `its model: ${id}` : "its model: Workers AI",
+        files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }],
+      });
+      said.textContent = "Saved: its next message uses it.";
+      pick.dataset.saved = pick.value;
+    } catch (e) {
+      said.textContent = e.message;
+    } finally {
+      pick.disabled = false;
+    }
+  };
+  const label = el("label", "agent-model-label");
+  label.append(el("span", "settings-key", "Model"), pick);
+  box.append(row, label, said);
+  return box;
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform
@@ -1334,7 +1400,7 @@ const PROVIDER_STATE = {
   not_set: "No key yet",
 };
 // a provider's name for people: google-places is Google Places, xai xAI
-const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs" };
+const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
@@ -1354,8 +1420,11 @@ function connectionsSection(linked, uses) {
     row.dataset.kind = p.kind;
     row.dataset.state = p.state;
     const head = el("div", "provider-head");
-    head.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", PROVIDER_KIND[p.kind] ?? p.kind));
-    const st = el("span", `provider-state ${p.state}`, PROVIDER_STATE[p.state] ?? p.state);
+    // an own key signed in to is the person's account there, its models theirs to pick
+    const kind = p.signIn ? (p.models?.length ? "Your account: its models for your agents" : "Your account") : PROVIDER_KIND[p.kind] ?? p.kind;
+    head.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
+    const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
+    const st = el("span", `provider-state ${p.state}`, stateName);
     head.append(st);
     row.append(head);
     const actions = el("div", "settings-actions");
@@ -1377,7 +1446,43 @@ function connectionsSection(linked, uses) {
       };
       actions.append(go);
     }
-    if (p.kind === "own") {
+    if (p.kind === "own" && p.signIn) {
+      // connected through the provider's own page (never a key pasted here):
+      // it makes a key of the person's, which their computer keeps sealed
+      if (p.state !== "set") {
+        const go = el("button", "quiet", "Connect");
+        go.type = "button";
+        go.dataset.action = "sign-in";
+        go.onclick = async () => {
+          go.disabled = true;
+          try {
+            const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
+            window.open(url, "_blank", "popup,width=520,height=720");
+            addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
+          } catch (e) {
+            go.textContent = e.message;
+          } finally {
+            go.disabled = false;
+          }
+        };
+        actions.append(go);
+        if (p.models?.length) actions.append(el("span", "muted", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
+      } else {
+        const off = el("button", "quiet", "Disconnect");
+        off.type = "button";
+        off.dataset.action = "disconnect";
+        off.onclick = async () => {
+          off.disabled = true;
+          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
+          await openSettings(false);
+        };
+        const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
+        manage.href = p.signIn.manage;
+        manage.target = "_blank";
+        manage.rel = "noopener";
+        actions.append(off, manage);
+      }
+    } else if (p.kind === "own") {
       const form = el("form", "provider-key");
       const input = el("input");
       input.type = "password";

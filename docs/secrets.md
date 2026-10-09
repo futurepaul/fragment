@@ -25,7 +25,8 @@ the old one still open, and come back resealed, which the cell stores.
 | Secret | Home |
 |---|---|
 | A person's GitHub token, other personal keys | the person's own cell |
-| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in |
+| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in. One with a sign-in (OpenRouter's, decision 60) is never pasted: the provider makes it when the person connects from settings, the platform exchanges the sign-in's code for it and the computer seals it at once; it is in no answer, no page and no log, and the guest holds only its placeholder. Revoking it is the person's, at the provider |
+| A sign-in to an own key's provider under way | its PKCE verifier, sealed in the person's computer's cell under the nonce's hash for at most 10 minutes, deleted when the provider sends the browser back (once) or when it expires (`fragment_core::own_signin`) |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |

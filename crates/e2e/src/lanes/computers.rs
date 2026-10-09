@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::records;
 use super::ledger::{end_of, entries};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{placeholder, swap_checks, Swapping, SWAP_CHECKS};
+use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -832,11 +832,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
-        replies_so_far += swap_checks(s, api, &Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity }, &fetched)?;
+        let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity };
+        replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
+        replies_so_far += model_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;
         s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["notion"]))?;

@@ -148,8 +148,15 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
         k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
     });
     s.ok(
-        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
-        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
+        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, own keys not set (one signed in to, with its models)",
+        status(&r) == Some(json!("not_connected"))
+            && row(crate::SWAP_CONNECTION)["kind"] == "connection"
+            && keys
+            && row(crate::SWAP_OWN)["state"] == "not_set"
+            && row(crate::SWAP_ROUTER)["state"] == "not_set"
+            && row(crate::SWAP_ROUTER)["signIn"]["manage"].is_string()
+            && row(crate::SWAP_ROUTER)["models"].as_array().is_some_and(|m| !m.is_empty())
+            && rows.len() == crate::SWAP_KEYS.len() + 3,
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
@@ -702,6 +709,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    models_ui(s, api, &mut b, &page, &session, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
@@ -851,18 +859,20 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // each row: its provider, kind, state, agents allowed, and uses
     let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
                 r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
-    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 2, row("perplexity")), wait);
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 3, row("perplexity")), wait);
     let got = b.eval(page, rows)?;
     let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
     s.ok(
-        "settings' Connections lists every provider, one row each, its kind and the person's state: Google connected, the operator's keys offered, an own key not set",
+        "settings' Connections lists every provider, one row each, its kind and the person's state: Google connected, the operator's keys offered, own keys not set",
         shown
             && of(crate::SWAP_CONNECTION)[1] == "connection"
             && of(crate::SWAP_CONNECTION)[2] == "connected"
             && crate::SWAP_KEYS.iter().all(|(k, _, _)| of(k)[1] == "operator" && of(k)[2] == "offered")
             && of(crate::SWAP_OWN)[1] == "own"
-            && of(crate::SWAP_OWN)[2] == "not_set",
+            && of(crate::SWAP_OWN)[2] == "not_set"
+            && of(crate::SWAP_ROUTER)[1] == "own"
+            && of(crate::SWAP_ROUTER)[2] == "not_set",
         &got,
     );
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
@@ -878,7 +888,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
-    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN]).collect();
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER]).collect();
     s.ok(
         "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
         narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),
@@ -889,6 +899,91 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// Settings' own models (Paul, 2026-10-08: "they should be able to connect
+/// them from settings ideally"): OpenRouter's row is connected with a
+/// press, through its own page (the fake's, which approves at once), with
+/// no key pasted and no CLI; then each agent offers the provider's models
+/// beside Workers AI's, and the one picked is its agent.json's `model`,
+/// its tier and colour kept, which its computer runs its next turn on.
+/// Workers AI again takes the model away; disconnecting takes the offer.
+fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("#settings-connections [data-provider={:?}]", crate::SWAP_ROUTER);
+    b.reload(page)?;
+    let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !!document.querySelector('{row} [data-action=sign-in]')"), wait);
+    let pasted = b.eval(page, &format!("!!document.querySelector('{row} input')"))?;
+    s.ok(
+        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet",
+        offered && pasted == false && b.eval(page, "document.querySelectorAll('[data-model-for]').length")? == 0,
+        b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
+    );
+    // the press opens the provider's page, which sends the browser back to the platform
+    let keys_before = s.openrouter.keys().len();
+    b.click(page, &format!("{row} [data-action=sign-in]"))?;
+    let callback = format!("/api/connections/{}/callback", crate::SWAP_ROUTER);
+    let mut popup = None;
+    let came_back = s.eventually(wait, || {
+        popup = b.pages().ok().and_then(|l| l.into_iter().find(|(_, url)| url.contains(&callback)).map(|(id, _)| id));
+        popup.is_some()
+    });
+    let said = match &popup {
+        Some(id) => {
+            let p = b.attach(id)?;
+            let connected = b.until(&p, "document.body?.innerText.includes('is connected')", wait);
+            let text = b.eval(&p, "document.body?.innerText ?? ''")?;
+            b.close(p)?;
+            (connected, text)
+        }
+        None => (false, Value::Null),
+    };
+    b.reload(page)?;
+    let set = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'set' && !!document.querySelector('{row} [data-action=disconnect]')"), wait);
+    let manage = b.eval(page, &format!("document.querySelector('{row} a[target=_blank][rel=noopener]')?.href ?? null"))?;
+    s.ok(
+        "pressed, its provider's page sends the browser back to the platform, which says it is connected; settings shows it connected, a Disconnect, and the provider's page to revoke the key",
+        came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
+        json!({ "popup": said.1, "manage": manage }),
+    );
+    // each agent offers the provider's models beside Workers AI's
+    let pickers = b.eval(page, "[...document.querySelectorAll('[data-model-for]')].map((p) => [p.dataset.modelFor, p.dataset.read === '1', [...p.options].map((o) => [o.value, o.textContent])])")?;
+    let first = pickers[0].clone();
+    let lead = first[0].as_str().unwrap_or("").to_string();
+    let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
+    let options = first[2].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "then each agent offers the provider's models, after Workers AI's (included), which it runs on now",
+        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI (included)") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
+        &pickers,
+    );
+    let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let before = agent_json();
+    let pick = |b: &mut Browser, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.saved === {value:?}"), wait))
+    };
+    let saved = pick(b, "openrouter anthropic/claude-sonnet-5.5")?;
+    let after = agent_json();
+    b.eval(page, &format!("(document.querySelector('[data-model-for={lead:?}]')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-own-models.png"));
+    b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
+    s.ok(
+        "picked, it is the agent's agent.json model ({provider, id}), its tier and colour kept",
+        saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" }) && after["tier"] == before["tier"] && after["color"] == before["color"],
+        json!({ "before": before, "after": after }),
+    );
+    b.reload(page)?;
+    let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
+    let back = pick(b, "")?;
+    let gone = agent_json();
+    s.ok("settings shows it again as picked; Workers AI again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // disconnected: the key goes, and no agent offers its models
+    b.click(page, &format!("{row} [data-action=disconnect]"))?;
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    s.ok("Disconnect takes the key away, and no agent offers its models", off, b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?);
     Ok(())
 }
 

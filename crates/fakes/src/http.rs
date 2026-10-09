@@ -19,6 +19,22 @@ pub struct Request {
 }
 
 impl Request {
+    /// A request as the server reads one: `target` its path and query (a
+    /// fake's own tests drive its handler with it).
+    pub fn new(method: &str, target: &str, headers: &[(&str, &str)], body: &[u8]) -> Request {
+        let (path, q) = target.split_once('?').unwrap_or((target, ""));
+        let pairs: Vec<(String, String)> = q
+            .split('&')
+            .filter(|s| !s.is_empty())
+            .map(|pair| {
+                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                (decode(k), decode(v))
+            })
+            .collect();
+        let headers = headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())).collect();
+        Request { method: method.into(), path: decode(path), query: pairs.iter().cloned().collect(), pairs, headers, body: body.to_vec() }
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
@@ -200,16 +216,9 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(len);
-    let (path, q) = target.split_once('?').unwrap_or((&target, ""));
-    let pairs: Vec<(String, String)> = q
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            (decode(k), decode(v))
-        })
-        .collect();
-    Some(Request { method, path: decode(path), query: pairs.iter().cloned().collect(), pairs, headers, body })
+    let mut r = Request::new(&method, &target, &[], &body);
+    r.headers = headers;
+    Some(r)
 }
 
 /// Percent-decoding (and `+` as space in queries, which paths never carry).

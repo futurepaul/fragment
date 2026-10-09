@@ -97,6 +97,12 @@ pub struct AgentCredential {
     pub env: Vec<String>,
     pub placeholder: String,
     pub hosts: Vec<String>,
+    /// An own key's provider that serves models (its catalog row's
+    /// `models`): its chat-completions base URL, on one of `hosts`, where
+    /// an agent whose `agent.json` names a model of the provider sends its
+    /// calls with the placeholder as its key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_base: Option<String>,
 }
 
 /// A provider as its person sees it (`GET /api/connections`): the state
@@ -136,6 +142,30 @@ pub struct ProviderView {
     pub env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<ProviderPrice>,
+    /// An own key the person connects through the provider's sign-in
+    /// (`POST …/authorize`, then the provider's page), never pasted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<ProviderSignIn>,
+    /// The models an own key's provider offers for the person's agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<ProviderModel>>,
+}
+
+/// An own key's sign-in, as its person sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSignIn {
+    /// The provider's page where they see and revoke their keys.
+    pub manage: String,
+}
+
+/// A model a person may pick for an agent (`agent.json`'s `model:
+/// {provider, id}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModel {
+    pub id: String,
+    pub name: String,
 }
 
 /// `GET /api/connections`.
@@ -497,9 +527,12 @@ mod tests {
     /// The guest's credentials on the wire, as an image reads them.
     #[test]
     fn a_guests_credential() {
-        let c = AgentCredential { provider: "google".into(), kind: ProviderKind::Connection, env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: "fcx_google_00".into(), hosts: vec!["www.googleapis.com".into()] };
+        let c = AgentCredential { provider: "google".into(), kind: ProviderKind::Connection, env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: "fcx_google_00".into(), hosts: vec!["www.googleapis.com".into()], model_base: None };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v, serde_json::json!({ "provider": "google", "kind": "connection", "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "placeholder": "fcx_google_00", "hosts": ["www.googleapis.com"] }));
+        // an own key's provider that serves models names their base
+        let own = AgentCredential { provider: "openrouter".into(), kind: ProviderKind::Own, env: vec!["OPENROUTER_API_KEY".into()], placeholder: "fck_openrouter_00".into(), hosts: vec!["openrouter.ai".into()], model_base: Some("https://openrouter.ai/api/v1".into()) };
+        assert_eq!(serde_json::to_value(&own).unwrap()["modelBase"], "https://openrouter.ai/api/v1");
         assert_eq!(serde_json::to_value(ProviderState::NeedsReauthorization).unwrap(), "needs_reauthorization");
     }
 }
