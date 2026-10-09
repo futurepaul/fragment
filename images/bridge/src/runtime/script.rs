@@ -50,7 +50,15 @@
 //!   it in the chat was cut by a restart): the reply ends with
 //!   `\n\n(told: <the note>)`;
 //! - `@<name>` of another agent in the reply's text hands off to it, as
-//!   any reply's does (the bridge reads mentions, not this runtime).
+//!   any reply's does (the bridge reads mentions, not this runtime);
+//! - `steer-me`: the turn drafts `waiting to be steered…` and waits (at
+//!   most `STEER_WAIT`) for a `/steer` said beside it (`Command::Aside`),
+//!   then its reply ends `(steered: <its words>)`, or `(steered: nothing)`;
+//! - a message quoting another (`TurnStart::quote`): the reply ends
+//!   `(quoting: <its text>)`, and `(quoting itself: …)` for its own;
+//! - a command of its menu (`MENU`): the reply `ran /<name> <args>`, no
+//!   drafts; one said beside a turn that is not a `/steer` into it (`/btw`)
+//!   is answered as a message of its own, `aside: <the command>`.
 //!
 //! A Stop ends the turn as `stopped` at its next draft.
 
@@ -61,7 +69,22 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::records::{Outcome, PromptOption, Step};
-use crate::runtime::{Command, Event, LocalFile, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
+use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
+
+/// The scripted agent's commands: one of each way the bridge carries one
+/// (`How`), so the platform's lanes run each with no agent runtime.
+pub const MENU: &[MenuItem] = &[
+    MenuItem { name: "usage", description: "Say what it has done", args: None, how: How::Turn, refuse: &[] },
+    MenuItem { name: "model", description: "Show or change the model", args: Some("Model name"), how: How::Turn, refuse: &[("--global", "this chat's alone")] },
+    MenuItem { name: "new", description: "Start over in this chat", args: None, how: How::Restart, refuse: &[] },
+    MenuItem { name: "stop", description: "Stop what it is doing here", args: None, how: How::Stop, refuse: &[] },
+    MenuItem { name: "steer", description: "Tell the running turn something", args: Some("What to tell it"), how: How::Steer, refuse: &[] },
+    MenuItem { name: "queue", description: "Queue a message for its next turn", args: Some("The message"), how: How::Message, refuse: &[] },
+    MenuItem { name: "btw", description: "Ask something beside what it does", args: Some("The question"), how: How::Aside, refuse: &[] },
+];
+
+/// How long a `steer-me` turn waits for its `/steer`.
+const STEER_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ScriptConfig {
@@ -117,6 +140,10 @@ impl Runtime for Script {
         "script"
     }
 
+    fn menu(&self) -> &'static [MenuItem] {
+        MENU
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         Box::pin(run(self.config, io))
     }
@@ -128,6 +155,8 @@ enum Heard {
     /// The option (none: expired), and the words of one answered in words.
     Answer(Option<String>, Option<String>),
     Told(String),
+    /// A `/steer` said beside it: its words.
+    Steered(String),
 }
 
 async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime::RuntimeError> {
@@ -166,6 +195,17 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
             Command::Tell { turn, text, .. } => {
                 if let Some(tx) = turns.get(&turn) {
                     let _ = tx.send(Heard::Told(text)).await;
+                }
+            }
+            Command::Aside { agent, fragment, turn, text, .. } => {
+                let steering = text.strip_prefix("/steer ").zip(turn.as_ref().and_then(|t| turns.get(t)));
+                match steering {
+                    Some((words, tx)) => {
+                        let _ = tx.send(Heard::Steered(words.to_string())).await;
+                    }
+                    None => {
+                        let _ = io.events.send(Event::Say { agent, fragment, text: format!("aside: {text}") }).await;
+                    }
                 }
             }
         }
@@ -377,7 +417,7 @@ async fn ask(events: &mpsc::Sender<Event>, rx: &mut mpsc::Receiver<Heard>, turn:
     loop {
         match rx.recv().await {
             Some(Heard::Told(words)) => return Some(words),
-            Some(Heard::Answer(..)) => continue,
+            Some(Heard::Answer(..) | Heard::Steered(_)) => continue,
             Some(Heard::Stop) | None => return None,
         }
     }
@@ -392,6 +432,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         }
     };
     let text = ts.text.to_lowercase();
+    if ts.command {
+        // a command of its menu: what it ran, at once
+        emit(Event::Reply { turn: id.clone(), part: 1, text: format!("ran {}", ts.text) }).await;
+        emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
+        return;
+    }
     if text.contains("fail") {
         emit(Event::End { turn: id, outcome: Outcome::Error("the script was asked to fail".into()) }).await;
         return;
@@ -454,7 +500,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let said = match rx.recv().await {
             Some(Heard::Answer(Some(o), _)) if o == "once" => "approved",
             Some(Heard::Answer(Some(_), _)) => "denied",
-            Some(Heard::Answer(None, _) | Heard::Told(_)) => "not approved",
+            Some(Heard::Answer(None, _) | Heard::Told(_) | Heard::Steered(_)) => "not approved",
             Some(Heard::Stop) | None => {
                 emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
                 return;
@@ -471,7 +517,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Some(Heard::Answer(Some(o), Some(words))) if o == "other" => Some(words),
             Some(Heard::Answer(Some(o), None)) if o == "other" => ask(&events, &mut rx, &id, "Type your answer:", &mut part).await,
             Some(Heard::Answer(Some(o), _)) => Some(options.iter().find(|x| x.id == o).map_or(o, |x| x.label.clone())),
-            Some(Heard::Answer(None, _) | Heard::Told(_)) => Some("nothing".into()),
+            Some(Heard::Answer(None, _) | Heard::Told(_) | Heard::Steered(_)) => Some("nothing".into()),
             Some(Heard::Stop) | None => None,
         };
         let Some(chose) = chose else {
@@ -486,6 +532,29 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             return;
         };
         reply = format!("{reply} (told: {told})");
+    }
+    if text.split_whitespace().any(|w| w == "steer-me") {
+        emit(Event::Draft { turn: id.clone(), text: "waiting to be steered…".into() }).await;
+        let wait = tokio::time::sleep(STEER_WAIT);
+        tokio::pin!(wait);
+        // bounded by STEER_WAIT
+        let steered = loop {
+            tokio::select! {
+                h = rx.recv() => match h {
+                    Some(Heard::Steered(words)) => break words,
+                    Some(Heard::Stop) | None => {
+                        emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                        return;
+                    }
+                    Some(_) => continue,
+                },
+                _ = &mut wait => break "nothing".to_string(),
+            }
+        };
+        reply = format!("{reply} (steered: {steered})");
+    }
+    if let Some(q) = &ts.quote {
+        reply = format!("{reply} (quoting{}: {})", if q.own { " itself" } else { "" }, q.text);
     }
     if !ts.files.is_empty() {
         let names: Vec<&str> = ts.files.iter().map(|f| f.name.as_str()).collect();

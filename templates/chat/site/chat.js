@@ -31,6 +31,12 @@
 // (`{fragment: "agents?"}`); a message to one of those asks the shell to
 // add it first (`{fragment: "add-agent"}`; the shell asks its person, in
 // its own dialog), then names it in `to`.
+// `/` lists the commands an agent's runtime takes from its owner (its menu,
+// `{kind: "commands"}` on `work`), for the agent's owner alone; one typed
+// whole is sent as `{kind: "command", command, args, to}`. A message sent
+// while its agent works is marked queued until its turn starts, and its
+// owner may Steer the running turn with it instead (`/steer`). Reply quotes
+// a message (`reply_to`, its seq), shown above the one that quotes it.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
 // runs. The look is Skyler's (the Fragment UI handoff, 2026-10-02).
@@ -69,6 +75,12 @@ const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+// A command's name (docs/chat-records.md), and the commands one agent's
+// menu offers, at most.
+const COMMAND = /^[a-z0-9_-]{1,32}$/;
+const MENU_MAX = 64;
+// A quoted message, as its quote shows it: its first characters.
+const QUOTE_SHOWN_CHARS = 140;
 const ROLES = ["public", "viewer", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 // Skyler's agent colors; an agent's is chosen by its identity.
@@ -190,7 +202,9 @@ export function mount(root) {
       <div class="here" id="here" hidden></div>
       <form class="composer" id="say">
         <div class="mentions" id="mentions" role="listbox" aria-label="Agents" hidden></div>
+        <div class="mentions commands" id="commands" role="listbox" aria-label="Commands" hidden></div>
         <input id="attachment-picker" type="file" multiple hidden>
+        <div class="quoting" id="quoting" hidden><span class="quote-who" id="quoting-who"></span><span class="quote-text" id="quoting-text"></span><button class="icon-button" id="unquote" type="button" title="Don't reply to it" aria-label="Don't reply to it">${svg("x")}</button></div>
         <div class="attachments" id="attachments" hidden></div>
         <textarea id="text" rows="1" aria-label="Message" maxlength="${TEXT_MAX_BYTES}" disabled></textarea>
         <div class="composer-actions">
@@ -200,6 +214,7 @@ export function mount(root) {
           <span class="recording" id="recording" role="status" hidden><i aria-hidden="true"></i><span id="recording-time">0:00</span></span>
           <span class="note" id="note"></span>
           <button class="icon-button" id="notify" type="button" hidden>${svg("bell")}</button>
+          <button class="steer" id="steer" type="button" title="Tell it now, in what it is doing (/steer)" hidden>${svg("navigation")}<span>Steer</span></button>
           <button class="send stop" id="stop" type="button" title="Stop reply" aria-label="Stop reply" hidden>${svg("stop")}</button>
           <button class="send" id="send" type="submit" title="Send message (Enter)" aria-label="Send" disabled>${svg("send")}</button>
         </div>
@@ -213,7 +228,7 @@ export function mount(root) {
   const state = {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
-    chat: [], // messages and replies, in seq order: { seq, at, n, principal, text, turn, to, attachments }
+    chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // turn -> its records (`turnOf`)
     drafts: new Map(), // turn -> { principal, text, at }: a reply as it streams
@@ -225,6 +240,8 @@ export function mount(root) {
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
+    menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
+    replyTo: null, // { seq, principal, m }: the message the composer quotes
   };
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
@@ -295,6 +312,29 @@ export function mount(root) {
     return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
   };
   const lead = () => chatAgents()[0] ?? [...state.turns.values()].find((t) => t.agent)?.agent ?? null;
+  // this page's person's turn running now, the newest
+  const myTurn = () => [...state.turns.values()].filter((t) => running(t) && t.asker && t.asker === state.me?.principal).sort((a, b) => b.startAt - a.startAt)[0] ?? null;
+  // an agent's turn running in the chat, whoever asked it
+  const workingOn = (agent) => [...state.turns.values()].find((t) => running(t) && t.agent === agent) ?? null;
+  // whom a command goes to: the agent working for this person, else the lead
+  const commandTarget = () => myTurn()?.agent ?? lead();
+  /// The commands this page's person may send `agent`: its runtime's menu,
+  /// when they are its owner (`__members` names an agent's owner); none
+  /// for anyone else, whose `/` stays words.
+  function menuOf(agent) {
+    if (!agent || !state.me) return [];
+    const member = state.members.find((m) => m.principal === agent);
+    if (!member || member.owner !== state.me.principal) return [];
+    return state.menus.get(agent)?.commands ?? [];
+  }
+  /// `text` as a command of the target's menu (`/name args`), or null.
+  function typedCommand(text) {
+    const typed = text.match(/^\/([a-z0-9_-]{1,32})(?:\s+([\s\S]*))?$/);
+    if (!typed) return null;
+    const target = commandTarget();
+    const c = menuOf(target).find((x) => x.name === typed[1]);
+    return c ? { target, name: c.name, args: (typed[2] ?? "").trim() } : null;
+  }
 
   function face(principal, w = who(principal), agentSize = "tiny") {
     if (w.agent) return avatar(w.color, agentSize);
@@ -364,11 +404,19 @@ export function mount(root) {
       if (typeof body.prompt === "string" && !state.answers.has(body.prompt)) state.answers.set(body.prompt, { option: body.option, by: record.principal });
       return schedule();
     }
+    const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
+    if (body.kind === "command") {
+      // a person's command for an agent's runtime: shown as they typed it
+      if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
+      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null });
+      want(record.principal);
+      return schedule();
+    }
     // Stop shows as how its turn ended; any other kind is a page's own
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
-    const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", turn, to, attachments: attachmentsOf(body) });
+    const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
+    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo });
     if (turn) {
       const t = turnOf(turn);
       if (t.agent === null || t.agent === record.principal) touch(t, record.at, n);
@@ -382,6 +430,7 @@ export function mount(root) {
 
   function onWork(record) {
     const b = record.body;
+    if (b?.kind === "commands") return onMenu(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
     const n = ++arrivals;
     const t = turnOf(b.turn);
@@ -409,6 +458,19 @@ export function mount(root) {
     want(t.agent);
     // an agent this page did not know is in the chat: it was added since
     if (t.agent && !state.members.some((m) => m.principal === t.agent)) membersAgain();
+    schedule();
+  }
+
+  // An agent's menu, as it posted it itself (its latest): what `/` offers
+  // its owner.
+  function onMenu(record, b) {
+    if (typeof b.agent !== "string" || b.agent !== record.principal || !Array.isArray(b.commands)) return;
+    if ((state.menus.get(b.agent)?.seq ?? -1) > record.seq) return;
+    const commands = b.commands
+      .filter((c) => c && typeof c.name === "string" && COMMAND.test(c.name))
+      .slice(0, MENU_MAX)
+      .map((c) => ({ name: c.name, description: typeof c.description === "string" ? c.description : "", args: typeof c.args === "string" && c.args ? c.args : null }));
+    state.menus.set(b.agent, { seq: record.seq, commands });
     schedule();
   }
 
@@ -543,14 +605,22 @@ export function mount(root) {
     if (document.title !== title) document.title = title;
     $("head-label").textContent = title;
     $("head-marks").replaceChildren(...(agents.length ? agents : [first]).slice(0, 3).map((a) => avatar(colorOf(a), "tiny")));
-    const mine = [...state.turns.values()].filter((t) => running(t) && t.asker && t.asker === state.me?.principal).sort((a, b) => b.startAt - a.startAt)[0];
+    const mine = myTurn();
     const stop = $("stop");
     stop.disabled = !mine || state.stopping.has(mine.id);
     stop.dataset.turn = mine?.id ?? "";
     if (canPost()) {
       const firstName = first ? who(first).name : null;
       const others = mentionable().length > 1;
-      input.placeholder = mine ? `Add to what ${who(mine.agent).name} is doing` : !firstName ? "Message" : others ? `Message ${firstName}, or @ someone else` : `Message ${firstName}`;
+      // while it works, a message waits its turn (marked queued); its owner may steer it instead
+      const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
+      input.placeholder = mine
+        ? `${who(mine.agent).name} is working: a message waits its turn${steers ? ", or Steer it now" : ""}`
+        : !firstName
+          ? "Message"
+          : others
+            ? `Message ${firstName}, or @ someone else`
+            : `Message ${firstName}`;
     }
     refreshSend();
   }
@@ -559,21 +629,104 @@ export function mount(root) {
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? ""].join("|");
-    return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine)))];
+    const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
+    const waits = !w.agent && queued(m);
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? ""].join("|");
+    return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
-  function userMessage(m, w, mine) {
+  /// Whether a person's message waits for its agent: no turn started on it
+  /// yet, while the agent it is for runs a turn that started before it,
+  /// one that is not asking them something (its last word before the
+  /// message a reply of its own: the message is likely its answer).
+  function queued(m) {
+    if (m.command) return false;
+    const turns = [...state.turns.values()];
+    if (turns.some((t) => t.cause?.channel === "chat" && t.cause?.seq === m.seq)) return false;
+    const named = chatAgents().filter((a) => mentions(m.text).includes(handleOf(a)));
+    const targets = m.to.length ? m.to : named.length ? named : [lead()];
+    return turns.some((t) => {
+      if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
+      if (t.asker !== m.principal) return true;
+      const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.n < m.n).map((r) => r.n));
+      const did = Math.max(-1, ...[...t.steps.values(), ...t.prompts.values()].filter((s) => s.n < m.n).map((s) => s.n));
+      return !(said >= 0 && said > did);
+    });
+  }
+
+  // A message's Reply: the composer quotes it (`reply_to`).
+  function replyButton(m) {
+    const b = el("button", "icon-button reply");
+    b.type = "button";
+    b.title = "Reply";
+    b.setAttribute("aria-label", "Reply");
+    b.innerHTML = svg("reply");
+    b.onclick = () => quote(m);
+    return b;
+  }
+
+  // What a message quotes, above it: who said it and its first words; a
+  // click shows it.
+  function quoteNode(m, quoted) {
+    const q = el("button", "quote");
+    q.type = "button";
+    if (!quoted) {
+      q.append(el("span", "quote-text", "a message from earlier"));
+      q.disabled = true;
+      return q;
+    }
+    q.append(el("span", "quote-who", who(quoted.principal).name), quoteText(el("span", "quote-text"), quoted));
+    q.onclick = () => $("messages").querySelector(`[data-seq="${quoted.seq}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    return q;
+  }
+  const quotedText = (m) => (m.command ? `/${m.command}${m.text ? ` ${m.text}` : ""}` : m.text || m.attachments.map((a) => a.name).join(", "));
+  const shownQuote = (m) => {
+    const line = quotedText(m).replace(/\s+/g, " ").trim();
+    return line.length > QUOTE_SHOWN_CHARS ? `${line.slice(0, QUOTE_SHOWN_CHARS)}…` : line;
+  };
+  // a quote's words in `span`: an agent's as its markdown shows them inline
+  // (bold, code; a link its words alone, never a link in a button), a
+  // person's as typed
+  function quoteText(span, m) {
+    const line = shownQuote(m);
+    if (!isAgent(m.principal)) {
+      span.textContent = line;
+      return span;
+    }
+    inline(span, line);
+    for (const a of span.querySelectorAll("a")) a.replaceWith(a.textContent);
+    return span;
+  }
+
+  function userMessage(m, w, mine, quoted, waits) {
     const wrap = el("div", `msg user ${mine ? "mine" : "other"}`);
     wrap.dataset.seq = m.seq;
     if (!mine) wrap.append(byline(m.principal, w));
+    if (m.replyTo) wrap.append(quoteNode(m, quoted));
     if (m.attachments.length) wrap.append(attachmentsNode(m.attachments));
-    if (m.text) {
+    if (m.command) {
+      // a command, as it was typed: its name, then its words
+      const bubble = el("div", "bubble command");
+      bubble.append(el("code", "command-name", `/${m.command}`));
+      if (m.text) bubble.append(` ${m.text}`);
+      fresh.add(bubble);
+      wrap.append(bubble);
+    } else if (m.text) {
       const bubble = el("div", "bubble", m.text);
       fresh.add(bubble);
       wrap.append(bubble);
     }
-    wrap.append(el("div", "time", time(m.at)));
+    const actions = el("div", "actions");
+    if (canPost()) actions.append(replyButton(m));
+    if (waits) {
+      // its agent answers it after the turn it is in now
+      const label = el("span", "queued");
+      label.innerHTML = svg("clock");
+      label.append("Queued");
+      actions.append(label);
+    }
+    actions.append(el("span", "time", time(m.at)));
+    wrap.append(actions);
     return wrap;
   }
 
@@ -592,6 +745,7 @@ export function mount(root) {
     copy.title = "Copy";
     copy.innerHTML = svg("copy");
     copy.onclick = () => copyText(m.text, copy);
+    if (canPost()) actions.append(replyButton(m));
     actions.append(copy, el("span", "time", time(m.at)));
     wrap.append(actions);
     return wrap;
@@ -1010,7 +1164,37 @@ export function mount(root) {
     const stops = !!$("stop").dataset.turn && !typed;
     $("stop").hidden = !stops;
     $("send").hidden = stops;
+    // words typed while its agent works: Send queues them, Steer tells the
+    // running turn at once (its owner's `/steer`)
+    const words = input.value.trim();
+    const target = commandTarget();
+    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
+    $("steer").hidden = !steers;
+    $("steer").disabled = sending;
   }
+  // The message the composer quotes, above what is typed.
+  function quote(m) {
+    if (!canPost()) return;
+    state.replyTo = { seq: m.seq, principal: m.principal, m };
+    renderQuoting();
+    input.focus();
+  }
+  function renderQuoting() {
+    const q = state.replyTo;
+    $("quoting").hidden = !q;
+    $("quoting-who").textContent = q ? `Replying to ${who(q.principal).name}` : "";
+    $("quoting-text").replaceChildren();
+    if (q) quoteText($("quoting-text"), q.m);
+  }
+  $("unquote").onclick = () => {
+    state.replyTo = null;
+    renderQuoting();
+    input.focus();
+  };
+  $("steer").onclick = () => {
+    const words = input.value.trim();
+    if (words) send(`/steer ${words}`);
+  };
   function grow() {
     input.style.height = "auto";
     input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
@@ -1233,6 +1417,50 @@ export function mount(root) {
     return mentionable().filter((a) => words.includes(handleOf(a)));
   }
 
+  // `/` at the start: the commands the target agent's runtime takes from
+  // its owner (its menu), whose names start with what is typed; picking one
+  // writes it, and Enter on one typed whole that takes no words sends it
+  let choosing = null; // { typed, matches, index }
+  function closeCommands() {
+    choosing = null;
+    $("commands").hidden = true;
+  }
+  function updateCommands() {
+    const caret = input.selectionStart;
+    const typed = caret === input.selectionEnd ? input.value.slice(0, caret).match(/^\/([a-z0-9_-]*)$/) : null;
+    const matches = typed ? menuOf(commandTarget()).filter((c) => c.name.startsWith(typed[1])) : [];
+    if (!matches.length) return closeCommands();
+    const was = choosing?.matches[choosing.index]?.name;
+    const index = Math.max(0, matches.findIndex((c) => c.name === was));
+    choosing = { typed: typed[1], matches, index };
+    $("commands").hidden = false;
+    $("commands").replaceChildren(
+      ...matches.map((c, i) => {
+        const b = el("button");
+        b.type = "button";
+        b.setAttribute("role", "option");
+        b.setAttribute("aria-selected", String(i === index));
+        b.dataset.command = c.name;
+        const what = el("span", "command-about");
+        what.append(el("span", "command-description", c.description));
+        if (c.args) what.append(el("span", "command-args", c.args));
+        b.append(el("code", "command-name", `/${c.name}`), what);
+        // before the textarea's blur
+        b.onpointerdown = (e) => e.preventDefault();
+        b.onclick = () => choose(c);
+        return b;
+      }),
+    );
+  }
+  function choose(c) {
+    const rest = input.value.slice(input.selectionEnd).replace(/^\S*/, "").trimStart();
+    input.value = `/${c.name}${c.args || rest ? " " : ""}${rest}`;
+    input.setSelectionRange(input.value.length, input.value.length);
+    closeCommands();
+    grow();
+    input.focus();
+  }
+
   // ---- the owner's other agents: the shell that frames the chat hands
   // them over when its person owns it (a guest's shell, or no shell, hands
   // none, and `@` lists the chat's own), and adds one on asking ----
@@ -1292,13 +1520,42 @@ export function mount(root) {
     grow();
     setTyping(!!input.value.trim());
     updateMentions();
+    updateCommands();
   });
-  input.addEventListener("click", updateMentions);
-  input.addEventListener("blur", closeMentions);
+  input.addEventListener("click", () => {
+    updateMentions();
+    updateCommands();
+  });
+  input.addEventListener("blur", () => {
+    closeMentions();
+    closeCommands();
+  });
   input.addEventListener("keyup", (e) => {
-    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) updateMentions();
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
+      updateMentions();
+      updateCommands();
+    }
   });
   input.addEventListener("keydown", (e) => {
+    if (choosing) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const n = choosing.matches.length;
+        choosing.index = (choosing.index + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        const name = choosing.matches[choosing.index].name;
+        for (const b of $("commands").children) b.setAttribute("aria-selected", String(b.dataset.command === name));
+        return;
+      }
+      const c = choosing.matches[choosing.index];
+      // typed whole, and it takes no words: Enter sends it
+      const whole = e.key === "Enter" && !e.shiftKey && c.name === choosing.typed && !c.args;
+      if (((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") && !whole) {
+        e.preventDefault();
+        return choose(c);
+      }
+      if (e.key === "Escape") return closeCommands();
+      if (whole) closeCommands();
+    }
     if (picking) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
@@ -1339,15 +1596,28 @@ export function mount(root) {
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
+    // a command of the agent's menu, typed whole by its owner (a file goes
+    // with a message alone)
+    const command = files.length ? null : typedCommand(text);
     sending = true;
     const typed = input.value;
     input.value = "";
     grow();
     setTyping(false);
     closeMentions();
+    closeCommands();
     for (const f of files) f.uploading = true;
     renderAttachments();
     try {
+      if (command) {
+        const body = { kind: "command", command: command.name, ...(command.args ? { args: command.args } : {}), to: [command.target] };
+        const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
+        unsent = { id, body };
+        await fragment.post("chat", body, { id });
+        unsent = null;
+        $("banner").hidden = true;
+        return;
+      }
       const to = addressed(text);
       // an agent of the owner's not in the chat yet is added first, so its
       // bridge follows the chat and takes the message (bounded: the roster)
@@ -1364,25 +1634,28 @@ export function mount(root) {
       const named = [];
       // bounded: at most ATTACHMENTS_MAX files
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
-      const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}) };
+      const replyTo = state.replyTo?.seq ?? null;
+      const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
       const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
       unsent = { id, body };
       const record = await fragment.post("chat", body, { id });
       unsent = null;
       attachments = attachments.filter((a) => !files.includes(a));
       renderAttachments();
+      if (state.replyTo?.seq === replyTo) state.replyTo = null;
+      renderQuoting();
       $("banner").hidden = true;
       expectTurn(record, to, text);
     } catch (err) {
       if (!input.value) input.value = typed;
       for (const f of files) f.uploading = false;
       renderAttachments();
-      problem(`Your message was not sent: ${err.message}`);
+      problem(`Your ${command ? "command" : "message"} was not sent: ${err.message}`);
     } finally {
       sending = false;
       grow();
+      input.focus();
     }
-    input.focus();
   }
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon

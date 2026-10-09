@@ -1716,6 +1716,88 @@ async fn other_answered_in_words_on_its_card() {
     });
 }
 
+/// Goal (the owner's commands, docs/chat-records.md; Hermes v0.21.6's
+/// manifest, relay/menu.rs): real Hermes takes a `{kind: "command"}` the
+/// bridge says as it is, as its own command, never as words for its model:
+/// `/usage` is answered with the session's usage, no model call; `/steer`
+/// lands in the running turn (its words in the model's next request,
+/// after the tool), and Hermes' word on it is a message of its own; a
+/// message quoting the agent's reply reaches the model as Hermes' quoted
+/// reply (`[Replying to your previous message: "…"]`); `/new` starts a new
+/// session for the chat, so the next message's request holds none of the
+/// chat before; `/model … --global` is refused, its end saying why, and
+/// Hermes never hears it.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn commands_and_quotes_reach_hermes() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let calls = || model.calls.lock().unwrap().clone();
+    let turn = |said: &serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let reply =|t: &str| fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == t)).map(|r| r["text"].as_str().unwrap_or("").to_string());
+    let command = |name: &str, args: &str| fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": name, "args": args }));
+
+    // /usage: Hermes' own answer, no model call
+    let before = calls().len();
+    let usage = turn(&command("usage", ""));
+    within(&fake, &chat, &c, 120_000, "/usage's end", ended_turn(&chat, &usage)).await;
+    let said = reply(&usage).unwrap_or_default();
+    eprintln!("commands: /usage said {said:?}");
+    assert!(said.to_lowercase().contains("token") || said.to_lowercase().contains("usage"), "Hermes' usage, not the model's words: {said:?}; {}", told(&fake, &chat, &c));
+    assert!(!said.starts_with("scripted:"), "{said:?}");
+    assert!(calls()[before..].iter().all(|x| !x.body["messages"].to_string().contains("/usage")), "no model call for it");
+
+    // a quote of the agent's first reply
+    let first = fake.with(|w| w.records(&chat, "chat").into_iter().find(|r| r["body"]["turn"].is_string()).unwrap());
+    let quoted = first["body"]["text"].as_str().unwrap_or("").to_string();
+    let q = turn(&fake.say(&chat, &person("paul"), json!({ "text": "what did you mean", "reply_to": first["seq"] })));
+    within(&fake, &chat, &c, 120_000, "the quoting message's end", ended_turn(&chat, &q)).await;
+    let (asked, _) = asked_with(&calls(), "what did you mean").unwrap_or_else(|| panic!("a request for the quoting message; {}", told(&fake, &chat, &c)));
+    eprintln!("commands: the quote as the model saw it: {asked:?}");
+    assert!(asked.contains(&format!("[Replying to your previous message: \"{quoted}\"]")), "Hermes' quoted reply, its own: {asked:?}");
+
+    // /steer while a turn runs its tool: into that turn
+    let slow = turn(&fake.say(&chat, &person("paul"), json!({ "text": "use the terminal slowly" })));
+    within(&fake, &chat, &c, 120_000, "the slow turn's step", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == slow.as_str())).await;
+    let steer = command("steer", "and say blue");
+    within(&fake, &chat, &c, 120_000, "the slow turn's end", ended_turn(&chat, &slow)).await;
+    let steered = calls().iter().any(|x| x.body["messages"].to_string().contains("and say blue"));
+    let word = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["text"].as_str().is_some_and(|t| t.starts_with('⏩'))));
+    eprintln!("commands: steer's word {word:?}");
+    assert!(steered, "the steer is in a request of the running turn's; {}", told(&fake, &chat, &c));
+    fake.with(|w| {
+        assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["cause"]["seq"] != steer["seq"]), "the steer is no turn of its own");
+        let word = word.as_ref().expect("Hermes' word on the steer");
+        assert_ne!(word["turn"], slow.as_str(), "a message of its own, not the running turn's: {word}");
+    });
+
+    // /new: a new session for the chat
+    let fresh = turn(&command("new", ""));
+    within(&fake, &chat, &c, 120_000, "/new's end", ended_turn(&chat, &fresh)).await;
+    eprintln!("commands: /new said {:?}", reply(&fresh));
+    let after = turn(&fake.say(&chat, &person("paul"), json!({ "text": "a fresh start" })));
+    within(&fake, &chat, &c, 120_000, "the next message's end", ended_turn(&chat, &after)).await;
+    let request = calls().into_iter().find(|x| x.path.ends_with("/chat/completions") && asked_with(std::slice::from_ref(x), "a fresh start").is_some()).expect("a request for the next message");
+    let history = request.body["messages"].to_string();
+    for earlier in ["what did you mean", "use the terminal slowly", "[paul] hello"] {
+        assert!(!history.contains(earlier), "the new session holds none of the chat before ({earlier:?}): {history}");
+    }
+
+    // refused: never said to Hermes
+    let global = turn(&command("model", "glm --global"));
+    within(&fake, &chat, &c, 30_000, "the refused command's end", ended_turn(&chat, &global)).await;
+    fake.with(|w| {
+        let end = w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == global.as_str()).unwrap();
+        assert_eq!(end["outcome"], "error", "{end}");
+        assert!(end["error"].as_str().is_some_and(|e| e.contains("this chat's session alone")), "{end}");
+    });
+    assert!(!c.logs().lines().any(|l| l.contains("\"relay.inbound\"") && l.contains(&global)), "never handed to Hermes");
+}
+
+/// Whether the turn `t` of `chat` has ended.
+fn ended_turn<'a>(chat: &'a str, t: &'a str) -> impl Fn(&support::fake::World) -> bool + 'a {
+    move |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t)
+}
+
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
 // 1hr window and now it's not responding to chats") ----
 
@@ -2492,6 +2574,25 @@ async fn bots_message_each_other() {
     }
     asked(&fake, &jchat, &c, "dm: maple: ping after a restart", |w, turn| reply(w, &jchat, turn).is_some()).await;
     within(&fake, &jchat, &c, 180_000, "juniper to say maple's answer after a restart", |w| w.bodies(&jchat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("relayed:") && t.contains("ping after a restart")))).await;
+
+    // `/new` in her Bot Chat (its owner's command, docs/chat-records.md): a
+    // new session under the chat's own key, which the hook titles `Bot
+    // Chat` as its first turn starts, so that turn has the roster again
+    let titled = c.logs().matches("\"botmode.titled\"").count();
+    let fresh = fake.say(&jchat, &person("paul"), json!({ "kind": "command", "command": "new" }));
+    let tnew = fragment_bridge::records::turn_id("juniper--k3x9", &jchat, "chat", fresh["seq"].as_u64().unwrap());
+    within(&fake, &jchat, &c, 120_000, "/new's end", |w| w.bodies(&jchat, "work", "turn.end").iter().any(|e| e["turn"] == tnew)).await;
+    eprintln!("bots: /new said {:?}", fake.with(|w| reply(w, &jchat, &tnew)));
+    asked(&fake, &jchat, &c, "a fresh start, juniper", |w, turn| reply(w, &jchat, turn).is_some()).await;
+    let kept = bot_chat_of(&c, "juniper--k3x9");
+    eprintln!("bots: juniper's Bot Chat after /new: {kept}");
+    assert_eq!(kept["key"], "agent:juniper--k3x9:relay:group:juniper-chat--h6j7/juniper--k3x9", "still her own chat's session: {kept}");
+    let texts = kept["texts"].to_string();
+    assert!(texts.contains("a fresh start, juniper") && !texts.contains("ping from juniper"), "the title is the new session's, which holds none of the chat before: {kept}");
+    assert_eq!(c.logs().matches("\"botmode.titled\"").count(), titled + 1, "titled again as its first turn started");
+    let first = calls_of(&model, "juniper--k3x9", "a fresh start, juniper").into_iter().next().expect("the first turn after /new");
+    assert!(first.body["messages"][0]["content"].to_string().contains("## Messaging other agents"), "and that turn has the roster");
+    assert!(!first.body["messages"].to_string().contains("ping from juniper"), "a new session: none of the chat before");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

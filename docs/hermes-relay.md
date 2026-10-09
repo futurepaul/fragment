@@ -53,6 +53,31 @@ upgrade re-reads it, and the real-Hermes lane
   sends a turn's note on a cut turn there (docs/bridge.md). No field of an
   event changes how a session's unanswered tail is read: two user
   messages in a row are joined (`_merge_consecutive_users`).
+- A quoted reply: `reply_to_message_id` and `reply_to: {text, author?,
+  is_own}` (`_event_from_wire`); with both an id and a text, Hermes puts
+  `[Replying to: "<text>"]` before the message (`[Replying to your
+  previous message: …]` when `is_own`; `gateway/run_inbound.py`,
+  `_prepend_inbound_reply_context`), the text whole. `author` is not
+  shown.
+- A message whose text starts with `/` is a command to Hermes
+  (`MessageEvent.is_command`), any of its registry's (hermes_cli/
+  commands.py): idle, run as a turn is, bracketed `👀` … `✅`, its answer
+  a `send` answering the message; while the chat's session is busy,
+  dispatched at once and never queued (`_handle_message_while_active`:
+  every command it resolves bypasses; `/stop`, `/new`, `/reset` interrupt
+  the turn first), its answer a `send` answering the command, with no
+  bracket. No slash access is set (`allow_admin_from`), so every user of
+  the chat may run every one: the connector is the gate (the bridge's
+  menu, `relay/menu.rs`). `/steer` mid-run lands after the turn's next
+  tool call (`_busy_steer_command`), idle it is a message
+  (`_hm_cmd_steer`); `/btw` answers from a snapshot of the session in an
+  auxiliary call, its answer a later `send` answering nothing (`💬 /btw:
+  "<question>"`, `gateway.btw.answer`); `/new` gives the session key a new
+  session (`_handle_reset_command`), asking nothing under
+  `approvals.destructive_slash_confirm: false`. The manifest
+  (`gateway/relay/command_manifest.py`, 28 commands with descriptions)
+  rides only a Discord `hello` (`command_manifest`), so a Relay connector
+  holds its own.
 - Hermes: `outbound {requestId, action}` → the connector:
   `outbound_result {requestId, result}` (Hermes waits 30 s). The ops in
   v0.21.5, each sent only when advertised:

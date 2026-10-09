@@ -31,15 +31,22 @@
 //!   ends no person's turn without saying something. No clock: a bracket
 //!   that never ends is the engine's idle bound's;
 //! - a file is uploaded to `/relay/media`, then sent by `send_media`;
-//!   a message's attachments are re-hosted at `/relay/media/<id>`.
+//!   a message's attachments are re-hosted at `/relay/media/<id>`;
+//! - a command of the menu (`menu`) is said as it is: a turn's text
+//!   (`TurnStart::command`), or beside the running turn
+//!   (`Command::Aside`: `/steer`, `/btw`), whose answers (a `send`
+//!   answering it, a side question's `💬 /btw: …` after) are messages of
+//!   their own (`Event::Say`), never the running turn's;
+//! - a message quoting another carries Hermes' quoted reply.
 //!
 //! Every inbound is kept until Hermes acks it and handed again on its next
 //! dial (Hermes drops one it saw, by message id). A new dial replaces the
 //! one before.
 
+pub mod menu;
 pub mod wire;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -67,6 +74,9 @@ pub const MEDIA_KEPT_MAX: usize = 256;
 /// Messages of a turn taken as its steps' words that the bridge remembers,
 /// at most (only so their edits change nothing; Hermes edits none once sent).
 pub const TAKEN_KEPT_MAX: usize = 64;
+/// Commands said beside a turn (`Command::Aside`) whose answers the bridge
+/// still knows, at most: the oldest go (Hermes answers one at once).
+pub const ASIDES_KEPT_MAX: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -197,6 +207,10 @@ impl Runtime for Relay {
         "relay"
     }
 
+    fn menu(&self) -> &'static [crate::runtime::MenuItem] {
+        menu::MENU
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         Box::pin(run(self.config, io))
     }
@@ -218,7 +232,7 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         tokio::spawn(net::serve(listener, handler, io.shutdown.clone()));
     }
 
-    let mut st = Loop { cfg, events: io.events.clone(), media, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
+    let mut st = Loop { cfg, events: io.events.clone(), media, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
@@ -355,6 +369,10 @@ struct Loop {
     inflight: HashMap<String, Inflight>,
     by_chat: HashMap<String, String>,
     answers: Vec<PendingAnswer>,
+    /// Commands said beside a turn (`Command::Aside`), by their message id,
+    /// and the agent and chat they were said in: what answers one is a
+    /// message of its own.
+    asides: VecDeque<(String, String, String)>,
     conn: Option<(u64, mpsc::Sender<Message>)>,
     greeted: bool,
     next_message: u64,
@@ -423,7 +441,7 @@ impl Loop {
                 // fails the command closed.
                 let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
-                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None };
+                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
                 // "Other" answered in words: Hermes takes the answer (and
@@ -439,6 +457,23 @@ impl Loop {
             }
             Command::Forget { turn } => self.forget(&turn),
             Command::Tell { turn, seq, by, by_name, text } => self.tell(&turn, seq, &by, &by_name, &text),
+            Command::Aside { agent, fragment, chat_name, turn, id, by, by_name, text } => {
+                // in the agent's chat, as it is, kept until Hermes acks it:
+                // Hermes takes a command mid-turn (`/steer` lands in the
+                // running turn after its next tool call) or beside none
+                let chat = wire::chat_id(&fragment, &agent);
+                let profile = wire::profile(&agent);
+                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None };
+                let buffer = format!("x-{id}");
+                let frame = wire::inbound(&m, &buffer);
+                crate::ev!("relay.aside", { "id": id, "turn": turn, "running": turn.as_ref().is_some_and(|t| self.inflight.contains_key(t)) });
+                if self.asides.len() >= ASIDES_KEPT_MAX {
+                    self.asides.pop_front();
+                }
+                self.asides.push_back((id, agent, fragment));
+                let _ = self.send(frame.clone());
+                self.answers.push(PendingAnswer { buffer, frame });
+            }
         }
     }
 
@@ -448,7 +483,7 @@ impl Loop {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
         crate::ev!("relay.told", { "turn": turn, "seq": seq });
@@ -487,7 +522,7 @@ impl Loop {
         // the message (TurnStart::note); Hermes' own session was closed at
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
         // its own, never folded into the cut one's
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref() };
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();
@@ -592,7 +627,7 @@ impl Loop {
         let ok = json!({ "success": true });
         // One line per op Hermes asks for: its kind and ids, never its text.
         match &action {
-            Action::Send { chat, content, reply } => crate::ev!("relay.op", { "op": "send", "chat": chat, "reply": reply, "chars": content.chars().count(), "turn": self.by_chat.get(chat) }),
+            Action::Send { chat, content, reply, .. } => crate::ev!("relay.op", { "op": "send", "chat": chat, "reply": reply, "chars": content.chars().count(), "turn": self.by_chat.get(chat) }),
             Action::Edit { chat, message_id, content } => crate::ev!("relay.op", { "op": "edit", "chat": chat, "message": message_id, "chars": content.chars().count() }),
             Action::React { chat, message_id, emoji, remove } => crate::ev!("relay.op", { "op": "react", "chat": chat, "message": message_id, "emoji": emoji, "remove": remove, "turn": self.by_chat.get(chat) }),
             Action::Draft { chat, draft_id, content, done } => crate::ev!("relay.op", { "op": "draft", "chat": chat, "draft": draft_id, "final": done, "chars": content.chars().count() }),
@@ -600,13 +635,28 @@ impl Loop {
             Action::Unsupported { op } => crate::ev!("relay.op", { "op": op, "supported": false }),
             other => crate::ev!("relay.op", { "op": format!("{other:?}").split([' ', '{']).next().unwrap_or("").to_lowercase() }),
         }
+        // what answers a command said beside a turn (`/steer`'s word on it,
+        // a side question's start, and its answer after) is a message of
+        // its own, never the running turn's, nor something it said
+        if let Action::Send { chat, content, reply_to, .. } = &action {
+            let answering = reply_to.as_ref().and_then(|r| self.asides.iter().find(|a| &a.0 == r)).map(|a| (a.1.clone(), a.2.clone()));
+            let btw = reply_to.is_none() && wire::btw_answer(content);
+            let said = answering.or_else(|| btw.then(|| wire::split_chat_id(chat).map(|(f, a)| (a.to_string(), f.to_string()))).flatten());
+            if let Some((agent, fragment)) = said {
+                let id = self.message_id();
+                let (text, _) = wire::uncursored(content);
+                crate::ev!("relay.aside_answered", { "chat": chat, "answering": reply_to });
+                self.emit(Event::Say { agent, fragment, text: text.to_string() }).await;
+                return json!({ "success": true, "message_id": id });
+            }
+        }
         match &action {
             Action::Send { chat, .. } | Action::Edit { chat, .. } | Action::Draft { chat, .. } | Action::Prompt { chat, .. } | Action::SendMedia { chat, .. } => self.spoke(chat),
             _ => {}
         }
         let turn_of = |chat: &str, by_chat: &HashMap<String, String>| by_chat.get(chat).cloned();
         match action {
-            Action::Send { chat, content, reply } => {
+            Action::Send { chat, content, reply, .. } => {
                 let id = self.message_id();
                 let (text, _) = wire::uncursored(&content);
                 let text = text.to_string();

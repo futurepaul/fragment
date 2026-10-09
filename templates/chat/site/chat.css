@@ -278,6 +278,41 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .mentions button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
 .mentions button[aria-selected="true"], .mentions button:hover { background: var(--bg-hover); }
 .mentions .mention-note { margin-left: auto; padding-left: 12px; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; }
+/* `/`: the agent's commands, for its owner */
+.commands { width: min(460px, calc(100% - 16px)); max-height: min(320px, 50vh); overflow-y: auto; }
+.commands button { align-items: baseline; gap: 10px; }
+.commands .command-about { display: flex; flex-direction: column; min-width: 0; }
+.commands .command-description { color: var(--text-secondary); font-size: 13px; }
+.commands .command-args { color: var(--text-tertiary); font-size: 12px; }
+.command-name { flex: none; font: 600 13px var(--font-mono); color: var(--text-primary); }
+.bubble.command .command-name { font-size: .92em; }
+/* a message's own actions (Reply), its queued mark and its time, under it */
+.msg.user .actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.msg.user.mine .actions { flex-direction: row; }
+.msg.user .actions .time { margin: 0; }
+.msg .actions .reply { width: 26px; height: 26px; border-radius: 8px; opacity: 0; transition: opacity .14s; }
+.msg .actions .reply svg { width: 15px; height: 15px; }
+.msg:hover .actions .reply, .msg:focus-within .actions .reply { opacity: 1; }
+@media (hover: none) { .msg .actions .reply { opacity: 1; } }
+.queued { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; background: var(--surface-muted); color: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.queued svg { width: 11px; height: 11px; }
+/* what a message quotes, above it; what the composer will quote, above what is typed */
+.quote, .quoting { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: min(520px, 100%); padding: 5px 10px; border: 0; border-left: 2px solid var(--chat-agent-color, var(--border-strong)); border-radius: 4px 10px 10px 4px; background: var(--surface-muted); color: var(--text-secondary); font-size: 12.5px; text-align: left; }
+.quote { margin-bottom: 4px; cursor: pointer; }
+.quote:disabled { cursor: default; }
+.quote-who { flex: none; font-weight: 600; color: var(--text-primary); }
+.quote-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quoting { max-width: 100%; align-items: center; }
+.quoting .quote-text { flex: 1; }
+.quoting .icon-button { width: 24px; height: 24px; flex: none; }
+.quoting .icon-button svg { width: 14px; height: 14px; }
+/* Steer: words for the running turn, now */
+.steer { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.steer:hover:not(:disabled) { background: var(--bg-hover); }
+.steer:disabled { opacity: .48; cursor: default; }
+.steer svg { width: 14px; height: 14px; }
+.steer:not([hidden]) { margin-left: auto; }
+#notify:not([hidden]) ~ .steer, .steer:not([hidden]) ~ .send { margin-left: 0; }
 
 @media (max-width: 680px) { .column { padding-top: 12px; } }
 @media (prefers-reduced-motion: reduce) {
