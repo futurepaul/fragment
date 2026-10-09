@@ -718,6 +718,223 @@ fn a_question_waits_as_long_as_a_prompt() {
     assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");
 }
 
+// ---- commands: the runtime's menu, from the agent's owner ----
+
+/// An engine whose runtime takes the scripted agent's commands (one of
+/// each way the bridge carries one).
+fn commanded(agents: &[Agent], life: &str) -> Engine {
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, life).expect("a fresh state").with_menu(crate::runtime::script::MENU);
+    e.step(Input::Agents(agents.to_vec()), T0);
+    e.recover(T0);
+    e.step(Input::Runtime(Event::Connected(true)), T0);
+    e
+}
+
+fn cmd(name: &str, args: &str) -> Value {
+    json!({ "kind": "command", "command": name, "args": args })
+}
+
+/// Goal: the agent's owner's command of the menu is a turn of its own,
+/// claimed as a message's is, its text said to the runtime as it is
+/// (`/<name> <args>`, `command`); the agent's first turn in a chat in a
+/// life posts its menu there once (`cm:<life>` on `work`), before the
+/// runtime hears of the turn. Replay: the same record again does nothing.
+/// Restart: a command waiting its turn stays one, and the next life's
+/// first turn there posts the menu again, as a record of its own.
+#[test]
+fn a_command_from_the_owner_is_a_turn_of_its_own() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let s = said(&mut e, &a, &v, 1, "npub1paul", cmd("model", "glm-5"), T0);
+    let t = started(&s).expect("handed");
+    assert_eq!((t.text.as_str(), t.command, t.asker.as_str()), ("/model glm-5", true, "npub1paul"));
+    let menu = records::commands(&a.identity, crate::runtime::script::MENU);
+    assert_eq!(posts(&s), vec![(records::work_id(&t.turn, "start"), posts(&s)[0].1.clone()), (records::menu_id(LIFE), menu.clone())], "its claim, then the menu");
+    assert_eq!(kinds(&s), vec!["turn.start", "commands"]);
+    assert_eq!(said(&mut e, &a, &v, 1, "npub1paul", cmd("model", "glm-5"), T0 + 1), Step::default(), "a replay does nothing");
+    ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "ran /model glm-5".into() }, T0 + 2);
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 2);
+    // the menu once a life in a chat: the next turn posts none
+    let usage = said(&mut e, &a, &v, 2, "npub1paul", cmd("usage", ""), T0 + 3);
+    assert_eq!((started(&usage).expect("handed").text.as_str(), kinds(&usage)), ("/usage", vec!["turn.start".to_string()]));
+    // waiting behind it, a command stays one across a restart
+    said(&mut e, &a, &v, 3, "npub1paul", cmd("usage", "again"), T0 + 4);
+    let state: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(&state, e.state());
+    let next_life = "fedcba9876543210fedcba9876543210";
+    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole").with_menu(crate::runtime::script::MENU);
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 10);
+    e2.recover(T0 + 10);
+    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 10);
+    let s = answered(&mut e2, c, T0 + 10);
+    let next = started(&s).expect("the waiting command runs");
+    assert_eq!((next.text.as_str(), next.command), ("/usage again", true));
+    assert_eq!(posts(&s).iter().filter(|(id, _)| id.starts_with("cm:")).cloned().collect::<Vec<_>>(), vec![(records::menu_id(next_life), menu)], "a new life posts it again");
+}
+
+/// Invalid: a command from anyone but the agent's owner, one not on its
+/// runtime's menu, one `to` another agent, and any command to an engine
+/// whose runtime takes none, start nothing (the cursor passes them).
+#[test]
+fn a_command_from_anyone_else_or_off_the_menu_starts_nothing() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a, &b]);
+    let mut e = commanded(&[a.clone(), b.clone()], LIFE);
+    let cases = [
+        ("npub1skyler", cmd("usage", "")),
+        ("npub1paul", cmd("update", "")),
+        ("npub1paul", cmd("restart", "")),
+        ("npub1paul", json!({ "kind": "command", "command": "usage", "to": [b.identity] })),
+        ("anon:7", cmd("usage", "")),
+        ("npub1juniper", cmd("usage", "")),
+    ];
+    for (i, (who, body)) in cases.into_iter().enumerate() {
+        let seq = i as u64 + 1;
+        let s = said(&mut e, &a, &v, seq, who, body.clone(), T0);
+        assert!(started(&s).is_none() && posts(&s).is_empty() && commands(&s).is_empty(), "{who} {body}");
+        assert_eq!(e.cursor(&a.fragment, "talk--k3x9", "chat"), seq);
+    }
+    let mut plain = engine(std::slice::from_ref(&a));
+    let s = said(&mut plain, &a, &v, 1, "npub1paul", cmd("usage", ""), T0);
+    assert!(started(&s).is_none() && posts(&s).is_empty(), "a runtime with no menu takes no command");
+    // a message that starts with `/` is a message, never a command
+    let s = said(&mut plain, &a, &v, 2, "npub1paul", json!({ "text": "/usage" }), T0);
+    assert_eq!(started(&s).map(|t| (t.text, t.command)), Some(("/usage".to_string(), false)));
+}
+
+/// Invalid: a command its menu refuses (`/model … --global`) gets both its
+/// records, its end saying why, and the runtime never hears it.
+#[test]
+fn a_refused_command_ends_saying_why() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let s = said(&mut e, &a, &v, 1, "npub1paul", cmd("model", "glm-5 --GLOBAL"), T0);
+    let turn = records::turn_id(&a.fragment, "talk--k3x9", "chat", 1);
+    assert!(started(&s).is_none(), "never handed");
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end"]);
+    assert_eq!(posts(&s)[1].1, json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "this chat's alone" }));
+    // the word alone refuses it, not a word that holds it
+    let s = said(&mut e, &a, &v, 2, "npub1paul", cmd("model", "my--globalish-model"), T0 + 1);
+    assert_eq!(started(&s).map(|t| t.text), Some("/model my--globalish-model".to_string()));
+}
+
+/// Goal: `stop` (How::Stop) stops the agent's running turn in the chat,
+/// whoever asked it, and ends its waiting ones there unrun, each with both
+/// its records; no turn of its own. Another chat's, and another agent's,
+/// are left alone.
+#[test]
+fn stop_stops_the_running_turn_and_ends_the_waiting() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a]);
+    let mut e = commanded(&[a.clone(), b.clone()], LIFE);
+    let running = started(&said(&mut e, &a, &v, 1, "npub1skyler", json!({ "text": "long" }), T0)).expect("started").turn;
+    said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "next" }), T0);
+    said(&mut e, &a, &v, 3, "npub1skyler", json!({ "text": "after" }), T0);
+    let elsewhere = {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "other--k3x9".into(), record: rec(1, "npub1paul", json!({ "text": "there" })), view: Some(v.clone()), since: 0 }, T0);
+        started(&answered(&mut e, s, T0)).expect("started there").turn
+    };
+    let s = said(&mut e, &a, &v, 4, "npub1paul", cmd("stop", ""), T0 + 1);
+    assert_eq!(commands(&s), vec![Command::Stop { turn: running.clone() }], "the running turn, though skyler asked it");
+    let waiting: Vec<String> = [2, 3].iter().map(|seq| records::turn_id(&a.fragment, "talk--k3x9", "chat", *seq)).collect();
+    let ended: Vec<(String, Value)> = posts(&s).into_iter().filter(|(_, b)| b["kind"] == "turn.end").collect();
+    assert_eq!(ended, waiting.iter().map(|t| (records::work_id(t, "end"), json!({ "kind": "turn.end", "turn": t, "outcome": "stopped" }))).collect::<Vec<_>>());
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "turn.start", "turn.end"], "each waiting one has both its records, and the command none");
+    assert!(e.state().turns.get(&elsewhere).is_some_and(|t| t.phase == Phase::Running), "another chat's turn runs on");
+    let after = ev(&mut e, Event::End { turn: running, outcome: Outcome::Stopped }, T0 + 2);
+    assert!(started(&after).is_none(), "nothing waited");
+    // with nothing running, it stops nothing
+    let s = said(&mut e, &a, &v, 5, "npub1paul", cmd("stop", ""), T0 + 3);
+    assert!(commands(&s).is_empty() && posts(&s).is_empty());
+}
+
+/// Goal: `new` (How::Restart) stops as `stop` does, then is a turn of its
+/// own, which runs once the stopped turn ends (a new session for the
+/// chat, the runtime's); with nothing running, at once.
+#[test]
+fn new_stops_then_runs_its_own_turn() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let running = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "long" }), T0)).expect("started").turn;
+    said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "next" }), T0);
+    let s = said(&mut e, &a, &v, 3, "npub1paul", cmd("new", ""), T0 + 1);
+    assert_eq!(commands(&s), vec![Command::Stop { turn: running.clone() }]);
+    assert!(started(&s).is_none(), "it waits for the stopped turn");
+    let after = ev(&mut e, Event::End { turn: running, outcome: Outcome::Stopped }, T0 + 2);
+    let fresh = started(&after).expect("then it runs");
+    assert_eq!((fresh.text.as_str(), fresh.command, fresh.seq), ("/new", true, 3), "the waiting message never runs");
+    ev(&mut e, Event::End { turn: fresh.turn, outcome: Outcome::Idle }, T0 + 3);
+    let s = said(&mut e, &a, &v, 4, "npub1paul", cmd("new", ""), T0 + 4);
+    assert_eq!(started(&s).map(|t| t.text), Some("/new".to_string()), "nothing running: at once");
+}
+
+/// Goal: `steer` (How::Steer) goes into the agent's running turn in the
+/// chat at once, said beside it (`Command::Aside`), no turn of its own and
+/// no record; with none running, its words are a message. `queue`
+/// (How::Message) is its words as a message, waiting its turn. `btw`
+/// (How::Aside) is said beside whatever runs, running or not. Each with no
+/// words is a turn of its own (the runtime says how to use it).
+#[test]
+fn steer_queue_and_btw() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let running = started(&said(&mut e, &a, &v, 1, "npub1skyler", json!({ "text": "long" }), T0)).expect("started").turn;
+    let s = said(&mut e, &a, &v, 2, "npub1paul", cmd("steer", "use blue"), T0 + 1);
+    let id = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
+    let aside = |turn: Option<String>, id: &str, text: &str| Command::Aside { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), chat_name: "talk--k3x9".into(), turn, id: id.to_string(), by: "npub1paul".into(), by_name: "paul".into(), text: text.into() };
+    assert_eq!(commands(&s), vec![aside(Some(running.clone()), &id, "/steer use blue")]);
+    assert!(posts(&s).is_empty() && !e.state().turns.contains_key(&id), "no turn of its own");
+    let s = said(&mut e, &a, &v, 3, "npub1paul", cmd("btw", "which file?"), T0 + 2);
+    assert_eq!(commands(&s), vec![aside(None, &records::turn_id(&a.fragment, "talk--k3x9", "chat", 3), "/btw which file?")]);
+    let s = said(&mut e, &a, &v, 4, "npub1paul", cmd("queue", "then tests"), T0 + 3);
+    assert!(commands(&s).is_empty(), "it waits behind the running turn");
+    let after = ev(&mut e, Event::End { turn: running, outcome: Outcome::Idle }, T0 + 4);
+    let queued = started(&after).expect("then it runs");
+    assert_eq!((queued.text.as_str(), queued.command, queued.seq), ("then tests", false, 4), "a message, its words alone");
+    ev(&mut e, Event::End { turn: queued.turn, outcome: Outcome::Idle }, T0 + 5);
+    // nothing running: a steer's words are a message, a btw is said beside
+    let s = said(&mut e, &a, &v, 5, "npub1paul", cmd("steer", "use red"), T0 + 6);
+    let t = started(&s).expect("a turn of its own");
+    assert_eq!((t.text.as_str(), t.command), ("use red", false));
+    ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 7);
+    let s = said(&mut e, &a, &v, 6, "npub1paul", cmd("btw", "and now?"), T0 + 8);
+    assert!(matches!(&commands(&s)[..], [Command::Aside { turn: None, .. }]) && posts(&s).is_empty());
+    // no words: a turn of its own
+    for (seq, name) in [(7, "steer"), (8, "queue"), (9, "btw")] {
+        let s = said(&mut e, &a, &v, seq, "npub1paul", cmd(name, " "), T0 + 9 + seq);
+        let t = started(&s).unwrap_or_else(|| panic!("{name} with no words is a turn"));
+        assert_eq!((t.text, t.command), (format!("/{name}"), true));
+        ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 9 + seq);
+    }
+}
+
+/// Goal: a person's message that quotes another (`reply_to`) hands its
+/// turn the seq it quotes (the driver reads the message), kept across a
+/// restart while it waits.
+#[test]
+fn a_quote_rides_along() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "first" }), T0)).expect("started");
+    assert_eq!((t.reply_to, t.quote.clone()), (None, None));
+    said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "that one", "reply_to": 1 }), T0 + 1);
+    let saved = serde_json::to_string(e.state()).expect("serializes");
+    assert!(saved.contains("\"reply_to\":1"), "{saved}");
+    let mut e2 = Engine::new(serde_json::from_str(&saved).expect("deserializes"), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 2);
+    e2.recover(T0 + 2);
+    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 2);
+    let next = started(&answered(&mut e2, c, T0 + 2)).expect("the waiting one runs");
+    assert_eq!((next.text.as_str(), next.reply_to, next.quote), ("that one", Some(1), None), "the driver reads the quote");
+}
+
 // ---- agents asking each other: the hop the bridge counts, the budget ----
 
 fn rec_at(seq: u64, at: i64, principal: &str, body: Value) -> Record {
@@ -1277,7 +1494,7 @@ impl World {
                     };
                     self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
-                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } => {}
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Runtime(Command::Aside { .. }) => {}
             }
         }
     }

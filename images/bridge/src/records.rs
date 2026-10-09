@@ -57,6 +57,21 @@ pub struct Message {
     pub turn: Option<String>,
     /// How many agent hand-offs led here (0 for a person's message).
     pub hop: u32,
+    /// The seq on `chat` of the message it quotes (a person's reply to it).
+    pub reply_to: Option<u64>,
+}
+
+/// A command for an agent's runtime (`{kind: "command"}`), from a person:
+/// one of the runtime's menu (`runtime::MenuItem`), answered only from the
+/// agent's owner.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CommandSaid {
+    /// `^[a-z0-9_-]{1,32}$`, without its `/`.
+    pub name: String,
+    /// Its argument, trimmed, at most `MESSAGE_TEXT_MAX_BYTES` (more is cut).
+    pub args: String,
+    /// The agents it is for; empty: the lead.
+    pub to: Vec<String>,
 }
 
 /// What a `chat` record says to an agent.
@@ -68,6 +83,8 @@ pub enum Said {
     /// An answer to a prompt: its id, the option picked, and the words of
     /// an option answered in words.
     PromptResponse { prompt: String, option: String, text: Option<String> },
+    /// A command for an agent's runtime.
+    Command(CommandSaid),
     /// Anything else: a page's own kind, or a body that is not a message.
     Other,
 }
@@ -107,6 +124,12 @@ pub fn valid_token(s: &str, max: usize) -> bool {
     len_ok && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Whether `s` is a command's name (`^[a-z0-9_-]{1,32}$`, Hermes' rule for
+/// its command manifest's names).
+pub fn valid_command(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// Whether `s` is a post id the platform takes (`^[A-Za-z0-9._:-]{1,128}$`).
 pub fn valid_post_id(s: &str) -> bool {
     let len_ok = !s.is_empty() && s.len() <= 128;
@@ -140,6 +163,7 @@ pub fn said(body: &Value) -> Said {
             Some(Value::String(t)) if valid_post_id(t) => Said::Stop { turn: Some(t.clone()) },
             Some(_) => Said::Other,
         },
+        Some(Value::String(k)) if k == "command" => command(o),
         Some(Value::String(k)) if k == "prompt_response" => {
             let (prompt, option) = (text_field(o, "prompt"), text_field(o, "option"));
             let text = match o.get("text") {
@@ -155,6 +179,30 @@ pub fn said(body: &Value) -> Said {
         }
         Some(_) => Said::Other,
     }
+}
+
+/// The agents a record is `to`: at most 16 identities, or none; `None` for
+/// any other shape.
+fn to_of(o: &Map<String, Value>) -> Option<Vec<String>> {
+    match o.get("to") {
+        None | Some(Value::Null) => Some(Vec::new()),
+        Some(Value::Array(ids)) if ids.len() <= 16 => {
+            let parsed: Vec<String> = ids.iter().filter_map(|v| v.as_str()).filter(|s| is_identity(s) && s.len() <= 128).map(str::to_string).collect();
+            (parsed.len() == ids.len()).then_some(parsed)
+        }
+        Some(_) => None,
+    }
+}
+
+fn command(o: &Map<String, Value>) -> Said {
+    let Some(name) = text_field(o, "command").filter(|n| valid_command(n)) else { return Said::Other };
+    let args = match o.get("args") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(a)) => cut_bytes(a.trim(), limits::MESSAGE_TEXT_MAX_BYTES),
+        Some(_) => return Said::Other,
+    };
+    let Some(to) = to_of(o) else { return Said::Other };
+    Said::Command(CommandSaid { name, args, to })
 }
 
 fn message(o: &Map<String, Value>) -> Said {
@@ -174,17 +222,7 @@ fn message(o: &Map<String, Value>) -> Said {
         None if !attachments.is_empty() => String::new(),
         _ => return Said::Other,
     };
-    let to = match o.get("to") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(ids)) if ids.len() <= 16 => {
-            let parsed: Vec<String> = ids.iter().filter_map(|v| v.as_str()).filter(|s| is_identity(s) && s.len() <= 128).map(str::to_string).collect();
-            if parsed.len() != ids.len() {
-                return Said::Other;
-            }
-            parsed
-        }
-        Some(_) => return Said::Other,
-    };
+    let Some(to) = to_of(o) else { return Said::Other };
     let turn = match o.get("turn") {
         None | Some(Value::Null) => None,
         Some(Value::String(t)) if valid_post_id(t) => Some(t.clone()),
@@ -197,7 +235,14 @@ fn message(o: &Map<String, Value>) -> Said {
             None => return Said::Other,
         },
     };
-    Said::Message(Message { text, to, attachments, turn, hop })
+    let reply_to = match o.get("reply_to") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64().filter(|s| *s >= 1) {
+            Some(seq) => Some(seq),
+            None => return Said::Other,
+        },
+    };
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to })
 }
 
 /// Reads a `tasks` record's body.
@@ -449,6 +494,33 @@ pub fn turn_end(turn: &str, outcome: &Outcome) -> Value {
     }
 }
 
+/// The commands an agent's runtime takes from its owner (its menu,
+/// `runtime::MenuItem`), as the chat's page offers them: each one's name,
+/// what it does, and what its argument is. Posted by the agent on a chat's
+/// `work` as it first runs a turn there in a life (`menu_id`), so the
+/// page's window of `work` holds it while the chat is used.
+pub fn commands(agent: &str, menu: &[crate::runtime::MenuItem]) -> Value {
+    assert!(!menu.is_empty() && menu.iter().all(|m| valid_command(m.name)), "a menu names its commands");
+    let items: Vec<Value> = menu
+        .iter()
+        .map(|m| {
+            let mut c = json!({ "name": m.name, "description": m.description });
+            if let Some(a) = m.args {
+                c["args"] = json!(a);
+            }
+            c
+        })
+        .collect();
+    json!({ "kind": "commands", "agent": agent, "commands": items })
+}
+
+/// The menu's post id in a chat: once a life (`cm:<life>`), so a menu a
+/// life posted again is a replay, and a new life's is a record of its own.
+pub fn menu_id(life: &str) -> String {
+    assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
+    format!("cm:{life}")
+}
+
 /// An agent's reply on `chat`: its text and turn; `to` and `hop` when it
 /// hands off to another agent. Attachments are added by whoever uploads them.
 pub fn reply(text: &str, turn: &str, to: &[String], hop: u32) -> Value {
@@ -494,6 +566,48 @@ mod tests {
         ] {
             assert_eq!(said(&bad), Said::Other, "{bad}");
         }
+    }
+
+    /// Goal: a command reads as the doc says, `{kind: "command", command,
+    /// args?, to?}`, its args trimmed and cut as a message's text; a
+    /// person's message may quote one (`reply_to`, a seq). Invalid shapes
+    /// are never guessed at.
+    #[test]
+    fn commands_and_quotes_read_strictly() {
+        assert_eq!(said(&json!({ "kind": "command", "command": "usage" })), Said::Command(CommandSaid { name: "usage".into(), ..CommandSaid::default() }));
+        assert_eq!(
+            said(&json!({ "kind": "command", "command": "steer", "args": "  use blue \n", "to": ["npub1a"] })),
+            Said::Command(CommandSaid { name: "steer".into(), args: "use blue".into(), to: vec!["npub1a".into()] })
+        );
+        let long = said(&json!({ "kind": "command", "command": "btw", "args": "a".repeat(limits::MESSAGE_TEXT_MAX_BYTES + 9) }));
+        assert!(matches!(long, Said::Command(c) if c.args.len() == limits::MESSAGE_TEXT_MAX_BYTES), "cut as a message's text is");
+        for bad in [
+            json!({ "kind": "command" }),
+            json!({ "kind": "command", "command": "" }),
+            json!({ "kind": "command", "command": "/usage" }),
+            json!({ "kind": "command", "command": "Usage" }),
+            json!({ "kind": "command", "command": "a".repeat(33) }),
+            json!({ "kind": "command", "command": "usage", "args": 3 }),
+            json!({ "kind": "command", "command": "usage", "to": ["someone"] }),
+            json!({ "kind": "command", "command": 7 }),
+        ] {
+            assert_eq!(said(&bad), Said::Other, "{bad}");
+        }
+        let Said::Message(m) = said(&json!({ "text": "that one", "reply_to": 12 })) else { panic!("a message") };
+        assert_eq!(m.reply_to, Some(12));
+        let Said::Message(m) = said(&json!({ "text": "none", "reply_to": null })) else { panic!("a message") };
+        assert_eq!(m.reply_to, None);
+        for bad in [json!({ "text": "x", "reply_to": 0 }), json!({ "text": "x", "reply_to": -1 }), json!({ "text": "x", "reply_to": "12" }), json!({ "text": "x", "reply_to": 1.5 })] {
+            assert_eq!(said(&bad), Said::Other, "{bad}");
+        }
+        assert!(valid_command("reload-mcp") && valid_command("a_b9") && !valid_command("a b") && !valid_command("é"));
+        use crate::runtime::{How, MenuItem};
+        let menu = [MenuItem { name: "steer", description: "Steer it", args: Some("What to tell it"), how: How::Steer, refuse: &[] }, MenuItem { name: "usage", description: "Usage", args: None, how: How::Turn, refuse: &[] }];
+        assert_eq!(
+            commands("npub1a", &menu),
+            json!({ "kind": "commands", "agent": "npub1a", "commands": [{ "name": "steer", "description": "Steer it", "args": "What to tell it" }, { "name": "usage", "description": "Usage" }] })
+        );
+        assert!(valid_post_id(&menu_id(&"0".repeat(32))));
     }
 
     #[test]

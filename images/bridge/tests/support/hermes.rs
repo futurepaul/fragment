@@ -31,6 +31,11 @@
 //! - `media` uploads a file to `/relay/media` and sends it; inbound media
 //!   is downloaded with the token and its bytes counted in the reply;
 //! - the reply echoes what it heard: `echo: [<user_name>] <text>`;
+//! - `/steer <words>` and `/btw <question>` are commands taken beside a
+//!   turn, as v0.21.6 takes them mid-run: answered at once with a send
+//!   answering the command (`⏩ Steer queued …`, `💬 Side question: …`),
+//!   and a side question's answer after, answering nothing (`💬 /btw:
+//!   "<question>"\n\nit was main.rs`); no turn of their own;
 //! - what its model is handed for a turn (`Seen::handed`) is the message as
 //!   v0.21.5 renders it in a shared chat: `[<user_name>] <text>`, after an
 //!   inbound's read-only `context` when it has one (`[Recent channel
@@ -98,6 +103,8 @@ pub struct Seen {
     pub handed: Vec<(String, String)>,
     /// Cut turns the boot closed before this gateway started.
     pub closed: usize,
+    /// The words of each `/steer` it took into a running turn.
+    pub steered: Vec<String>,
 }
 
 pub struct Hermes {
@@ -289,6 +296,31 @@ async fn serve(seen: Arc<Mutex<Seen>>, ws: net::ClientWs, addr: std::net::Socket
                         if let Some(tx) = gw.turns.lock().unwrap().get(&chat) {
                             let _ = tx.send(Heard::Answer(pr["option_id"].as_str().unwrap_or("").to_string()));
                         }
+                        continue;
+                    }
+                    let said = event["text"].as_str().unwrap_or("").to_string();
+                    let mid = event["message_id"].as_str().unwrap_or("").to_string();
+                    if let Some(words) = said.strip_prefix("/steer ").map(str::to_string) {
+                        // v0.21.6's `_busy_steer_command`: into the running
+                        // turn, answered at once, answering the command
+                        gw.seen.lock().unwrap().steered.push(words.clone());
+                        let gw = gw.clone();
+                        tokio::spawn(async move {
+                            let word = format!("⏩ Steer queued into current run — arrives after the next tool call: '{words}'");
+                            gw.act(json!({ "op": "send", "chat_id": chat, "content": word, "reply_to": mid, "metadata": {} })).await;
+                        });
+                        continue;
+                    }
+                    if let Some(question) = said.strip_prefix("/btw ").map(str::to_string) {
+                        // v0.21.6's `_handle_btw_command`: its start answering
+                        // the command, then the answer answering nothing
+                        let gw = gw.clone();
+                        tokio::spawn(async move {
+                            let started = format!("💬 Side question: \"{question}\"\nAnswering from a snapshot of this conversation — the current work continues.");
+                            gw.act(json!({ "op": "send", "chat_id": chat, "content": started, "reply_to": mid, "metadata": {} })).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            gw.act(json!({ "op": "send", "chat_id": chat, "content": format!("💬 /btw: \"{question}\"\n\nit was main.rs"), "reply_to": null, "metadata": {} })).await;
+                        });
                         continue;
                     }
                     if gw.clarifying.lock().unwrap().contains(&chat) {

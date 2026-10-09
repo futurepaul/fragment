@@ -611,3 +611,61 @@ async fn a_wrong_token_is_refused() {
     });
     bridge.stop().await;
 }
+
+/// Goal: the owner's command of the menu (relay/menu.rs) reaches Hermes as
+/// it is (`/usage`), a turn of its own, where the same words as a message
+/// are kept from reading as one; `/steer` and `/btw` go beside the running
+/// turn at once, and what answers them (the steer's word, the side
+/// question's start and its answer, which answers nothing) is each a
+/// message of its own, never the running turn's reply or step; a message
+/// quoting the agent's reply carries Hermes' quoted reply, its text read
+/// from the chat. Invalid: a command off the menu (`/update`) never
+/// reaches Hermes.
+#[tokio::test]
+async fn commands_said_as_they_are() {
+    let (fake, bridge, hermes, _dir) = setup("relay-commands", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let reply_of = |w: &World, turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn);
+    let heard = |text: &str| hermes.with(|s| s.heard.iter().find(|e| e["text"] == text).cloned());
+
+    let usage = fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "usage" }));
+    let tu = records::turn_id("juniper--k3x9", &chat, "chat", usage["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the command's reply", |w| reply_of(w, &tu).is_some()).await;
+    assert_eq!(heard("/usage").map(|e| e["message_id"].clone()), Some(json!(tu)), "said as it is, its turn's message");
+    fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "update" }));
+    let typed = fake.say(&chat, &person("paul"), json!({ "text": "/usage" }));
+    let tt = records::turn_id("juniper--k3x9", &chat, "chat", typed["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the typed one's reply", |w| reply_of(w, &tt).is_some()).await;
+    assert!(heard("\u{200b}/usage").is_some(), "a message's leading slash is kept from reading as a command");
+    assert!(hermes.with(|s| !s.heard.iter().any(|e| e["text"].as_str().is_some_and(|t| t.contains("/update")))), "off the menu, never said");
+
+    // a quote of the agent's reply
+    let answered = fake.with(|w| w.records(&chat, "chat").into_iter().find(|r| r["body"]["turn"] == tu.as_str()).unwrap()["seq"].as_u64().unwrap());
+    let quoting = fake.say(&chat, &person("paul"), json!({ "text": "about that", "reply_to": answered }));
+    let tq = records::turn_id("juniper--k3x9", &chat, "chat", quoting["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the quoting message's reply", |w| reply_of(w, &tq).is_some()).await;
+    let q = heard("about that").expect("heard");
+    assert_eq!(q["reply_to_message_id"], json!(records::turn_id("juniper--k3x9", &chat, "chat", answered)));
+    assert_eq!(q["reply_to"], json!({ "text": "echo: [paul] /usage", "is_own": true }));
+
+    // beside a running turn
+    hermes.with(|s| s.turn_ms = 300);
+    let slow = fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
+    let ts = records::turn_id("juniper--k3x9", &chat, "chat", slow["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the slow turn's drafts", |w| w.drafts.iter().any(|d| d.2 == ts)).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "steer", "args": "use blue" }));
+    fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "btw", "args": "which file?" }));
+    fake.until(WAIT, "the side question's answer", |w| replies(w, &chat).iter().any(|r| r["text"].as_str().is_some_and(|t| t.starts_with("💬 /btw:")))).await;
+    fake.until(20_000, "the slow turn's reply", |w| reply_of(w, &ts).is_some()).await;
+    hermes.with(|s| assert_eq!(s.steered, vec!["use blue".to_string()]));
+    fake.with(|w| {
+        let said: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["text"].as_str().is_some_and(|t| t.starts_with('⏩') || t.starts_with("💬"))).collect();
+        assert_eq!(said.len(), 3, "the steer's word, the side question's start and its answer: {said:?}");
+        assert!(said.iter().all(|r| r["turn"] != ts.as_str()), "each a message of its own, never the running turn's: {said:?}");
+        assert!(w.bodies(&chat, "work", "turn.step").iter().all(|s| s["turn"] != ts.as_str()), "nor its steps");
+        assert_eq!(reply_of(w, &ts).unwrap()["text"], "echo: [paul] slow please");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 4, "usage, the typed one, the quote, the slow one: the steer and the side question are no turns");
+    });
+    bridge.stop().await;
+}

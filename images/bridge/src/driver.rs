@@ -39,7 +39,7 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo, TurnStart};
+use crate::runtime::{Agent, Command, Event, LocalFile, Quote, Runtime, RuntimeIo, TurnStart};
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -282,7 +282,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), stop.clone()));
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
-    let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
+    let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?.with_menu(runtime.menu());
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
@@ -1094,9 +1094,18 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note);
+                    let quote = async {
+                        let seq = ts.reply_to?;
+                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), quote_of(&api, ts, seq)).await;
+                        read.unwrap_or_else(|_| {
+                            crate::ev!("quote.unread", { "turn": ts.turn, "seq": seq, "why": "the chat answered too slowly" });
+                            None
+                        })
+                    };
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote);
                     ts.files = files;
                     ts.note = note;
+                    ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
                     return;
@@ -1110,6 +1119,29 @@ impl RuntimeLane {
         // The engine bounds its open turns, and so the commands in flight.
         let _ = self.tx.send(c);
     }
+}
+
+/// The message a turn's message quotes (`reply_to`, a seq on the chat's
+/// `chat`), read as the agent: its text (a command as typed; a file with no
+/// words, its names), cut to `QUOTE_TEXT_MAX_BYTES`, and whether it is the
+/// agent's own. `None` when it is not there, is no message, or the chat did
+/// not answer: a turn is never held back for its quote.
+async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
+    let page = api.records(&ts.agent.fragment, &ts.fragment, records::CHAT, seq.saturating_sub(1), 1).await.map_err(|e| crate::ev!("quote.unread", { "turn": ts.turn, "seq": seq, "error": e.to_string() })).ok()?;
+    let r = page.records.into_iter().find(|r| r.seq == seq)?;
+    let text = match records::said(&r.body) {
+        records::Said::Message(m) if !m.text.trim().is_empty() => m.text,
+        records::Said::Message(m) => m.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "),
+        records::Said::Command(c) if c.args.is_empty() => format!("/{}", c.name),
+        records::Said::Command(c) => format!("/{} {}", c.name, c.args),
+        _ => String::new(),
+    };
+    if text.trim().is_empty() {
+        crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes no message" });
+        return None;
+    }
+    let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
+    Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: r.principal == ts.agent.identity })
 }
 
 /// A message's attachments, from the chat's blobs to scratch files.
