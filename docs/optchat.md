@@ -11,6 +11,11 @@ the template, the platform additions, the goose image, and the MCP
 server. Where it disagrees with docs/cloudflare-v1.md, it wins on this
 branch only.
 
+The mind's turn loop is our own JavaScript today. goose becomes the
+agent in the mind too (Paul, 2026-10-09: "the same agent and same
+memories running in DO or on the computer"): docs/optchat-goose.md is
+that design and its phases.
+
 ## Paul's sketch (2026-10-07)
 
 - There's one chat. Every chat running anywhere gets the same optmem
