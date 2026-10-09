@@ -106,6 +106,33 @@ async fn a_failed_turn_ends_at_its_cross() {
     bridge.stop().await;
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
+/// steps named after their first word): a message Hermes sends that starts
+/// with one of its notice glyphs is a `turn.notice` of its turn, never a
+/// step nor a reply: its inactivity warning before the reply, and its
+/// self-improvement review sent after the turn's `✅`, which is still that
+/// turn's (Paul keeps these). The turn's one reply is its answer.
+#[tokio::test]
+async fn hermes_notices_are_notices() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-notices", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "notice this" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let notices = |w: &World| w.bodies(&chat, "work", "turn.notice");
+    fake.until(WAIT, "the turn's end, and both notices", |w| !work_of(w, &chat, &turn, "turn.end").is_empty() && notices(w).len() == 2).await;
+    fake.with(|w| {
+        let got: Vec<(Value, Value, Value)> = notices(w).iter().map(|n| (n["turn"].clone(), n["category"].clone(), n["text"].clone())).collect();
+        let stuck = support::hermes::STUCK.trim_start_matches("⚠️ ");
+        assert_eq!(got, vec![(json!(turn), json!("warning"), json!(stuck)), (json!(turn), json!("memory"), json!("Self-improvement review: Memory updated"))]);
+        let posted = &w.fragments[&chat].channels["work"].ids;
+        assert!(posted.contains_key(&records::work_id(&turn, "n1")) && posted.contains_key(&records::work_id(&turn, "n2")), "numbered in the turn");
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty(), "no notice is a step");
+        assert_eq!(replies(w, &chat), vec![json!({ "text": "echo: [paul] notice this", "turn": turn })], "its one reply, and no notice is one");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: the model's text beside a tool call (Paul on p5, 2026-10-05: one
 /// message got two replies) is the step's words, never a reply of its
 /// own: Hermes' stream consumer ends the draft segment at the tool
@@ -163,8 +190,11 @@ async fn an_approval_through_the_relay() {
     fake.with(|w| {
         assert!(replies(w, &chat)[0]["text"].as_str().unwrap().ends_with("(approved)"));
         assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed")[0]["option"], "once");
-        // Hermes' own confirmation ("✅ once", an interim send) is a step
-        assert!(w.bodies(&chat, "work", "turn.step").iter().any(|s| s["tool"] == "once"), "{:?}", w.bodies(&chat, "work", "turn.step"));
+        // Hermes' own confirmation ("✅ Approved once", an interim send) is
+        // a notice, never a step
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty(), "{:?}", w.bodies(&chat, "work", "turn.step"));
+        let acked: Vec<(Value, Value)> = w.bodies(&chat, "work", "turn.notice").iter().map(|n| (n["category"].clone(), n["text"].clone())).collect();
+        assert_eq!(acked, vec![(json!("info"), json!("Approved once"))]);
     });
     hermes.with(|s| {
         let answer = s.heard.iter().find(|e| e.get("prompt_response").is_some()).expect("a structured answer");

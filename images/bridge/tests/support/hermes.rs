@@ -28,6 +28,10 @@
 //!   does: drafts, then a send answering the message at the tool boundary,
 //!   and the tool's progress after it (`late`: before it); `only`, the
 //!   answer beside a housekeeping call, and nothing after;
+//! - `notice` sends Hermes' inactivity warning (`⚠️ I seem to be stuck …`)
+//!   before its reply, a send answering nothing, and its self-improvement
+//!   review's (`💾 Self-improvement review: Memory updated`) after its `✅`,
+//!   as v0.21.6 releases it once the turn is done;
 //! - `media` uploads a file to `/relay/media` and sends it; inbound media
 //!   is downloaded with the token and its bytes counted in the reply;
 //! - the reply echoes what it heard: `echo: [<user_name>] <text>`;
@@ -188,6 +192,10 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 /// What a `narrate` turn says beside its tool call.
 pub const NARRATION: &str = "Let me check that.";
+/// What a `notice` turn warns before its reply (Hermes' inactivity
+/// warning), and says after its end (its self-improvement review).
+pub const STUCK: &str = "⚠️ I seem to be stuck (no activity for 1 min). If nothing happens in the next 1 min I'll give up on this task.";
+pub const REVIEWED: &str = "💾 Self-improvement review: Memory updated";
 /// What a `fail` turn says after its `❌`.
 pub const FAILURE: &str = "Sorry, I encountered an error (RuntimeError).\nno details available\nTry again or use /reset to start a fresh session.";
 
@@ -428,6 +436,9 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
             return;
         }
     }
+    if text.contains("notice") {
+        gw.act(json!({ "op": "send", "chat_id": chat, "content": STUCK, "reply_to": null, "metadata": {} })).await;
+    }
     if text.contains("tool") {
         let sent = gw.act(json!({ "op": "send", "chat_id": chat, "content": "💻 terminal: `ls`", "reply_to": null, "metadata": {} })).await;
         let id = sent["message_id"].as_str().unwrap_or("").to_string();
@@ -464,8 +475,10 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         }
         let said = match answered {
             Some(Heard::Answer(o)) => {
-                // Hermes confirms in the chat, as an interim send.
-                gw.act(json!({ "op": "send", "chat_id": chat, "content": format!("✅ {o}"), "reply_to": null, "metadata": {} })).await;
+                // Hermes confirms in the chat, as an interim send (its
+                // relay adapter's `_EXEC_APPROVAL_LABELS`)
+                let ack = if o == "deny" { "❌ Denied".to_string() } else { format!("✅ Approved {o}") };
+                gw.act(json!({ "op": "send", "chat_id": chat, "content": ack, "reply_to": null, "metadata": {} })).await;
                 if o == "deny" { "denied" } else { "approved" }
             }
             Some(Heard::Interrupt) => {
@@ -539,6 +552,9 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     }
     gw.act(react("👀", true)).await;
     gw.act(react("✅", false)).await;
+    if text.contains("notice") {
+        gw.act(json!({ "op": "send", "chat_id": chat, "content": REVIEWED, "reply_to": null, "metadata": {} })).await;
+    }
 }
 
 async fn http(gw: &Gateway, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {

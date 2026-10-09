@@ -141,6 +141,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .msg.notice { display: flex; align-items: flex-start; gap: 7px; font-size: 13px; color: var(--text-tertiary); }
 .msg.notice svg { width: 14px; height: 14px; margin-top: 2px; }
 .msg.notice .why { color: var(--text-secondary); }
+/* a notice of the agent's runtime, as quiet: what it is about, by its icon */
+.msg.notice.runtime.warning svg { color: var(--danger-text); }
+.msg.notice.runtime.memory svg { color: var(--chat-agent-color, var(--text-tertiary)); }
 
 /* markdown */
 .md p, .md ul, .md ol, .md pre, .md-code, .md blockquote, .md .md-table { margin: 0 0 .75rem; }

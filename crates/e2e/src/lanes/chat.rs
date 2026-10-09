@@ -248,6 +248,18 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.eval(&page, open_cards)?;
     let _ = chrome.screenshot(&page, &shots.join("desktop-step.png"));
 
+    // a runtime's notices (as Hermes' inactivity warning or its review of
+    // its memory, the one after the turn's end): quiet lines of the turn,
+    // never a step nor the agent's words
+    say(&mut chrome, "a notice please")?;
+    let notice = |category: &str, text: &str| format!("[...document.querySelectorAll('.msg.notice.runtime.{category}')].some((n) => n.textContent === {} && n.querySelector('svg') && !n.closest('details'))", js(text));
+    let noticed = shows(&mut chrome, &page, &format!("{} && {} && {}", notice("info", "Compressing context"), notice("memory", "Self-improvement review: Memory updated"), replied("a notice please")));
+    let words = chrome.eval(&page, "[...document.querySelectorAll('.msg.agent .md, details.tools')].some((m) => /Self-improvement|Compressing/.test(m.textContent))")?;
+    s.ok("a runtime's notices show as quiet lines of their turn, the one after its end too, never a step nor its words", noticed && words == false, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    chrome.eval(&page, open_cards)?;
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
+    let _ = chrome.screenshot(&page, &shots.join("desktop-notices.png"));
+
     // an @mention: the composer offers the chat's agents, and the message is `to` the one picked
     chrome.click(&page, "#text")?;
     chrome.type_text(&page, &format!("@{}", &label[..3]))?;
@@ -435,7 +447,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn", turns.len() == 9 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn", turns.len() == 10 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 

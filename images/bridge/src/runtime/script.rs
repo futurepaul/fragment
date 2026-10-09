@@ -20,6 +20,9 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
+//! - `notice`: a notice before the reply (`info`, "Compressing context"),
+//!   and one after the turn's end (`memory`, "Self-improvement review:
+//!   Memory updated"), as Hermes sends its review once its turn is done;
 //! - `fetch <http url> with <value> [in <header> | in query <param> | as
 //!   basic <user>]`: the guest's own request, as any SDK sends one, with no
 //!   header of ours: `<value>` is `$<NAME>`, the agent's credential in that
@@ -69,7 +72,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::records::{Category, Outcome, PromptOption, Step};
+use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
 
 /// The scripted agent's commands: one of each way the bridge carries one
@@ -565,6 +568,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(note) = &ts.note {
         reply = format!("{reply}\n\n(told: {note})");
     }
+    if text.split_whitespace().any(|w| w == "notice") {
+        emit(Event::Notice { agent: ts.agent.fragment.clone(), fragment: ts.fragment.clone(), category: NoticeCategory::Info, text: "Compressing context".into() }).await;
+    }
     let drafts = if text.contains("slow") { 20 } else { 2 };
     for i in 1..=drafts {
         let cut = reply.chars().count() * i / (drafts + 1);
@@ -583,7 +589,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
+    let noticed = text.split_whitespace().any(|w| w == "notice");
     emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
+    if noticed {
+        let (agent, fragment) = (ts.agent.fragment.clone(), ts.fragment.clone());
+        emit(Event::Notice { agent, fragment, category: NoticeCategory::Memory, text: "Self-improvement review: Memory updated".into() }).await;
+    }
 }
 
 #[cfg(test)]

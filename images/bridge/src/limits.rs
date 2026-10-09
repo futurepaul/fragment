@@ -62,6 +62,16 @@ pub const STEPS_PER_TURN_MAX: u32 = 200;
 /// Replies one turn posts, at most (a runtime that sends more is looping).
 pub const REPLIES_PER_TURN_MAX: u32 = 64;
 
+/// Notices one turn posts, at most (each a line of the chat's, quietly);
+/// the rest are dropped.
+pub const NOTICES_PER_TURN_MAX: u32 = 32;
+/// A notice's text, at most.
+pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
+/// Chats whose last turn the engine keeps for its runtime's notices, at
+/// most (one per agent and chat it ran a turn in this life): past it, the
+/// one longest unused goes.
+pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
+
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;
 

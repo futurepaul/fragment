@@ -8,6 +8,9 @@
 //!   answers the turn's message: a reply part;
 //! - its tool progress is a `send` answering nothing whose lines grow by
 //!   `edit`s: each new line a step;
+//! - a `send` answering nothing that starts with a notice glyph (`💾`,
+//!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
+//!   turn running or not (its review comes after its turn's `✅`);
 //! - the model's text beside a tool call arrives as a reply too (Hermes
 //!   ends a draft segment at every tool boundary with such a `send`): the
 //!   step that follows takes it back (`Event::Retract`) as its words, and
@@ -662,11 +665,24 @@ impl Loop {
                 let text = text.to_string();
                 let Some(turn) = turn_of(&chat, &self.by_chat) else {
                     let Some((fragment, agent)) = wire::split_chat_id(&chat) else { return json!({ "success": false, "error": "no chat by that id" }) };
-                    self.emit(Event::Say { agent: agent.to_string(), fragment: fragment.to_string(), text }).await;
+                    let (agent, fragment) = (agent.to_string(), fragment.to_string());
+                    // a notice after its turn (its review, released once
+                    // the turn is done) is still that turn's
+                    match wire::notice(&text) {
+                        Some((category, text)) => self.emit(Event::Notice { agent, fragment, category, text }).await,
+                        None => self.emit(Event::Say { agent, fragment, text }).await,
+                    }
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                if f.worded && text.trim_start().starts_with("✏️") {
+                let notice = if reply { None } else { wire::notice(&text) };
+                if let Some((category, text)) = notice {
+                    // neither a reply nor a step: its edits change nothing
+                    f.take_message(id.clone());
+                    let (fragment, agent) = (f.start.fragment.clone(), f.start.agent.fragment.clone());
+                    crate::ev!("relay.notice", { "turn": turn, "category": category.as_str() });
+                    self.emit(Event::Notice { agent, fragment, category, text }).await;
+                } else if f.worded && text.trim_start().starts_with("✏️") {
                     // "Other"'s ask for words, which went with its answer
                     f.worded = false;
                     f.take_message(id.clone());

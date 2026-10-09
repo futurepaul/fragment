@@ -286,6 +286,23 @@ across a restart, and the agent's next turn is told the card was cut
 with it), or `stopped`.
 
 ```json
+{ "kind": "turn.notice", "turn": "…", "category": "memory",
+  "text": "Self-improvement review: Memory updated" }
+```
+
+Part `n<k>`, from 1: a notice of the agent's runtime, neither a step nor
+a reply (it seems stuck, its context was compressed, an approval's
+acknowledgment, it updated its memory). `category` is what it is about:
+`info`, `warning`, or `memory` (a page shows any other as `info`); `text`
+at most 300 characters. At most 32 a turn. A notice the runtime sends
+after the turn's end (its review of the turn, once the turn is done) is
+still that turn's, posted after its `turn.end`: the turn of the agent's
+the bridge last ran in that chat, in its life. With none (the agent's
+last turn there ran in an earlier life), a notice belongs to no turn and
+is not posted. A page shows each as a quiet line, never in a card of
+steps nor as the agent's words, and never pushes it.
+
+```json
 { "kind": "turn.end", "turn": "…", "outcome": "idle" }
 ```
 
@@ -367,7 +384,8 @@ prompt as a card whose buttons
 only `asks` may press (enabled for them alone), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a
-reply; and a turn's end when it was not `idle` (Stopped, or the error,
+reply; a runtime's notice, quietly, its category's icon beside its
+words; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft shows after the turn's last record, and while
 a turn runs with no draft nor open card, a working line does.
 

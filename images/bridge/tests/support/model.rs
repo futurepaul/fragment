@@ -31,6 +31,10 @@
 //!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked;
+//! - Hermes' self-improvement review (its prompts start `Review the
+//!   conversation above`), where it may save to memory, of a conversation
+//!   where a person said `remember this` is answered by a `memory` call
+//!   that adds `REMEMBERED` (any other's saves nothing);
 //! - of a message with channel context before it (`[Recent channel
 //!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
 //!   turn), only the message after `[New message]` is acted on;
@@ -173,7 +177,8 @@ pub const STALL_S: u64 = 120;
 /// not to the route's `fallback`.
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
-    last_user.contains("stall") && body["model"] != "fallback"
+    // Hermes' review prompts say "install" (and so `stall`): never one of a test's
+    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != "fallback"
 }
 
 /// How long a call waits whose last user message says `take your time`: past
@@ -189,6 +194,8 @@ fn unhurried(body: &Value) -> bool {
 
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
+/// What Hermes' memory review saves (its `memory` tool, `add`).
+pub const REMEMBERED: &str = "Paul tests the bridge in Docker.";
 
 fn text_of(content: &Value) -> String {
     match content {
@@ -270,6 +277,14 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes' smart-approval guardian asks for one word: a person decides.
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
+    }
+    // Hermes' self-improvement review of its memory saves one thing, of a
+    // conversation that asked it to remember something (others' reviews
+    // save nothing, as before)
+    let asked_to_remember = messages.iter().any(|m| m["role"] == "user" && text_of(&m["content"]).contains("remember this"));
+    if last_user.starts_with("Review the conversation above") && asked_to_remember && offered("memory") {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "memory", "arguments": json!({ "action": "add", "target": "memory", "content": REMEMBERED }).to_string() } });
+        return (String::new(), Some(call));
     }
     if last_user.contains("end this turn with exactly [SILENT]") {
         return ("[SILENT]".into(), None);
@@ -535,6 +550,18 @@ fn answers_are_the_transcripts() {
     let had = "[IMPORTANT: Background process proc_3 completed (exit code 0).\nOutput:\n{\"reply\": \"Maple also messaged you this answer directly. If it adds nothing for your person, end this turn with exactly [SILENT].\\n\\nscripted: Message from x\"}]";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": had }], "tools": bots }));
     assert_eq!((t.as_str(), call), ("[SILENT]", None));
+    // Hermes' memory review saves one thing, where it may
+    let memory = json!([{ "type": "function", "function": { "name": "memory" } }]);
+    let review = "Review the conversation above and consider saving to memory if appropriate.\n\nMemory has …";
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] remember this: hi" }, { "role": "assistant", "content": "scripted: hi" }, { "role": "user", "content": review }], "tools": memory }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "action": "add", "target": "memory", "content": REMEMBERED }).to_string());
+    let both = "Review the conversation above and update two things:\n\n**Memory**: …";
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] remember this: hi" }, { "role": "user", "content": both }], "tools": memory }));
+    assert!(call.is_some(), "its memory-and-skills review saves it too");
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] hi" }, { "role": "assistant", "content": "scripted: hi" }, { "role": "user", "content": review }], "tools": memory }));
+    assert!(call.is_none(), "nothing asked to be remembered, nothing saved");
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": review }], "tools": tools }));
+    assert_eq!((t.as_str(), call.is_none()), ("scripted: Review the conversation above and consider saving to memory if appropriate.", true), "no memory tool, no call");
     // a note on a cut risky turn is context: the message after it is answered
     let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));

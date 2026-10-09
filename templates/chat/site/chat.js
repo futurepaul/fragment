@@ -113,6 +113,9 @@ const STEP_SAYS = {
   memory: ["brain", "Updating memory"],
 };
 
+// What a runtime's notice is about (its `category`): its icon. Any other is `info`.
+const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
+
 /// A step as a line reads it: `{icon, verb, args}` ("Running", `npm test`).
 export function stepSays(s) {
   const args = typeof s.args === "string" ? s.args : "";
@@ -468,7 +471,7 @@ export function mount(root) {
   // ---- records ----
   function turnOf(id) {
     if (!state.turns.has(id)) {
-      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), end: null });
+      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), end: null });
     }
     return state.turns.get(id);
   }
@@ -547,6 +550,8 @@ export function mount(root) {
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
     } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
       t.steps.set(b.step, { ...b, at: record.at, n });
+    } else if (b.kind === "turn.notice" && typeof b.text === "string" && b.text.trim()) {
+      t.notices.set(record.seq, { text: b.text, category: Object.hasOwn(NOTICE_ICON, b.category) ? b.category : "info", at: record.at, n, seq: record.seq });
     } else if (b.kind === "turn.prompt" && typeof b.prompt === "string") {
       t.prompts.set(b.prompt, { ...b, options: Array.isArray(b.options) ? b.options.filter((o) => o && typeof o.id === "string") : [], at: record.at, n });
       expiryTimer();
@@ -609,6 +614,7 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       for (const s of t.steps.values()) items.push({ at: s.at, n: s.n, type: "step", t, s });
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
+      for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
       if (t.end && t.end.outcome !== "idle") items.push({ at: t.end.at, n: t.end.n, type: "end", t });
     }
     const now = Date.now();
@@ -665,6 +671,8 @@ export function mount(root) {
         return promptNode(it.t, it.p);
       case "end":
         return endNode(it.t);
+      case "notice":
+        return noticeNode(it.t, it.x);
       case "draft":
         return draftNode(it.turn, it.d);
       default:
@@ -1057,6 +1065,23 @@ export function mount(root) {
           said.textContent = `${name} stopped (${t.end.outcome}).`;
         }
         line.append(said);
+        return line;
+      }),
+    ];
+  }
+
+  // A notice of the agent's runtime (`turn.notice`): a quiet line in the
+  // turn, its icon saying what it is about.
+  function noticeNode(t, x) {
+    const key = `n:${x.seq}`;
+    return [
+      key,
+      cached(key, `${x.category}|${x.text}`, () => {
+        const line = el("div", `msg notice runtime ${x.category}`);
+        line.dataset.turn = t.id;
+        line.dataset.category = x.category;
+        line.innerHTML = svg(NOTICE_ICON[x.category]);
+        line.append(el("span", "said", x.text));
         return line;
       }),
     ];

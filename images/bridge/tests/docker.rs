@@ -1825,6 +1825,52 @@ async fn steps_say_what_they_do() {
     }
 }
 
+/// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
+/// steps, `💾 Self-improvement review: Memory updated` one named
+/// "Self-improvement"; Paul keeps these): real Hermes' review of its memory,
+/// which it runs after every tenth turn of a session (its
+/// `memory.nudge_interval`) and announces once the turn is done, is a
+/// `turn.notice` of the turn it reviewed (`memory`), never a step nor a
+/// reply. Method: short turns until one is reviewed, the scripted model
+/// saving one thing when asked to review.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_memory_review_is_a_notice() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let reviewed = |w: &support::fake::World| w.bodies(&chat, "work", "turn.notice").into_iter().find(|n| n["category"] == "memory");
+    let reviews = || model.calls.lock().unwrap().iter().filter(|call| content_text(call.body["messages"].as_array().and_then(|m| m.last()).unwrap_or(&json!(null))).starts_with("Review the conversation")).count();
+    let mut turns = Vec::new();
+    // bounded: the nudge's ten turns, and a few more. Once the model is
+    // asked to review, nothing more is said: Hermes cancels a review a live
+    // turn of its session meets (`cancel_background_review_for_live_turn`)
+    for n in 0..14 {
+        turns.push(asked(&fake, &chat, &c, &format!("remember this: fact number {n}"), ended).await);
+        let t = Instant::now();
+        // bounded: four seconds
+        while reviews() == 0 && t.elapsed() < Duration::from_secs(4) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if reviews() > 0 {
+            break;
+        }
+    }
+    if tokio::time::timeout(Duration::from_secs(60), fake.until(120_000, "the review's notice", |w| reviewed(w).is_some())).await.is_err() {
+        let logs = c.exec_out(&["sh", "-c", "grep -rhi 'review' /data/hermes/logs /data/hermes/profiles/juniper--k3x9/logs 2>/dev/null | tail -30"]);
+        panic!("no review's notice after {} turns; the model was asked to review {} times; Hermes logged:\n{logs}\n{}", turns.len(), reviews(), told(&fake, &chat, &c));
+    }
+    fake.with(|w| {
+        let n = reviewed(w).unwrap();
+        eprintln!("review: {n} after {} turns; work: {:?}", turns.len(), w.records(&chat, "work").iter().rev().take(6).map(|r| r["body"]["kind"].clone()).collect::<Vec<_>>());
+        assert_eq!(n["text"], "Self-improvement review: Memory updated", "{n}");
+        assert!(turns.iter().any(|t| n["turn"] == t.as_str()), "the notice is a turn's it reviewed: {n}");
+        let steps = w.bodies(&chat, "work", "turn.step");
+        assert!(!steps.iter().any(|s| s["tool"].as_str().is_some_and(|t| t.starts_with("Self"))), "no step: {steps:?}");
+        let said = w.bodies(&chat, "chat", "reply");
+        assert!(!said.iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("Self-improvement"))), "no reply: {said:?}");
+    });
+}
+
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
 // 1hr window and now it's not responding to chats") ----
 

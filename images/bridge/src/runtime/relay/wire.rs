@@ -10,7 +10,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::records::{Category, PromptOption, Step};
+use crate::records::{Category, NoticeCategory, PromptOption, Step};
 
 /// The contract this connector speaks.
 pub const CONTRACT_VERSION: u64 = 1;
@@ -426,6 +426,54 @@ pub fn question(text: &str) -> Option<String> {
     (!asked.is_empty()).then(|| asked.to_string())
 }
 
+/// The glyphs Hermes v0.21.6's gateway starts its notices with, and what
+/// each is about: every message it sends mid-turn that is neither a reply
+/// nor tool progress (its status and warning rails, its busy acks, a
+/// prompt's acks, its self-improvement review), read from its `gateway/`,
+/// `agent/` and `locales/en.yaml`. No tool's emoji is among them (its
+/// registry's, and `⚙️`/`⚡`, its default ones), so no progress line reads
+/// as one. Nor are its words on a person's own message (`⏩` a steer's,
+/// `↪` a redirect's) and a side question's answer (`💬 /btw: …`): those
+/// are messages of their own (`act`'s asides, before any notice). Longest
+/// first: `⚠️` before `⚠`.
+const NOTICES: &[(&str, NoticeCategory)] = &[
+    // its self-improvement review (`display.review.summary_callback`)
+    ("💾", NoticeCategory::Memory),
+    // its inactivity warning ("I seem to be stuck"), a sub-agent's failure
+    // (`format_subagent_failure_line`), its agent's warnings
+    ("⚠️", NoticeCategory::Warning),
+    ("⚠", NoticeCategory::Warning),
+    // a denied approval's ack, and failures
+    ("❌", NoticeCategory::Warning),
+    ("⛔", NoticeCategory::Warning),
+    // busy acks ("⏳ Compressing context"), waits, expiries, timeouts
+    ("⏳", NoticeCategory::Info),
+    ("⌛", NoticeCategory::Info),
+    ("⏱️", NoticeCategory::Info),
+    ("⏱", NoticeCategory::Info),
+    // an approval's or a choice's ack ("✅ Approved once"), compaction done
+    ("✅", NoticeCategory::Info),
+    ("✓", NoticeCategory::Info),
+    // context compaction's status
+    ("🗜️", NoticeCategory::Info),
+    ("📦", NoticeCategory::Info),
+    ("💤", NoticeCategory::Info),
+    ("ℹ️", NoticeCategory::Info),
+    ("ℹ", NoticeCategory::Info),
+    // a cancelled clarify
+    ("↩️", NoticeCategory::Info),
+];
+
+/// A message of Hermes' that is a notice (`NOTICES`, by its leading
+/// glyph): what it is about, and its words without the glyph; `None` for
+/// any other.
+pub fn notice(text: &str) -> Option<(NoticeCategory, String)> {
+    let t = text.trim_start();
+    let (glyph, category) = NOTICES.iter().find(|(g, _)| t.starts_with(g))?;
+    let words = t[glyph.len()..].trim_start_matches('\u{fe0f}').trim();
+    (!words.is_empty()).then(|| (*category, words.to_string()))
+}
+
 /// A message's text without the edit stream's cursor, and whether it still
 /// streams.
 pub fn uncursored(content: &str) -> (&str, bool) {
@@ -586,6 +634,29 @@ mod tests {
         assert_eq!(question("✏️ Digita la tua risposta:").as_deref(), Some("Digita la tua risposta:"));
         for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️", "💻 terminal ❓", "✍️ Writing notes.md"] {
             assert_eq!(question(not), None, "{not}");
+        }
+    }
+
+    /// A notice is Hermes' message that starts with one of its notice
+    /// glyphs: what it is about, its words without the glyph. A progress
+    /// line (a tool's emoji, Hermes' default ones included), a question in
+    /// words, a reply, or a glyph with no words is no notice.
+    #[test]
+    fn a_notice_is_by_its_glyph() {
+        let n = |t: &str| notice(t).map(|(c, w)| (c.as_str(), w));
+        assert_eq!(n("💾 Self-improvement review: Memory updated"), Some(("memory", "Self-improvement review: Memory updated".into())));
+        assert_eq!(n("⚠️ I seem to be stuck (no activity for 5 min)."), Some(("warning", "I seem to be stuck (no activity for 5 min).".into())));
+        assert_eq!(n("⚠ Compression aborted: x"), Some(("warning", "Compression aborted: x".into())));
+        assert_eq!(n("⚠️ Subagent failed — \"research\" after 12s."), Some(("warning", "Subagent failed — \"research\" after 12s.".into())));
+        assert_eq!(n("⏳ Compressing context — your message is queued"), Some(("info", "Compressing context — your message is queued".into())));
+        assert_eq!(n("⌛ Approval timed out after 1 hour — the command was NOT run."), Some(("info", "Approval timed out after 1 hour — the command was NOT run.".into())));
+        assert_eq!(n("✅ Approved once"), Some(("info", "Approved once".into())));
+        assert_eq!(n("❌ Denied"), Some(("warning", "Denied".into())));
+        assert_eq!(n("  ℹ️ Context compression deferred"), Some(("info", "Context compression deferred".into())));
+        assert_eq!(n("⏱️ The AI model service is rate-limiting requests."), Some(("info", "The AI model service is rate-limiting requests.".into())));
+        // a steer's word, a redirect's, a side question's answer: messages of their own (asides)
+        for not in ["💻 terminal: `ls`", "🔍 Searching the web for x", "⚙️ computer_use...", "⚡ some_tool", "📝 Updating skill x", "💬 thinking", "❓ Which one?", "✏️ Type your answer:", "Here is the answer.", "💾", "⚠️  ", "", "⏩ Steer queued into current run — arrives after the next tool call: 'x'", "↪ Redirected current run", "💬 /btw: \"why\"\n\nbecause"] {
+            assert_eq!(n(not), None, "{not}");
         }
     }
 

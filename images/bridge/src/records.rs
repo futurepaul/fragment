@@ -453,6 +453,32 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     body
 }
 
+/// What a runtime's notice is about (docs/chat-records.md, `turn.notice`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeCategory {
+    /// How the turn goes: a wait, a confirmation, its context compressed.
+    Info,
+    /// Something went wrong, or may: it seems stuck, a sub-agent failed.
+    Warning,
+    /// What the agent remembers changed (its review after a turn).
+    Memory,
+}
+
+impl NoticeCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoticeCategory::Info => "info",
+            NoticeCategory::Warning => "warning",
+            NoticeCategory::Memory => "memory",
+        }
+    }
+}
+
+/// A runtime's notice in a turn: neither a step nor a reply.
+pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
+    json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
+}
+
 fn cut_or_empty(text: &str, max: usize) -> String {
     if text.trim().is_empty() {
         String::new()
@@ -712,6 +738,9 @@ mod tests {
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }));
+        assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
+        assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
+        assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
         let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
         assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));

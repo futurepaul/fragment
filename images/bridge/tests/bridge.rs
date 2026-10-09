@@ -139,6 +139,29 @@ async fn tool_steps() {
     bridge.stop().await;
 }
 
+/// Goal: a runtime's notices are its turn's `turn.notice`s, before its end
+/// and after it (the stub's `notice`: as Hermes sends its review once the
+/// turn is done), never a step nor a reply.
+#[tokio::test]
+async fn notices_are_the_turns() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("notices");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "a notice please" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "the turn's end, then its review's notice", |w| w.bodies(&chat, "work", "turn.notice").len() == 2).await;
+    fake.with(|w| {
+        let kinds: Vec<String> = w.records(&chat, "work").iter().filter_map(|r| r["body"]["kind"].as_str().filter(|k| k.starts_with("turn.")).map(str::to_string)).collect();
+        assert_eq!(kinds, vec!["turn.start", "turn.notice", "turn.end", "turn.notice"], "the turn's records");
+        let notices: Vec<(Value, Value, Value)> = w.bodies(&chat, "work", "turn.notice").iter().map(|n| (n["turn"].clone(), n["category"].clone(), n["text"].clone())).collect();
+        assert_eq!(notices, vec![(json!(turn), json!("info"), json!("Compressing context")), (json!(turn), json!("memory"), json!("Self-improvement review: Memory updated"))]);
+        assert_eq!(w.bodies(&chat, "chat", "reply").len(), 1, "its one reply");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (decision 42): an approval is a card for the agent's owner; while
 /// it waits the keepalive is held (an idle sleep would cut its turn); the
 /// owner's answer resumes the turn, a second answer is ignored, and someone

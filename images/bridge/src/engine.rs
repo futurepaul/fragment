@@ -88,7 +88,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::limits;
-use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, Outcome, PromptOption, Record, Said, Task};
+use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, NoticeCategory, Outcome, PromptOption, Record, Said, Task};
 use crate::runtime::{Agent, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
 /// The state file's format. 2: one life per turn (no `handed` phase).
@@ -407,10 +407,25 @@ pub struct Engine {
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
     published: BTreeSet<(String, String)>,
+    /// Per agent and chat, its turn there the runtime's notices belong to
+    /// (the one running, else the last this life handed there) and how many
+    /// it posted, the one used last at the back (at most
+    /// `NOTICE_CHATS_MAX`). Never written to `/data`: a turn runs in one
+    /// life, and a notice no turn of this life's is there for goes unposted.
+    noticed: VecDeque<Noticed>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
     now: u64,
+}
+
+/// The turn an agent's notices in a chat belong to, and how many it posted.
+#[derive(Debug, Clone, PartialEq)]
+struct Noticed {
+    agent: String,
+    fragment: String,
+    turn: String,
+    notices: u32,
 }
 
 /// A turn that ran here and ended: whose, where, how deep, and when (the
@@ -452,6 +467,7 @@ impl Engine {
             forgotten: BTreeMap::new(),
             menu: &[],
             published: BTreeSet::new(),
+            noticed: VecDeque::new(),
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -1029,6 +1045,12 @@ impl Engine {
         if !self.menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, self.menu), Vec::new());
         }
+        // the runtime's notices in this chat are this turn's from here
+        self.noticed.retain(|n| !(n.agent == agent && n.fragment == fragment));
+        self.noticed.push_back(Noticed { agent: agent.clone(), fragment, turn: id.to_string(), notices: 0 });
+        while self.noticed.len() > limits::NOTICE_CHATS_MAX {
+            self.noticed.pop_front();
+        }
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
@@ -1189,7 +1211,7 @@ impl Engine {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Say { .. } => None,
+                Event::Connected(_) | Event::Say { .. } | Event::Notice { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -1256,7 +1278,38 @@ impl Engine {
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
                 self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0), Vec::new());
             }
+            Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
         }
+    }
+
+    /// A notice of the runtime's in a chat (`Event::Notice`): a `turn.notice`
+    /// of the agent's turn running there, or of the last one this life handed
+    /// there (a review its runtime finishes after the turn's end is about
+    /// that turn), at most `NOTICES_PER_TURN_MAX` a turn, numbered from 1
+    /// (`n<k>`). With no turn of this life's there (the agent's last ran in
+    /// an earlier life, or none did), it is no turn's, and goes unposted.
+    fn notice(&mut self, agent: &str, fragment: &str, category: NoticeCategory, text: &str) {
+        if self.agent(agent).is_none() || text.trim().is_empty() {
+            return;
+        }
+        let Some(at) = self.noticed.iter().position(|n| n.agent == agent && n.fragment == fragment) else {
+            crate::ev!("notice.dropped", { "agent": agent, "fragment": fragment, "why": "no turn of this life's in that chat" });
+            return;
+        };
+        let mut n = self.noticed.remove(at).expect("found");
+        if n.notices >= limits::NOTICES_PER_TURN_MAX {
+            crate::ev!("notice.dropped", { "turn": n.turn, "why": "a turn posts at most so many" });
+            self.noticed.push_back(n);
+            return;
+        }
+        n.notices += 1;
+        let (turn, k) = (n.turn.clone(), n.notices);
+        self.noticed.push_back(n);
+        if let Some(t) = self.state.turns.get_mut(&turn).filter(|t| t.active()) {
+            t.last_ms = self.now;
+        }
+        crate::ev!("notice.posted", { "turn": turn, "n": k, "category": category.as_str() });
+        self.post(agent, fragment, records::WORK, records::work_id(&turn, &format!("n{k}")), records::turn_notice(&turn, category, text), Vec::new());
     }
 
     /// Reply `part` of a turn changed: its text, or a file it carries.
@@ -1431,6 +1484,7 @@ impl Engine {
                 self.out.push(Effect::Runtime(Command::Forget { turn: id }));
             }
         }
+        self.noticed.retain(|n| !(n.agent == agent && n.fragment == fragment));
         self.views.remove(fragment);
     }
 }

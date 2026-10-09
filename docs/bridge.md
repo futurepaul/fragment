@@ -57,6 +57,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
+| `Notice {agent, fragment, category, text}` | a notice, neither a step nor a reply: a `turn.notice` of the agent's turn running in that chat, or of the last this life ran there (none: not posted) |
 
 A runtime also names its **menu** (`Runtime::menu`): the commands it
 takes from its agents' owners, each with how the bridge carries it
@@ -442,8 +443,21 @@ get_chat_info`.
   (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
   is a test's shorter one). At its timeout Hermes tries to edit the card
   (the bridge refuses: it is no message of the turn), sends `⌛ Approval
-  timed out …` (a step), hands the model `BLOCKED: Command timed out
+  timed out …` (a notice), hands the model `BLOCKED: Command timed out
   without user response`, and the turn goes on to its reply.
+- A notice is a `send` answering nothing that starts with one of the
+  glyphs Hermes' gateway starts its notices with (`relay/wire.rs`,
+  `NOTICES`, read from v0.21.6: `💾` its self-improvement review, `⚠️` its
+  inactivity warning and a sub-agent's failure, `⏳` its busy acks and
+  waits, `⌛` an approval's timeout, `✅`/`❌` a prompt's ack, its
+  compaction's status, …): a `Notice` (`turn.notice`), the glyph its
+  category, never a step. Hermes releases its review's notice once the
+  turn is done, after its `✅`, so a notice with no turn running is the
+  turn's the engine last ran in that chat, not a turn of its own. No
+  tool's emoji is a notice glyph, so no progress line reads as one; and
+  Hermes' word on a command said beside a turn (`⏩` a steer's, `💬 /btw:`
+  a side question's answer) is the command's message of its own
+  (above, "Commands"), read before any notice.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
   token.
