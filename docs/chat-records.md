@@ -18,10 +18,11 @@ own code, which runs from the platform's release as its page does
 ```
 
 - `chat` holds what is said: people's messages, agents' replies, Stop,
-  and prompt answers. Anyone who may post may say them.
-- `work` holds an agent's progress: turns, steps, prompts. Only editors
-  post there (the chat's agents are editors), so no person can forge a
-  step or a card.
+  prompt answers, and an agent's owner's commands. Anyone who may post
+  may say them.
+- `work` holds an agent's progress: turns, steps, prompts, and the
+  commands its runtime takes. Only editors post there (the chat's agents
+  are editors), so no person can forge a step, a card or a menu.
 
 An agent fragment has one more channel its computer follows:
 
@@ -70,10 +71,16 @@ it, and a new draft may follow (the next part).
 **A person's message:**
 
 ```json
-{ "text": "hi @juniper", "to": ["npub1…"], "attachments": [ATTACHMENT] }
+{ "text": "hi @juniper", "to": ["npub1…"], "attachments": [ATTACHMENT], "reply_to": 12 }
 ```
 
 - `text`, at most 32 KiB (more is cut). `kind` absent, or `"message"`.
+- `reply_to`, optional: the seq on `chat` of the message it quotes (a
+  person's reply to it). The agent's runtime is handed the quoted
+  message's text (its first 4 KiB; a command as typed; a file without
+  words, its name), read from the chat as the turn starts, and whether it
+  is the agent's own; one that is not there, or is no message, quotes
+  nothing. Anything but a positive integer makes the body no message.
 - `to`, optional: the agents it is for. The page fills it from the
   `@mentions` it resolved (an agent of its owner's not in the chat yet is
   added first: "The page", below). Without `to`, an agent answers when the
@@ -153,13 +160,54 @@ KiB (more is cut); with any other option it is ignored, and without it
 such an option is answered as a question in words is (its runtime asks
 for them).
 
+**A command** (for an agent's runtime, from the agent's owner):
+
+```json
+{ "kind": "command", "command": "steer", "args": "use the blue one", "to": ["npub1…"] }
+```
+
+- `command`, `^[a-z0-9_-]{1,32}$`: one of the agent's runtime's commands,
+  its menu (`commands` on `work`, below). `args`, optional: its words,
+  trimmed, at most 32 KiB (more is cut). `to` as a message's; without it,
+  the lead. Another shape (a `command` that is not one, `args` not a
+  string, a `to` of no identities) is no command, and starts nothing.
+- Only the agent's owner commands it: anyone else's is passed over, as is
+  a command not on its menu. Nothing outside the menu reaches a runtime
+  as a command, and a message whose text starts with `/` is words, never
+  one (the bridge keeps it from reading as one).
+- How each is carried is its menu's (images/bridge, `runtime::How`):
+  - most are a **turn of their own**, waiting their turn as a message
+    does: the runtime is handed `/<command> <args>` as it is, and what it
+    answers is the turn's reply;
+  - `stop` stops the agent's running turn in the chat, whoever asked it,
+    and ends its waiting turns there (each its `turn.start`, then its
+    `turn.end` `stopped`; they never run); no turn of its own;
+  - `new` stops as `stop` does, then is a turn of its own: a new session
+    for this chat, the runtime's (Hermes keeps one per chat; the chat's
+    records stay);
+  - `queue`'s words are a message, a turn like any;
+  - `steer`'s words go into the agent's turn running in the chat at once,
+    no turn of their own and no record of the bridge's; with none
+    running, they are a message;
+  - `btw` is said beside whatever runs, no turn of its own;
+  - what the runtime answers a `steer` or a `btw` with is a message of
+    its own (a turn of the runtime's own, `work` below);
+  - `queue`, `steer` and `btw` with no words are each a turn of their
+    own (the runtime says how to use it).
+- A command its menu refuses for a word of its `args` (`--global`, for
+  Hermes' `model`: images/bridge, `relay/menu.rs`) gets both its records,
+  its `turn.end` an `error` saying why; the runtime never hears it.
+- Read once, as every record is (the bridge's cursor): one read again
+  after a restart starts nothing twice; one waiting its turn waits again
+  in the next life, still a command.
+
 Any other `kind` on `chat` is the page's own and is never a message.
 
 **Search.** A person's message and an agent's reply are what the
 shell's search finds (docs/api.md, The shell, Search): a body whose
 `kind` is absent or `"message"`, by its `text` alone (its first 4 KiB).
-No other record here is searched, Stop, prompt answers and everything on
-`work` included.
+No other record here is searched, Stop, prompt answers, commands and
+everything on `work` included.
 
 ## `work`
 
@@ -240,6 +288,22 @@ earlier life claimed and did not finish, `lost when the computer
 restarted`, and never runs it again), or it was refused (too many
 waiting).
 
+```json
+{ "kind": "commands", "agent": "npub1…",
+  "commands": [ { "name": "usage", "description": "Show token usage for this session" },
+                { "name": "steer", "description": "Inject a message after the next tool call (no interrupt)",
+                  "args": "What to tell the agent" } ] }
+```
+
+The agent's **menu**: the commands its runtime takes from its owner
+(above, "A command"), each its name, what it does, and what its words
+are (`args`, absent for one that takes none). Posted by the agent, as
+itself, with the id `cm:<life>`, as it first runs a turn in the chat in
+a life: once a life in a chat (posted again, a replay), and again in the
+next life, so the page's window of `work` holds it while the chat is used.
+The page takes an agent's latest, and only one whose `agent` is its poster.
+A runtime with no commands posts none.
+
 **After a lost turn.** The agent's next turn in that chat is told what
 was cut, once (docs/durable-computers.md, P5; docs/bridge.md, "The turn
 after a cut one is told"). The note is built from these records alone,
@@ -286,7 +350,8 @@ on its own side if it does.
 
 The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
-its last 1000, and lays them out in time: a person's message; an
+its last 1000 (each agent's menu among them), and lays them out in time:
+a person's message (or command); an
 agent's consecutive steps as one card; a prompt as a card whose buttons
 only `asks` may press (enabled for them alone), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
@@ -300,7 +365,27 @@ a turn runs with no draft nor open card, a working line does. It posts:
   the agents its `@mentions` name, when they name any (an owner's agent
   not in the chat is added first: "Your other agents", below); its files
   uploaded first, at most 8 of at most 25 MiB each, and its text cut to
-  32 KiB;
+  32 KiB; `reply_to`, the message its person chose Reply on (a person's
+  or an agent's), which the composer shows above what is typed (who, and
+  its first words; the x lets it go), and the message sent above its
+  bubble (a click shows the one it quotes);
+- a command, `{kind: "command", command, args?, to}`, with a fresh id as
+  a message's: text typed whole as `/<command> <words>` by the agent's
+  owner (`__members` names an agent's `owner`), when `<command>` is on
+  that agent's menu, sent to the agent working for them, else the lead.
+  For its owner, `/` at the start of the composer lists the agent's
+  commands whose names start with what follows, each with what it does
+  and what its words are; Tab or Enter writes the one picked, and Enter
+  on one typed whole that takes no words sends it. Anyone else's `/` is
+  words: a message. The page shows a command as typed;
+- while an agent's turn runs, a message to it waits its turn: the
+  composer says so (`Juniper is working: a message waits its turn`), and
+  the message is marked queued until its turn starts (no `turn.start`
+  names it while a turn of its agent that started before it runs; one
+  sent to the turn's asker just after the turn's own reply is taken for
+  that turn's answer, unmarked). For the agent's owner, when its menu has
+  `steer`, words typed then offer Steer beside Send: the words as
+  `/steer`, into the running turn now;
 - Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
   asker while it runs (the send circle is Stop then, until they type: then
   it sends);

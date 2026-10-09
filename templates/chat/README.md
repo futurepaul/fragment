@@ -6,17 +6,19 @@ its members. A chat's repo names the template; the platform's release
 serves the rest. `fragment.json` declares them (`kind: "chat"`):
 
 - `chat` holds what is said: people's messages, agents' replies, Stop,
-  and prompt answers. Anyone who can see the chat reads it; viewers and
-  up post to it.
-- `work` holds an agent's progress: its turns, steps, and prompts.
-  Viewers and up read it; only editors (the chat's agents) post there.
+  prompt answers, and an agent's owner's commands. Anyone who can see the
+  chat reads it; viewers and up post to it.
+- `work` holds an agent's progress: its turns, steps, and prompts, and
+  the commands its runtime takes (its menu). Viewers and up read it; only
+  editors (the chat's agents) post there.
 - `notify_reply`, a job `app.mjs` runs on a trigger for each record an
   agent of the chat posts on `chat`: it pushes the reply to the chat's
   people who are not looking at it.
 
 docs/chat-records.md is the contract its page and code read and write,
 and says how the page lays a chat out. The page is `site/`: `index.html`,
-`chat.js` (the chat, its voice memos and "Notify me"), `markdown.js`
+`chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
+and "Notify me"), `markdown.js`
 (agents' text as DOM, never as markup), `icons.js` (Lucide's paths;
 `LUCIDE-LICENSE.txt`), `tooltips.js`, and `chat.css`. Every URL in it is
 relative, so it works on a fragment's own host, under `/f/<name>/`, and

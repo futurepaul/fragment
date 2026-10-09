@@ -1194,8 +1194,9 @@ hermes.rs), against Hermes v0.21.6:
   Hermes' file tools to a project's `AGENTS.md`, `CLAUDE.md`, `SOUL.md` or
   `.cursorrules` (Hermes asks for these even under `/yolo`).
 - Not used: `approvals.mode: off`, which also runs every flagged command
-  unreviewed, and `/yolo` (the bridge keeps a leading `/` from reading as
-  a command; it would also run the desktop's driver unrestricted).
+  unreviewed, and `/yolo` (on no agent's menu, and a message's leading
+  `/` never reads as a command: docs/bridge.md, "Commands"; it would
+  also run the desktop's driver unrestricted).
 
 ### Bot Mode in our Hermes image
 

@@ -53,7 +53,8 @@ async fn a_reply() {
         let reply_record = w.records(&chat, "chat").into_iter().find(|x| x["body"]["turn"] == turn).expect("the reply");
         assert_eq!(reply_record["principal"], "npub1juniper", "the agent answers, never its owner");
         let work: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(work, vec!["turn.start", "turn.end"]);
+        // its menu, as it first runs a turn in the chat in this life (records::menu_id)
+        assert_eq!(work, vec!["turn.start", "commands", "turn.end"]);
         assert_eq!(w.bodies(&chat, "work", "turn.start")[0]["asker"], "npub1paul");
         assert_eq!(w.bodies(&chat, "work", "turn.end")[0]["outcome"], "idle");
     });
@@ -132,7 +133,7 @@ async fn tool_steps() {
         assert_eq!((steps[0]["tool"].as_str(), steps[0]["step"].as_u64(), steps[0]["ok"].as_bool(), steps[0]["turn"].as_str()), (Some("search"), Some(1), Some(true), Some(turn.as_str())));
         assert_eq!(steps[0]["text"], "Let me look.");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(ids, vec!["turn.start", "turn.step", "turn.end"]);
+        assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
     });
     bridge.stop().await;
 }
@@ -1120,6 +1121,63 @@ async fn a_message_during_a_hold_waits_for_the_next_life() {
         assert_eq!(starts_of(w, &chat, &t2).len(), 1);
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle");
         assert_eq!(replies(w, &chat).iter().filter(|r| r["turn"] == t2.as_str()).count(), 1, "answered once");
+    });
+    bridge.stop().await;
+}
+
+/// Goal: the agent's owner's commands (docs/chat-records.md, `{kind:
+/// "command"}`) through the whole bridge with the scripted agent: its menu
+/// on `work` as it first runs in the chat, a command a turn of its own
+/// (`ran /usage`), `/steer` into the running turn (no turn of its own, its
+/// words in that turn's reply), `/btw` answered as a message of its own;
+/// a message quoting another (`reply_to`) hands the agent the quoted text,
+/// read from the chat. Invalid: another person's command starts nothing.
+#[tokio::test]
+async fn commands_and_quotes() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("commands");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let reply_to = |w: &World, turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn);
+    let starts = |w: &World, seq: u64| w.bodies(&chat, "work", "turn.start").into_iter().filter(|s| s["cause"]["seq"] == seq).count();
+
+    let cmd = fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "usage" }));
+    let t = turn_of("juniper", &chat, seq(&cmd));
+    fake.until(WAIT, "the command's reply", |w| reply_to(w, &t).is_some()).await;
+    fake.with(|w| {
+        assert_eq!(reply_to(w, &t).unwrap()["text"], "ran /usage");
+        let menus: Vec<Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["kind"] == "commands").collect();
+        assert_eq!(menus.len(), 1, "its menu once: {menus:?}");
+        assert_eq!(menus[0]["principal"], "npub1juniper", "posted as the agent");
+        assert_eq!(menus[0]["body"], records::commands("npub1juniper", fragment_bridge::runtime::script::MENU));
+    });
+
+    // another person's command is passed over
+    let theirs = fake.say(&chat, &person("skyler"), json!({ "kind": "command", "command": "usage" }));
+
+    // a quote of the agent's reply: the quoted text, read from the chat
+    let answered = fake.with(|w| w.records(&chat, "chat").into_iter().find(|r| r["body"]["turn"] == t.as_str()).unwrap()["seq"].as_u64().unwrap());
+    let quoting = fake.say(&chat, &person("paul"), json!({ "text": "that one", "reply_to": answered }));
+    let tq = turn_of("juniper", &chat, seq(&quoting));
+    fake.until(WAIT, "the quoting message's reply", |w| reply_to(w, &tq).is_some()).await;
+    fake.with(|w| assert_eq!(reply_to(w, &tq).unwrap()["text"], "echo: [paul] that one (quoting itself: ran /usage)"));
+
+    // /steer into a running turn, then /btw beside it
+    let waiting = fake.say(&chat, &person("paul"), json!({ "text": "steer-me please" }));
+    let tw = turn_of("juniper", &chat, seq(&waiting));
+    fake.until(WAIT, "the turn waiting to be steered", |w| w.drafts.iter().any(|d| d.2 == tw && d.3.as_deref() == Some("waiting to be steered…"))).await;
+    let btw = fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "btw", "args": "which file?" }));
+    fake.until(WAIT, "the side question's answer", |w| replies(w, &chat).iter().any(|r| r["text"] == "aside: /btw which file?")).await;
+    let steer = fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "steer", "args": "use blue" }));
+    fake.until(WAIT, "the steered turn's reply", |w| reply_to(w, &tw).is_some()).await;
+    fake.with(|w| {
+        assert_eq!(reply_to(w, &tw).unwrap()["text"], "echo: [paul] steer-me please (steered: use blue)");
+        for (what, r) in [("the steer", &steer), ("the side question", &btw), ("another person's command", &theirs)] {
+            assert_eq!(starts(w, seq(r)), 0, "{what} is no turn of its own");
+        }
+        let aside = replies(w, &chat).into_iter().find(|r| r["text"] == "aside: /btw which file?").unwrap();
+        assert_ne!(aside["turn"], tw.as_str(), "the side question's answer is a message of its own");
     });
     bridge.stop().await;
 }

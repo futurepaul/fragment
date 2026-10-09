@@ -127,8 +127,9 @@ pub enum FromGateway {
 pub enum Action {
     /// A new message: a reply when it answers a message (`reply_to`, or
     /// the metadata's `reply_to_message_id`, or a final's `notify`), else
-    /// its tool progress.
-    Send { chat: String, content: String, reply: bool },
+    /// its tool progress. `reply_to`: the message it answers, when it names
+    /// one.
+    Send { chat: String, content: String, reply: bool, reply_to: Option<String> },
     /// The whole text of a message it sent, again.
     Edit { chat: String, message_id: String, content: String },
     /// A message it sent, taken back.
@@ -191,8 +192,9 @@ fn action(a: &Value) -> Action {
     let op = s("op");
     match op.as_str() {
         "send" => {
-            let reply = a["reply_to"].is_string() || a["metadata"]["reply_to_message_id"].is_string() || a["metadata"]["notify"] == json!(true);
-            Action::Send { chat: s("chat_id"), content: s("content"), reply }
+            let reply_to = a["reply_to"].as_str().or_else(|| a["metadata"]["reply_to_message_id"].as_str()).map(str::to_string);
+            let reply = reply_to.is_some() || a["metadata"]["notify"] == json!(true);
+            Action::Send { chat: s("chat_id"), content: s("content"), reply, reply_to }
         }
         "edit" => Action::Edit { chat: s("chat_id"), message_id: s("message_id"), content: s("content") },
         "delete" => Action::Delete { chat: s("chat_id"), message_id: s("message_id") },
@@ -332,18 +334,38 @@ pub struct Inbound<'a> {
     /// `gateway/run_inbound.py`, `_prefix_inbound_sender_context`): never
     /// the person's words, so never attributed to them.
     pub context: Option<&'a str>,
+    /// Its text is a command of the runtime's menu (relay/menu.rs), said as
+    /// it is; a message's never reads as one.
+    pub command: bool,
+    /// The message it quotes: Hermes' quoted reply (`reply_to_message_id`,
+    /// `reply_to: {text, is_own}`), which it renders before the message as
+    /// `[Replying to: "<text>"]` (`[Replying to your previous message: …]`
+    /// for its own; `gateway/run_inbound.py`,
+    /// `_prepend_inbound_reply_context`).
+    pub quote: Option<&'a crate::runtime::Quote>,
 }
 
 /// A delivery, buffered until the gateway acks it: a group message, so
 /// Hermes reads it as `[name] …` in the chat's one session. A leading `/`
-/// is a command to Hermes (`/new` would reset the session), so it is kept
-/// from reading as one.
+/// is a command to Hermes (`/new` would reset the session), so a message's
+/// is kept from reading as one: only a command of the menu, which the
+/// agent's owner sent as one (`{kind: "command"}`), is said as it is.
 pub fn inbound(m: &Inbound, buffer_id: &str) -> String {
-    let text = match m.text.trim_start().starts_with('/') {
+    let text = match !m.command && m.text.trim_start().starts_with('/') {
         true => format!("\u{200b}{}", m.text),
         false => m.text.to_string(),
     };
     line(event(m, buffer_id, &text, None))
+}
+
+/// The answer to a side question (`/btw`, relay/menu.rs), which Hermes sends
+/// as a message answering nothing once its auxiliary call is done: its
+/// first line `💬 /btw: "<question>"` (`gateway.btw.answer`), or `❌ /btw
+/// failed: …` (`gateway.btw.failed`), the glyph and `/btw` in every locale
+/// of v0.21.6. A message of its own, never a running turn's progress.
+pub fn btw_answer(text: &str) -> bool {
+    let first = text.trim_start().lines().next().unwrap_or("");
+    (first.starts_with('💬') || first.starts_with('❌')) && first.contains("/btw")
 }
 
 /// A prompt's answer: a structured `prompt_response` Hermes resolves
@@ -375,6 +397,10 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
     // one item with no source: Hermes renders it as the text alone
     if let Some(note) = m.context.filter(|n| !n.trim().is_empty()) {
         event["context"] = json!([{ "text": note }]);
+    }
+    if let Some(q) = m.quote {
+        event["reply_to_message_id"] = json!(q.id);
+        event["reply_to"] = json!({ "text": q.text, "is_own": q.own });
     }
     if let Some(pr) = prompt_response {
         event["prompt_response"] = pr;
@@ -520,9 +546,9 @@ mod tests {
         assert_eq!(got[3], Ok(FromGateway::GoingIdle));
         assert_eq!(got[4], Ok(FromGateway::Other("interrupt".into())));
         let out = |a: Value| frames(&json!({ "type": "outbound", "requestId": "r1", "action": a }).to_string()).remove(0).expect("a frame");
-        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "Hi", "reply_to": "12" })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "Hi".into(), reply: true } });
-        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "💻 terminal", "reply_to": null, "metadata": {} })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "💻 terminal".into(), reply: false } });
-        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "x", "metadata": { "notify": true } })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "x".into(), reply: true } });
+        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "Hi", "reply_to": "12" })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "Hi".into(), reply: true, reply_to: Some("12".into()) } });
+        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "💻 terminal", "reply_to": null, "metadata": {} })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "💻 terminal".into(), reply: false, reply_to: None } });
+        assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "x", "metadata": { "notify": true } })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "x".into(), reply: true, reply_to: None } });
         assert_eq!(out(json!({ "op": "draft", "chat_id": "c", "draft_id": 3, "content": "He", "final": false })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Draft { chat: "c".into(), draft_id: 3, content: "He".into(), done: false } });
         let p = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.12", "options": [{ "id": "once", "label": "Allow Once", "style": "primary" }, { "id": "deny", "label": "Deny" }] }));
         let FromGateway::Outbound { action: Action::Prompt { prompt_id, options, .. }, .. } = p else { panic!("a prompt") };
@@ -550,7 +576,7 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None };
+        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None, command: false, quote: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");
@@ -569,6 +595,27 @@ mod tests {
         assert_eq!(s, json!({ "type": "interrupt_inbound", "session_key": "agent:juniper--k3x9:relay:group:talk--k3x9/juniper--k3x9", "chat_id": "talk--k3x9/juniper--k3x9" }));
         assert_eq!(session_key("default", "c"), "agent:main:relay:group:c");
         assert_eq!(session_key("main", "c"), "agent:main~:relay:group:c");
+        // a command of the menu, sent as one by the agent's owner, is said as it is
+        let cmd: Value = serde_json::from_str(inbound(&Inbound { text: "/usage", command: true, media: &[], ..m.clone() }, "b6").trim_end()).unwrap();
+        assert_eq!(cmd["event"]["text"], "/usage");
+        // a quote is Hermes' quoted reply: the id it answers, and the text
+        let q = crate::runtime::Quote { id: "t9".into(), text: "the plan, step 1".into(), own: true };
+        let quoted: Value = serde_json::from_str(inbound(&Inbound { text: "do that one", quote: Some(&q), media: &[], ..m.clone() }, "b7").trim_end()).unwrap();
+        assert_eq!((&quoted["event"]["reply_to_message_id"], &quoted["event"]["reply_to"]), (&json!("t9"), &json!({ "text": "the plan, step 1", "is_own": true })));
+        assert!(i["event"].get("reply_to").is_none() && i["event"].get("reply_to_message_id").is_none(), "no quote, none");
+    }
+
+    /// A side question's answer is read by its glyph line, in every
+    /// locale of v0.21.6 (`💬 /btw: "…"`, `💬 /btw : « … »`, `💬 /btw:「…」`);
+    /// its start (`💬 Side question: …`) answers the question's own message.
+    #[test]
+    fn a_side_questions_answer() {
+        for yes in ["💬 /btw: \"which file?\"\n\nmain.rs", "💬 /btw : « quel fichier »\n\nmain.rs", "  💬 /btw:「どの」\n\nmain.rs", "❌ /btw failed: \"x\"\nno model", "❌ A /btw sikertelen: \"x\"\nno"] {
+            assert!(btw_answer(yes), "{yes}");
+        }
+        for no in ["💬 Side question: \"which file?\"", "/btw which file?", "echo: 💬 /btw", "❌ the turn failed", "💬 hello\n/btw"] {
+            assert!(!btw_answer(no), "{no}");
+        }
     }
 
     #[test]
