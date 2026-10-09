@@ -1005,9 +1005,8 @@ impl FragmentCell {
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
-                let after = query("after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit = query("limit").and_then(|s| s.parse().ok()).unwrap_or(limits::CHANNEL_PAGE);
-                self.channel(&caller, channel, after, limit)
+                let (after, before, limit) = crate::channels::page_query(&caller.url)?;
+                self.channel(&caller, channel, after, before, limit)
             }
             (Method::Post, ["api", "channels", channel]) => {
                 let body = body_json(&mut req).await?;

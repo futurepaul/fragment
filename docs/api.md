@@ -791,7 +791,7 @@ Agents have no email: they are added by npub (`PUT members`).
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
 | `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in) |
-| `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
+| `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (at most 1000 a page, always ascending by seq). `after` (default 0) reads forwards; `before` reads the nearest records with seq strictly less than its cursor. Pass `next` as the same cursor for the next page: the last seq forwards, the first seq backwards (the input cursor if empty). Supplying both cursors, a negative or malformed cursor, or a malformed limit is 400. |
 | `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401). A poster holding only `public` spends a public call (Serving, `__op`) |
 | `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `{turn, text}` → `{ok}`: a record its poster is writing, its whole text so far (at most 64 KiB), shown to the sockets following the channel at once (a `draft` frame on `__live`) and never stored; `text: null` stops it. The record its poster then writes with the same `turn` replaces it on a page. At most 10 a second across the fragment (429 past that: the poster's next carries the whole text anyway); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
 
@@ -1487,6 +1487,7 @@ API answers on the platform's host):
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}`, the first added first, as `GET /api/f/{name}/members` answers it (a chat's agents, its lead the first agent added) |
+| `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: the same page and exclusive cursors as `GET /api/f/{name}/channels/{channel}`, using this origin's session or share link |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
@@ -1586,9 +1587,13 @@ record comes back, and the same id again is the same record), `live(op, input,
 onResult, onError?)` (re-runs a query after every change, over the socket
 when it is open and over HTTP when not, or when its principal's budget is
 spent; one run at a time, however many changes came), `subscribe(
-channel, onRecord, {after?, last?, onDraft?})` (pages through the backlog, then
+channel, onRecord, {after?, last?, onDraft?, onReady?})` (pages through the backlog, then
 follows live; after a reconnect it resumes after the last record;
-`onDraft` hears the channel's drafts while it is live),
+`onDraft` hears the channel's drafts while it is live; `onReady({next})`
+hears when the backlog is caught up, including after reconnect),
+`read(channel, {after?, before?, limit?})` (one page through `__channel`,
+independent of a live subscription's cursor; `before` reads backwards,
+with records in ascending order and `next` the cursor for an older page),
 `presence.set(data)` (changes within 150 ms go as one, the latest),
 `presence.on(fn)` (called with everyone here now, and on each change),
 `blob(file, {name?, type?})` (a File or Blob uploaded as one of the

@@ -162,7 +162,7 @@ export function mount(root) {
   root.classList.add("fragment-chat");
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
-    <div class="scroll" id="scroll"><div class="column" id="messages"></div></div>
+    <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
     <div class="composer-wrap">
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
       <div class="here" id="here" hidden></div>
@@ -206,8 +206,57 @@ export function mount(root) {
   };
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
-  // a record's arrival: ties of `at` across the two channels keep it
-  let arrivals = 0;
+  // Each channel's seq keeps history ordered even when a page arrives
+  // backwards and several records have the same timestamp.
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false };
+  const workSeen = new Set();
+  function remember(channel, record) {
+    const first = history.first[channel];
+    history.first[channel] = first === null ? record.seq : Math.min(first, record.seq);
+    if (channel === "work") history.workAt = Math.min(history.workAt, record.at);
+  }
+
+  async function historyReady() {
+    if (history.first.chat === null) return;
+    try {
+      const page = await fragment.read("chat", { before: history.first.chat, limit: 1 });
+      $("earlier").hidden = !page.records.length;
+    } catch {
+      // A failed availability check must still let the reader try.
+      $("earlier").hidden = false;
+    }
+  }
+  $("earlier").onclick = async () => {
+    if (history.loading) return;
+    history.loading = true;
+    const button = $("earlier");
+    button.disabled = true;
+    button.textContent = "Loading earlier messages…";
+    $("history-error").textContent = "";
+    stuck = false;
+    try {
+      const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
+      for (const record of page.records) onChat(record);
+      button.hidden = page.records.length < CHAT_LAST;
+      const oldest = Math.min(...state.chat.map((m) => m.at));
+      // Work is paged independently: one turn can write many records, and
+      // a page boundary must not leave its earlier progress behind. Both
+      // postable channels retain at most 10,000 records (ten work pages).
+      for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
+        const work = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
+        for (const record of work.records) onWork(record);
+        history.workDone = work.records.length < WORK_LAST;
+      }
+    } catch (err) {
+      button.hidden = false;
+      $("history-error").textContent = `Could not load earlier messages: ${err.message}. Try again.`;
+    } finally {
+      history.loading = false;
+      button.disabled = false;
+      button.textContent = "Load earlier messages";
+      schedule();
+    }
+  };
 
   // ---- who: names and pictures from the fragment (`__people`), asked in
   // batches; an agent by its name, a person by email ----
@@ -332,11 +381,12 @@ export function mount(root) {
   function onChat(record) {
     if (state.seen.has(record.seq)) return;
     state.seen.add(record.seq);
+    remember("chat", record);
     let body = record.body;
     // a bare string is a message with that text
     if (typeof body === "string") body = { text: body };
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
-    const n = ++arrivals;
+    const n = record.seq;
     if (body.kind === "prompt_response") {
       // the first answer wins (the agent closes the card with it)
       if (typeof body.prompt === "string" && !state.answers.has(body.prompt)) state.answers.set(body.prompt, { option: body.option, by: record.principal });
@@ -359,9 +409,12 @@ export function mount(root) {
   }
 
   function onWork(record) {
+    if (workSeen.has(record.seq)) return;
+    workSeen.add(record.seq);
+    remember("work", record);
     const b = record.body;
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
-    const n = ++arrivals;
+    const n = record.seq;
     const t = turnOf(b.turn);
     t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
     touch(t, record.at, n);
@@ -486,6 +539,8 @@ export function mount(root) {
 
   function render() {
     const col = $("messages");
+    const anchor = !stuck ? [...col.children].find((node) => node.getBoundingClientRect().bottom > $("scroll").getBoundingClientRect().top) : null;
+    const top = anchor?.getBoundingClientRect().top;
     const used = new Set();
     const shown = [];
     for (const it of timeline()) {
@@ -509,6 +564,7 @@ export function mount(root) {
     renderChrome();
     renderHere();
     if (stuck) toEnd();
+    else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
   }
 
   // The chat's color (its lead's), its name, Stop, and the placeholder.
@@ -1416,7 +1472,7 @@ export function mount(root) {
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft });
+  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: historyReady });
   readMembers();
   fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
@@ -1427,7 +1483,7 @@ export function mount(root) {
     state.me = hello;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
-    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST });
+    if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: () => { history.workReady = true; } });
     const note = $("note");
     note.replaceChildren();
     if (!canPost()) {
