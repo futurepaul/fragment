@@ -529,7 +529,11 @@ impl FragmentCell {
                     "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND status = 'held' AND finished_at > ?",
                     vec![op.into(), SqlStorageValue::Integer((now - limits::AUTO_PAUSE_WINDOW_MS).max(since))],
                 )?;
-                if held >= limits::AUTO_PAUSE_HELD {
+                // only installed code says an operation is gone, and one it
+                // no longer has is paused no more (`forget_undeclared_pauses`):
+                // a run of it held after the install pauses nothing
+                let gone = matches!(self.declared(op), Err(e) if e.code == ErrorCode::UnknownOperation);
+                if held >= limits::AUTO_PAUSE_HELD && !gone {
                     let why = format!("{held} held runs in {} minutes; last: {}", limits::AUTO_PAUSE_WINDOW_MS / 60_000, clip(&e));
                     self.set_paused(op, true, "auto", &why)?;
                 }
