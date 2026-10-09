@@ -4,7 +4,8 @@
 // its replies' kind `talk`, adapted only where the mind differs: the Turns
 // section names the web's, the apps' and `computer` in the gist's voice
 // instead of subagents, zoom's lines name files and a computer task, a
-// paragraph says what starts each message (the chat and the persona), and
+// paragraph says what starts each message (the chat and the persona), the
+// view's paragraph says how an import not summarized yet shows, and
 // the computers paragraph is the mind's hands. The person's about-me
 // follows it. Nothing here changes from call to call, for any persona or
 // thread (no date, no state, no persona: those start each message, §6): the
@@ -34,7 +35,10 @@ The summaries form a binary tree: each message is compressed into a line (a
 short message is its own line), then adjacent lines are merged in pairs, again
 and again. So recent lines cover one message each, and older lines cover more. A
 message not summarized yet shows as "(not summarized yet: zoom it)". A text too
-long for one message is split over several in a row.
+long for one message is split over several in a row. Chats the user imported
+from other agents are summarized after the live chat: until they are, a stretch
+of them shows as one line, "(messages a–b: imported chats, not summarized yet;
+zoom(id, 1) gives one whole)".
 
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
