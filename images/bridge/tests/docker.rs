@@ -159,6 +159,13 @@ impl Container {
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
     }
 
+    /// Restarted, its disk kept: as a computer's next start after a deploy
+    /// or a sleep finds its `/data`.
+    fn restart(&self) {
+        let out = Command::new(docker()).args(["restart", "-t", "20", &self.id]).output().expect("docker runs");
+        assert!(out.status.success(), "docker restart: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// SIGTERM, as the Computer DO's sleep sends it: how long until it is
     /// gone, and its exit code.
     fn sigterm(&self) -> (Duration, i64) {
@@ -2468,6 +2475,23 @@ async fn bots_message_each_other() {
     assert!(jsaid.len() == 1 && jsaid[0].contains("pong"), "juniper passes maple's message on once, and her woken turn says nothing: {jsaid:?}");
     assert!(msaid.is_empty(), "maple's woken turn says nothing: {msaid:?}");
     assert!(fake.with(|w| seq_of(w, &jchat, "npub1maple", "pong").is_some()), "maple's message back is a hand-off in juniper's chat");
+
+    // After a restart (p5, 2026-10-09: a deploy, then the first message),
+    // maple's answer still comes back: Hermes reads juniper's session back
+    // from disk, with no live adapter, and reaches it through the relay
+    // only because her profile is routed (bots.rs, `profile_routes`)
+    let routes = c.exec_out(&["cat", "/etc/hermes/config.yaml"]);
+    assert!(routes.contains("profile_routes:\n  - name: \"juniper--k3x9\"\n    platform: \"relay\"\n    profile: \"juniper--k3x9\"\n    chat_id: \"juniper-chat--h6j7/juniper--k3x9\"\n"), "each bot's chat routed to its profile: {routes}");
+    let started = c.logs().matches("\"botmode.started\"").count();
+    c.restart();
+    let t = Instant::now();
+    // bounded: three minutes
+    while !c.logs().split("\"botmode.started\"").nth(started + 1).is_some_and(|after| after.matches("\"botmode.owned\"").count() >= 2) {
+        assert!(t.elapsed() < Duration::from_secs(180), "the keeper to hold both Bot Chats again: {}", told(&fake, &jchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    asked(&fake, &jchat, &c, "dm: maple: ping after a restart", |w, turn| reply(w, &jchat, turn).is_some()).await;
+    within(&fake, &jchat, &c, 180_000, "juniper to say maple's answer after a restart", |w| w.bodies(&jchat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("relayed:") && t.contains("ping after a restart")))).await;
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

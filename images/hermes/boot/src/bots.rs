@@ -148,6 +148,33 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
     json!({ "bots": bots }).to_string()
 }
 
+/// Hermes' `profile_routes`, for the gateway's config (the managed
+/// overlay, main.rs): each agent whose Bot Chat is found, that chat routed
+/// to its profile. No route picks a message's profile (the relay names it
+/// on each, which wins); a route makes its profile one the gateway reaches
+/// through the default profile's relay after a restart (v0.21.6:
+/// `gateway/authz_mixin.py`, `_is_shared_bot_satellite`). A session the
+/// gateway reads back from disk holds no live adapter, and a profile has
+/// none of its own, so without one a background process's completion in
+/// it, message_agent's reply among them, was retried unsent for ever (p5,
+/// 2026-10-09). The gateway reads them as it starts: an agent come since
+/// has its route at the next start, and its sessions until then are this
+/// gateway's own, which need none.
+pub fn profile_routes(agents: &[Agent], chats: &BTreeMap<String, String>) -> String {
+    let routes: Vec<String> = agents
+        .iter()
+        .filter_map(|a| {
+            let profile = wire::profile(&a.fragment);
+            let chat = wire::chat_id(chats.get(&a.fragment)?, &a.fragment);
+            Some(format!("  - name: {}\n    platform: \"relay\"\n    profile: {}\n    chat_id: {}\n", q(&profile), q(&profile), q(&chat)))
+        })
+        .collect();
+    if routes.is_empty() {
+        return String::new();
+    }
+    format!("profile_routes:\n{}", routes.concat())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +299,20 @@ mod tests {
         assert_eq!(f["bots"].as_array().map(Vec::len), Some(2), "maple, with no chat found, is left out");
         assert_eq!(f["bots"][1]["chat"], "fred-chat--b3c4");
         assert_eq!(bots_file(&[], Path::new("/data/hermes"), &chats), r#"{"bots":[]}"#);
+    }
+
+    /// Valid: each agent whose Bot Chat is found, that chat (as the relay
+    /// names it to Hermes) routed to its profile. An agent with none found
+    /// has no route; with none at all, no key.
+    #[test]
+    fn each_bot_chat_is_routed_to_its_profile() {
+        let chats: BTreeMap<String, String> = [("juniper--k3x9".to_string(), "juniper-chat--h6j7".to_string()), ("fred--k3x9".into(), "fred-chat--b3c4".into())].into();
+        let agents = [agent("juniper", "Juniper"), agent("maple", "Maple"), agent("fred", "Fred")];
+        assert_eq!(
+            profile_routes(&agents, &chats),
+            "profile_routes:\n  - name: \"juniper--k3x9\"\n    platform: \"relay\"\n    profile: \"juniper--k3x9\"\n    chat_id: \"juniper-chat--h6j7/juniper--k3x9\"\n  - name: \"fred--k3x9\"\n    platform: \"relay\"\n    profile: \"fred--k3x9\"\n    chat_id: \"fred-chat--b3c4/fred--k3x9\"\n"
+        );
+        assert_eq!(profile_routes(&agents[1..2], &chats), "", "maple, with no chat found, has none");
+        assert_eq!(profile_routes(&[], &chats), "");
     }
 }
