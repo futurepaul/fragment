@@ -409,6 +409,16 @@ words (`turn.asked`), its composer saying what they type answers it
 ("Your answer for Juniper"), or whose answer it waits for, to anyone
 else.
 
+Commentary uses the replies' safe markdown, smaller and muted; a long note
+folds at a whole block or sentence and expands on request. A step's line
+has a check for `ok: true`, an error mark for `ok: false`, or a spinner
+without a result; an `excerpt` shows below it, with failures in red. The
+posting agent's own `/data/work/<agent>/home/` shows as `~/`, its workspace
+as `work/`, and `/data/hermes/managed-skills/` as `skills/`; the full
+arguments stay in a title on their text. Paths wrap to two lines before
+directories are shortened in the middle, keeping the filename. These
+rules also apply to steps without a category.
+
 Load earlier messages reads older pages of both channels, keeping the
 visible message in place and the live cursor at its end. When scrolled
 up, Jump to latest counts new messages and returns to the end. Replies

@@ -710,6 +710,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let sidebar = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.getElementById('sidebar').getBoundingClientRect().width > 0", wait);
     s.ok("at a desktop's width the sidebar shows beside the chat", sidebar, "");
+    s.ok("the chat frame's accessible name cannot show a tooltip over its contents; the agent name carries it", b.eval(&page, "(() => { const f = [...document.querySelectorAll('#frames iframe')].find(f => !f.hidden); const n = document.getElementById('chat-title'); return !!f && !f.hasAttribute('title') && f.getAttribute('aria-label') === n.textContent && n.title === n.textContent; })()")? == true, "");
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
 
     // a second agent, from the sidebar

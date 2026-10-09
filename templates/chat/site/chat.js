@@ -123,6 +123,69 @@ export function stepSays(s) {
   return { icon, verb, args };
 }
 
+// Only the posting agent's own workspace is home. Other agents' paths
+// remain distinct; the full arguments stay in the line's title.
+function shortStepArgs(text, agent) {
+  return text.replace(/\/data\/work\/([^/\s]+)\/(home\/)?/g, (path, owner, home) => owner === agent ? (home ? "~/" : "work/") : path)
+    .replaceAll("/data/hermes/managed-skills/", "skills/");
+}
+
+// Keep a path's beginning and its filename, removing directories first.
+// Arguments are bounded by the record; no tool name or shell syntax is parsed.
+function middlePaths(text, room) {
+  return text.replace(/(^|[\s=("'`])((?:~\/|\/|work\/|skills\/)[^\s"'`<>]+)/g, (match, before, path) => {
+    if (path.length <= room) return match;
+    const slash = path.lastIndexOf("/");
+    const tail = path.slice(slash);
+    if (slash <= 0 || tail.length + 2 >= path.length) return match;
+    const head = path.indexOf("/") + 1;
+    return `${before}${path.slice(0, Math.max(head, room - tail.length - 1))}…${tail}`;
+  });
+}
+
+// Fit after layout and again on resize/open. Two lines are available before
+// any directories disappear, including on phones; filenames stay at the end.
+function fitStepArgs(node) {
+  const text = node.dataset.short;
+  node.textContent = text;
+  if (!node.clientWidth) return; // a folded card is measured when opened
+  const height = Number.parseFloat(getComputedStyle(node).lineHeight) * 2 + 1;
+  if (node.scrollHeight <= height) return;
+  let low = 1, high = text.length;
+  while (low < high) {
+    const room = Math.ceil((low + high) / 2);
+    node.textContent = middlePaths(text, room);
+    if (node.scrollHeight <= height) low = room;
+    else high = room - 1;
+  }
+  node.textContent = middlePaths(text, low);
+}
+
+// A complete first block or sentence, cloned from safe DOM. Range preserves
+// emphasis and code spans without slicing markdown delimiters or a sentence.
+function notePreview(body) {
+  const first = body.firstElementChild;
+  if (!first) return document.createDocumentFragment();
+  if (first.textContent.length <= 160 && body.children.length > 1) return first.cloneNode(true);
+  if (first.nodeName !== "P") return el("span", null, "Commentary");
+  const sentence = [...new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(first.textContent)][0]?.segment;
+  if (!sentence || sentence.length >= body.textContent.length) return el("span", null, "Commentary");
+  const range = document.createRange();
+  range.setStart(first, 0);
+  const walker = document.createTreeWalker(first, NodeFilter.SHOW_TEXT);
+  let left = sentence.trimEnd().length;
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (left <= text.length) {
+      range.setEnd(text, left);
+      const preview = el("p");
+      preview.append(range.cloneContents());
+      return preview;
+    }
+    left -= text.length;
+  }
+  return first.cloneNode(true);
+}
+
 /// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
 export function essence(type) {
   return String(type ?? "").split(";")[0].trim().toLowerCase();
@@ -264,6 +327,7 @@ export function mount(root) {
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
+    expandedNotes: new Set(), // turn:step, a commentary someone expanded
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
     failed: new Map(), // post id -> the message and its transport error
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
@@ -926,11 +990,49 @@ export function mount(root) {
   // A turn's steps, one card: open while it works, saying what it does now
   // ("Running: npm test"), folded once done ("Worked through N steps")
   // unless someone opened it. Each step is its icon, its verb and its
-  // arguments, then what came of it.
+  // arguments, with a compact status and any useful result.
+  function stepNote(t, s) {
+    const note = el("div", "step-text");
+    const body = el("div", "md");
+    body.append(renderMarkdown(s.text));
+    if (body.textContent.length <= 160) { openBeside(body); note.append(body); return note; }
+    const key = `${t.id}:${s.step}`;
+    const preview = el("div", "md note-preview");
+    preview.append(notePreview(body));
+    openBeside(preview);
+    openBeside(body);
+    const button = el("button", "note-expand");
+    button.type = "button";
+    const update = () => {
+      const expanded = state.expandedNotes.has(key);
+      body.hidden = !expanded;
+      preview.hidden = expanded;
+      button.textContent = expanded ? "Show less" : "…";
+      button.setAttribute("aria-label", expanded ? "Collapse commentary" : "Expand commentary");
+      button.setAttribute("aria-expanded", String(expanded));
+    };
+    button.onclick = () => {
+      if (state.expandedNotes.has(key)) state.expandedNotes.delete(key);
+      else state.expandedNotes.add(key);
+      update();
+    };
+    update();
+    note.append(preview, body, button);
+    return note;
+  }
+
+  let stepWidth = 0;
+  const stepWidths = new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width === stepWidth) return;
+    stepWidth = entry.contentRect.width;
+    for (const args of $("messages").querySelectorAll(".step-args")) fitStepArgs(args);
+  });
+  stepWidths.observe($("messages"));
   function stepsNode(t, steps) {
     const key = `s:${t.id}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
-    const sig = `${steps.length}|${live}`;
+    const agent = profiles.get(t.agent)?.fragment ?? null;
+    const sig = JSON.stringify([steps, live, agent]);
     return [
       key,
       cached(key, sig, () => {
@@ -940,25 +1042,42 @@ export function mount(root) {
         d.ontoggle = () => {
           if (d.open !== live) state.toggled.set(key, d.open);
           else state.toggled.delete(key);
+          if (d.open) for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args);
         };
         const summary = el("summary");
         summary.innerHTML = svg(live ? "loader" : "wrench", live ? "spin" : "");
         const now = stepSays(steps[steps.length - 1]);
-        summary.append(el("span", "grow", live ? `${now.verb}${now.args ? `: ${now.args}` : ""}` : `Worked through ${plural(steps.length, "step")}`));
+        const heading = el("span", "grow", live ? `${now.verb}${now.args ? `: ${shortStepArgs(now.args, agent)}` : ""}` : `Worked through ${plural(steps.length, "step")}`);
+        if (live && now.args) heading.title = `${now.verb}: ${now.args}`;
+        summary.append(heading);
         summary.insertAdjacentHTML("beforeend", svg("chevron", "chev"));
         d.append(summary);
         for (const s of steps) {
-          if (s.text) d.append(el("div", "step-text", s.text));
+          if (s.text) d.append(stepNote(t, s));
           const step = el("div", `step${s.ok === false ? " error" : ""}`);
           const says = stepSays(s);
           step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
           const name = el("div", "step-name");
           name.innerHTML = svg(says.icon);
-          name.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
-          if (says.args) name.append(el("code", "step-args", says.args));
-          step.append(name, el("pre", null, s.excerpt || (s.ok === false ? "failed" : "done")));
+          const label = el("div", "step-label");
+          label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
+          if (says.args) {
+            const args = el("code", "step-args", shortStepArgs(says.args, agent));
+            args.title = says.args;
+            args.dataset.short = args.textContent;
+            label.append(args);
+          }
+          const status = s.ok === false ? "failed" : s.ok === true ? "done" : "running";
+          const mark = el("span", `step-status ${status}`);
+          mark.setAttribute("role", "img");
+          mark.setAttribute("aria-label", status);
+          mark.innerHTML = svg(status === "failed" ? "x" : status === "done" ? "check" : "loader", status === "running" ? "spin" : "");
+          name.append(label, mark);
+          step.append(name);
+          if (s.excerpt) step.append(el("pre", "step-result", s.excerpt));
           d.append(step);
         }
+        requestAnimationFrame(() => { for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args); });
         return d;
       }),
     ];
