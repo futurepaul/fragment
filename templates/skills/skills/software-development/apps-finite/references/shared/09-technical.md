@@ -39,6 +39,12 @@ build: build and test before deploying.
   before you pass it.
 - `app.mjs` and `applib/` together are at most 4 MiB and 64 modules.
 - Use relative asset paths inside `site/`.
+- Apps default to no header, title bar, banner, hero, or page-title
+  heading unless the human asks. The shell already names the app; start
+  with useful content. Content and section headings are fine.
+- A page may link `./__fragment.css` for the platform's theme and base
+  styles, then add its own rules. Design for a narrow pane (about 380 px)
+  as well as phones and desktop.
 - External links should use `target="_blank" rel="noopener noreferrer"`.
 - Install missing development tools in the project or your home rather
   than asking for host changes.
@@ -86,7 +92,8 @@ If the app needs state, webhooks, schedules or AI, read `19-backend.md`.
 - Research informed the design.
 - Typography, color, spacing, and assets feel intentional.
 - Interactive or data-heavy views were checked in a real browser.
-- Mobile and desktop both look deliberate.
+- Narrow pane, mobile and desktop look deliberate, in light and dark;
+  primary actions work with the keyboard.
 - The project's own tests and build passed before the deploy.
 - The live link was tested after the deploy, not only a local preview.
 - Visibility matches the human's explicit request.

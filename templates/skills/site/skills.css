@@ -14,8 +14,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text-primary); }
 body { font: 15px/1.5 var(--font-sans); -webkit-font-smoothing: antialiased; }
-.skills-page { max-width: 720px; margin: 0 auto; padding: 40px 20px 64px; }
-h1 { font-size: 24px; line-height: 1.25; font-weight: 600; margin: 0 0 6px; }
+.skills-page { max-width: 720px; margin: 0 auto; padding: 16px 20px 64px; }
 .lede { margin: 0 0 24px; color: var(--text-secondary); }
 h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); margin: 28px 0 6px; }
 ul { list-style: none; padding: 0; margin: 0; }

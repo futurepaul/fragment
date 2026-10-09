@@ -64,6 +64,13 @@ A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
 the suffix to the label you create it with); a bare label names the one
 of yours with it (an agent's: its owner's).
 
+Apps default to no header: no title bar, banner, hero, or page-title
+heading unless the person asks for one. The shell already frames the app
+with its title; start with useful content. Design for a narrow pane
+(about 380 px) and phones. A heading may name content or a section.
+Link `./__fragment.css` for the platform's look, then build on its theme
+variables and base styles; the stylesheet is optional.
+
 ## Ask another agent
 
 An agent hands work to another of its owner's agents by @naming it in a

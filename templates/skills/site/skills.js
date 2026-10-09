@@ -40,10 +40,7 @@ async function main() {
     if (e.data?.fragment === "theme" && (e.data.mode === "light" || e.data.mode === "dark")) document.documentElement.dataset.theme = e.data.mode;
   });
   const title = document.querySelector('meta[property="og:title"]')?.content;
-  if (title) {
-    document.title = title;
-    $("title").textContent = title;
-  }
+  if (title) document.title = title;
   const listed = await fetch("__files", { headers: { accept: "application/json" }, credentials: "same-origin" }).then((r) => (r.ok ? r.json() : { files: [] })).catch(() => ({ files: [] }));
   const skills = skillsOf((listed.files ?? []).map((f) => f.path));
   const box = $("categories");

@@ -9,7 +9,12 @@ reason to hide the first result while the agent repeatedly debates its own taste
 
 - Use Playwright for real browser QA, not just DOM inspection.
 - Keep one server running and reload between edits instead of restarting constantly.
-- Take screenshots at desktop and mobile.
+- Take screenshots at desktop, narrow pane (about 380 px), and mobile
+  widths, in light and dark. Check for horizontal overflow and confirm
+  that primary controls work with the keyboard.
+- Apps default to no header, title bar, banner, hero, or page-title
+  heading unless the human asks: the shell already names the app. Review
+  that the page starts with useful content; content headings are fine.
 - Check both functionality and visual quality.
 - For simple one-page static sites, a careful manual code review may be enough. For anything richer, use Playwright.
 
