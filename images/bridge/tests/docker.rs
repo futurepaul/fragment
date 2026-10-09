@@ -1808,10 +1808,11 @@ async fn an_expired_approval_ends_its_turn() {
 /// agent's other calls are).
 ///
 /// Method: the image with a 20 s approval, so a desktop action that asked
-/// would end its turn `BLOCKED` within it; the scripted model scrolls,
-/// changes focus raising the window (its `bring_to_front` scope too), and
-/// clicks in the foreground, each a turn of its own, after a capture that
-/// starts the desktop. None is a card, and none is refused. Then `rm -rf`,
+/// would end its turn `BLOCKED` within it; the scripted model changes
+/// focus raising the window (its `bring_to_front` scope too), then scrolls
+/// and clicks in the foreground (on X11 Hermes' driver delivers a scroll
+/// only so, and tells the model to retry so: a grant of its own), each a
+/// turn of its own, after a capture that starts the desktop. None is a card, and none is refused. Then `rm -rf`,
 /// which the guardian (scripted: `ESCALATE`) leaves to a person: a card.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
@@ -1821,8 +1822,8 @@ async fn an_agents_own_desktop_never_asks() {
     let look = x.say("look at your screen");
     within(fake, chat, &c, 240_000, "its look", |w| x.reply(w, &look).is_some()).await;
     for args in [
-        json!({ "action": "scroll", "direction": "down", "amount": 3, "coordinate": [400, 300] }),
         json!({ "action": "focus_app", "app": "xfce4-panel", "raise_window": true }),
+        json!({ "action": "scroll", "direction": "down", "amount": 3, "coordinate": [400, 300], "delivery_mode": "foreground" }),
         json!({ "action": "click", "coordinate": [400, 300], "delivery_mode": "foreground" }),
     ] {
         let turn = x.say(&format!("desk: {args}"));
