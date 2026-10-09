@@ -161,6 +161,12 @@ pub mod limits {
     /// person owns.
     pub const KEYS_PER_IDENTITY_MAX: u64 = 64;
     pub const AGENTS_PER_OWNER_MAX: u64 = 100;
+    /// Machines' keys one agent holds paired at once (its owner's own
+    /// machines as its hands: docs/api.md, "A machine's keys"). A few: one
+    /// agent fragment is one machine, and a new key replaces a lost one.
+    pub const PAIRED_KEYS_PER_AGENT_MAX: u64 = 4;
+    /// A machine's name as its pairing gives it, in bytes.
+    pub const MACHINE_NAME_MAX_BYTES: usize = 63;
     /// A file an app reads (a larger one is served from the site).
     pub const FILE_READ_MAX_BYTES: usize = 1024 * 1024;
     /// What one mutation or one job step may write to files, and in how many.
@@ -987,6 +993,44 @@ pub struct KeyView {
     pub added_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
+}
+
+/// `POST /api/f/<agent>/keys` (its owner): a machine's key paired to the
+/// agent fragment's agent, with a key proof by that key, and the machine's
+/// name (docs/api.md, "A machine's keys").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairKey {
+    pub proof: String,
+    pub name: String,
+}
+
+/// One machine's key paired to an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedKey {
+    pub npub: String,
+    /// The machine's name, as its pairing gave it (its host's name).
+    pub name: String,
+    pub paired_at: i64,
+    /// When it was unpaired: from then on it signs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<i64>,
+}
+
+/// An agent fragment's machine keys (`GET`, `POST` and `DELETE
+/// /api/f/<agent>/keys…`): the agent's identity (none until its first
+/// pairing or computer gives it one) and every key paired to it, the
+/// newest first, unpaired ones included.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedKeys {
+    pub agent: Option<String>,
+    pub keys: Vec<PairedKey>,
+    /// Whether this answer paired or unpaired the key it names (a replay
+    /// answers false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<bool>,
 }
 
 /// An identity as it, or its owner, sees it.

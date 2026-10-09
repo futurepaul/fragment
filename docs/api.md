@@ -240,6 +240,37 @@ the new key and meant it for this signer.
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
 | `DELETE /api/users/{username}` | the fleet's operators | → `{username, identity, released}`: undoes a username taken by mistake, so its person chooses again; refused (409) while they own a fragment under it (its URLs name it) |
 
+### A machine's keys
+
+A person's own machine can be one of their agent's hands (Paul,
+2026-10-09: "pair this machine as hands"; docs/optchat.md, "A machine
+as hands"): a key the machine holds is paired to an agent fragment of
+theirs (template `agent`), and a request NIP-98-signed by it acts as that
+agent, exactly as a computer's egress signs one (`for` its owner, its
+memberships, the model route with its owner paying and their `hands`
+choice): the router resolves the key to the agent like any. The registry
+keeps the key among the agent's keys, marked a machine's and named for it
+(`registry.rs`, table `paired`), and is asked live on every request, so
+an unpaired key is 401 from the next one. An agent fragment no computer
+runs gets its agent's identity at its first pairing (its own key, as a
+computer's assignment gives it, an editor of its own fragment).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/f/{agent}/keys` | the agent fragment's owner | → `{agent, keys: [{npub, name, pairedAt, revokedAt?}]}` (`PairedKeys`): the machines' keys paired to it, the newest first, unpaired ones included; `agent` is null before its first pairing |
+| `POST /api/f/{agent}/keys` | the same, signed by a key of theirs | `{proof, name}` → the same with `changed`: the proof's key (a key proof: the machine signs this same request, naming the owner's key in `p`) paired, `name` the machine's (1 to 63 of letters, digits, `.`, `_`, `-`); again, `changed: false`; a key someone holds, the agent's own, or one unpaired 409; past 4 paired at once (`PAIRED_KEYS_PER_AGENT_MAX`) 400 |
+| `DELETE /api/f/{agent}/keys/{npub}` | the same | → the same with `changed`: the key unpaired, 401 from the next request on and never back; again, `changed: false`; a key that is not one of its machines' 404 |
+
+Only the person who owns the agent fragment pairs, lists or unpairs: a
+session or a connected client cannot pair (it holds no key to name in the
+proof), and an agent, even one acting for its owner, is 403; a fragment
+of another kind is 400. Each pairing and unpairing is an event of the
+agent fragment (`machine.paired`, `machine.unpaired`). Pages see the
+machine in a profile: `__people` and `job.people` give an agent paired
+to one `machine`, its newest pairing's name (docs/optchat.md: the mind
+names its hands so). A wipe of the person takes their agents' pairings
+with their keys.
+
 ## Names (docs/cloudflare-v1.md, R16)
 
 A person chooses a **username** once (above; the platform's page asks
@@ -1657,7 +1688,7 @@ API answers on the platform's host):
 | `POST __mcp`, `/.well-known/oauth-protected-resource[/__mcp]` | its MCP server, for a connected client, and its metadata (Connected clients, A fragment's MCP server, above): the platform's, before the site and the app |
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
-| `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture, name?, fragment?}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment` and its label as its `name`, which `@mentions` it); an id the registry does not hold is left out |
+| `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture, name?, fragment?, title?, machine?}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment` and its label as its `name`, which `@mentions` it, and its fragment's `title`; one paired to its owner's own machine names it, `machine`: Identities, "A machine's keys"); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |

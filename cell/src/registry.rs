@@ -58,7 +58,7 @@ mod oauth;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Hold, SubjectOf,
+    Hold, Pair, Paired, SubjectOf, Unpair,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, Connected, Disconnect, EndSession, Exchange, FindClient, FindUsername, GrantCode,
     Holder, IssueTokens, ListConnections, Logout, Lookup, Mint, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, RegisterClient,
     Released, ReleaseUsername, Resolve, RevokeKey, RevokeToken, Session, SetPicture, StartDraft, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS agent_fragments (
   identity TEXT PRIMARY KEY, fragment TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS paired (
+  key TEXT PRIMARY KEY, identity TEXT NOT NULL, name TEXT NOT NULL, paired_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS paired_identity ON paired (identity);
 ";
 
 #[durable_object]
@@ -422,7 +425,12 @@ impl RegistryCell {
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
             // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment, title: None });
+            // an agent whose hands are its owner's own machine names it
+            let machine = match who.kind {
+                IdentityKind::Agent => self.machine_of(&id)?,
+                _ => None,
+            };
+            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment, title: None, machine });
         }
         Ok(ProfilesAnswer { profiles })
     }
@@ -553,6 +561,114 @@ impl RegistryCell {
         let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec("UPDATE identities SET held = ? WHERE id = ?", vec![held, agent.id.as_str().into()])?;
         self.view(&self.named_identity(&agent.id)?, Some(false))
+    }
+
+    /// The agent a pairing call names, if `by` is its owner, a person
+    /// (`registry::may_pair`): anyone else is refused, an agent included.
+    fn paired_agent(&self, by: &By, agent: &str) -> CellResult<(Identity, Identity)> {
+        let by = self.by(by)?;
+        let agent = self.named_identity(agent)?;
+        if !registry::may_pair(&by.id, by.kind, agent.kind, agent.owner.as_deref()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner pairs their machines to it"));
+        }
+        Ok((by, agent))
+    }
+
+    /// The machine a paired agent's hands are: its newest pairing's name.
+    fn machine_of(&self, agent: &str) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            name: String,
+        }
+        let row = self.rows::<Row>("SELECT name FROM paired WHERE identity = ? ORDER BY paired_at DESC, key LIMIT 1", vec![agent.into()])?.pop();
+        Ok(row.map(|r| r.name))
+    }
+
+    /// An agent's machines' keys, the newest first, unpaired ones included.
+    fn paired_keys(&self, agent: &str, changed: Option<bool>) -> CellResult<fragment_proto::PairedKeys> {
+        #[derive(Deserialize)]
+        struct Row {
+            key: String,
+            name: String,
+            paired_at: i64,
+            revoked_at: Option<i64>,
+        }
+        let rows = self.rows::<Row>(
+            "SELECT p.key, p.name, p.paired_at, k.revoked_at FROM paired p JOIN keys k ON k.key = p.key WHERE p.identity = ? ORDER BY p.paired_at DESC, p.key",
+            vec![agent.into()],
+        )?;
+        // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
+        let mut keys = Vec::with_capacity(rows.len());
+        for r in rows {
+            if !npub::is_hex_key(&r.key) {
+                return Err(CellError::host(format!("paired.key {:?} is not 64 hex", r.key)));
+            }
+            keys.push(fragment_proto::PairedKey { npub: npub::encode(&r.key), name: r.name, paired_at: r.paired_at, revoked_at: r.revoked_at });
+        }
+        Ok(fragment_proto::PairedKeys { agent: Some(agent.to_string()), keys, changed })
+    }
+
+    /// A machine's key paired to an agent by its owner (docs/api.md, "A
+    /// machine's keys"), in one transaction: the key joins the agent's
+    /// keys and is marked a machine's, named for it. A replay answers the
+    /// same; a key someone holds, one that stopped, the agent's own, or one
+    /// past the cap is refused (`registry::pairing`).
+    fn pair(&self, b: Pair) -> CellResult<fragment_proto::PairedKeys> {
+        let (by, agent) = self.paired_agent(&b.by, &b.agent)?;
+        check_key(&b.key)?;
+        if !registry::valid_machine_name(&b.name) {
+            return Err(CellError::invalid(format!(
+                "a machine's name is 1 to {} of letters, digits, `.`, `_` and `-`, starting with a letter or a digit",
+                limits::MACHINE_NAME_MAX_BYTES
+            )));
+        }
+        let paired = self.count("SELECT COUNT(*) AS n FROM paired WHERE key = ? AND identity = ?", vec![b.key.as_str().into(), agent.id.as_str().into()])? > 0;
+        let held = match self.key_row(&b.key)? {
+            None => registry::Held::Free,
+            Some(row) if row.identity != agent.id => registry::Held::Other,
+            Some(row) if paired => registry::Held::Paired { active: row.active() },
+            Some(row) => registry::Held::Own { active: row.active() },
+        };
+        let active = self.count(
+            "SELECT COUNT(*) AS n FROM paired p JOIN keys k ON k.key = p.key WHERE p.identity = ? AND k.revoked_at IS NULL",
+            vec![agent.id.as_str().into()],
+        )?;
+        let added = registry::pairing(held, active).map_err(|why| match why.conflict() {
+            true => conflict(why.message()),
+            false => CellError::invalid(why.message()),
+        })?;
+        if added {
+            assert!(self.insert_key(&agent.id, &b.key, &by.id)?, "a free key joins the agent");
+            self.exec(
+                "INSERT INTO paired (key, identity, name, paired_at) VALUES (?, ?, ?, ?)",
+                vec![b.key.as_str().into(), agent.id.as_str().into(), b.name.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
+        self.paired_keys(&agent.id, Some(added))
+    }
+
+    /// One of an agent's machines' keys revoked by its owner: it is 401
+    /// from the next request on, and never signs again. Unpairing always
+    /// works (no machine's key is an agent's last word: its fragment's own
+    /// key stays its own). Unpaired again, it answers the same.
+    fn unpair(&self, b: Unpair) -> CellResult<fragment_proto::PairedKeys> {
+        let (_, agent) = self.paired_agent(&b.by, &b.agent)?;
+        check_key(&b.key)?;
+        let paired = self.count("SELECT COUNT(*) AS n FROM paired WHERE key = ? AND identity = ?", vec![b.key.as_str().into(), agent.id.as_str().into()])? > 0;
+        let row = self.key_row(&b.key)?.filter(|r| paired && r.identity == agent.id);
+        let Some(row) = row else {
+            return Err(CellError::new(ErrorCode::NotFound, "not a machine's key of this agent"));
+        };
+        if !row.active() {
+            return self.paired_keys(&agent.id, Some(false));
+        }
+        self.exec("UPDATE keys SET revoked_at = ? WHERE key = ?", vec![SqlStorageValue::Integer(js::now_ms()), b.key.as_str().into()])?;
+        self.paired_keys(&agent.id, Some(true))
+    }
+
+    fn paired_for(&self, b: Paired) -> CellResult<fragment_proto::PairedKeys> {
+        let (_, agent) = self.paired_agent(&b.by, &b.agent)?;
+        self.paired_keys(&agent.id, None)
     }
 
     /// The identity a call names (`None`: the asker's own).
@@ -704,6 +820,9 @@ impl RegistryCell {
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
+            Pair::PATH => reply::<Pair>(self.pair(body(&bytes)?)),
+            Unpair::PATH => reply::<Unpair>(self.unpair(body(&bytes)?)),
+            Paired::PATH => reply::<Paired>(self.paired_for(body(&bytes)?)),
             SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),
             AddKey::PATH => reply::<AddKey>(self.add_key(body(&bytes)?)),

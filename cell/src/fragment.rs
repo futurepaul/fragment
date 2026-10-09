@@ -1110,6 +1110,13 @@ impl FragmentCell {
                 self.subscribe(&caller, &body)
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
+            // an agent fragment's machines' keys (runs_on.rs): its owner's own machines as its hands
+            (Method::Get, ["api", "keys"]) => json_response(&self.machine_keys(&caller).await?),
+            (Method::Post, ["api", "keys"]) => {
+                let body = req.bytes().await?;
+                json_response(&self.pair_machine(&caller, &body).await?)
+            }
+            (Method::Delete, ["api", "keys", key]) => json_response(&self.unpair_machine(&caller, key).await?),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
                 let token = match req.headers().get("x-fragment-inbox-token")? {

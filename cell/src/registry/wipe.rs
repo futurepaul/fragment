@@ -272,6 +272,8 @@ impl RegistryCell {
         self.end_access(identity)?;
         self.exec(&format!("DELETE FROM consents WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM agent_fragments WHERE {THEIRS}"), theirs(identity))?;
+        // their agents' machines (the keys themselves went with their access)
+        self.exec(&format!("DELETE FROM paired WHERE {THEIRS}"), theirs(identity))?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM usernames WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;

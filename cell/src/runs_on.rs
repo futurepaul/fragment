@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{FragmentCell, MetaKey};
+use crate::fragment::{Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
 
@@ -103,25 +103,8 @@ impl FragmentCell {
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
                 }
-                let identity = match self.meta(MetaKey::AgentIdentity)? {
-                    Some(id) => id,
-                    None => {
-                        let npub = self.must(MetaKey::Npub)?;
-                        let key = npub::parse(&npub).ok_or_else(|| CellError::host("the fragment's npub does not decode"))?;
-                        // the agent is named for its fragment (a page shows it so: `__people`)
-                        let register = calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key, fragment: Some(self.name()?) };
-                        let agent = crate::ask_registry(&self.env, &register).await?;
-                        self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
-                        agent.id
-                    }
-                };
+                let identity = self.agent_identity(&b.owner).await?;
                 self.set_meta(MetaKey::Computer, &b.computer)?;
-                // the agent keeps its own state here (its SOUL.md, memories,
-                // skills, routines): it is an editor of its own fragment
-                if self.member_role(&identity)?.is_none() {
-                    let as_owner = self.as_owner()?;
-                    self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor, people_only: false }).await?;
-                }
                 self.event("computer.assigned", &format!("runs on {}", b.computer), json!({ "computer": b.computer, "identity": identity }));
                 Ok(json!({ "identity": identity }))
             }
@@ -193,6 +176,94 @@ impl FragmentCell {
             }
             r => Err(CellError::new(ErrorCode::NotFound, format!("no route computer/{r}"))),
         }
+    }
+
+    /// The agent this agent fragment is: its own key registered as the
+    /// agent's identity, its owner's (once: a computer's assignment or a
+    /// machine's pairing makes it), an editor of its own fragment, where
+    /// it keeps its own state (its SOUL.md, memories, skills, routines).
+    async fn agent_identity(&self, owner: &str) -> CellResult<String> {
+        let identity = match self.meta(MetaKey::AgentIdentity)? {
+            Some(id) => id,
+            None => {
+                let npub = self.must(MetaKey::Npub)?;
+                let key = npub::parse(&npub).ok_or_else(|| CellError::host("the fragment's npub does not decode"))?;
+                // the agent is named for its fragment (a page shows it so: `__people`)
+                let register = calls::RegisterAgent { owner: By::Identity(owner.to_string()), key, fragment: Some(self.name()?) };
+                let agent = crate::ask_registry(&self.env, &register).await?;
+                self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
+                agent.id
+            }
+        };
+        if self.member_role(&identity)?.is_none() {
+            let as_owner = self.as_owner()?;
+            self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor, people_only: false }).await?;
+        }
+        Ok(identity)
+    }
+
+    /// The owner of this agent fragment asking about its machines' keys
+    /// (docs/api.md, "A machine's keys"): a person, signed by a key of
+    /// theirs, on a fragment of kind `agent`. No agent asks, not even one
+    /// acting for them (`registry::may_pair` says so again).
+    fn machine_owner<'a>(&self, caller: &'a Caller) -> CellResult<&'a crate::routed::Signed> {
+        let signed = caller.signed.as_ref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))?;
+        if signed.identity.kind != IdentityKind::Person || self.must(MetaKey::Owner)? != signed.identity.id {
+            return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner pairs their machines to it"));
+        }
+        let face: Value = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok()).unwrap_or(Value::Null);
+        if face["kind"] != "agent" {
+            return Err(CellError::invalid("a machine is paired to an agent fragment (template agent)"));
+        }
+        Ok(signed)
+    }
+
+    /// `GET /api/f/{agent}/keys`: its machines' keys (none until its first
+    /// pairing).
+    pub(crate) async fn machine_keys(&self, caller: &Caller) -> CellResult<fragment_proto::PairedKeys> {
+        let signed = self.machine_owner(caller)?;
+        let Some(agent) = self.meta(MetaKey::AgentIdentity)? else {
+            return Ok(fragment_proto::PairedKeys { agent: None, keys: vec![], changed: None });
+        };
+        crate::ask_registry(&self.env, &calls::Paired { agent, by: By::Identity(signed.identity.id.clone()) }).await
+    }
+
+    /// `POST /api/f/{agent}/keys {proof, name}`: a machine of its owner's
+    /// paired as this agent's hands. The proof is a NIP-98 event by the
+    /// machine's new key for this same request, naming the owner's signing
+    /// key (`p`), so the machine holds it and meant it for them. The agent
+    /// gets its identity first when it has none (no computer runs it).
+    pub(crate) async fn pair_machine(&self, caller: &Caller, body: &[u8]) -> CellResult<fragment_proto::PairedKeys> {
+        let signed = self.machine_owner(caller)?;
+        let b: fragment_proto::PairKey = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+        let signer = signed.key.as_deref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "pairing is signed by a key you hold (`fragment login`)"))?;
+        let now_s = js::now_ms() / 1000;
+        let key = fragment_nip98::verify_proof(&b.proof, "POST", caller.url.as_str(), signer, now_s, fragment_proto::limits::AUTH_WINDOW_S)
+            .map_err(|e| CellError::invalid(format!("proof: {e}")))?;
+        if key == signer {
+            return Err(CellError::invalid("proof: the machine's key must not be the key that signs the request"));
+        }
+        let owner = signed.identity.id.clone();
+        let agent = self.agent_identity(&owner).await?;
+        let paired = crate::ask_registry(&self.env, &calls::Pair { agent, key: key.clone(), name: b.name.clone(), by: By::Identity(owner) }).await?;
+        if paired.changed == Some(true) {
+            self.event("machine.paired", &format!("{} paired as its hands", b.name), json!({ "name": b.name, "npub": npub::encode(&key) }));
+        }
+        Ok(paired)
+    }
+
+    /// `DELETE /api/f/{agent}/keys/{npub}`: a machine unpaired; its key is
+    /// 401 from the next request on.
+    pub(crate) async fn unpair_machine(&self, caller: &Caller, named: &str) -> CellResult<fragment_proto::PairedKeys> {
+        let signed = self.machine_owner(caller)?;
+        let key = npub::parse(named).ok_or_else(|| CellError::invalid(format!("{named:?} is not an npub or a 64-hex key")))?;
+        let agent = self.meta(MetaKey::AgentIdentity)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, "no machine is paired to this agent"))?;
+        let unpaired = crate::ask_registry(&self.env, &calls::Unpair { agent, key: key.clone(), by: By::Identity(signed.identity.id.clone()) }).await?;
+        if unpaired.changed == Some(true) {
+            let name = unpaired.keys.iter().find(|k| npub::parse(&k.npub).as_deref() == Some(key.as_str())).map_or("a machine", |k| k.name.as_str());
+            self.event("machine.unpaired", &format!("{name} unpaired: its key signs nothing from now on"), json!({ "name": name, "npub": npub::encode(&key) }));
+        }
+        Ok(unpaired)
     }
 
     /// An agent became a member here (`set_member`, `join`): its computer

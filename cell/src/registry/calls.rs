@@ -159,6 +159,46 @@ impl Call for RevokeKey {
     type Answer = IdentityView;
 }
 
+/// `POST /pair`: a machine's key paired to `agent` by its owner (the key's
+/// proof checked by the agent fragment), named for the machine.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Pair {
+    pub agent: String,
+    pub key: String,
+    pub name: String,
+    pub by: By,
+}
+
+impl Call for Pair {
+    const PATH: &'static str = "/pair";
+    type Answer = fragment_proto::PairedKeys;
+}
+
+/// `POST /unpair`: one of `agent`'s machines' keys revoked by its owner.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Unpair {
+    pub agent: String,
+    pub key: String,
+    pub by: By,
+}
+
+impl Call for Unpair {
+    const PATH: &'static str = "/unpair";
+    type Answer = fragment_proto::PairedKeys;
+}
+
+/// `POST /paired`: `agent`'s machines' keys, as its owner sees them.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Paired {
+    pub agent: String,
+    pub by: By,
+}
+
+impl Call for Paired {
+    const PATH: &'static str = "/paired";
+    type Answer = fragment_proto::PairedKeys;
+}
+
 /// `POST /check`: whether `key` is one of `identity`'s active keys, asked
 /// by the identity or one of its agents.
 #[derive(Serialize, Deserialize)]
@@ -276,6 +316,11 @@ pub(crate) struct Profile {
     /// page asks (serve.rs `__people`), never by the registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// An agent whose hands are its owner's own machine (a key paired to
+    /// it: docs/api.md, "A machine's keys"): that machine's name, its
+    /// newest pairing's, paired still or not. None for a computer's agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
