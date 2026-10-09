@@ -1632,7 +1632,8 @@ async fn other_answered_in_words_on_its_card() {
     within(&fake, &chat, &c, 120_000, "the clarify's card", |w| card(w).is_some()).await;
     let p = fake.with(|w| card(w).unwrap());
     let words: Vec<(String, bool)> = p["options"].as_array().unwrap().iter().map(|o| (o["id"].as_str().unwrap_or("").to_string(), o["words"] == true)).collect();
-    assert_eq!(p["text"], "Which color?", "{p}");
+    // its question without the glyph (v0.21.6 adds a line on "skip")
+    assert!(p["text"].as_str().is_some_and(|t| t.starts_with("Which color?")), "{p}");
     assert_eq!(words, vec![("c0".to_string(), false), ("c1".to_string(), false), ("other".to_string(), true)], "{p}");
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other", "text": "purple" }));
     within(&fake, &chat, &c, 120_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
