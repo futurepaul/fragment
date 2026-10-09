@@ -1956,6 +1956,102 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
 }
 
+/// Goal: offered operator placeholders select Hermes' real backends;
+/// removing them restores its defaults. Two FAL scopes submit interleaved,
+/// then their result workers run outside either scope, retaining each key.
+/// Only the vendor HTTP transport is faked, never the SDK or profile writer.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn tool_profiles_select_offered_operator_keys() {
+    let (fake, _model, _chat, c) = hermes_running().await;
+    let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+    let absent = config();
+    for selection in ["web:", "image_gen:", "tts:", "cloud_provider:"] {
+        assert!(!absent.contains(selection), "no offered provider: {absent}");
+    }
+    let credentials: Vec<serde_json::Value> = [
+        ("firecrawl", "FIRECRAWL_API_KEY"), ("fal", "FAL_KEY"),
+        ("elevenlabs", "ELEVENLABS_API_KEY"), ("browser-use", "BROWSER_USE_API_KEY"),
+        ("perplexity", "PERPLEXITY_API_KEY"), ("xai", "XAI_API_KEY"),
+    ].iter().map(|(provider, env)| json!({
+        "provider": provider, "kind": "operator", "env": [env],
+        "placeholder": format!("fck_{provider}_{}", "a".repeat(32)), "hosts": ["api.test"]
+    })).collect();
+    fake.with(|w| w.computer["agents"][0]["credentials"] = json!(credentials));
+    let t = Instant::now();
+    while !config().contains("  cloud_provider: \"local\"") {
+        assert!(t.elapsed() < Duration::from_secs(30), "profile did not refresh: {}\n{}", config(), c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let checked = hermes_python(&c, &["HERMES_HOME=/data/hermes/profiles/juniper--k3x9"], r#"
+import json, sys
+sys.path.insert(0, '/opt/fragment')
+import tool_keys
+tool_keys.install()
+from hermes_cli.config import load_config
+from agent.secret_scope import set_secret_scope, reset_secret_scope
+from tools.tool_backend_helpers import read_selection
+from tools import image_generation_tool as images
+from pm.extras import available
+cfg = load_config()
+assert cfg['web']['backend'] == cfg['web']['search_backend'] == cfg['web']['extract_backend'] == 'firecrawl'
+assert cfg['image_gen']['provider'] == 'fal' and cfg['image_gen']['model'] == 'fal-ai/flux-2/klein/9b'
+assert cfg['tts']['provider'] == 'elevenlabs'
+assert cfg['browser']['cloud_provider'] == 'local' and cfg['browser']['backend'] == 'off'
+assert all(available(e) for e in ('edge-tts', 'firecrawl', 'fal', 'tts-premium'))
+import fal_client, httpx
+real = fal_client.SyncClient
+seen, clients = [], []
+def transport(request):
+    seen.append(request.headers['Authorization'])
+    if request.method == 'POST':
+        body = {'request_id': 'test', 'status_url': 'https://queue.fal.run/status',
+                'response_url': 'https://queue.fal.run/result', 'cancel_url': 'https://queue.fal.run/cancel'}
+    elif request.url.path == '/status':
+        body = {'status': 'COMPLETED', 'logs': None, 'metrics': {}}
+    else:
+        body = {'images': []}
+    return httpx.Response(200, json=body)
+def client(**kwargs):
+    c = real(**kwargs)
+    c.__dict__['_client'] = httpx.Client(transport=httpx.MockTransport(transport), headers={'Authorization': c._auth.header_value})
+    clients.append(c)
+    return c
+fal_client.SyncClient = client
+handles = []
+for letter in ('a', 'b'):
+    token = set_secret_scope({'FAL_KEY': 'fck_fal_' + letter * 32})
+    try:
+        assert read_selection('image_gen') == 'fal'
+        handles.append(images._submit_fal_request(cfg['image_gen']['model'], {'prompt': 'test'}))
+    finally:
+        reset_secret_scope(token)
+assert seen == ['Key fck_fal_' + 'a' * 32, 'Key fck_fal_' + 'b' * 32]
+for handle in handles:
+    assert handle.get() == {'images': []}
+assert seen[2:] == ['Key fck_fal_' + 'a' * 32] * 2 + ['Key fck_fal_' + 'b' * 32] * 2
+assert all(c._client.is_closed for c in clients)
+token = set_secret_scope({})
+try:
+    try:
+        images._submit_fal_request(cfg['image_gen']['model'], {'prompt': 'test'})
+        raise AssertionError('missing scoped key was accepted')
+    except ValueError:
+        pass
+finally:
+    reset_secret_scope(token)
+assert len(seen) == 6
+print(json.dumps({'selections': True, 'extras': True, 'scoped_fal': True}))
+"#);
+    assert_eq!(checked, json!({"selections": true, "extras": true, "scoped_fal": true}));
+    fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
+    let t = Instant::now();
+    while config() != absent {
+        assert!(t.elapsed() < Duration::from_secs(30), "revoked selections remain: {}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 // ---- Hermes' catalog refresh under the hold (2026-10-07:
 // `held_nothing_under_data_changes` failed once, in a parallel run, when the
 // refresh landed inside its hold) ----

@@ -120,6 +120,18 @@
   // (`fragment_core::own_signin`); its `models` are what their agents may
   // run on, paid by their account at the provider.
   "providers": [
+    { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["X_API_BEARER_TOKEN"], "key": "fragment-x-api-key" },
+    { "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["FIRECRAWL_API_KEY"], "key": "fragment-firecrawl-api-key" },
+    { "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"],
+      "placements": [{ "header": "authorization", "format": "Key {}" }],
+      "env": ["FAL_KEY"], "key": "fragment-fal-api-key" },
+    { "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"],
+      "placements": [{ "header": "x-browser-use-api-key" }],
+      "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -163,8 +175,8 @@
   // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
-  // (fragment_core::price::DEFAULT_BOOK_VERSION, 3 since DeepSeek V4 Flash
-  // was priced): raise it past both with every change to a key's price, or
+  // (fragment_core::price::DEFAULT_BOOK_VERSION, 4 since Hermes' tool keys
+  // were priced): raise it past both with every change to a key's price, or
   // ledgers keep their book.
-  "price_book_version": 3
+  "price_book_version": 4
 }

@@ -750,15 +750,54 @@ fragment.club until cutover (decisions 34–35).
   fee ($0.02 to $0.04 a brief at list), priced as a $0.005 search; xAI's X Search bills posts and
   profiles fetched, priced as a 20-post call ($0.12); ElevenLabs bills
   minutes of music (and characters of speech), priced as a minute ($0.15).
+  Since 2026-10-09, Firecrawl is priced as one 10-result search (2 Hobby
+  PAYG credits, $0.01), also charged for a basic one-credit scrape. FAL
+  is priced as a 1 MP FLUX.2 Klein 9B image ($0.006) on every authenticated
+  request, including queue polls and result reads. Browser Use is priced
+  as five minutes at $0.02/hour ($0.02/12) on every control request,
+  including stop, excluding its $5/GB proxy traffic. Sources:
+  [Firecrawl](https://www.firecrawl.dev/pricing),
+  [FAL](https://fal.ai/models/fal-ai/flux-2/klein/9b),
+  [Browser Use](https://browser-use.com/pricing), read 2026-10-09.
+  X API's separate `x` key is estimated as the `x-api-finite` helper's
+  default ten-post recent search ($0.05), from its
+  [per-resource prices](https://docs.x.com/x-api/getting-started/pricing):
+  $0.005 per post, $0.010 per user. Expanded users, batches and searches
+  returning up to 100 posts can cost more; a single lookup costs less.
+  Vendor daily deduplication is not reflected in our per-request meter.
 - **Risk:** a brief or a long composition costs the operator more than
   it charges; a short jingle or a speech call charges the person more than
   it cost.
+  Polling a FAL image charges more than the generation's list price;
+  longer browser sessions and proxy traffic can cost more than the
+  control calls charge. The estimates are not usage-based vendor billing.
 - **First proof:** a month's vendor invoice against the ledger's `key:`
   settlements for that key.
 - **Delete when:** the swap reads each answer's usage (a header or the
   body, as the model route reads tokens) and settles the vendor's own
   units against a hold of its worst case, each catalog row naming how,
   proven by a lane whose upstream fake answers usage and is charged by it.
+
+## Hermes' direct FAL client reads process credentials, not profile scope
+
+- **Observed:** 2026-10-09, Hermes v0.21.6's
+  `tools/image_generation_tool.py::_submit_fal_request` calls the module's
+  global `fal_client.submit`. Its pinned SDK 0.13.1 caches `FAL_KEY` from
+  `os.environ`, while the multiplex gateway keeps credentials in
+  `agent.secret_scope`. It fails with no process key and reuses a process
+  key across profiles when one exists.
+- **Stand-in:** the image's `tool_keys.py`, installed by its preload,
+  binds a fresh explicit-key SDK client to each direct image request and
+  its result handle. The key is the profile's placeholder, no environment
+  mutation, and the client closes when its result is read. Other image
+  selections use upstream's path. The Docker test drives two scopes
+  interleaved against a fake HTTP transport, then reads their results
+  outside either scope and checks each retained its own placeholder.
+- **Risk:** the adapter calls a pinned upstream private function and SDK
+  client property; an upstream change could bypass it or break cleanup.
+- **First proof:** the Docker profile test against the next pinned image.
+- **Delete when:** Hermes' direct native image path uses an explicit SDK
+  client from its active profile scope, including the result worker.
 
 ## Hermes keeps its providers' variable names from its terminal
 

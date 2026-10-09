@@ -63,6 +63,28 @@ skill for anything Google. If it is unset, Google is not connected: ask
 your owner to connect it, and it reaches you within seconds.
 `PERPLEXITY_API_KEY`, `XAI_API_KEY` and the others work the same way.
 
+When offered, native `web_search` and `web_extract` use Firecrawl, native
+`image_generate` uses FAL's FLUX.2 Klein 9B, and `text_to_speech` uses
+ElevenLabs. With only Perplexity offered, native search uses Perplexity.
+For Perplexity research with Firecrawl also offered, load the
+`perplexity-research` skill. For X posts, use native `x_search` or the
+`x-search` skill with `XAI_API_KEY`. Check which variables are set before
+using a provider; deployments may offer a subset.
+For exact X API post data and profiles, load `x-api-finite`, whose helper
+uses the separate `X_API_BEARER_TOKEN` operator placeholder at `api.x.com`.
+
+Use native `image_generate` for an image you need now in chat. For an app's
+repeatable image pipeline, use the Fragment platform skill's Workers AI
+image step: the deployment's AI binding pays, with no FAL key required.
+
+Your native browser tools drive headed Chromium on your own desktop.
+When `BROWSER_USE_API_KEY` is offered you can also choose a separate cloud
+browser from the terminal, without replacing your desktop browser:
+`BU_NAME=remote browser-harness 'start_remote_daemon("remote")'`, then
+`BU_NAME=remote browser-harness 'new_tab("https://example.com"); print(page_info())'`.
+Finish with `BU_NAME=remote browser-harness 'stop_remote_daemon("remote")'`.
+Cloud sessions spend credit; use the local desktop for signed-in browsing.
+
 ## Documents
 
 Load Hermes' `pdf`, `docx`, `powerpoint` or `xlsx` skill for that file type.

@@ -4,7 +4,7 @@
 // provider the platform offers, so the hosted lane can swap each operator
 // key against its real vendor. Copy it outside the repo and set your
 // account. Every secret the Workers read is a secret in the account's
-// Cloudflare Secrets Store, named here (docs/secrets.md): the four operator
+// Cloudflare Secrets Store, named here (docs/secrets.md): the eight operator
 // keys are Paul's to set (`cargo xtask secret set <name> --config <file>`);
 // none is in the repo, and a deploy that finds one missing from the store
 // stops before anything changes, naming the command that sets it. The DNS
@@ -44,11 +44,23 @@
     }
   },
   // The platform's catalog (Paul, 2026-10-04): Google, and the operator's
-  // Perplexity, Google Places, xAI and ElevenLabs keys, each at the price
+  // Firecrawl, FAL, Browser Use, Perplexity, Google Places, xAI and ElevenLabs keys, each at the price
   // book's list price (fragment_core::price DEFAULT_KEYS); and the person's
   // own OpenRouter, signed in to (2026-10-08). A local run signs in to the
   // OpenRouter fake instead (crates/e2e swap_providers).
   "providers": [
+    { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["X_API_BEARER_TOKEN"], "key": "fragment-x-api-key" },
+    { "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["FIRECRAWL_API_KEY"], "key": "fragment-firecrawl-api-key" },
+    { "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"],
+      "placements": [{ "header": "authorization", "format": "Key {}" }],
+      "env": ["FAL_KEY"], "key": "fragment-fal-api-key" },
+    { "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"],
+      "placements": [{ "header": "x-browser-use-api-key" }],
+      "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -88,6 +100,6 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
-  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 3
-  "price_book_version": 3
+  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 4
+  "price_book_version": 4
 }

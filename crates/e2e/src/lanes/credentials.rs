@@ -53,6 +53,11 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "no one else reads them, and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
     "an operator key's call its owner's ledger will not hold is refused, and reaches no provider",
+    "firecrawl: its SDK header is swapped only at its catalog host",
+    "fal: its SDK header is swapped only at its catalog host",
+    "browser-use: its SDK header is swapped only at its catalog host",
+    "xai: its SDK header is swapped only at its catalog host",
+    "x: its SDK header is swapped only at its catalog host",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -164,6 +169,22 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "said": said, "seen": seen }),
     );
 
+    // Hermes' tool vendors share the existing upstream fake: each real
+    // host and SDK header, with no vendor-specific response simulation.
+    for (i, (n, name, host, env, header, scheme)) in [
+        (130, "firecrawl", "api.firecrawl.dev", "FIRECRAWL_API_KEY", "authorization", "Bearer "),
+        (131, "fal", "queue.fal.run", "FAL_KEY", "authorization", "Key "),
+        (132, "browser-use", "api.browser-use.com", "BROWSER_USE_API_KEY", "x-browser-use-api-key", ""),
+        (133, "xai", "api.x.ai", "XAI_API_KEY", "authorization", "Bearer "),
+        (134, "x", "api.x.com", "X_API_BEARER_TOKEN", "authorization", "Bearer "),
+    ].into_iter().enumerate() {
+        let said = say(s, n, &format!("fetch http://{host}/e2e with ${env} in {header}"))?;
+        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+        s.ok(SWAP_CHECKS[22 + i],
+            said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
+            json!({ "said": said, "seen": seen }));
+    }
+
     // refusals: the wrong place, the wrong host, a forged tag, another computer's
     let seen_before = s.upstream.seen().len();
     let place = say(s, 110, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY in x-api-key")?;
@@ -198,7 +219,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
 
     // the holds: each operator key's call, settled at its price; and the month's counts
-    let keyed = ["perplexity", "elevenlabs", "google-places"];
+    let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "fal", "browser-use", "xai", "x"];
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| end_of(e) == "settled").count() == keyed.len());
     let rows = held();
@@ -207,7 +228,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             rows.iter().any(|r| r["entry"]["reserve"]["worst"] == json!({ "kind": "key", "key": k, "units": 1 }) && r["entry"]["reserve"]["agent"] == w.identity && r["entry"]["end"]["charge"] == charge_of(k))
         });
     s.ok(SWAP_CHECKS[17], metered && priced, json!(rows));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 1, charge_of("elevenlabs")), ("google-places", 1, charge_of("google-places")), (SWAP_OWN, 1, 0)];
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 1, charge_of("elevenlabs")), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 1, charge_of("fal")), ("browser-use", 1, charge_of("browser-use")), ("xai", 1, charge_of("xai")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));

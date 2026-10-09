@@ -640,11 +640,36 @@ the provider's own hosts.
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
   | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
+  | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
+  | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
   | `perplexity` | operator | `api.perplexity.ai` | `Authorization: Bearer {}` | `PERPLEXITY_API_KEY` (Perplexity's SDKs) | $0.005 |
   | `google-places` | operator | `places.googleapis.com` | `X-Goog-Api-Key: {}`, or `?key=` | `GOOGLE_PLACES_API_KEY` (no Google SDK reads one; the goplaces skill's helper does) | $0.035 |
   | `xai` | operator | `api.x.ai` | `Authorization: Bearer {}` | `XAI_API_KEY` (xAI's SDK) | $0.12 |
+  | `x` | operator | `api.x.com`, `api.twitter.com` | `Authorization: Bearer {}` | `X_API_BEARER_TOKEN` (`x-api-finite` calls `api.x.com/2`) | $0.05 (ten post resources) |
   | `elevenlabs` | operator | `api.elevenlabs.io` | `xi-api-key: {}` | `ELEVENLABS_API_KEY` (ElevenLabs' SDKs) | $0.15 |
   | `openrouter` | own, signed in to, with models | `openrouter.ai` | `Authorization: Bearer {}` | `OPENROUTER_API_KEY` (OpenRouter's and Hermes' name) | none: the person's OpenRouter credit pays |
+
+  Hermes' tool selections are the image's `profile_config`, conditional on
+  the agent's currently held placeholders, never just `credentialEnv`:
+  Firecrawl sets `web.backend`, `search_backend` and `extract_backend`;
+  FAL sets `image_gen.provider: fal`, `model: fal-ai/flux-2/klein/9b`;
+  ElevenLabs sets `tts.provider: elevenlabs`. Without those credentials
+  the category is untouched, so Hermes keeps its keyless defaults. With
+  only Perplexity, `web.search_backend: perplexity`; when Firecrawl is
+  also offered it wins for full-page extraction (Perplexity returns
+  query-relevant snippets). X uses native `x_search`, not `web.backend`.
+  Browser Use is offered as an extra: `browser.cloud_provider: local`
+  prevents its key being auto-selected by Hermes' built-in browser tools;
+  the agent chooses a separate cloud session with Browser Harness from
+  its terminal (the platform skill's computer page has the commands).
+  Browserbase would need a project id too. Native image generation serves
+  chat; the platform skill's Workers AI image step remains available for
+  app pipelines through the AI binding. All three optional SDK extras
+  are baked in from upstream's frozen lock. Direct FAL also needs the
+  scoped-client adapter recorded in the debt ledger. These API hosts and
+  SDK headers were read from the pinned Hermes v0.21.6 image, including
+  its pinned SDKs, on 2026-10-09; no CDN hostname receives the FAL key.
 
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key. `<tag>` is 32 hex of HMAC-SHA256 over

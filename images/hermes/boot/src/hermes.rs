@@ -344,6 +344,26 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
         q(&format!("agent:{}", agent.fragment)),
         q(TRANSCRIBE_MODEL)
     ));
+    // Stored selections, never inferred by Hermes from credential presence.
+    // Only placeholders actually held by this agent count: the catalog's
+    // credential_env also includes providers it cannot currently use.
+    let vars = credential_vars(agent);
+    let offered = |env: &str| vars.iter().any(|(name, _)| name == env);
+    if offered("FIRECRAWL_API_KEY") {
+        // Full-page extraction, unlike Perplexity's query-relevant snippets.
+        y.push_str("web:\n  backend: \"firecrawl\"\n  search_backend: \"firecrawl\"\n  extract_backend: \"firecrawl\"\n");
+    } else if offered("PERPLEXITY_API_KEY") {
+        // Search remains usable on a deployment offering only Perplexity;
+        // leave extraction's selection untouched.
+        y.push_str("web:\n  search_backend: \"perplexity\"\n");
+    }
+    if offered("FAL_KEY") {
+        y.push_str("image_gen:\n  provider: \"fal\"\n  model: \"fal-ai/flux-2/klein/9b\"\n");
+    }
+    if offered("ELEVENLABS_API_KEY") {
+        y.push_str("tts:\n  provider: \"elevenlabs\"\n");
+    }
+    // XAI_API_KEY enables Hermes' separate x_search, not a web backend.
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
     // the screen shows it, through agent-browser (in the image: its
@@ -352,6 +372,12 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     // reads `browser` from the profile's own config file alone, never from
     // the managed overlay.
     y.push_str("browser:\n  headed: true\n  backend: \"off\"\n");
+    if offered("BROWSER_USE_API_KEY") {
+        // Without this Hermes auto-detects the offered key and sends the
+        // built-in browser tools to the cloud. Cloud browsing is opt-in
+        // through BU_NAME=remote browser-harness; the desktop stays local.
+        y.push_str("  cloud_provider: \"local\"\n");
+    }
     // Its approvals: its own desktop is never asked about (`DESKTOP_ACTIONS`
     // says why, and what still asks). Hermes reads the list from the
     // config of the profile whose turn it runs (`_permanent_set`).
@@ -1065,6 +1091,40 @@ mod tests {
             hosts: vec!["api.perplexity.ai".into()],
             model_base: None,
         }
+    }
+
+    /// Goal: only an agent's currently held placeholders select paid tool
+    /// backends. Method: each category offered, removed, and merely named
+    /// in credential_env; another profile remains on Hermes' defaults.
+    #[test]
+    fn tool_categories_select_only_offered_credentials() {
+        for (provider, env, selection) in [
+            ("firecrawl", "FIRECRAWL_API_KEY", "web:\n  backend: \"firecrawl\"\n  search_backend: \"firecrawl\"\n  extract_backend: \"firecrawl\"\n"),
+            ("fal", "FAL_KEY", "image_gen:\n  provider: \"fal\"\n  model: \"fal-ai/flux-2/klein/9b\"\n"),
+            ("elevenlabs", "ELEVENLABS_API_KEY", "tts:\n  provider: \"elevenlabs\"\n"),
+            ("browser-use", "BROWSER_USE_API_KEY", "  cloud_provider: \"local\"\n"),
+            ("perplexity", "PERPLEXITY_API_KEY", "web:\n  search_backend: \"perplexity\"\n"),
+        ] {
+            let mut a = agent();
+            let write = |a: &Agent| profile_config(a, &Tier::Cheap.into(), "http://m", &[env.into()], Path::new("/c.sh"));
+            let absent = write(&a);
+            assert!(!absent.contains(selection), "catalog alone never selects {provider}");
+            a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
+            let present = write(&a);
+            assert!(present.contains(selection), "offered {provider}: {present}");
+            assert!(present.contains("browser:\n  headed: true\n  backend: \"off\"\n"));
+            a.credentials.clear();
+            assert_eq!(write(&a), absent, "revocation restores {provider}'s defaults");
+        }
+        let mut a = agent();
+        for (provider, env) in [("perplexity", "PERPLEXITY_API_KEY"), ("firecrawl", "FIRECRAWL_API_KEY"), ("xai", "XAI_API_KEY")] {
+            a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
+        }
+        let config = profile_config(&a, &Tier::Cheap.into(), "http://m", &[], Path::new("/c.sh"));
+        assert!(config.contains("  search_backend: \"firecrawl\"\n"), "Firecrawl wins over Perplexity");
+        assert!(!config.contains("\"xai\""), "X search is a separate native tool, never a web backend");
+        assert!(profile_env(&a).contains("XAI_API_KEY=fck_xai_"));
+        assert!(profile_env(&a).contains("PERPLEXITY_API_KEY=fck_perplexity_"));
     }
 
     /// Valid: an agent.json that names a model of a provider its owner

@@ -1041,12 +1041,12 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
-            assert_eq!(keys.len(), 4, "{file}: each operator key's store secret");
+            assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
-            let conventional = devstack::store::Bound::conventional(true, false, &["perplexity", "google-places", "xai", "elevenlabs"]);
+            let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"]);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
     }
@@ -1142,6 +1142,10 @@ mod tests {
                 ("CODESTORAGE_KEY", "fragment-codestorage-private-key"),
                 ("WORKOS_CLIENT", "fragment-workos-client-id"),
                 ("WORKOS_KEY", "fragment-workos-api-key"),
+                ("OPERATOR_KEY_X", "fragment-x-api-key"),
+                ("OPERATOR_KEY_FIRECRAWL", "fragment-firecrawl-api-key"),
+                ("OPERATOR_KEY_FAL", "fragment-fal-api-key"),
+                ("OPERATOR_KEY_BROWSER_USE", "fragment-browser-use-api-key"),
                 ("OPERATOR_KEY_PERPLEXITY", "fragment-perplexity-api-key"),
                 ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
                 ("OPERATOR_KEY_XAI", "fragment-xai-api-key"),
