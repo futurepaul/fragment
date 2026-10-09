@@ -76,7 +76,9 @@ each with its reason. Everything else in the gist holds as it says.
    devices): after the view and before the person's words, each turn says
    its time, its chat (the thread's id, title, start, and its last 6
    messages' ids, so an old or switched-to thread is a zoom away), the
-   persona (name, emoji, instructions) and the hands. The persona sits
+   persona (name, emoji, instructions) and the hands (each by name, a
+   cloud computer awake or asleep or a paired machine online or offline,
+   and which is the default). The persona sits
    there, not in the system prompt, and every persona is offered the same
    tools (`computer` too: one without hands is told so in its block and
    answered an error), so the cached [tools] [system prompt] prefix is
@@ -192,6 +194,9 @@ each with its reason. Everything else in the gist holds as it says.
                             ├─ chat/work ─▶ goose on your computer (bridge, runtime `goose`)
                             │               fresh ACP session per hand-off,
                             │               seeded with the mind's view
+                            ├─ chat/work ─▶ goose on a machine of yours, paired as hands
+                            │               (`fragment hands run`: the same bridge, its
+                            │               requests signed by the machine's key)
                             │
                             ├─ mind--<you>.<zone>/__mcp (OAuth) ─▶ claude.ai, ChatGPT, Claude Code, …
                             └─ `fragment mcp mind` (stdio) ─▶ any agent with a shell (Claude Code, goose, …)
@@ -203,7 +208,10 @@ each with its reason. Everything else in the gist holds as it says.
 - **goose** is the hands. It runs on the person's computer (Containers),
   takes hand-offs as turns through the bridge, and reports back. Each
   hand-off is a fresh goose session whose first message is the mind's
-  view, so goose knows what the mind knows.
+  view, so goose knows what the mind knows. A machine of the person's own
+  can be hands too, beside the computer ("A machine as hands", below):
+  the same bridge and goose, and the mind picks which hands a task goes
+  to (`computer(task, on)`).
 - **The MCP servers** serve any fragment's described operations as
   tools, by one rule (`fragment_core::mcp`): the fragment's own `__mcp`
   over HTTP, for a client its person connects with OAuth (issue #232's
@@ -388,7 +396,7 @@ person's words, §6):
 Now: 2026-10-08 14:03 UTC, Thursday.
 Chat: t_0123456789abcdef "the garden", begun 2026-10-07 09:12 UTC; its last messages before this one: 12, 13, 14, 17, 18, 19.
 You are Builder 🛠️ in this chat. You get things done on the user's computer. …
-Your hands: goose (its computer awake).
+Your hands: cloud (cloud computer, awake; the default), paulbox (paired machine, online).
 ```
 
 - the time (the turn's `turn_begin`'s, so every call of a turn says the
@@ -398,12 +406,18 @@ Your hands: goose (its computer awake).
   one switched to; "it begins here" for a new one). Threads stay a label
   in the log: the view is one and global;
 - the persona: its name, emoji and instructions;
-- the hands: the mind's lead agent (its first agent member) by its
-  fragment's label, and whether its computer is awake (the platform's
-  `job.members()` `here`: its bridge holds a live socket on the mind while
-  it follows `chat`). A persona without hands is told "as Mind you hand
-  nothing to them in this chat", and its `computer` call answered with an
-  error to act on; with no agent, "Your hands: none."
+- the hands: each agent member of the mind (the first added first, at
+  most 16), by name and kind ("A machine as hands", below): the cloud
+  computer's agent (`cloud`, when it is the only one, else its fragment's
+  label) awake or asleep, and each machine paired as hands (by the
+  machine's name, its profile's `machine`) online or offline: whether its
+  bridge holds a live socket on the mind (the platform's `job.members()`
+  `here`; it does while it follows `chat`). With more than one, the one
+  `computer` goes to without `on` is marked "the default". The profiles
+  are `job.people`'s, kept an hour between turns. A persona without hands
+  is told "as Mind you hand nothing to them in this chat", and its
+  `computer` call answered with an error to act on; with no agent, "Your
+  hands: none."
 
 ### Turns (job `heard`, triggered by `say`)
 
@@ -489,15 +503,23 @@ Tools (descriptions verbatim from the gist's §6 where it has them):
 - `research(question)`: an answer with numbered sources.
 - `apps()`, `app_ops(fragment)`, `app_call(fragment, op, input)`: the
   user's apps ("The user's apps", below).
-- `computer(task)`: hand work to goose on the person's computer. Its
-  description says it has the fragment CLI and its skill, and makes the
-  user's apps and changes their code (to use one, `app_call`). It
-  answers `[<task id>] started` at once. The report arrives later as a
-  `work` message `[<task id>] <report>`, which reaches the running turn
-  between its tool calls or starts a turn of its own (the prompt: never
-  wait or poll for it). Every persona is offered it (the tools are every
-  call's); one without `hands`, or a mind with no agent member, is
-  answered an error saying why. The turn's files go with it.
+- `computer(task, on?)`: hand work to one of the person's hands: goose
+  on their cloud computer, or on a machine of theirs paired as hands.
+  `on` names which, as the turn's "Your hands" names them (or the agent
+  fragment's label); without it, the hands this persona named last
+  (`kv.hands_last`), else the cloud computer, else the first. A paired
+  machine is asked whether it is online at the call (a `members` step):
+  offline, the call is answered at once with an error saying so (and
+  which other hands could take it), and no task opens. Its description
+  says it has the fragment CLI and its skill, and makes the user's apps
+  and changes their code (to use one, `app_call`). It answers `[<task
+  id>] started on <hands>` at once. The report arrives later as a `work`
+  message `[<task id>] <report>`, which reaches the running turn between
+  its tool calls or starts a turn of its own (the prompt: never wait or
+  poll for it). Every persona is offered it (the tools are every call's,
+  `on` an optional argument, so the list is the same every turn); one
+  without `hands`, or a mind with no agent member, is answered an error
+  saying why. The turn's files go with it.
 
 A turn has no `search` (§5: "Never grep or search memories manually;
 zoom is your only allowed mechanism to navigate the tree"). The `search`
@@ -818,15 +840,19 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 ### Hand-offs (job `computer` → `chat` → goose)
 
 1. **The task.** The tool's step publishes
-   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>], attachments?}`
+   `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<the chosen hands' agent id>], attachments?}`
    (the turn's files) on `chat` as the fragment (`job.publish`, which answers the record's
-   `seq`); then `task_open` records the task, that `seq`, and the turn
+   `seq`): `to` names the one agent that answers (docs/chat-records.md),
+   so a cloud computer's bridge passes over a task for a machine, and the
+   other way round. Then `task_open` records the task, that `seq`, the
+   hands it went to (`{agent, name, kind}`), and the turn
    the agent's bridge gives that record: 24 hex of SHA-256 of `<agent
    fragment>|<mind>/chat/<seq>` (images/bridge `turn_id`; the agent
    fragment's full name from `job.people`). The task id is
-   `w<run>-<step>`.
-2. **goose's turn.** The bridge admits it as a turn: the agent is the
-   mind's lead, and the record is from neither the agent nor `anon:`.
+   `w<run>-<step>`. A task `on` named hands makes them the persona's
+   default from then on.
+2. **goose's turn.** The bridge admits it as a turn: its `to` names the
+   agent, and the record is from neither the agent nor `anon:`.
    It claims the turn on `work` (`turn.start`, whose `cause.seq` names
    the task) and posts its steps and end there. It posts **one reply** on
    `chat` (`rp:<turn>:1`): its report, or `(ended: <outcome>: <why>)`
@@ -893,8 +919,9 @@ membership, which only its owner and the agent hold. Operations with a
 | `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` (as `thread`'s) |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
-| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
-| `task` | query | `{id}` → `{task: {id, thread, i, turn, text, state, report, started, ended, reported} \| null}`: one task whole, as `tasks` says it, `reported` its report's message (a turn's zoom renders it with goose's run) |
+| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended, hands}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message); `hands` where it went, `{agent, name, kind: computer \| machine}`, null for a task from before |
+| `task` | query | `{id}` → `{task: {id, thread, i, turn, text, state, report, started, ended, reported, hands} \| null}`: one task whole, as `tasks` says it, `reported` its report's message (a turn's zoom renders it with goose's run) |
+| `hands_look` | job | `{}` → `{hands: [{agent, fragment, name, kind, here}]}`: the hands now (a `members` and a `people` step), published on `log` as `{type: "hands", hands}` (the page's Settings, Hands) |
 | `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}], ready, left, pumps, pump: {at} \| null, view, cview, nodes, import: {conversations, messages, last} \| null, instance, folds, now}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed; `ready`, whether nodes are left to build (`left`, how many); `pumps`, the compactions at work now; `pump`, when a node was last taken; `view` and `cview`, the views' bytes; `nodes`, the tree's built nodes; `import`, what imports landed; `instance`, the App instance's (a restart is a new one); `folds`, how many times the views were built from the log (a mind made before they were saved: once) |
 | `import` | mutation | `{source, conversation: {id, title?, started?}, from, total?, messages: [{role: user \| assistant, text, at}]}` (1 to 64, each text at most 131 072 characters) → `{thread, landed, appended, T}`: "Importing chats" |
 | `imported` | query | `{conversations: [{source, id}]}` (at most 200) → `{landed: [n]}`: how many of each conversation's messages are in |
@@ -934,9 +961,12 @@ person removed stays removed: `kv.seeded`):
   before it (a long text is several in a row). A mutation publishes at
   most 60 of them; a page reads the rest with `thread`.
 - `{type: "turn", thread, state: "thinking" | "settling" | "done" | "error" | "stopped", error?}`.
-- `{type: "task", id, thread, state, text, turn, report?}`: as it opens,
-  as its reply reports, and as it is found lost. Its live steps are
-  goose's own records on `work` under `turn`, which the page follows.
+- `{type: "task", id, thread, state, text, turn, hands, report?}`: as it
+  opens, as its reply reports, and as it is found lost (`hands`, where it
+  went: `{agent, name, kind}`). Its live steps are goose's own records on
+  `work` under `turn`, which the page follows.
+- `{type: "hands", hands: [{agent, fragment, name, kind, here}]}`: what
+  `hands_look` found.
 - `{type: "topics", thread, topics: [{id, p}]}`.
 - `{type: "thread", id, title}`.
 - `{type: "suggest", names}`.
@@ -969,7 +999,9 @@ beside the mind; opened on its own origin the page shows its own rail.
     ×3" row; one that used the person's apps reads "Used todo: add", the
     app's name a link to it.
   - A hand-off is a card that shows goose's live steps and its report
-    (a `work` message, or a `user` one `[<task id>] …` logged before).
+    (a `work` message, or a `user` one `[<task id>] …` logged before),
+    and where it ran: "On your cloud computer" (its screen a Watch away
+    in the shell), or "On <machine>" for a paired machine (no screen).
   - A long text the log holds as several messages in a row (`cont`) is
     one bubble.
   - Snippets of other threads (a search hit, a zoom result) are
@@ -987,8 +1019,13 @@ beside the mind; opened on its own origin the page shows its own rail.
 - **Settings** (`site/settings.js`): a screen (`#/settings`), never a
   sheet (Paul, 2026-10-07: "I prefer using the center column rather than
   a modal"). About you; the memory and **Export memory** (the whole log
-  as one JSON file, the `export` query paged); **Import chats** (the
-  page's upload, below); and **Connect another agent**: the claude.ai
+  as one JSON file, the `export` query paged); **Hands** (`hands_look`:
+  each hands by name and kind, awake or asleep, online or offline, and a
+  paired machine's Unpair, which the shell that frames the page asks its
+  person and does: docs/api.md, "A page of the person's own may ask to
+  unpair a machine"; on its own origin, the CLI's `fragment hands unpair`
+  on that machine); **Import chats** (the page's upload, below); and
+  **Connect another agent**: the claude.ai
   connector's URL (the mind's origin's `/__mcp`), Claude Code's `claude
   mcp add --transport http`, and `claude mcp add mind -- fragment mcp
   mind.<username>`. In the shell they are the **Mind** section of its
@@ -1073,6 +1110,104 @@ beside the mind; opened on its own origin the page shows its own rail.
     per role, on Claude (their API key) or ChatGPT (Sign in with ChatGPT,
     or their OpenAI API key), for every call they pay for that they or
     their agents make. A job's text step names its role (`role`).
+12. **A machine's keys** ("A machine as hands", below; docs/api.md,
+    Identities): an agent fragment's owner pairs a key of their own
+    machine to its agent, and a request that key signs acts as the
+    agent; profiles name a paired agent's `machine`.
+
+## A machine as hands (Paul, 2026-10-09)
+
+Paul: "let's pair this machine as hands". A person's own machine (their
+Linux box, their laptop) becomes a second set of hands for their mind,
+beside their cloud computer, running goose locally on the same bridge
+and goose runtime.
+
+- **The platform: a machine's keys** (docs/api.md, Identities, "A
+  machine's keys"). An agent fragment of the person's (template `agent`)
+  may have keys of their machines paired to its agent by its owner (`POST
+  /api/f/<agent>/keys {proof, name}` with a key proof by the machine's
+  key; `GET` lists, `DELETE …/keys/<npub>` unpairs), at most 4 at once. A
+  request NIP-98-signed by one acts as that agent exactly as a computer's
+  egress-signed one does: `for` its owner, its memberships, the model route
+  with its owner paying and their `hands` choice applying. The registry
+  holds the key among the agent's (marked a machine's, named for it) and
+  is asked live, so an unpaired key is 401 from its next request. An agent
+  fragment no computer runs gets its identity at its first pairing. A
+  profile (`__people`, `job.people`) names a paired agent's `machine`:
+  that is how the mind tells a machine from the cloud computer.
+- **The CLI** (cli/src/hands.rs; cli/GUIDE.md, "A machine as hands"):
+  - `fragment hands pair [--name <n>] [--mind mind]`, signed as the
+    person: makes or reuses the agent fragment `hands-<host>` (titled with
+    the host's name), makes a key kept only in this machine's fragment
+    config (`hands.json` beside `config.json`, 0600; its directory follows
+    `XDG_CONFIG_HOME`, so a config for another host keeps its own),
+    pairs it, and adds the agent to the mind as an editor, so its bridge
+    follows the mind's `chat` and `work`. Again, the same pairing.
+  - `fragment hands run`, in the foreground: a loopback proxy
+    (cli/src/hands/proxy.rs) that plays the Computer DO's intercepts for
+    this machine. `GET /api/computer` and the keepalive socket are
+    answered there (one agent, the paired one, with no credentials);
+    every other API and fragment request names that agent and goes to
+    the platform signed by the machine's key, `x-fragment-agent` dropped
+    (a socket upgraded at the platform first and then relayed as bytes, a
+    GET's redirect followed once and signed again, a wake subscription
+    answered there: nothing wakes a machine); `POST /v1/chat/completions`
+    and `/v1/decide` are the platform's model route as the agent; a 401 is
+    checked against the key, and an unpaired one stops the run. Under it,
+    `fragment-bridge run` (`BRIDGE_RUNTIME=goose`,
+    `BRIDGE_GOOSE_PLACE=machine`: docs/bridge.md), its `FRAGMENT_API` and
+    `FRAGMENT_MODEL` the proxy, everything under one folder,
+    `~/fragment-hands` (`bridge/` its state, `work/` goose's cwd, `home/`
+    its `HOME`, `goose/` its state; never the home directory itself), no
+    restore gate, its hold files there (nothing holds a machine), an
+    environment of none of the person's but `PATH` and the locale, in a
+    process group of its own that Ctrl-C (or SIGTERM, SIGHUP) stops whole.
+    goose is `--goose` or on `PATH`; the bridge `--bridge`, beside the CLI,
+    or on `PATH` (built from `images/`).
+  - `fragment hands status` (whether the key is paired still, whether a
+    run holds the folder) and `fragment hands unpair` (the key revoked,
+    the agent out of the mind, the pairing forgotten here).
+- **goose on a machine** (docs/bridge.md, `BRIDGE_GOOSE_PLACE`): every
+  session is told it works on its owner's own machine, in its own folder
+  (`HANDS_MACHINE`, the same bytes every turn), and its platform skill's
+  page is the machine's. Its tools: goose's `developer` (shell and editor)
+  in the work folder, the mind's `fragment mcp <mind>`, and, when the
+  machine has them, the web tools (`fragment-desktop mcp web`) and a
+  headless browser (`fragment-desktop mcp browser --headless`: Playwright
+  MCP 0.0.83 by `npx`, a fresh profile each session, the machine's Chromium
+  or Chrome, behind the same gate as the image's). No desktop or computer
+  tools: a machine's hands never drive their owner's screen.
+- **The mind** ("Turns", "Hand-offs" above): each turn lists every hands
+  with its kind and state, `computer` takes `on`, a task to an offline
+  machine is refused at once, the task records where it went (its card and
+  zoom say so), and Settings lists the hands with a paired machine's
+  Unpair.
+- **What it is not, yet.** A machine runs only while `fragment hands run`
+  does (no service, no wake). goose there runs as the person, with their
+  user's reach: its folder is a convention, not a sandbox (the machine
+  page says to keep to it). No connection or key of the catalog is
+  swapped on a machine (no placeholders: the egress swap is the computer
+  DO's), so a task that needs Google or a paid API is the cloud
+  computer's. A machine added to a chat is not told it joined (`joined`
+  is a computer's notice): its bridge finds the chat within 5 minutes,
+  or at its next start. A task to the machine still wakes the cloud
+  computer, whose wake subscription on the mind's `chat` sees every
+  record (its bridge then passes over it, `to` naming another). The
+  technical-debt ledger has each.
+- **The proof.** Host tests: the pairing's rules
+  (`fragment_core::registry`), the proxy against a fake platform that
+  checks each signature (cli/src/hands/proxy/tests.rs), a machine's
+  sessions (images/bridge, goose.rs) and its headless browser
+  (images/goose/desktop, tools.rs). The e2e's `mind` section plays a
+  machine beside the stub's cloud computer: it pairs it with the CLI, runs
+  `fragment hands run` with the bridge's scripted agent (a task `on` it
+  for it alone, its report back, its model call through the proxy, the
+  persona's next task there unasked), stops it (offline: refused at once)
+  and unpairs it (401). With `FRAGMENT_GOOSE_BIN` naming a goose build, it
+  runs goose itself there too, on the Workers AI fake: its call is told it
+  is on its owner's machine, offered its shell and the mind's and the
+  web's tools and no screen's, runs a shell command in the machine's work
+  folder, and leaves nothing running once stopped.
 
 ## Your own models (Paul, 2026-10-08)
 

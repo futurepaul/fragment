@@ -836,3 +836,52 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the route keeps an agent's last answer's thinking
   blocks by its tool calls' ids and puts them back on the next call
   that carries those calls, or goose's fork passes the field through.
+
+## A machine paired as hands runs goose as its person, unsandboxed
+
+- **Observed:** 2026-10-09, `fragment hands run` (cli/src/hands.rs;
+  docs/optchat.md, "A machine as hands"). goose's shell runs as the user
+  who started it; its folder (`~/fragment-hands/work`, its `HOME` beside)
+  and the machine page's words keep it there by convention only. Its
+  environment holds none of the person's (only `PATH` and the locale),
+  but their files, keys and the CLI's own config are readable to it.
+- **Risk:** a task (or a prompt injected into one through the web) reads
+  or changes the person's files outside its folder.
+- **First proof:** a hand-off on a machine that touched a path outside
+  `~/fragment-hands`.
+- **Delete when:** `hands run` starts the bridge in a sandbox of its own
+  (bubblewrap or a container on Linux, `sandbox-exec` on macOS) that sees
+  its folder alone.
+
+## A task to a paired machine wakes the cloud computer
+
+- **Observed:** 2026-10-09, the mind's hand-offs to a machine paired as
+  hands (docs/optchat.md, "A machine as hands"). The cloud computer's
+  agent holds a wake subscription on the mind's `chat`, and a record wakes
+  its computer whoever it is `to` (and a machine's reply there too, the
+  machine holding no wake subscription the platform could pass over).
+- **Risk:** a cloud computer awake for 20 minutes (and its awake time
+  billed) for each task its person sent to their own machine.
+- **First proof:** a preview's computer view showing a wake at a task
+  `to` a paired machine.
+- **Delete when:** a wake subscription wakes nothing for a record whose
+  `to` names agents none of which are its own (the platform reading
+  `to` on chat records, a convention it would then hold), or the mind
+  hands off on a channel of each hands' own.
+
+## A machine paired as hands hears of a new chat late, and swaps nothing
+
+- **Observed:** 2026-10-09, `fragment hands run`. `joined` is posted
+  through the agent's owner's computer (runs_on.rs `flush_joined`), which
+  does not run a paired agent, so a machine's bridge finds a chat it was
+  added to at its next listing (5 minutes) or start. Its proxy swaps no
+  placeholder (the swap is the Computer DO's egress), so its agent holds
+  no connection and no key of the catalog.
+- **Risk:** a chat's first message to a machine waits up to 5 minutes; a
+  task that needs Google or an operator key fails there.
+- **First proof:** a machine added to a chat answering minutes late; a
+  task on a machine asking for a credential it lacks.
+- **Delete when:** the platform tells a paired agent's machine directly
+  (the agent's own `tasks`, which its bridge follows), and the proxy asks
+  the platform to swap (a route of the computer's, signed by the machine's
+  key).

@@ -1955,6 +1955,18 @@ anyone but its own owner's agents to its own fragment, which is an
 owner's share with their own agent (decision 36). It names no template;
 the chat's `@` is its user (docs/chat-records.md, "The page").
 
+**A page of the person's own may ask to unpair a machine** (on the
+optchat branch: Identities, "A machine's keys"). The same frame may ask
+`{fragment: "unpair-hands", agent: <agent fragment>, nonce}` for one of
+the person's own agent fragments. The shell asks its person in its own
+dialog ("Unpair <the agent's title>? … it stops being your hands at once"),
+Unpair armed 800 ms after it shows, and only on Unpair revokes every key
+paired to that agent (`DELETE /api/f/{agent}/keys/{npub}`) and takes the
+agent out of the frame's fragment (`DELETE …/members/{agent}`). It answers
+`{fragment: "hands-unpaired", nonce, ok, error?}`, its errors an add's. A
+frame of a fragment shared with the person gets no answer. The mind's
+Settings, Hands, uses it (docs/optchat.md, "A machine as hands").
+
 **The mind in the shell.** The shell frames its person's mind with
 `?embed=shell` (the frame mint's `return`), and the mind's page then shows
 no rail and no header: the shell's sidebar lists the mind's personas (the

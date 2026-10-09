@@ -31,6 +31,14 @@ design bug (the rule).
 - A computer is deleted only with its owner, by an operator's wipe of them
   (docs/api.md, Operators; below, "Deleted with its owner"). A new
   identity is a new computer: its id is its owner's.
+- A person's own machine may run an agent too, paired as its hands (on
+  the optchat branch: docs/optchat.md, "A machine as hands"). It is no
+  computer: no DO runs it, saves it or wakes it. `fragment hands run`
+  plays this contract's guest side for it against a loopback proxy that
+  answers `GET /api/computer` and the keepalive itself and signs every
+  other request with the machine's own key, paired to the agent
+  (docs/api.md, "A machine's keys"), so the same bridge runs there
+  unchanged but for `BRIDGE_GOOSE_PLACE=machine`.
 
 ## Lifecycle
 
