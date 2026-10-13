@@ -106,6 +106,7 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      ({email} as {owner_id}, lent {PAID_CALLS} paid calls)");
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    super::computers::on_candidate(s, api, &keys, &id)?;
     let word = format!("marmalade{}", now_s() % 1000);
     let (juniper, juniper_id) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {email}'s agent. Help with whatever they ask.\n"))?;
     let (fred, fred_id) = agent(api, &keys, &id, &s.name("fred"), "Fred", &format!("You are Fred, {email}'s agent. You keep their secret word, which is {word}. When anyone asks you for the secret word, answer with just that word.\n"))?;
