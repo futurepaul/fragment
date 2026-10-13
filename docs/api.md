@@ -1883,7 +1883,9 @@ is a message like any other: the agent makes it. A guest's launcher only
 finds.
 
 **The first run, in its chat.** The person's first agent is made with
-its chat (decision 10), and the chat comes first: the shell makes it and
+its chat (decision 10), once they hold a seat (one bought on the welcome
+is set up on its card first: docs/billing.md, The shell), and the chat
+comes first: the shell makes it and
 opens it at once with `?setup=1`, then makes the agent, assigns it to
 their computer, adds it to the chat (which wakes the computer) and waits
 for it to follow the chat. For that chat's frame alone the `agents`
