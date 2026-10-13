@@ -562,6 +562,7 @@ function openChat(name, push = true) {
   if (!byName(name)) return;
   if (push) at("/");
   state.page = null;
+  $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
   $("frames").hidden = false;
   state.current = name;
