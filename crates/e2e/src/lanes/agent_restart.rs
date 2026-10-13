@@ -161,13 +161,15 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     if let Some(image) = &candidate {
         let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
         let latest = r.body["latest"].as_str().unwrap_or("").to_string();
-        let told = within(LET_GO, || (notice(&view(), "update")["version"] == latest.as_str()).then_some(())).is_some();
-        s.ok(
-            &format!("pinned to the candidate, {image}, while awake on {first_image}: its owner is told an update is ready, to the candidate's version"),
-            r.status == 200 && r.body["image"] == image.as_str() && !latest.is_empty() && r.body["version"] != latest.as_str() && told,
-            json!({ "pinned": r.body, "view": view() }),
-        );
-        upgraded = Some(latest);
+        let label = format!("pinned to the candidate, {image}, while awake on {first_image}: its owner is told an update is ready, to the candidate's version");
+        if r.status == 200 && r.body["version"] == latest.as_str() {
+            // between rounds the canary is stable's digest: nothing to try
+            s.skip(&label, &format!("{image} is the version {first_image} runs ({latest}): no upgrade to make, so the restart is a restart"));
+        } else {
+            let told = within(LET_GO, || (notice(&view(), "update")["version"] == latest.as_str()).then_some(())).is_some();
+            s.ok(&label, r.status == 200 && r.body["image"] == image.as_str() && !latest.is_empty() && told, json!({ "pinned": r.body, "view": view() }));
+            upgraded = Some(latest);
+        }
     }
 
     // Restart, naming the start its owner saw
