@@ -31,6 +31,7 @@ const ICON = {
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
   screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
   // Lucide's external-link, link and square-pen
@@ -371,12 +372,15 @@ $("add-agent-cancel").onclick = () => addDialog.close();
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
   const out = [];
-  const { guests = 0, visibility } = f.sharing ?? {};
-  if (guests > 0) {
+  const { guests = 0, invites = 0, visibility } = f.sharing ?? {};
+  if (guests > 0 || invites > 0) {
     const b = el("span", "shared");
     b.innerHTML = svg("people");
-    b.append(String(guests));
-    b.title = `Shared with ${guests} ${guests === 1 ? "person" : "people"}`;
+    b.append(String(guests + invites));
+    b.title = [
+      guests > 0 ? `Shared with ${guests} ${guests === 1 ? "person" : "people"}` : "",
+      invites > 0 ? `${invites} ${invites === 1 ? "invite waits" : "invites wait"} on an email` : "",
+    ].filter(Boolean).join("; ");
     out.push(b);
   }
   if (visibility === "public") {
@@ -388,9 +392,13 @@ function badges(f) {
   return out;
 }
 const sheet = $("sheet");
+// Its owner shares it; anyone else in it sees who is, and may leave
+// (the sheet decides who may do what: share.rs).
+const someoneElses = (name) => !!byName(name) && !own(byName(name));
+const shareItem = (name) => (someoneElses(name) ? { icon: "people", text: "People…", onClick: () => share(name) } : { icon: "invite", text: "Invite…", onClick: () => share(name) });
 function share(name) {
   const frame = el("iframe");
-  frame.setAttribute("aria-label", `Share ${titleOf(name)}`);
+  frame.setAttribute("aria-label", someoneElses(name) ? `Who has access to ${titleOf(name)}` : `Share ${titleOf(name)}`);
   frame.allow = "clipboard-write";
   frame.src = `/share/${encodeURIComponent(name)}`;
   sheet.replaceChildren(frame);
@@ -403,7 +411,13 @@ addEventListener("message", (e) => {
   if (e.data?.share === "done") sheet.close();
 });
 sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
-sheet.onclose = () => { sheet.replaceChildren(); load().catch(() => {}); };
+sheet.onclose = () => {
+  sheet.replaceChildren();
+  load().catch(() => {});
+  // settings' Sharing says what the sheet may have changed
+  const shown = $("settings-access");
+  if (shown && state.page === "Settings") api("GET", "/api/access").then((a) => shown.replaceWith(accessSection(a))).catch(() => {});
+};
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
@@ -531,7 +545,7 @@ $("agent-heading").onclick = () => {
   openMenu($("agent-heading"), [
     ...(mine && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(mine) }] : []),
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
-    { icon: "invite", text: "Invite…", onClick: () => share(name) },
+    shareItem(name),
     ...profiles,
     ...screens,
     archiveItem(name),
@@ -691,6 +705,8 @@ function openApp(name, path = "/") {
       {
         icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [
           { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
+          // someone else's: who else is in it, and leaving it
+          ...(f && !own(f) ? [shareItem(name)] : []),
           ...(f ? [archiveItem(name)] : []),
         ]),
       },
@@ -1390,10 +1406,11 @@ async function openSettings(push = true) {
   // a credit pack's Checkout returning, before the ledger is read
   const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false) };
   const back = await returning(billingHelpers);
-  const [ledger, linked, uses] = await Promise.all([
+  const [ledger, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+    api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
   if (ledger) setGuest(ledger.plan === "guest");
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
@@ -1513,7 +1530,165 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, ...billing, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, ...billing, computer, agents, accessSection(access), skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- settings' Sharing: who has access to what the person owns (GET
+// /api/access), by fragment or by person; each fragment opens its share
+// sheet, where it changes ----
+const GENERAL = {
+  members: { icon: "lock", name: "Restricted" },
+  link: { icon: "link", name: "Anyone with the link" },
+  public: { icon: "globe", name: "Public" },
+};
+const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
+let accessBy = "fragment";
+// an identity too long to read whole: its npub's ends
+const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id);
+// a member as the view names them, and what they are to the person; a
+// person's agents reach what they do (a share is "all the pubkeys under the
+// umbrella of this email": Paul, 2026-10-13)
+const theirAgents = (m) => (m.agents ?? []).map((a) => a.name ?? shortId(a.principal));
+function accessWho(m) {
+  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: theirAgents(m).length ? `with their agents ${theirAgents(m).join(", ")}` : "" };
+  if (m.owner === state.me.id) {
+    const mine = state.agents.get(m.principal);
+    return { name: mine ? titleOf(mine.fragment) : m.name ?? shortId(m.principal), about: "your agent" };
+  }
+  const whose = m.ownerEmail ?? (m.owner ? shortId(m.owner) : null);
+  return { name: m.name ?? shortId(m.principal), about: whose ? `${whose}'s agent: they read what it reads` : "an agent" };
+}
+// a fragment's own line: its title (its sheet), what it is, and who may open it
+function accessHead(row) {
+  const head = el("div", "access-head");
+  const open = el("button", "access-name", row.title || labelOf(row.name));
+  open.type = "button";
+  open.title = "Open its share sheet";
+  open.dataset.share = row.name;
+  open.onclick = () => share(row.name);
+  const general = GENERAL[row.sharing?.visibility];
+  const tag = el("span", "access-tag");
+  if (general) {
+    tag.innerHTML = svg(general.icon);
+    tag.append(general.name);
+  }
+  head.append(open, el("span", "muted access-kind", row.kind), tag);
+  return head;
+}
+function accessByFragment(rows) {
+  const list = el("div", "access-list");
+  const shared = rows.filter((r) => r.members?.length || r.invites?.length || r.sharing?.guests || r.sharing?.invites || r.sharing?.visibility === "public");
+  const rest = rows.filter((r) => !shared.includes(r));
+  for (const row of shared) {
+    const item = el("div", "access-row");
+    item.dataset.fragment = row.name;
+    const people = el("ul", "access-people");
+    for (const m of row.members ?? []) {
+      const who = accessWho(m);
+      const li = el("li");
+      li.append(el("span", "access-who", who.name), el("span", "muted", [who.about, ROLE[m.role] ?? m.role].filter(Boolean).join(" · ")));
+      people.append(li);
+    }
+    for (const i of row.invites ?? []) {
+      const li = el("li");
+      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, not signed in yet`));
+      people.append(li);
+    }
+    if (row.more) people.append(el("li", "muted", `and ${row.more} more`));
+    // asked of no fragment (past the view's bound): its counts
+    if (!row.members && row.sharing) people.append(el("li", "muted", `${row.sharing.guests} ${row.sharing.guests === 1 ? "person" : "people"}${row.sharing.invites ? `, ${row.sharing.invites} invited` : ""}: its sheet names them`));
+    if (!people.children.length) people.append(el("li", "muted", "No one else is in it"));
+    item.append(accessHead(row), people);
+    list.append(item);
+  }
+  if (rest.length) {
+    const more = el("details", "access-rest");
+    more.append(el("summary", null, `${rest.length} more no one else is in`));
+    for (const row of rest) {
+      const item = el("div", "access-row");
+      item.dataset.fragment = row.name;
+      item.append(accessHead(row));
+      more.append(item);
+    }
+    list.append(more);
+  }
+  if (!rows.length) list.append(el("p", "muted", "You own nothing yet."));
+  return list;
+}
+// by person: who can open what of the person's, everyone else's agents by
+// their owners, and those anyone may open
+function accessByPerson(rows) {
+  const people = new Map();
+  const add = (key, name, about, row, role, agents = []) => {
+    if (!people.has(key)) people.set(key, { name, about, rows: [], agents: new Set() });
+    people.get(key).rows.push({ row, role });
+    for (const a of agents) people.get(key).agents.add(a);
+  };
+  for (const row of rows) {
+    for (const m of row.members ?? []) {
+      // the person's own agents see all of theirs anyway (decision 44)
+      if (m.kind === "agent" && m.owner === state.me.id) continue;
+      const who = accessWho(m);
+      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role, theirAgents(m));
+    }
+    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, not signed in yet", row, ROLE[i.role] ?? i.role);
+  }
+  const anyone = rows.filter((r) => r.sharing?.visibility === "public");
+  const linked = rows.filter((r) => r.sharing?.visibility === "link");
+  const list = el("div", "access-list");
+  const group = (name, about, entries, open = true, agents = []) => {
+    const item = el("details", "access-person");
+    item.open = open;
+    const summary = el("summary");
+    summary.append(el("span", "access-who", name), el("span", "muted", [about, `${entries.length} ${entries.length === 1 ? "fragment" : "fragments"}`].filter(Boolean).join(" · ")));
+    const ul = el("ul", "access-people");
+    // a person's agents, with the same access as them
+    for (const a of agents) {
+      const li = el("li", "access-agent");
+      li.append(el("span", "access-who", a), el("span", "muted", "their agent, the same access"));
+      ul.append(li);
+    }
+    for (const { row, role } of entries) {
+      const li = el("li");
+      const open = el("button", "access-name", row.title || labelOf(row.name));
+      open.type = "button";
+      open.onclick = () => share(row.name);
+      li.append(open, el("span", "muted", role));
+      ul.append(li);
+    }
+    item.append(summary, ul);
+    list.append(item);
+  };
+  for (const p of people.values()) group(p.name, p.about, p.rows, true, [...p.agents]);
+  if (anyone.length) group("Everyone", "public: no link needed", anyone.map((row) => ({ row, role: "Viewer" })));
+  if (linked.length) group("Anyone with the share link", "you hold the links; each sheet copies its own", linked.map((row) => ({ row, role: "Viewer" })), false);
+  if (!list.children.length) list.append(el("p", "muted", "No one else can open anything of yours."));
+  return list;
+}
+function accessSection(access) {
+  const s = section("Sharing");
+  s.id = "settings-access";
+  if (!access || access.error) {
+    s.append(el("p", "settings-warning", `Who has access did not load${access?.error ? `: ${access.error}` : ""}.`));
+    return s;
+  }
+  s.append(el("p", "muted", "Who can open what you own. A title opens its share sheet, where that changes."));
+  const tabs = el("div", "settings-actions");
+  const body = el("div", "access-body");
+  const draw = () => {
+    for (const b of tabs.children) b.setAttribute("aria-pressed", String(b.dataset.by === accessBy));
+    body.replaceChildren(accessBy === "person" ? accessByPerson(access.fragments) : accessByFragment(access.fragments));
+  };
+  for (const [by, text] of [["fragment", "By fragment"], ["person", "By person"]]) {
+    const b = el("button", "chip", text);
+    b.type = "button";
+    b.dataset.by = by;
+    b.onclick = () => { accessBy = by; draw(); };
+    tabs.append(b);
+  }
+  draw();
+  s.append(tabs, body);
+  return s;
 }
 
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model

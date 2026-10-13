@@ -133,6 +133,19 @@ pub mod limits {
     /// A chat's unread messages its row counts, at most: past it the count
     /// stops (the shell shows this many as "99+").
     pub const LISTED_UNREAD_MAX: u32 = 100;
+    /// Fragments `GET /api/access` asks for their members and invites, at
+    /// most: those someone else is in or invited to, the first listed
+    /// first. Past it, a fragment's row has its counts alone (its share
+    /// sheet has the rest).
+    pub const ACCESS_ASKED_MAX: usize = 64;
+    /// Members (but its owner) a fragment's row in `GET /api/access` lists,
+    /// at most: past it, `more` counts the rest.
+    pub const ACCESS_MEMBERS_MAX: usize = 50;
+    /// Fragments `GET /api/access` asks at once.
+    pub const ACCESS_ASKED_AT_ONCE: usize = 16;
+    /// Identities `GET /api/access` names by email, at most (eight of the
+    /// registry's asks): past it, a member shows by their npub.
+    pub const ACCESS_PROFILES_MAX: usize = 512;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -537,6 +550,17 @@ impl Visibility {
             _ => None,
         }
     }
+
+    /// Who may open a fragment made from `template` with no visibility
+    /// asked: a chat or an agent (its SOUL and memories) only its members
+    /// (Paul, 2026-10-13); anything else anyone with its share link
+    /// (decision 48).
+    pub fn made_from(template: Option<&str>) -> Visibility {
+        match template {
+            Some("chat" | "agent") => Visibility::Members,
+            _ => Visibility::Link,
+        }
+    }
 }
 
 /// `POST /api/fragments`. The fragment's own key is made by the node's
@@ -625,6 +649,12 @@ pub struct Urls {
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
+    /// What it is, and its title, as its live `fragment.json` last said
+    /// (an app with no title until it has).
+    #[serde(default)]
+    pub kind: FragmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub npub: String,
     pub owner: String,
     /// The caller's role.
@@ -634,7 +664,9 @@ pub struct FragmentStatus {
     pub pins: Pins,
     pub counts: Counts,
     pub code: CodeStatus,
-    /// Viewers and up see the share link's token.
+    /// The share link's token: its owner's alone (and their agent's,
+    /// sharing for them), as the share sheet shows it. A member does not
+    /// share by link: they ask its owner.
     pub view_token: Option<String>,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
@@ -775,13 +807,99 @@ pub struct MessageHit {
 }
 
 /// A fragment's sharing, in its owner's list (the platform's page): who
-/// may open it, how many members it has, and how many of them are guests
-/// (neither the owner nor an agent of theirs).
+/// may open it, how many members it has, how many of them are guests
+/// (neither the owner nor an agent of theirs), and how many invites wait
+/// on an email (`None` in a row sent before rows counted them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sharing {
     pub visibility: Visibility,
     pub members: u64,
     pub guests: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invites: Option<u64>,
+}
+
+impl Sharing {
+    /// Whether anyone but its owner and their own agents is in it, or is
+    /// invited (a row sent before invites were counted may have some).
+    pub fn with_others(&self) -> bool {
+        self.guests > 0 || self.invites.is_none_or(|n| n > 0)
+    }
+}
+
+/// `GET /api/access` (a person): who has access to each fragment they own
+/// (docs/api.md, Sharing).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Access {
+    pub fragments: Vec<AccessRow>,
+}
+
+/// One fragment its asker owns, and who may open it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessRow {
+    pub name: String,
+    pub kind: FragmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Who may open it, and its counts, as its owner's list holds them
+    /// (`None` until the fragment has sent them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<Sharing>,
+    /// Its agent members as the list names them (`ListedFragment::agents`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// Its members but its owner, asked of the fragment when someone else
+    /// may be in it or invited (`Sharing::with_others`), at most
+    /// `limits::ACCESS_MEMBERS_MAX`; `None` when it was not asked (no one
+    /// else is, or it is past `limits::ACCESS_ASKED_MAX` fragments asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<AccessMember>>,
+    /// Members past `ACCESS_MEMBERS_MAX`, not listed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub more: u64,
+    /// The invites waiting, when it was asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invites: Vec<Invite>,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A member as the access view shows them: a person by their email, an
+/// agent by its name and by its owner's email (its owner reads what it
+/// reads).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessMember {
+    pub principal: String,
+    pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<IdentityKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// An agent's name: its agent fragment's label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
+    /// A person's agents, who reach what the person does (Paul,
+    /// 2026-10-13: a share is "all the pubkeys under the umbrella of this
+    /// email"), each acting with at most its cap (R17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AccessAgent>,
+}
+
+/// A member's agent, as the access view names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessAgent {
+    pub principal: String,
+    /// Its agent fragment's label, when it was made from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// `GET /api/fragments` (any signer).
@@ -805,9 +923,6 @@ pub struct Member {
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// The share lends the member's agents nothing.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub people_only: bool,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -982,10 +1097,6 @@ pub struct IdentityView {
 #[serde(rename_all = "camelCase")]
 pub struct SetRole {
     pub role: Role,
-    /// The share lends the member's agents nothing (decision 36): only the
-    /// person acts with it.
-    #[serde(default)]
-    pub people_only: bool,
 }
 
 /// `POST /api/f/<name>/invites` (owner): share with whoever signs in as
@@ -1627,17 +1738,31 @@ mod tests {
         }
         let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, unread: 0, sharing: None, archived: false, owned: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
-        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
+        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
             fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["npub1juniper".into()], preview: Some("hi".into()), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true }] })
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
         assert!(!read.archived && read.unread == 0);
+        // a row's sharing sent before invites were counted reads back
+        // without them: someone else may be invited, so the access view asks
+        let old: Sharing = serde_json::from_value(serde_json::json!({ "visibility": "link", "members": 2, "guests": 0 })).unwrap();
+        assert!(old.invites.is_none() && old.with_others());
+        assert!(!Sharing { invites: Some(0), ..old }.with_others());
+        assert!(Sharing { invites: Some(1), ..old }.with_others());
+        assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
+        // a chat and an agent are made members only; the rest by link
+        assert_eq!([Some("chat"), Some("agent")].map(Visibility::made_from), [Visibility::Members; 2]);
+        assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
+        // a share is the person's and their agents' (Paul, 2026-10-13): no
+        // field says otherwise, and one that tries is refused
+        assert_eq!(value(&SetRole { role: Role::Editor }), serde_json::json!({ "role": "editor" }));
+        assert!(serde_json::from_value::<SetRole>(serde_json::json!({ "role": "viewer", "peopleOnly": true })).is_err());
         let found = SearchAnswer {
             fragments: vec![],
             messages: vec![MessageHit { fragment: "talk.ann".into(), channel: "chat".into(), seq: 4, at: 1, snippet: "water the tomatoes".into() }],

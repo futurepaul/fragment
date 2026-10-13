@@ -106,11 +106,12 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .menu svg { width: var(--icon-size); height: var(--icon-size); color: var(--text-secondary); }
 .row.settings { color: var(--text-secondary); text-decoration: none; }
 .row.settings svg { width: var(--icon-size); height: var(--icon-size); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-/* the share sheet's dialog: the sheet's own card colors, as tall as it says (shell.js `share`) */
-.sheet { padding: 0; border: 0; border-radius: 14px; width: min(30rem, calc(100vw - 32px)); background: #fff; box-shadow: 0 12px 48px rgba(0,0,0,.45); overflow: hidden; }
+/* the share sheet's dialog: the sheet's own card colors (share.rs, its
+   --surface), the frame its whole width and as tall as it says (shell.js `share`) */
+.sheet { padding: 0; border: 0; border-radius: 14px; width: min(32rem, calc(100vw - 32px)); background: #fffdfa; box-shadow: 0 12px 48px rgba(0,0,0,.45); overflow: hidden; }
 .sheet::backdrop { background: rgba(0,0,0,.55); }
-.sheet iframe { display: block; width: 100%; height: 26rem; max-height: calc(100vh - 48px); border: 0; }
-@media (prefers-color-scheme: dark) { .sheet { background: #1f2327; } }
+.sheet iframe { display: block; width: 100%; height: 26rem; max-height: calc(100dvh - 48px); border: 0; }
+@media (prefers-color-scheme: dark) { .sheet { background: #2b2b2a; } }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
 .spacer { flex: 1; }
 
@@ -387,7 +388,25 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
 .chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
 .chip:disabled { opacity: .6; }
-.sheet iframe { display: block; width: min(92vw, 460px); height: 600px; border: 0; }
+/* settings' Sharing: who has access to what of the person's (shell.js accessSection) */
+.access-body { width: 100%; }
+.access-list { width: 100%; display: flex; flex-direction: column; }
+.access-row, .access-person { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.access-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.access-name { min-width: 0; padding: 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-weight: 600; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.access-name:hover { text-decoration: underline; text-underline-offset: 2px; }
+.access-kind { font-size: 12.5px; }
+.access-tag { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; flex: none; font-size: 12.5px; color: var(--text-secondary); }
+.access-tag svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.access-people { list-style: none; margin: 4px 0 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 2px; }
+.access-people li { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 13.5px; }
+.access-people li .muted { font-size: 12.5px; }
+.access-who { overflow-wrap: anywhere; }
+.access-rest, .access-person { width: 100%; }
+.access-rest summary, .access-person summary { cursor: pointer; padding: 6px 0; color: var(--text-secondary); font-size: 13.5px; }
+.access-person summary { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; color: var(--text-primary); }
+.access-person summary .muted { font-size: 12.5px; }
+.access-rest .access-row { padding-left: 12px; }
 .picture { gap: 10px; cursor: pointer; }
 .picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
 /* setup: the steps of making the default agent (shell.js creatingAgent) */

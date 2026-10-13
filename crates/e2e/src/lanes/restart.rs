@@ -99,9 +99,28 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/archived"), Some(&json!({ "archived": true })))?;
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
     anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
+    // sharing: an invite waiting, and who has access as the access view says it
+    let invitee = format!("restart-invitee-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": invitee, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "invite setup: {r}");
+    let access_row = |api: &Api| -> Value {
+        let r = api.signed(&owner, "GET", "/api/access", None).ok();
+        r.and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str()).cloned())).unwrap_or_default()
+    };
+    let access_before = access_row(&api);
+    anyhow::ensure!(
+        access_before["members"].as_array().is_some_and(|m| m.iter().any(|m| m["email"] == MEMBER_EMAIL && m["role"] == "editor")) && access_before["invites"][0]["email"] == invitee.as_str(),
+        "access setup: {access_before}"
+    );
 
     s.stop()?;
     let api = s.start(false)?;
+    let access_after = access_row(&api);
+    s.ok(
+        "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
+        access_after == access_before,
+        format!("{access_before} → {access_after}"),
+    );
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
