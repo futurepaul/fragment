@@ -1,7 +1,8 @@
 //! The operators' admin (docs/api.md, Operators; decision 59): people and
 //! orgs a page at a time, searched by email; a person's page with their
-//! ledger and computer; billing's health; a trial mailed; and the log of
-//! what operators did. An operator key no person holds reaches it, as a
+//! ledger and computer; their computer pinned to another image and back
+//! (a canary: docs/computers.md, "Stable and canary"); billing's health; a
+//! trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
 //! wipe's does; no one else. Valid and invalid.
 
 use anyhow::Result;
@@ -42,11 +43,50 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     let theirs = get(&operator, &format!("/people/{ivy_id}"))?;
     s.ok(
         "a person's page: as listed, with their ledger, and no computer",
-        theirs.status == 200 && theirs.body["person"] == row && theirs.body["ledger"]["plan"] == "seat" && theirs.body["computer"].is_null(),
+        theirs.status == 200 && theirs.body["person"] == row && theirs.body["ledger"]["plan"] == "seat" && theirs.body["computer"].is_null() && theirs.body["references"].is_null(),
         &theirs,
     );
     let missing = get(&operator, "/people/npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq")?;
     s.ok("no one by that npub is 404", missing.status == 404, &missing);
+
+    // ---- a person's computer pinned by an operator (docs/computers.md,
+    // "Stable and canary"): onto another image, and back
+    let pin = |keys: &Keys, image: &str| api.signed(keys, "PUT", &format!("/api/admin/people/{ivy_id}/computer/image"), Some(&json!({ "image": image })));
+    let none_yet = pin(&operator, "stub")?;
+    s.ok("an operator's pin of a person with no computer yet is 404", none_yet.status == 404, &none_yet);
+    const PINNED: &str = "an operator pins a person's computer to another image: its view names it, its next start runs another version, asleep it is told nothing, and the person's page gives both images' whole references";
+    const PINNED_BACK: &str = "`fragment operator pin` with the operator key's file pins it back, and the log holds the pin";
+    let computers = s.runs("admin", &[Need::Computers]);
+    // locally, the stub's two builds; hosted, its own image again (a
+    // deployment's names are its config's)
+    let mut first = String::new();
+    if !computers {
+        for label in [PINNED, "an image the deployment lacks is refused (400)", PINNED_BACK] {
+            s.skip(label, "this deployment makes no computers");
+        }
+    } else {
+        let made = api.signed(&ivy, "POST", "/api/computers", Some(&json!({})))?;
+        first = made.body["image"].as_str().unwrap_or("").to_string();
+        let other = if s.hosted() { first.clone() } else { "stub-next".to_string() };
+        let r = pin(&operator, &other)?;
+        let page = get(&operator, &format!("/people/{ivy_id}"))?;
+        let next = page.body["references"]["next"].as_str().unwrap_or("").to_string();
+        s.ok(
+            PINNED,
+            made.status == 200
+                && r.status == 200
+                && r.body["image"] == other.as_str()
+                && (s.hosted() || r.body["latest"] != made.body["latest"])
+                && r.body["notices"].as_array().is_none_or(|n| n.is_empty())
+                && page.body["computer"]["image"] == other.as_str()
+                && page.body["references"]["running"].is_null()
+                && !next.is_empty()
+                && r.body["latest"] == fragment_core::computer::version_of(&next).as_str(),
+            json!({ "made": made.body, "pinned": r.body, "references": page.body["references"] }),
+        );
+        let unknown = pin(&operator, "no-such-image")?;
+        s.ok("an image the deployment lacks is refused (400)", unknown.status == 400, &unknown);
+    }
 
     // ---- orgs and billing's health
     let orgs = get(&operator, "/orgs")?;
@@ -116,8 +156,23 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
         listed.as_ref().is_ok_and(|v| v["people"].as_array().is_some_and(|p| p.iter().any(|p| p["npub"] == ivy_id.as_str()))),
         format!("{listed:?}"),
     );
+    if computers {
+        let back = s.cli_json(api, &home, &["operator", "pin", &ivy_id, &first, "--key-file", &path, "--json"]);
+        let log = get(&operator, "/log")?;
+        let pins: Vec<&Value> = log.body["entries"].as_array().into_iter().flatten().filter(|e| e["action"] == "pin" && e["target"] == ivy_id.as_str()).collect();
+        s.ok(
+            PINNED_BACK,
+            back.as_ref().is_ok_and(|v| v["image"] == first.as_str()) && pins.len() == 2 && pins[0]["detail"] == first.as_str() && pins[0]["operator"] == fragment_core::npub::encode(wiper.pubkey_hex()).as_str(),
+            json!({ "cli": format!("{back:?}"), "pins": pins }),
+        );
+    }
     let stranger = api.person()?;
-    let refused = [get(&stranger, "/people")?, get(&stranger, "/health")?, api.signed(&stranger, "POST", "/api/admin/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 1, "capacity": 1 })))?];
+    let refused = [
+        get(&stranger, "/people")?,
+        get(&stranger, "/health")?,
+        api.signed(&stranger, "POST", "/api/admin/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 1, "capacity": 1 })))?,
+        pin(&stranger, "stub")?,
+    ];
     let unsigned = api.unsigned("GET", "/api/admin/people", None)?;
     s.ok(
         "anyone else is refused (403), unsigned is 401",

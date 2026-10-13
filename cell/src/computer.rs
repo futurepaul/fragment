@@ -49,7 +49,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
-use fragment_core::computer::{notices, valid_version, version_running, Action, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
+use fragment_core::computer::{image_running, notices, valid_version, version_running, Action, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
@@ -1694,6 +1694,16 @@ impl ComputerCell {
                 self.look_and_tell().await;
                 json_response(&self.view()?)
             }
+            // an operator's view of it (orgs.rs, the person page): the whole
+            // references of the image it runs and of the one its next start
+            // runs, which a promotion copies (docs/computers.md, "Stable and
+            // canary"); its owner's view names their versions alone
+            "computer/references" => {
+                self.must(MetaKey::Id)?;
+                self.look_and_tell().await;
+                let (life, saves, images) = (self.lifecycle()?, self.saves()?, self.images()?);
+                json_response(&json!({ "running": image_running(&life, &saves), "next": images.next() }))
+            }
             "computer/wipe" => json_response(&self.wipe().await?),
             "computer/wipe-view" => json_response(&self.wipe_view().await?),
             "computer/wake" => {
@@ -1764,6 +1774,9 @@ impl ComputerCell {
             }
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
+                // its owner's, or an operator's: a computer made, never one
+                // a pin would leave half made
+                self.must(MetaKey::Id)?;
                 let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
                 if !images.as_array().is_some_and(|names| names.iter().any(|n| n == b.image.as_str())) {
                     return Err(CellError::invalid(format!("no image {:?} on this deployment (its images: {images})", b.image)));
@@ -2108,7 +2121,7 @@ async fn owned(env: &Env, who: &str, id: &str) -> CellResult<ComputerView> {
 }
 
 /// `{image}` from a body.
-fn image_named(body: &[u8]) -> CellResult<String> {
+pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
     v["image"].as_str().filter(|i| fragment_core::price::printable(i, 64)).map(str::to_string).ok_or_else(|| CellError::invalid("name an image"))
 }

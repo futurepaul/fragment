@@ -315,7 +315,7 @@ and a computer's host label, `<24 hex>--computer--<branch>`, fits too.
 
 The deployment's operators run it from `/admin` (a platform page, plain
 like the shell: it holds nothing, and its API answers only operators),
-from `fragment operator people|person|orgs|comp|uncomp|trials|health|log`,
+from `fragment operator people|person|pin|orgs|comp|uncomp|trials|health|log`,
 or over `/api/admin/*`. An operator is: a key the deployment's
 `operators` lists, held by anyone or no one (no registry is asked of one
 no one holds, as a wipe's); an identity it lists, signed or through the
@@ -327,10 +327,11 @@ no one holds by its npub: a grant's `by`, and the log's.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves) |
-| `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null}` |
+| `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Stable and canary") |
+| `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
-| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, and ledger command, written in its own turn; the newest 10,000 kept |
+| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
 Comps, orgs' views and trial codes are under Seats and orgs.
