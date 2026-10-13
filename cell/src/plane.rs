@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{manifest, npub, site};
 use fragment_proto::{limits, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
-use fragment_templates::blessed;
+use fragment_templates::{blessed, File};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -348,7 +348,7 @@ impl FragmentCell {
         let blessed = manifest.template.clone();
         let manifest = match &blessed {
             None => manifest,
-            Some(t) => match blessed::manifest(t).and_then(|b| manifest::on_template(&manifest, &b)) {
+            Some(t) => match crate::assets::blessed_manifest(&self.env, t).await?.and_then(|b| manifest::on_template(&manifest, &b)) {
                 Ok(m) => m,
                 Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
             },
@@ -359,7 +359,15 @@ impl FragmentCell {
                 if let Some(own) = self.tree_rows("live")?.into_iter().map(|r| r.path).find(|p| blessed::is_code(p)) {
                     return self.code_refused(sha, &format!("a fragment on the {t} template carries no code of its own ({own}): fork it to change its code"));
                 }
-                match blessed::code(t) {
+                let read = match blessed::code_files(t) {
+                    Ok(Some(files)) => {
+                        let bytes = crate::assets::read_all(&self.env, &files).await?;
+                        blessed::code(t, files.into_iter().zip(bytes).collect()).map(Some)
+                    }
+                    Ok(None) => Ok(None),
+                    Err(fault) => Err(fault),
+                };
+                match read {
                     Ok(code) => code.map(Code::Release),
                     Err(fault) => return self.code_refused(sha, &format!("the {t} template's code: {}", fault.message())),
                 }
@@ -369,7 +377,7 @@ impl FragmentCell {
         // the code's modules and identity, read before anything is written
         let (source, modules, loader_id) = match code {
             None => (None, BTreeMap::new(), String::new()),
-            Some(Code::Release(c)) => (Some(c.source.to_string()), c.modules.into_iter().map(|(p, s)| (p, s.to_string())).collect(), c.id),
+            Some(Code::Release(c)) => (Some(c.source), c.modules, c.id),
             Some(Code::Live) => match self.read_live_code(&cs, &repo, sha).await? {
                 Ok((source, modules, id)) => (Some(source), modules, id),
                 Err(why) => return self.code_refused(sha, &why),
@@ -380,7 +388,7 @@ impl FragmentCell {
             None => self.del_meta(MetaKey::MetaLive)?,
         }
         match &blessed {
-            Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
+            Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
             None => self.del_meta(MetaKey::Blessed)?,
         }
         self.face_is(manifest.kind(), manifest.title())?;
@@ -488,11 +496,11 @@ impl FragmentCell {
 
     /// Whether this fragment runs an older release of its blessed template
     /// than the one this build serves (the platform deployed since): one
-    /// meta read, against a hash made once per isolate.
+    /// meta read, against the hash the build made.
     fn blessed_stale(&self) -> CellResult<bool> {
         let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(false) };
         let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
-        Ok(blessed::release(t).as_deref() != Some(release))
+        Ok(blessed::release(t) != Some(release))
     }
 
     /// A blessed fragment installed from an older release of its template
@@ -699,7 +707,7 @@ impl FragmentCell {
             })
             .collect();
         // a blessed template's data, beneath the fragment's own files (decision 40)
-        files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.bytes.len(), "mode": "100644", "lastCommitSha": d.version, "machinery": false, "release": true })));
+        files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.size, "mode": "100644", "lastCommitSha": blessed::data_version(d), "machinery": false, "release": true })));
         files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         json_response(&json!({ "ref": facts.pin_main, "files": files }))
     }
@@ -709,31 +717,32 @@ impl FragmentCell {
     /// template lists and reads it from the release, so one deploy of the
     /// platform updates every one of them, and a file of its own at the same
     /// path wins over the release's.
-    pub(crate) fn release_data(&self, own: &std::collections::BTreeSet<&str>) -> CellResult<Vec<&'static blessed::DataFile>> {
+    pub(crate) fn release_data(&self, own: &std::collections::BTreeSet<&str>) -> CellResult<Vec<&'static File>> {
         let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(vec![]) };
         let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
-        Ok(blessed::data(template).iter().filter(|d| !own.contains(d.path)).collect())
+        Ok(blessed::data(template).into_iter().filter(|d| !own.contains(d.path)).collect())
     }
 
     /// One data file of the blessed template live runs, when the fragment
     /// holds no file of its own at `path`.
-    pub(crate) fn release_file(&self, path: &str) -> CellResult<Option<&'static blessed::DataFile>> {
+    pub(crate) fn release_file(&self, path: &str) -> CellResult<Option<&'static File>> {
         let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(None) };
         let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
         Ok(blessed::data_file(template, path))
     }
 
-    /// A release's data file as a file route answers one.
-    pub(crate) fn release_response(d: &blessed::DataFile, head: bool) -> CellResult<Response> {
+    /// A release's data file as a file route answers one, its bytes
+    /// streamed from the release's Static Assets (a HEAD reads none).
+    pub(crate) async fn release_response(&self, d: &File, head: bool) -> CellResult<Response> {
         let headers = Headers::new();
         headers.set("content-type", site::mime_for_path(d.path))?;
         headers.set("cache-control", "no-store")?;
-        headers.set("x-fragment-ref", &d.version)?;
-        headers.set("content-length", &d.bytes.len().to_string())?;
+        headers.set("x-fragment-ref", &blessed::data_version(d))?;
         if head {
+            headers.set("content-length", &d.size.to_string())?;
             return Ok(Response::empty()?.with_headers(headers));
         }
-        Ok(Response::from_bytes(d.bytes.to_vec())?.with_headers(headers))
+        crate::assets::body(&self.env, d, headers).await
     }
 
     /// Streams a file from a pin (`main` for the API, `live` for the site);
@@ -772,7 +781,7 @@ impl FragmentCell {
         let Some(row) = self.tree_row("main", path)? else {
             // beneath its own files, its blessed template's data (decision 40)
             if let Some(d) = self.release_file(path)? {
-                return Self::release_response(d, false);
+                return self.release_response(d, false).await;
             }
             return Err(CellError::new(ErrorCode::NotFound, format!("no file {path} at main")));
         };
