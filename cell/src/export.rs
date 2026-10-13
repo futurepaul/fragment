@@ -1305,6 +1305,7 @@ impl PrincipalCell {
                     title: face["title"].as_str().map(str::to_string),
                     agents: vec![],
                     preview: None,
+                    preview_at: None,
                     unread: 0,
                     sharing: None,
                     archived: false,
