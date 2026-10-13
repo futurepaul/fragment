@@ -249,6 +249,23 @@ function theme(frame) {
 dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 mobileChat.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
+// ---- what is visible: the page is as tall as the visual viewport, from
+// where it is (shell.css, --viewport-*). A phone's keyboard shrinks that
+// viewport and Safari pans it, leaving the layout viewport be (it ignores
+// `interactive-widget`), so the body follows it: a chat's composer, the
+// launcher's input and a window's fields sit just above the keyboard, and
+// the page itself never scrolls under it. ----
+const visible = window.visualViewport;
+function fitViewport() {
+  if (!visible) return;
+  const root = document.documentElement.style;
+  root.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+  root.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+}
+visible?.addEventListener("resize", fitViewport);
+visible?.addEventListener("scroll", fitViewport);
+fitViewport();
+
 // ---- the person's agents, for a page of theirs that asks (a chat's @) ----
 // A frame of a fragment the person owns may ask for their agents
 // (`{fragment: "agents?"}`); the shell answers it, at that fragment's own

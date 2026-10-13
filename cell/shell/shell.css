@@ -59,8 +59,24 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html, body { margin: 0; height: 100%; background: var(--bg-window); color: var(--text-primary); }
-body { font: 15px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
+/* A native app's page (Paul, 2026-10-13: "staying strictly in the
+   viewport"): the page itself never scrolls, bounces or zooms. html and
+   body are pinned; only the real scroll areas scroll (the chat list, the
+   settings, the launcher, sheets, a window's frame), each keeping its own
+   overscroll. The body is as tall as what is visible, from where it is
+   (--viewport-*: shell.js `fitViewport`, from the visual viewport, which is
+   what a phone's keyboard shrinks: Safari leaves the layout viewport be),
+   and is the containing block of everything fixed in it (the sheet, the
+   list, the + button), so the composer and the windows sit above the
+   keyboard and nothing slides under it. */
+html, body { position: fixed; inset: 0; margin: 0; overflow: hidden; overscroll-behavior: none; background: var(--bg-window); color: var(--text-primary); }
+html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); transform: translateZ(0); font: 15px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
+:root { --vh: var(--viewport-height, 100dvh); }
+/* the chrome is the app's, not text to select or hold; what people write and read stays selectable */
+button, .row, .menu, .topbar, .sidebar-top, .settings-nav, .pane-head, .desktop-dock, .chip { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+button, a, .row, summary, label { touch-action: manipulation; }
+.rows, .page, .pane-body, .search-dialog, .search-results, .menu, .catalog, .first-run { overscroll-behavior: contain; }
 button, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 svg { width: var(--icon-size); height: var(--icon-size); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
@@ -115,7 +131,8 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
    --surface), the frame its whole width and as tall as it says (shell.js `share`) */
 .sheet { padding: 0; border: 0; border-radius: 14px; width: min(32rem, calc(100vw - 32px)); background: #fffdfa; box-shadow: 0 12px 48px rgba(0,0,0,.45); overflow: hidden; }
 .sheet::backdrop { background: rgba(0,0,0,.55); }
-.sheet iframe { display: block; width: 100%; height: 26rem; max-height: calc(100dvh - 48px); border: 0; }
+.sheet { max-height: calc(var(--vh) - 32px - env(safe-area-inset-top, 0px)); overflow-y: auto; overscroll-behavior: contain; }
+.sheet iframe { display: block; width: 100%; height: 26rem; max-height: none; border: 0; }
 @media (prefers-color-scheme: dark) { .sheet { background: #2b2b2a; } }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
 .spacer { flex: 1; }
@@ -211,11 +228,15 @@ body.reordering iframe { pointer-events: none; }
 .scrim { display: none; }
 @media (max-width: 760px) {
   html, body { touch-action: pan-x pan-y; }
+  /* no zoom as a field takes focus: Safari zooms in on text under 16px */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), textarea, select { font-size: 16px !important; }
+  /* a phone's own edges: the status bar, the home indicator, a notch turned sideways */
+  .layout.narrow { padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
   .layout.narrow .chat { padding-bottom: env(safe-area-inset-bottom, 0px); }
   .layout.narrow .sidebar-shell, .layout.narrow .viewer { position: fixed; z-index: 10; top: 0; bottom: 0; }
-  .layout.narrow .sidebar-shell { left: 0; width: 100%; padding: 8px 8px max(8px, env(safe-area-inset-bottom, 0px)); }
+  .layout.narrow .sidebar-shell { left: 0; width: 100%; padding: max(8px, env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
   /* the viewer is a sheet from the bottom, the chat's top still showing above it */
-  .layout.narrow .viewer { top: auto; left: 0; right: 0; height: min(88dvh, calc(100dvh - 48px)); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; clip-path: inset(0 round 16px 16px 0 0); box-shadow: 0 -12px 32px rgba(0,0,0,.28); }
+  .layout.narrow .viewer { top: auto; left: 0; right: 0; height: min(calc(var(--vh) * .88), calc(var(--vh) - 48px - env(safe-area-inset-top, 0px))); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; clip-path: inset(0 round 16px 16px 0 0); box-shadow: 0 -12px 32px rgba(0,0,0,.28); }
   .layout.narrow .viewer .stack { padding: 6px 6px max(6px, env(safe-area-inset-bottom)); }
   /* the sheet is the whole viewer: no pane needs maximizing in it, and its title keeps the room */
   .layout.narrow .pane-max { display: none; }
@@ -271,12 +292,12 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 
 .sidebar-top .brand { min-width: 0; padding-right: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.search-dialog { --search-top: max(24px, calc(50dvh - 33px)); position: fixed; inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; padding: var(--search-top) 20px 24px; border: 0; border-radius: 0; background: transparent; isolation: isolate; color: var(--text-primary); overflow-y: auto; }
+.search-dialog { --search-top: max(calc(24px + env(safe-area-inset-top, 0px)), calc(var(--vh) / 2 - 33px)); position: fixed; inset: 0; top: var(--viewport-top, 0px); bottom: auto; width: 100%; max-width: none; height: var(--vh); max-height: none; margin: 0; padding: var(--search-top) 20px 24px; border: 0; border-radius: 0; background: transparent; isolation: isolate; color: var(--text-primary); overflow-y: auto; }
 .search-dialog[open] { display: block; animation: search-landscape-in 280ms cubic-bezier(.22, 1, .36, 1) both; }
 /* Transparent underneath: the landscape fades over the current workspace. */
 .search-dialog::backdrop { background: transparent; }
 /* Keep the input centered; only the results below it grow and scroll. */
-.search-panel { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(100dvh - var(--search-top) - 24px); margin: 0 auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 33px; background: var(--bg-sidebar); }
+.search-panel { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(var(--vh) - var(--search-top) - 24px); margin: 0 auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 33px; background: var(--bg-sidebar); }
 .search-dialog[open] .search-panel { animation: search-panel-in 240ms cubic-bezier(.22, 1, .36, 1) both; }
 @keyframes search-landscape-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes search-panel-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -337,11 +358,11 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .page-title { font-weight: 700; margin: 0 auto; }
 /* first run (sign in, the welcome, a seat's step): one card on the
    landscape, as the launcher's panel is (Skyler's design) */
-.first-run { position: relative; isolation: isolate; min-height: 100%; display: grid; place-items: center; padding: 24px 16px; background: transparent; }
+.first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; display: grid; place-items: safe center; padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: transparent; }
 .first-run::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
 .first-run-card { width: min(100%, 480px); display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
 .first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 10px; padding: 0; }
-@media (max-width: 520px) { .first-run { padding: 16px 12px; align-items: end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
+@media (max-width: 520px) { .first-run { padding: max(16px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px)); align-items: safe end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
 .first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
 .first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; }
 .first-run-card p { margin: 0; }

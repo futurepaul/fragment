@@ -394,6 +394,17 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
+**On a phone, an app's page.** The page never scrolls, bounces or
+zooms, framed or on its own: its html and body are pinned
+(`overscroll-behavior: none`) and the messages scroll, holding their own
+overscroll. It is as tall as the visual viewport, from where it is (its
+`resize` and `scroll`), so the composer sits just above a phone's keyboard
+(Safari shrinks and pans only that viewport); framed, the shell does the
+same for the frame. Its fields are 16px or more on a phone's width (no
+zoom as one takes focus), its buttons neither selected nor held; a table's
+cells keep their words whole, and a wide table or a long line of code
+scrolls in its own box, never the page.
+
 **Sending, then sent.** A message or command sent from the page shows
 at once as **sending**: its bubble dimmed, "Sending…" where its time
 goes, no Reply, never queued. It is sent once the platform answers with
