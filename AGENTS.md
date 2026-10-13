@@ -173,12 +173,17 @@ prebuilt bundle is in the debt ledger).
   calls (crates/e2e/src/lanes/agent_smoke.rs). `agent-restart` runs only
   here too, by name: its owner's Restart of a real Hermes computer awake
   after a reply (its newest save restored, fresh from the image, asked
-  twice made once), then a reply after it; up to 10 paid calls
-  (crates/e2e/src/lanes/agent_restart.rs). `checkout` runs only here, by
+  twice made once), then a reply after it; up to 10 paid calls (16 with
+  a candidate) (crates/e2e/src/lanes/agent_restart.rs). `checkout` runs only here, by
   name and with `--operator-key-file`: a guest buys a $100 seat on
   Stripe's own sandbox Checkout in Chrome (card 4242…), comes back to it,
   and their first agent answers; about a minute, one paid call
-  (crates/e2e/src/lanes/checkout.rs). `--dry-run` prints the plan (base URL,
+  (crates/e2e/src/lanes/checkout.rs). `--candidate <image>` (one of the
+  config's images, not its default) pins each real-agent section's new
+  computer to that image before its first start, and makes
+  `agent-restart`'s Restart the upgrade and then the rollback: a canary
+  round's run (docs/computers.md, "Stable and canary"). `--dry-run`
+  prints the plan (base URL,
   what runs, what is skipped and why) and calls nothing. A preview is
   shared (several sessions run on it at once), so a sweep is one run's
   unless told otherwise: `--sweep` deletes the fragments of the last run
