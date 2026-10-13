@@ -1994,46 +1994,39 @@ function dataSection() {
       "Download everything that is yours: your fragments and your agents' (their files, app data and messages), your computer's newest save, and the names of what others share with you. It is one file, made in the background: we email you when it is ready, and it is kept for seven days.",
     ),
   );
+  // its rows, drawn again as the export changes
   const shown = el("div", "settings-export");
   shown.dataset.state = "loading";
   s.append(shown);
-  const said = el("p", "muted");
   let timer = null;
-  const render = (v) => {
+  const render = (v, refused) => {
     shown.dataset.state = v?.state ?? "none";
-    const parts = [];
-    if (v) {
-      parts.push(line("Export", EXPORT_STATE[v.state] ?? v.state));
-      if (v.state === "building") parts.push(line("Progress", `${v.progress.done} of ${v.progress.total} parts, ${sized(v.progress.bytes)} so far`));
-      if (v.state === "ready") {
-        parts.push(line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()));
-        parts.push(el("p", "muted", "Exporting again replaces this one: its download goes."));
-      }
-      if (v.state === "failed" && v.error) parts.push(el("p", "settings-warning", v.error.message));
-    }
-    const actions = el("div", "settings-actions");
-    if (v?.state === "ready" && v.download) {
-      const get = el("a", "quiet", "Download");
-      get.href = v.download;
-      get.dataset.action = "export-download";
-      actions.append(get);
-    }
     const go = el("button", "quiet", v?.state === "building" ? "Exporting…" : v?.state === "ready" ? "Export again" : "Export everything");
     go.type = "button";
     go.dataset.action = "export";
     go.disabled = v?.state === "building";
     go.onclick = async () => {
       go.disabled = true;
-      said.textContent = "";
       try {
         render(await api("POST", "/api/export"));
       } catch (e) {
-        said.textContent = e.message;
-        go.disabled = false;
+        render(v, e.message);
       }
     };
-    actions.append(go);
-    shown.replaceChildren(...parts, actions, said);
+    const rows = [];
+    if (v?.state === "ready" && v.download) {
+      const get = el("a", "quiet", "Download");
+      get.href = v.download;
+      get.dataset.action = "export-download";
+      rows.push(line("Export", EXPORT_STATE.ready, get), line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()), line("New export", "Replaces this one, and its download", go));
+    } else if (v?.state === "building") {
+      rows.push(line("Export", EXPORT_STATE.building, go), line("Progress", `${v.progress.done} of ${v.progress.total} parts, ${sized(v.progress.bytes)} so far`));
+    } else {
+      rows.push(line("Export", v ? EXPORT_STATE[v.state] ?? v.state : "None yet", go));
+      if (v?.state === "failed" && v.error) rows.push(el("p", "settings-warning", v.error.message));
+    }
+    if (refused) rows.push(el("p", "settings-warning", refused));
+    shown.replaceChildren(...rows);
     // while it builds, read it again, as long as this page shows it
     clearTimeout(timer);
     if (v?.state === "building") timer = setTimeout(refresh, 2000);
@@ -2042,10 +2035,7 @@ function dataSection() {
     if (!s.isConnected && shown.dataset.state !== "loading") return;
     api("GET", "/api/export")
       .then((r) => render(r.export))
-      .catch((e) => {
-        said.textContent = e.message;
-        shown.replaceChildren(said);
-      });
+      .catch((e) => shown.replaceChildren(el("p", "settings-warning", `Your export did not load: ${e.message}`)));
   };
   refresh();
   return s;

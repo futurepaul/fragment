@@ -425,8 +425,9 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-section > .quiet { align-self: flex-end; margin: 12px 2px; }
 .settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select { min-height: 34px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
-.settings-export { width: 100%; display: flex; flex-direction: column; gap: 8px; }
-.settings-export > p { margin: 0; }
+/* Your data's rows, drawn again as its export changes, are the section's own */
+.settings-export { display: contents; }
+.settings-export > p { margin: 0; padding: 12px 2px; }
 .settings-value.mono, .settings-section code { font: 500 12.5px/1.6 var(--font-mono); }
 .settings-section p code { padding: 2px 5px; border-radius: 5px; background: var(--chat-code); }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
