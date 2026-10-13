@@ -349,6 +349,23 @@ struct WakeBody {
     why: Wake,
 }
 
+/// `computer/export`: its owner's export asks for the save it copies.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExportAsk {
+    owner: String,
+}
+
+/// `computer/export-read`: a range of one of that save's records.
+#[derive(serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExportRead {
+    pub owner: String,
+    pub record: String,
+    pub offset: u64,
+    pub length: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AlwaysOnBody {
@@ -1585,6 +1602,40 @@ impl ComputerCell {
         Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more }))
     }
 
+    /// That `owner` owns it (an export's reads: anyone else finds none).
+    fn owned_by(&self, owner: &str) -> CellResult<()> {
+        match self.meta(MetaKey::Owner)? {
+            Some(o) if o == owner => Ok(()),
+            _ => Err(CellError::new(ErrorCode::NotFound, "no such computer")),
+        }
+    }
+
+    /// A range of one record of a save it keeps that restores, as stored
+    /// (`DirectoryBackup`'s tar+zstd): its owner's export copies it a piece
+    /// at a time. A record no such save names (pushed out by newer saves
+    /// since the export looked) is 404, as is a range past its end.
+    async fn export_read(&self, b: &ExportRead) -> CellResult<Response> {
+        let saves = self.saves()?;
+        let record = saves.all().iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
+        let Some(record) = record else {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no save keeps the record {}: the computer saved again since", b.record)));
+        };
+        let size = record["size"].as_u64().ok_or_else(|| CellError::host(format!("the record {} names no size", b.record)))?;
+        if b.length == 0 || b.length > fragment_core::export::limits::PIECE_BYTES as u64 || b.offset >= size {
+            return Err(CellError::invalid(format!("a read is 1 to {} bytes, within the record's {size}", fragment_core::export::limits::PIECE_BYTES)));
+        }
+        let last = (b.offset + b.length).min(size) - 1;
+        let key = format!("{}{}.tar.zst", self.backups_prefix(), b.record);
+        let blob = js::blob_get(&self.env, &key, Some(&format!("bytes={}-{last}", b.offset))).await?;
+        let blob = blob.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("the record {}'s archive is gone", b.record)))?;
+        if blob.size != size {
+            return Err(CellError::new(ErrorCode::NotFound, format!("the record {}'s archive is {} bytes, not the {size} it says", b.record, blob.size)));
+        }
+        let mut resp = Response::from_body(ResponseBody::Stream(blob.body))?;
+        resp.headers_mut().set("content-range", &format!("bytes {}-{last}/{size}", b.offset))?;
+        Ok(resp)
+    }
+
     /// What a wipe finds of it (docs/api.md, Operators): whether it is
     /// wiped, made, its phase, its saves, how many objects its saves' prefix
     /// holds (one page: `more` past it), and whether it keeps a snapshot.
@@ -1706,6 +1757,21 @@ impl ComputerCell {
             }
             "computer/wipe" => json_response(&self.wipe().await?),
             "computer/wipe-view" => json_response(&self.wipe_view().await?),
+            // its owner's export (export.rs): the newest save that restores,
+            // and a range of one of its records, read here so its saves have
+            // one reader (and one place to open them, were they sealed)
+            "computer/export" => {
+                let b: ExportAsk = body_json(&mut req).await?;
+                self.owned_by(&b.owner)?;
+                let saves = self.saves()?;
+                let save = saves.all().iter().find(|s| !s.unusable);
+                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
+            }
+            "computer/export-read" => {
+                let b: ExportRead = body_json(&mut req).await?;
+                self.owned_by(&b.owner)?;
+                self.export_read(&b).await
+            }
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;

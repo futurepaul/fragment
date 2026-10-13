@@ -1736,9 +1736,12 @@ async function openSettings(push = true) {
   account.append(actionLine("Sign-ins", link), actionLine("Session", signout));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, back);
+  // everything that is theirs, to download (a guest's too: what is shared
+  // with them, named)
+  const data = dataSection();
   // a guest has no agents to stop, nor a computer, skills or connections
   // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return renderSettingsPage(page, [...billing, account]);
+  if (state.guest) return renderSettingsPage(page, [...billing, account, data]);
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -1814,7 +1817,7 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli, data]);
 }
 
 // ---- settings' Sharing: who has access to what the person owns (GET
@@ -1972,6 +1975,76 @@ function accessSection(access) {
   }
   draw();
   s.append(actionLine("Show", tabs), body);
+  return s;
+}
+
+// ---- your data: an export of everything that is the person's (docs/api.md,
+// Export), built in the background, which they are mailed about once it is
+// ready, and which downloads from here (the platform session, on a click
+// on this page) for seven days. One at a time; three a day.
+const EXPORT_STATE = { building: "Building", ready: "Ready to download", failed: "Failed", expired: "Expired" };
+const sized = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n >= 1e3 ? `${(n / 1e3).toFixed(1)} KB` : `${n} bytes`);
+function dataSection() {
+  const s = section("Your data");
+  s.id = "settings-data";
+  s.append(
+    el(
+      "p",
+      "muted",
+      "Download everything that is yours: your fragments and your agents' (their files, app data and messages), your computer's newest save, and the names of what others share with you. It is one file, made in the background: we email you when it is ready, and it is kept for seven days.",
+    ),
+  );
+  const shown = el("div", "settings-export");
+  shown.dataset.state = "loading";
+  s.append(shown);
+  const said = el("p", "muted");
+  let timer = null;
+  const render = (v) => {
+    shown.dataset.state = v?.state ?? "none";
+    const parts = [];
+    if (v) {
+      parts.push(line("Export", EXPORT_STATE[v.state] ?? v.state));
+      if (v.state === "building") parts.push(line("Progress", `${v.progress.done} of ${v.progress.total} parts, ${sized(v.progress.bytes)} so far`));
+      if (v.state === "ready") parts.push(line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()));
+      if (v.state === "failed" && v.error) parts.push(el("p", "settings-warning", v.error.message));
+    }
+    const actions = el("div", "settings-actions");
+    if (v?.state === "ready" && v.download) {
+      const get = el("a", "quiet", "Download");
+      get.href = v.download;
+      get.dataset.action = "export-download";
+      actions.append(get);
+    }
+    const go = el("button", "quiet", v?.state === "building" ? "Exporting…" : v?.state === "ready" ? "Export again" : "Export everything");
+    go.type = "button";
+    go.dataset.action = "export";
+    go.disabled = v?.state === "building";
+    go.onclick = async () => {
+      go.disabled = true;
+      said.textContent = "";
+      try {
+        render(await api("POST", "/api/export"));
+      } catch (e) {
+        said.textContent = e.message;
+        go.disabled = false;
+      }
+    };
+    actions.append(go);
+    shown.replaceChildren(...parts, actions, said);
+    // while it builds, read it again, as long as this page shows it
+    clearTimeout(timer);
+    if (v?.state === "building") timer = setTimeout(refresh, 2000);
+  };
+  const refresh = () => {
+    if (!s.isConnected && shown.dataset.state !== "loading") return;
+    api("GET", "/api/export")
+      .then((r) => render(r.export))
+      .catch((e) => {
+        said.textContent = e.message;
+        shown.replaceChildren(said);
+      });
+  };
+  refresh();
   return s;
 }
 

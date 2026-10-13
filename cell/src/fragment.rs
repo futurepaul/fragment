@@ -1043,6 +1043,8 @@ impl FragmentCell {
                 self.pause(&caller, body)
             }
             (Method::Get, ["api", "triggers"]) => self.triggers_api(&caller),
+            // its app's database, for its owner (export.rs)
+            (Method::Get, ["api", "database"]) => self.database(&caller, query("table"), query("offset")).await,
             (Method::Post, ["api", "subscriptions"]) => {
                 let body: Value = body_json(&mut req).await?;
                 self.subscribe(&caller, &body)

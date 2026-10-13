@@ -470,6 +470,59 @@ pub async fn blob_get(env: &Env, key: &str, range: Option<&str>) -> CellResult<O
     Ok(Some(BlobBody { body, size, range }))
 }
 
+/// `length` bytes of `key` from `offset`, read whole (a piece: the caller
+/// bounds it), or `None` when the object is absent.
+pub async fn blob_range(env: &Env, key: &str, offset: u64, length: u64) -> CellResult<Option<Vec<u8>>> {
+    assert!(length > 0, "a range reads something");
+    let got = blobs(env)?.get(key).range(worker::Range::OffsetWithLength { offset, length }).execute().await?;
+    let Some(object) = got else { return Ok(None) };
+    let body = object.body().ok_or_else(|| CellError::host(format!("{key} has no body")))?;
+    Ok(Some(body.bytes().await?))
+}
+
+/// Starts a multipart upload at `key`, typed `content_type`: its id.
+pub async fn upload_start(env: &Env, key: &str, content_type: &str) -> CellResult<String> {
+    let metadata = worker::HttpMetadata { content_type: Some(content_type.to_string()), ..Default::default() };
+    let upload = blobs(env)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
+    Ok(upload.upload_id().await)
+}
+
+/// Uploads part `part` (from 1) of the upload `upload` at `key`: its etag.
+/// The same part again replaces it.
+pub async fn upload_part(env: &Env, key: &str, upload: &str, part: u16, bytes: Vec<u8>) -> CellResult<String> {
+    assert!(part >= 1, "parts count from 1");
+    let uploaded = blobs(env)?.resume_multipart_upload(key, upload)?.upload_part(part, bytes).await?;
+    Ok(uploaded.etag())
+}
+
+/// Completes the upload with `parts` (number, etag), in order: the
+/// object's size. workers-rs takes only the parts its own calls answered,
+/// so the list goes as R2's binding takes it.
+pub async fn upload_complete(env: &Env, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
+    assert!(!parts.is_empty() && parts.windows(2).all(|w| w[0].0 < w[1].0), "a completion names its parts once each, in order");
+    let bucket = blobs(env)?;
+    let pending = await_js(call(bucket.as_ref(), "resumeMultipartUpload", &[key.into(), upload.into()]), "resumeMultipartUpload").await?;
+    let list = Array::new();
+    for (n, etag) in parts {
+        let p = Object::new();
+        set(&p, "partNumber", JsValue::from_f64(f64::from(*n)));
+        set(&p, "etag", etag.as_str());
+        list.push(&p);
+    }
+    let object = await_js(call(&pending, "complete", &[list.into()]), "complete").await?;
+    get(&object, "size")?.as_f64().map(|s| s as u64).ok_or_else(|| CellError::host("a completed upload names no size"))
+}
+
+/// Aborts the upload: its parts go. One already gone (completed, aborted,
+/// or expired) is no failure.
+pub async fn upload_abort(env: &Env, key: &str, upload: &str) -> CellResult<()> {
+    match blobs(env)?.resume_multipart_upload(key, upload)?.abort().await {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().contains("NoSuchUpload") || e.to_string().contains("10024") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub async fn blob_delete(env: &Env, keys: &[String]) -> CellResult<()> {
     Ok(blobs(env)?.delete_multiple(keys.to_vec()).await?)
 }

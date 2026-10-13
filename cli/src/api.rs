@@ -458,6 +458,25 @@ impl Client {
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
         self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
+    /// A signed GET whose answer goes to `to` as it arrives (an export's
+    /// archive, which may be gigabytes), never held whole: its bytes. A
+    /// refusal is read whole, as any other's is.
+    pub fn download(&self, path: &str, to: &std::path::Path) -> Result<u64> {
+        let url = self.url(path);
+        let (header, value) = self.signer.header("GET", &url, &[]);
+        if self.verbose {
+            eprintln!("GET {path}");
+        }
+        let mut resp = self.http.get(&url).header(header, value).timeout(Duration::from_secs(6 * 3600)).send().with_context(|| format!("GET {path}"))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            return Err(anyhow::Error::new(Resp { status, body }.refusal()));
+        }
+        let mut file = std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?;
+        let n = resp.copy_to(&mut file).with_context(|| format!("GET {path}: the download broke off"))?;
+        Ok(n)
+    }
     pub fn head(&self, path: &str) -> Result<Resp> {
         self.request("HEAD", path, None)
     }

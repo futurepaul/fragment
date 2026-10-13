@@ -22,3 +22,5 @@ fragment-devstack = { path = "../devstack" }
 fragment-fakes = { path = "../fakes" }
 # the release's blessed templates, to compare what fragments on them serve
 fragment-templates = { path = "../templates", features = ["embed"] }
+# reads back the archive an export downloads
+tar = { version = "0.4", default-features = false }

@@ -271,6 +271,12 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             Ok(Did::finished(u64::from(v["held"] == true)))
         }
         Step::Lists => {
+            // their export first: its upload aborted and its archive deleted,
+            // which the list's own end (one step, no await) cannot
+            let e = routed::ask_object(env, "PRINCIPAL", person, "wipe/exports", &json!({ "person": person })).await?;
+            if e["more"] == true {
+                return Ok(Did::going(0, "their export's objects hold more: the next call deletes on".into()));
+            }
             let mut rows = 0u64;
             for (principal, _) in whom(facts) {
                 let v = routed::ask_object(env, "PRINCIPAL", &principal, "wipe/end", &json!({})).await?;

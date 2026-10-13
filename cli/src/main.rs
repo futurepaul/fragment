@@ -191,6 +191,15 @@ enum Cmd {
         #[command(subcommand)]
         sub: OperatorCmd,
     },
+    /// Export everything that is yours (your fragments and your agents',
+    /// your computer's newest save, the names of what others share with
+    /// you) as one tar file: starts an export, or finds the one building,
+    /// waits for it, and downloads it (docs/api.md, Export)
+    Export {
+        /// Where to write it (default: fragment-export-<date>.tar here)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Your usage ledger: your credit, your plan, what you may still
     /// spend, and this month's spend by fragment (your fragments' hosting
     /// and AI, and your agents' models, bill you)
@@ -1506,6 +1515,38 @@ fn run(cli: Cli) -> Result<()> {
             let v: Run = c.call_as(c.get(&format!("/api/f/{name}/runs/{id}"))?)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::Export { out } => {
+            use fragment_proto::export::{ExportState, ExportView};
+            let mut v: ExportView = c.call_as(c.post_json("/api/export", &json!({}))?)?;
+            // bounded: a build fails past its own time (6 hours), and so does this wait
+            let t0 = std::time::Instant::now();
+            while v.state == ExportState::Building {
+                if t0.elapsed() > std::time::Duration::from_secs(6 * 3600 + 600) {
+                    return Err(anyhow!("export {} is still building after six hours", v.id));
+                }
+                if !j {
+                    eprint!("\rbuilding export {}: {} of {} parts, {} bytes   ", v.id, v.progress.done, v.progress.total, v.progress.bytes);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let status: fragment_proto::export::ExportStatus = c.call_as(c.get("/api/export")?)?;
+                v = status.export.ok_or_else(|| anyhow!("the export went away as it was built"))?;
+            }
+            if !j {
+                eprintln!();
+            }
+            let (Some(download), ExportState::Ready) = (v.download.clone(), v.state) else {
+                let why = v.error.as_ref().map_or_else(|| format!("{:?}", v.state), |e| format!("{:?}: {}", e.code, e.message));
+                return Err(anyhow!("export {} did not finish: {why}", v.id));
+            };
+            let day = fragment_core::export::rfc3339(v.started_at)[..10].to_string();
+            let out = out.unwrap_or_else(|| PathBuf::from(format!("fragment-export-{day}.tar")));
+            let n = c.download(&download, &out)?;
+            if Some(n) != v.size {
+                return Err(anyhow!("{} holds {n} bytes, not the export's {}: download it again", out.display(), v.size.unwrap_or(0)));
+            }
+            json_exit(j, &json!({ "export": v, "out": out }));
+            println!("{}: export {} ({n} bytes), kept until it expires", out.display(), v.id);
         }
         Cmd::Ledger { sub } => match sub {
             None => {

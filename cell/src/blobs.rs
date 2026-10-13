@@ -184,10 +184,15 @@ impl FragmentCell {
 
     /// Every pointer at a pin: path → the size of the bytes it names.
     pub(crate) fn pointer_sizes(&self, which: &str) -> CellResult<std::collections::BTreeMap<String, u64>> {
+        Ok(self.pointers_at(which)?.into_iter().map(|(path, (_, size))| (path, size)).collect())
+    }
+
+    /// Every pointer at a pin: path → (the SHA-256 of the bytes it names, their size).
+    pub(crate) fn pointers_at(&self, which: &str) -> CellResult<std::collections::BTreeMap<String, (String, u64)>> {
         Ok(self
-            .rows("SELECT path, size FROM pointers WHERE ref = ?", vec![which.into()])?
+            .rows("SELECT path, sha, size FROM pointers WHERE ref = ?", vec![which.into()])?
             .into_iter()
-            .filter_map(|r| Some((r["path"].as_str()?.to_string(), r["size"].as_u64()?)))
+            .filter_map(|r| Some((r["path"].as_str()?.to_string(), (r["sha"].as_str()?.to_string(), r["size"].as_u64()?))))
             .collect())
     }
 
