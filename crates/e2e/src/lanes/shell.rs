@@ -1047,7 +1047,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     // the list: the sidebar over the chat, its + the launcher, bottom right
     b.click(&page, "#toggle-left")?;
-    let list = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.getElementById('sidebar').getBoundingClientRect().width >= innerWidth - 2", wait);
+    let list = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2", wait);
     let fab = b.eval(&page, "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()")?;
     let _ = b.screenshot(&page, &shots.join("phone-list.png"));
     s.ok("on a phone the list covers the chat, its + the launcher at its bottom right, a thumb's size", list && fab == true, &fab);
@@ -1713,7 +1713,9 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     b.eval(page, &fill("#workspace-search", "Reader"))?;
     let stacked = format!("#search-results .search-result[data-fragment={}] .avatar-stack .agent-avatar", js(&group));
     let colors = b.until(page, &format!("document.querySelectorAll({}).length === 2", js(&stacked)), wait);
-    s.ok("found by its title, a group shows its agents' colours stacked, the lead's first", colors, b.eval(page, "document.getElementById('search-results').innerText")?);
+    let found_row = b.eval(page, &format!("document.querySelector({})?.outerHTML ?? null", js(&format!("#search-results .search-result[data-fragment={}]", js(&group)))))?;
+    let listed_row = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == group.as_str()).cloned()).unwrap_or(Value::Null);
+    s.ok("found by its title, a group shows its agents' colours stacked, the lead's first", colors, json!({ "row": found_row, "listed": listed_row }));
     b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
     b.until(page, "!document.getElementById('search-dialog').open", wait);
     // a direct chat's ⋯ opens its own agent's screen
@@ -1735,7 +1737,8 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let marked = b.until(page, &format!("[...document.querySelectorAll({rows})].some((r) => r.querySelector('.meta')?.textContent === 'Archived')"), wait);
     s.ok("search still finds it, marked archived", marked, b.eval(page, "document.getElementById('search-results').innerText")?);
     b.click(page, &hit)?;
-    b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
+    // the launcher gone (it fades out over the page), its chat open
+    b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
     b.click(page, "#chat-options")?;
     let unarchived = menu_item(b, page, "Unarchive")?;
     let back = b.until(page, &row_of(&first_chat), wait);

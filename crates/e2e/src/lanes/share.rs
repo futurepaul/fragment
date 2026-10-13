@@ -723,9 +723,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
     let theirs = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&theirs, 1280, 800, false)?;
-    let listed = chrome.until(&theirs, &format!("{} && document.getElementById('layout').classList.contains('left-open')", settled(&row)), wait);
+    // (the launcher finds it from settings, and opens its window on the desktop)
+    let mut listed = chrome.until(&theirs, &format!("{} && {} && document.getElementById('layout').classList.contains('left-open')", settled("#sidebar-new-chat"), settled(&row)), wait);
     if listed {
-        chrome.click(&theirs, &row)?;
+        chrome.click(&theirs, "#sidebar-new-chat")?;
+        chrome.eval(&theirs, "(() => { const i = document.getElementById('workspace-search'); i.value = 'Todo'; i.dispatchEvent(new Event('input')); return true; })()")?;
+        listed = chrome.until(&theirs, &settled(&found), wait);
+    }
+    if listed {
+        chrome.click(&theirs, &found)?;
     }
     let more = "#stack button[aria-label='More']";
     let windowed = listed && chrome.until(&theirs, &settled(more), wait);

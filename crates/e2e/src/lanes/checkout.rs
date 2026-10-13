@@ -164,8 +164,8 @@ pub fn checkout(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let t_pay = Instant::now();
     let paid = pay(&mut b, &page, &shots.join("2-checkout.png"));
-    // back at the welcome's return: its seat step done, at home's address
-    let seated = "[...document.querySelectorAll('#first-run-card .creating-steps li')].some((li) => li.textContent === 'Setting up your seat' && li.className === 'done')";
+    // back at the welcome's return: its seat step done, the first run in its chat, at home's address
+    let seated = "document.getElementById('first-run').hidden && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')";
     let back = paid.is_ok() && b.until(&page, &format!("location.href === {:?} && {seated}", format!("{}/", api.base)), PAID);
     let stripe = if back { Value::Null } else { stripe_state(&mut b, &page) };
     if !back {
@@ -183,10 +183,14 @@ pub fn checkout(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
 
-    // ---- their first agent, as the shell's first run makes it, at once
+    // ---- their first agent, as the shell's first run makes it, at once,
+    // in its chat: its card goes once the agent follows the chat
     let t_agent = Instant::now();
-    let creating = b.until(&page, "location.pathname === '/' && /Creating your agent/.test(document.getElementById('first-run')?.innerText ?? '')", PAGE);
-    let ready = creating && b.until(&page, "document.getElementById('first-run').hidden && !!document.querySelector('#frames iframe[data-fragment]')", FIRST_START);
+    let creating = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')", PAGE);
+    let first_chat = own(api, &keys, "chat").unwrap_or_default();
+    let ready = creating
+        && !first_chat.is_empty()
+        && s.eventually(FIRST_START, || b.eval_in_frame(&page, &first_chat, "!document.querySelector('.setup-card') && !!document.querySelector('.msg.agent')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(&page, &shots.join("4-chat.png"));
     println!("      (their seat to its chat open, its computer's first start: {:.1?})", t_agent.elapsed());
     let (agent, chat) = (own(api, &keys, "agent").unwrap_or_default(), own(api, &keys, "chat").unwrap_or_default());
