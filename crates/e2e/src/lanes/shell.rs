@@ -1711,7 +1711,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("clicking it opens its chat", opened, b.eval(page, "document.getElementById('chat-title').textContent")?);
     b.click(page, "#sidebar-new-chat")?;
     b.eval(page, &fill("#workspace-search", "Reader"))?;
-    let stacked = format!("#search-results .search-result[data-fragment={}] .avatar-stack .agent-avatar", js(&group));
+    let stacked = format!("#search-results .search-result:not(.search-message)[data-fragment={}] .avatar-stack .agent-avatar", js(&group));
     let colors = b.until(page, &format!("document.querySelectorAll({}).length === 2", js(&stacked)), wait);
     let found_row = b.eval(page, &format!("document.querySelector({})?.outerHTML ?? null", js(&format!("#search-results .search-result[data-fragment={}]", js(&group)))))?;
     let listed_row = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == group.as_str()).cloned()).unwrap_or(Value::Null);
