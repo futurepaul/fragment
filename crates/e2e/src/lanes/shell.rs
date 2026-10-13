@@ -908,7 +908,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(document.getElementById('settings-page').scrollTop = 1e6, true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-end.png"));
     b.reload(&page)?;
-    let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
+    let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Account')", wait);
     s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
     b.click(&page, "#chats .agent-row")?;
     let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
@@ -1234,8 +1234,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = first[2].as_array().cloned().unwrap_or_default();
     s.ok(
-        "then each agent offers the provider's models, after Workers AI's (included), which it runs on now",
-        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI (included)") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
+        "then each agent offers the provider's models, after Workers AI's, which it runs on now",
+        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
         &pickers,
     );
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
