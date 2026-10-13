@@ -289,7 +289,7 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
 /// decision 48), and an agent member's owner, who reads what it reads. A
 /// person's agents are named: they reach what the person does (Paul,
 /// 2026-10-13).
-async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
+pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {

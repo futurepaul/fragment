@@ -1649,26 +1649,31 @@ impl PrincipalCell {
                 vec![]
             }
         };
-        // names as its members see them: a person's email, an agent's name
-        let mut profiles = serde_json::Map::new();
-        for chunk in members.chunks(64) {
-            let q: String = chunk.iter().filter_map(|m| m["principal"].as_str()).map(|p| format!("id={p}")).collect::<Vec<_>>().join("&");
-            if let Ok(mut p) = self.read_json(person, name, "serve/__people", &format!("?{q}")).await? {
-                if let Value::Object(found) = p["profiles"].take() {
-                    profiles.extend(found);
-                }
-            }
-        }
+        // who they are, as its owner's share sheet and access view show them
+        // (share.rs `profiles`): a person by their email, with their agents,
+        // who reach what the person does (a share is a person's and their
+        // agents'); an agent by its name, and its owner's email. A fragment
+        // its person reads only through an agent of theirs names no one.
+        let owned = meta.owner.as_deref() == Some(person);
+        let ids: Vec<String> = members.iter().flat_map(|m| [m["principal"].as_str(), m["owner"].as_str()]).flatten().map(str::to_string).collect();
+        let named = if owned { crate::share::profiles(&self.env, ids).await } else { BTreeMap::new() };
+        let email = |id: Option<&str>| id.and_then(|id| named.get(id)).and_then(|p| p.email.clone());
         for mut m in members {
             let principal = m["principal"].as_str().unwrap_or("").to_string();
-            let p = profiles.get(&principal);
-            let email = p.and_then(|p| p["email"].as_str()).map(str::to_string);
-            let shown = p.and_then(|p| p["title"].as_str().or(p["name"].as_str())).map(str::to_string);
-            if let Some(n) = email.clone().or(shown.clone()) {
-                frag.names.insert(principal, n);
+            let p = named.get(&principal);
+            let mail = email(Some(&principal));
+            let shown = p.and_then(|p| p.name.clone());
+            if let Some(n) = mail.clone().or(shown.clone()) {
+                frag.names.insert(principal.clone(), n);
             }
-            m["email"] = json!(email);
+            m["email"] = json!(mail);
             m["name"] = json!(shown);
+            if m["kind"] == "agent" {
+                m["ownerEmail"] = json!(email(m["owner"].as_str()));
+            } else {
+                let agents: Vec<Value> = p.map(|p| p.agents.iter().map(|a| json!({ "principal": a.id, "name": a.name })).collect()).unwrap_or_default();
+                m["agents"] = json!(agents);
+            }
             meta.members.push(m);
         }
         match self.read_json(person, name, "invites", "").await? {

@@ -503,8 +503,10 @@ sealed at rest later is read as its owner reads it):
   agents own (each kept whole); and every fragment someone else owns that
   they or an agent of theirs is in (`sharedWithMe`: named, its role and
   whose membership, and its owner from its `status`; never copied);
-- each fragment kept: `status`, `members` and `__people` (each member's
-  email, or an agent's name, as its members see them), `invites`,
+- each fragment kept: `status`, `members` (each named as its owner's
+  share sheet names them, through the registry's profiles: a person by
+  their email, with their agents, since a share is a person's and their
+  agents'; an agent by its name and its owner's email), `invites`,
   `secrets` (names), `channels` and each channel's records (pages of 100
   after its cursor, up to the newest its listing named), `files` and
   `file` at main (its working copy, which the file API reads: an agent's

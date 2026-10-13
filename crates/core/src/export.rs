@@ -464,7 +464,9 @@ pub struct FragmentMeta {
     /// The code live runs (`code.id` of status), and why the newest was not installed.
     pub code: Option<String>,
     pub code_error: Option<String>,
-    /// Its members, each with their email (people) or name (agents) as its members see them.
+    /// Its members as its owner's share sheet shows them: a person with
+    /// their email and their agents (a share is a person's and their
+    /// agents'), an agent with its name and its owner's email.
     pub members: Vec<Value>,
     /// The invites waiting on an email.
     pub invites: Vec<Value>,
@@ -772,8 +774,10 @@ JSON file names is relative to its own folder.
 `meta.json` holds what its owner reads of it: its kind and title, the blessed
 template it runs (if one), its npub, its owner, its visibility, whether a
 share link or an inbox token exists (never the tokens), the commits its
-`main` and `live` are at, the code live runs, its members (each with the
-email or name its members see), the invites waiting on an email, its secrets'
+`main` and `live` are at, the code live runs, its members (a person with
+their email and their agents, who reach what they do: a share is a
+person's and their agents'; an agent with its name and its owner's email),
+the invites waiting on an email, its secrets'
 names (never their values), and how many files, rows, records and blobs it
 holds. `skipped` names anything the export could not take, and why.
 
