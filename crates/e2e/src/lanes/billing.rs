@@ -332,14 +332,23 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
     let text = |b: &mut crate::browser::Lease, p: &crate::browser::Page| b.eval(p, "document.getElementById('settings-page')?.innerText ?? ''").map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
-    // what a guest sees: the middle column, the sidebar, every button that
-    // makes something (a guest's create is refused), and any warning
-    let seen = "({ path: location.pathname, home: document.getElementById('notice')?.innerText ?? '', sidebar: document.getElementById('sidebar').innerText, makes: ['new-agent', 'new-agent-top', 'new-group', 'add-app'].filter((id) => !document.getElementById(id).hidden), warned: [...document.querySelectorAll('.settings-warning')].map((w) => w.textContent) })";
+    // what a guest sees: the middle column, the sidebar, every control that
+    // makes something (a guest's create is refused: the dock's Add, the top
+    // bar's new chat, the launcher's start), and any warning
+    let seen = "({ path: location.pathname, home: document.getElementById('notice')?.innerText ?? '', sidebar: document.getElementById('sidebar').innerText, \
+                makes: [document.getElementById('add-app') && 'add-app', !document.getElementById('new-chat').hidden && 'new-chat', !document.getElementById('search-send').disabled && 'search-send', document.querySelector('#search-results .search-start') && 'search-start', document.querySelector('#desktop-empty .desktop-suggestion') && 'suggestion'].filter(Boolean), \
+                warned: [...document.querySelectorAll('.settings-warning')].map((w) => w.textContent) })";
     let home = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && /You're a guest/.test(document.getElementById('notice')?.innerText ?? '')", wait);
     let _ = b.screenshot(&page, &shots.join("guest-first-run.png"));
+    // the launcher, words typed: a guest's only finds
+    b.eval(&page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    b.eval(&page, "(() => { const i = document.getElementById('workspace-search'); i.value = 'garden'; i.dispatchEvent(new Event('input')); return true; })()")?;
+    std::thread::sleep(Duration::from_millis(800));
     let first = b.eval(&page, seen)?;
+    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(&page, "!document.getElementById('search-dialog').open", wait);
     s.ok(
-        "a new guest's first run is home: what a guest may do, a seat and what it gives, and no button that can only fail",
+        "a new guest's first run is home: what a guest may do, a seat and what it gives, and no control that can only fail (their launcher only finds)",
         home && first["makes"] == json!([])
             && first["home"].as_str().is_some_and(|t| t.contains("share with you") && t.contains("Get a seat"))
             && first["sidebar"].as_str().is_some_and(|t| t.contains("shared with you")),
@@ -394,7 +403,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let offered = b.until(&page, "[...document.querySelectorAll('#settings-page button')].some(b => b.textContent === 'Make your first agent')", wait);
     s.ok("with their seat and no chats, Billing offers their first agent", offered, text(&mut b, &page));
     b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Make your first agent').click()")?;
-    let creating = b.until(&page, "location.pathname === '/' && /Creating your agent/.test(document.getElementById('first-run')?.innerText ?? '')", wait);
+    // the first run, in its chat: the chat opens at once, the making a card in it
+    let creating = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && document.getElementById('first-run').hidden && !!document.querySelector('#frames iframe[data-fragment]')", wait);
     let started = std::time::Instant::now();
     let mut theirs = Value::Null;
     // bounded: the wait
@@ -430,7 +440,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         wait,
     );
     let _ = b.screenshot(&page, &shots.join("invited-guest.png"));
-    let row = b.eval(&page, &format!("document.querySelector('#apps .row[data-key=\"app:{app}\"] .label')?.textContent ?? null"))?;
+    let row = b.eval(&page, &format!("document.querySelector('#apps [data-key=\"app:{app}\"] .label')?.textContent ?? null"))?;
     let first = b.eval(&page, seen)?;
     s.ok(
         "an invited guest lands home on what was shared with them, its window open and titled as its owner titled it, a seat offered beside it",
