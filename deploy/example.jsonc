@@ -7,27 +7,32 @@
 // A deploy checks the store holds every one named here before it changes
 // anything.
 {
-  // Your Cloudflare account (`wrangler whoami`), and the zone the
-  // deployment's routes are on. The zone needs one proxied wildcard DNS
-  // record (`*` AAAA 100::), which Universal SSL covers. wrangler deploys
-  // with CLOUDFLARE_API_TOKEN: a token on this account and zone with
-  // Account · Workers Scripts, Workers R2 Storage, Workflows, Queues,
-  // Containers, Browser Rendering and AI Gateway · Edit; Workers KV
-  // Storage, Account Settings and Secrets Store · Read; Zone · Workers
-  // Routes and DNS · Edit; User · Memberships and User Details · Read
-  // (`wrangler delete`, in a teardown, reads the account's KV namespaces).
+  // Your Cloudflare account (`wrangler whoami`), and a branch deployment's
+  // zone: `--branch <b>` deploys at <b>.<zone>, its fragments at
+  // <name>--<b>.<zone>, both routes in the zone. The zone needs one proxied
+  // wildcard DNS record (`*` AAAA 100::), which Universal SSL covers.
+  // wrangler deploys with CLOUDFLARE_API_TOKEN: a token on this account and
+  // the zone (or both of a deployment of its own's, below) with Account ·
+  // Workers Scripts, Workers R2 Storage, Workflows, Queues, Containers,
+  // Browser Rendering and AI Gateway · Edit; Workers KV Storage, Account
+  // Settings and Secrets Store · Read; Zone · Workers Routes and DNS · Edit;
+  // User · Memberships and User Details · Read (`wrangler delete`, in a
+  // teardown, reads the account's KV namespaces).
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "example.dev",
-  // A Cloudflare API token with Zone · DNS · Edit on the zone(s) (and
-  // Account · AI Gateway · Edit, to make the gateway below): with it, a
-  // deploy makes that record when it is missing. Without it, make it by
-  // hand. A file: it is the deploying machine's own, which no Worker reads.
+  // A Cloudflare API token with Zone · DNS · Edit on the zone (or both):
+  // with it, a deploy makes the records its routes need when they are
+  // missing. Without it, make them by hand. A file: it is the deploying
+  // machine's own, which no Worker reads.
   // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
-  // A deployment of its own names its hosts (production: "fragment.club"
-  // and "fragment.boats", each a zone on the account). Without them,
-  // `--branch <b>` deploys a branch at <b>.<zone>.
-  // "platform_host": "fragment.club",
-  // "fragment_suffix": "fragment.boats",
+  // A deployment of its own names its hosts instead of a zone (a `zone`
+  // beside them is refused), each a zone's own name on the account: the
+  // platform's route `<platform_host>/*` is in its zone, with a proxied
+  // record at its apex, and the fragments' `*.<fragment_suffix>/*` in the
+  // suffix's, with the wildcard record above (the bare suffix has neither).
+  // One zone for both names it twice. It takes no --branch.
+  // "platform_host": "finite.chat",
+  // "fragment_suffix": "finite.place",
   // 32 random bytes or more, as text (`cargo xtask secret gen`): seals
   // every value at rest. Never set again in place: rotate it by name, the
   // new one here and the one before as host_secret_previous, until every
