@@ -280,6 +280,10 @@ function attachmentsOf(body) {
 /// Mounts the chat in `root` (the page's body).
 export function mount(root) {
   const framed = window.parent !== window;
+  // The shell opens the first chat before its agent joins. Keep its
+  // scripted introduction separate from records, drafts and model context.
+  let setup = framed && new URLSearchParams(location.search).has("setup")
+    ? { phase: "agent", joined: false, title: "Your agent" } : null;
   root.classList.add("fragment-chat");
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
@@ -333,7 +337,18 @@ export function mount(root) {
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
   };
+  const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const outgoingOrigins = new Map(); // local post id -> composer position before clearing
+  const arrivingOrigins = new Map(); // confirmed sequence -> its one entrance
+  const messageFlights = new Map();
   fragment.observePosts(({ channel, id, body, status, record, error }) => {
+    if (channel === "chat" && outgoingOrigins.has(id)) {
+      if (record) {
+        arrivingOrigins.set(record.seq, outgoingOrigins.get(id));
+        outgoingOrigins.delete(id);
+        schedule();
+      } else if (status === "failed") outgoingOrigins.delete(id);
+    }
     if (channel !== "chat" || !body || body.kind && body.kind !== "message") return;
     if (status === "failed") {
       state.failed.set(id, { id, body, seq: `failed:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal, text: body.text ?? "", to: Array.isArray(body.to) ? body.to : [], replyTo: Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null, attachments: attachmentsOf(body), error: error.message, retrying: false });
@@ -759,6 +774,10 @@ export function mount(root) {
     const { node: anchor, top } = history.anchor ?? (!stuck ? visibleAnchor() : {});
     const used = new Set();
     const shown = [];
+    for (const [key, node] of setupNodes()) {
+      used.add(key);
+      shown.push(node);
+    }
     for (const it of timeline()) {
       const [key, node] = itemNode(it);
       used.add(key);
@@ -783,6 +802,101 @@ export function mount(root) {
     else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
     if (!history.loading) history.anchor = null;
     showLatest();
+    animateSentMessages();
+  }
+
+  // A visual copy can cross the scroll boundary above the composer. The real
+  // bubble keeps its layout and accessibility; follow it if a reply scrolls it.
+  function animateSentMessages() {
+    const col = $("messages");
+    for (const [seq, origin] of arrivingOrigins) {
+      const message = col.querySelector(`.msg.user.mine[data-seq="${seq}"]`);
+      if (!message && performance.now() - origin.at < 4000) continue;
+      arrivingOrigins.delete(seq);
+      const bubble = message?.querySelector(":scope > .bubble");
+      if (!bubble || sendReducedMotion.matches || document.hidden) continue;
+      const target = bubble.getBoundingClientRect();
+      const viewport = $("scroll").getBoundingClientRect();
+      if (!target.height || target.bottom < viewport.top || target.top > viewport.bottom) continue;
+      const copy = bubble.cloneNode(true);
+      copy.classList.add("send-flight");
+      copy.setAttribute("aria-hidden", "true");
+      copy.style.width = `${target.width}px`;
+      root.append(copy);
+      const recent = performance.now() - origin.at < 1200;
+      const startY = Math.max(recent ? origin.y : 0, target.top + target.height / 2 + 16);
+      const began = performance.now();
+      let frame = 0;
+      const finish = () => {
+        cancelAnimationFrame(frame);
+        copy.remove();
+        col.querySelector(`.msg[data-seq="${seq}"]`)?.classList.remove("send-arriving");
+        message.classList.remove("send-arriving");
+        messageFlights.delete(seq);
+      };
+      const tick = now => {
+        const current = col.querySelector(`.msg.user.mine[data-seq="${seq}"]`);
+        const destination = current?.querySelector(":scope > .bubble");
+        if (!destination || sendReducedMotion.matches || document.hidden) return finish();
+        current.classList.add("send-arriving");
+        const rect = destination.getBoundingClientRect();
+        const t = Math.min(1, (now - began) / 280);
+        // The same restrained spring as the desktop's panels and menus.
+        const p = t === 1 ? 1 : 1 - Math.exp(-8 * t) * (Math.cos(6 * t) + 4 / 3 * Math.sin(6 * t));
+        const y = rect.top + (startY - rect.top - rect.height / 2) * (1 - p);
+        // Start at the bubble's final horizontal position: only travel upward.
+        copy.style.transform = `translate(${rect.left}px, ${y}px)`;
+        copy.style.opacity = String(Math.min(1, .25 + .75 * p));
+        if (t === 1) finish(); else frame = requestAnimationFrame(tick);
+      };
+      messageFlights.set(seq, finish);
+      tick(began);
+    }
+    // A status update may replace a cached message during its entrance.
+    for (const seq of messageFlights.keys()) col.querySelector(`.msg[data-seq="${seq}"]`)?.classList.add("send-arriving");
+  }
+  const stopMessageFlights = () => { for (const finish of [...messageFlights.values()]) finish(); };
+  sendReducedMotion.addEventListener("change", () => { if (sendReducedMotion.matches) stopMessageFlights(); });
+  addEventListener("resize", stopMessageFlights);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopMessageFlights(); });
+  $("scroll").addEventListener("wheel", stopMessageFlights, { passive: true });
+  $("scroll").addEventListener("touchstart", stopMessageFlights, { passive: true });
+
+  function setupNodes() {
+    if (!setup) return [];
+    const title = setup.title || "Your agent";
+    const color = colorOf(setup.id);
+    const messages = ["Making your agent…", ...(setup.joined ? ["Starting your agent…"] : [])];
+    const shown = messages.map((text, i) => {
+      const key = `setup:${i}`;
+      return [key, cached(key, `${title}|${color}`, () => {
+        const wrap = el("div", "msg agent setup-message");
+        const line = el("div", "who");
+        line.append(avatar(color, "small"), title);
+        const body = el("div", "md");
+        body.append(el("p", null, text));
+        wrap.append(line, body);
+        return wrap;
+      })];
+    });
+    if (setup.phase === "error") {
+      const key = "setup:error";
+      shown.push([key, cached(key, setup.error, () => {
+        const wrap = el("div", "msg setup-error");
+        wrap.setAttribute("role", "alert");
+        wrap.append(el("p", null, setup.error || "Your agent could not start."));
+        const retry = el("button", null, "Try again");
+        retry.type = "button";
+        retry.onclick = () => {
+          if (!rosterOrigin) return;
+          retry.disabled = true;
+          window.parent.postMessage({ fragment: "retry-setup" }, rosterOrigin);
+        };
+        wrap.append(retry);
+        return wrap;
+      })]);
+    }
+    return shown;
   }
 
   // The chat's color (its lead's), its name, Stop, and the placeholder.
@@ -817,6 +931,10 @@ export function mount(root) {
               : `Message ${firstName}`;
     }
     refreshSend();
+    if (setup && setup.phase !== "ready") {
+      input.placeholder = setup.joined ? "Message your agent while it starts" : "Write your first message…";
+      $("note").textContent = setup.joined ? "Your agent will reply when it's ready." : "You can type now. Send is available in a moment.";
+    } else if (setup) $("note").textContent = "";
   }
 
   function messageNode(m) {
@@ -1467,7 +1585,7 @@ export function mount(root) {
   let recording = null; // the voice memo being recorded (`startMemo`)
   function refreshSend() {
     const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
-    $("send").disabled = sending || !typed || !canPost();
+    $("send").disabled = sending || !typed || !canPost() || !!setup && !setup.joined;
     // while their turn runs the circle is Stop, until they type: then it
     // sends (what the agent asked them, or more for it)
     const stops = !!$("stop").dataset.turn && !typed;
@@ -1794,6 +1912,16 @@ export function mount(root) {
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
         .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+      if (d.setup && ["agent", "computer", "ready", "error"].includes(d.setup.phase)) {
+        const joined = setup?.joined;
+        setup = {
+          phase: d.setup.phase, joined: d.setup.joined === true,
+          title: typeof d.setup.title === "string" ? d.setup.title.slice(0, 100) : "Your agent",
+          id: typeof d.setup.id === "string" ? d.setup.id : null,
+          error: typeof d.setup.error === "string" ? d.setup.error.slice(0, 1000) : null,
+        };
+        if (setup.joined && !joined) readMembers();
+      } else setup = null;
       schedule();
       if (picking) updateMentions();
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
@@ -1901,7 +2029,7 @@ export function mount(root) {
   // failed and is sent again unchanged is the same record (docs/api.md).
   let unsent = null; // { id, body }
   async function send(text) {
-    if (sending || !canPost()) return;
+    if (sending || !canPost() || setup && !setup.joined) return;
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
@@ -1910,6 +2038,9 @@ export function mount(root) {
     const command = files.length ? null : typedCommand(text);
     sending = true;
     const typed = input.value;
+    const source = input.getBoundingClientRect();
+    const sendOrigin = { y: source.top + Math.min(source.height, 48) / 2, at: performance.now() };
+    let movingPost = null;
     input.value = "";
     grow();
     setTyping(false);
@@ -1922,6 +2053,7 @@ export function mount(root) {
         const body = { kind: "command", command: command.name, ...(command.args ? { args: command.args } : {}), to: [command.target] };
         const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
         unsent = { id, body };
+        if (!sendReducedMotion.matches) { movingPost = id; outgoingOrigins.set(id, sendOrigin); }
         await fragment.post("chat", body, { id });
         unsent = null;
         $("banner").hidden = true;
@@ -1947,6 +2079,7 @@ export function mount(root) {
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
       const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
       unsent = { id, body };
+      if (!sendReducedMotion.matches) { movingPost = id; outgoingOrigins.set(id, sendOrigin); }
       const record = await fragment.post("chat", body, { id });
       unsent = null;
       attachments = attachments.filter((a) => !files.includes(a));
@@ -1961,6 +2094,7 @@ export function mount(root) {
       renderAttachments();
       problem(`Your ${command ? "command" : "message"} was not sent: ${err.message}`);
     } finally {
+      if (movingPost) outgoingOrigins.delete(movingPost);
       sending = false;
       grow();
       input.focus();
@@ -2071,11 +2205,19 @@ export function mount(root) {
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
-    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) document.documentElement.dataset.theme = d.mode;
+    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) {
+      document.documentElement.dataset.theme = d.mode;
+      if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
+    }
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
+  addEventListener("keydown", event => {
+    if (!framed || event.isComposing || event.repeat || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.code !== "KeyK") return;
+    event.preventDefault();
+    window.parent.postMessage({ fragment: "open-launcher" }, rosterOrigin || "*");
+  });
 
   // ---- who this page is, then the channels it may read, and who is here ----
   fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); } });

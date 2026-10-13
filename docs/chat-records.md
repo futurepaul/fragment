@@ -390,6 +390,27 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
+Locally sent text and commands appear at their final horizontal position
+and spring straight upward from the composer into the thread, without
+sideways movement or scaling. A temporary visual copy crosses
+the scroll boundary while the real message keeps its layout and accessibility.
+Incoming messages, history and failed sends do not replay this entrance;
+reduced motion skips it. Scrolling or resizing interrupts it cleanly.
+
+**First-run setup.** The shell opens the first chat before provisioning
+its agent. The page shows two scripted agent messages ahead of the
+transcript: "Making your agent…", then "Starting your agent…" once the
+agent has joined. These are presentation only, never channel records,
+model context, notifications or search results. The shell sends this
+chat's setup state with its roster (`setup`: `phase`, `joined`, `title`,
+optional `id` and `error`; docs/api.md). The composer accepts typing at
+once; Send, including Enter, waits for membership so the bridge cannot
+skip a message posted before the agent joined. The same frame and draft
+survive readiness and Retry; an error offers Retry inside the chat.
+The shell remembers setup per person in this browser, resuming an
+unfinished setup after reload and keeping the two introductory messages
+when this browser reopens the first chat. Other chats have no setup copy.
+
 The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
@@ -495,8 +516,18 @@ Who is who comes from the fragment: `__members` lists the chat's agents
 agent fragment's label, which `@mentions` it). An agent's color is one
 of six, chosen by its identity until agents carry one; the chat takes
 its lead's. The shell that frames it may send `postMessage({fragment:
-"theme", mode: "light"|"dark"})`; otherwise it follows
-`prefers-color-scheme`.
+"theme", mode: "light"|"dark", mobile: boolean})`; otherwise it follows
+`prefers-color-scheme`. The optional `mobile` flag follows the shell's 760px
+breakpoint, so a narrow desktop chat does not pick up the phone's rounded
+composer and larger input text. Mobile inputs use 16px text to avoid focus
+zoom; messages remain 14px. The shell reserves the home-indicator safe area,
+and the mobile composer adds bottom clearance.
+
+**Desktop launcher.** Command K (or Control K) opens the shell's shared
+search/new-chat input, including while typing in the framed chat. The chat
+sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
+only from its focused, listed fragment iframe with the expected origin.
+Standalone chats leave the shortcut to the browser.
 
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a

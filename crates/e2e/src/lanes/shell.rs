@@ -650,27 +650,57 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let email = format!("shell-ui-{}@e2e.test", crate::api::now_s());
     let session = api.sign_in(&email)?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/", api.base))?;
+    // Hold the first computer request, then fail it once. The actual
+    // chat must already be usable for drafting, and Retry must keep it.
+    let page = b.open_with_script(&format!("{}/", api.base), r#"
+      if (window === window.top) {
+        const fetch = window.fetch.bind(window);
+        let held = false;
+        window.fetch = async (url, options) => {
+          if (url === '/api/computers' && options?.method === 'POST' && !held) {
+            held = true;
+            await new Promise(resolve => { window.releaseSetup = resolve; });
+            return new Response(JSON.stringify({message: 'Setup temporarily unavailable'}), {status: 503});
+          }
+          return fetch(url, options);
+        };
+      }
+    "#)?;
     b.viewport(&page, 1280, 800, false)?;
 
-    // first run: the default agent, made while the shell waits with no
-    // question asked (Paul, 2026-10-03), and nothing to choose before it
-    let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
-    s.ok("signed in, the shell makes their default agent at once, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
-    let _ = b.screenshot(&page, &shots.join("creating.png"));
+    let creating = b.until(&page, "!document.getElementById('layout').hidden && document.getElementById('first-run').hidden", wait);
+    s.ok("first run enters the chat layout immediately, without a separate loading screen", creating, "");
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
     if !opened {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
     let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
-    s.ok("the agent is made, named, and its chat opens once it is ready", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
+    s.ok("the named chat opens before the agent is provisioned", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     // the chat's name as the sidebar holds it: a title like "Starfire 40K"
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
     let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
     let host = chat.clone();
+    let drafting = s.eventually(wait, || b.eval_in_frame(&page, &host,
+        "(() => { const t = document.getElementById('text'); if (!t || t.disabled || !document.querySelector('.setup-message')) return false; t.value = 'my first draft'; t.dispatchEvent(new Event('input', {bubbles: true})); return document.getElementById('send').disabled && document.querySelector('.setup-message .md').textContent === 'Making your agent…'; })()"
+    ).ok() == Some(Value::Bool(true)));
+    s.ok("the first scripted message and editable composer appear while provisioning is held; Send waits for membership", drafting, "");
+    let _ = b.screenshot(&page, &shots.join("creating.png"));
+    b.until(&page, "typeof window.releaseSetup === 'function'", wait);
+    b.eval(&page, "window.releaseSetup()")?;
+    let failed = s.eventually(wait, || b.eval_in_frame(&page, &host, "document.querySelector('.setup-error')?.textContent.includes('Setup temporarily unavailable')").ok() == Some(Value::Bool(true)));
+    s.ok("a setup failure offers Retry inside the chat", failed, "");
+    b.eval_in_frame(&page, &host, "document.querySelector('.setup-error button').click()")?;
+    let scripted = s.eventually(agent_wait, || b.eval_in_frame(&page, &host,
+        "JSON.stringify([...document.querySelectorAll('#messages > .setup-message .md')].map(n => n.textContent)) === JSON.stringify(['Making your agent…', 'Starting your agent…']) && document.getElementById('text').value === 'my first draft' && !document.getElementById('send').disabled"
+    ).ok() == Some(Value::Bool(true)));
+    s.ok("retry preserves the draft, shows the two scripted messages in order, and enables Send after the agent joins", scripted, "");
+    // Readiness still happens in the background, without replacing the frame.
+    let ready = s.eventually(agent_wait, || b.eval_in_frame(&page, &host, "document.getElementById('note').textContent === '' && document.getElementById('text').value === 'my first draft'").ok() == Some(Value::Bool(true)));
+    s.ok("the real agent becomes ready without losing the draft", ready, "");
+
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
     s.ok("the shell's first agent names the cheap tier (GLM-5.3 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
     // ready is ready: its computer awake, and the agent following its chat
@@ -678,12 +708,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
     let awake = computers.body["computers"][0]["phase"] == "awake";
     let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"));
-    s.ok("as it opens, its computer is awake and the agent follows the chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
+    s.ok("after setup, its computer is awake and the agent follows the already open chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
     let first_id = agent_ids(api, &session, &[&first_label])?.remove(0);
     let (hello, seen) = said_hello(s, api, &session, &chat, &first_id, agent_wait);
     s.ok("the agent speaks first: its hello, and no message of the person's before it", hello, &seen);
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
-    let _ = s.eventually(wait, || b.eval_in_frame(&page, &host, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
+    let _ = s.eventually(wait, || b.eval_in_frame(&page, &host, "!!document.querySelector('.msg.agent:not(.streaming):not(.setup-message)')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(&page, &shots.join("first-hello.png"));
     // the person's first message, answered by an agent already up
     let t0 = std::time::Instant::now();

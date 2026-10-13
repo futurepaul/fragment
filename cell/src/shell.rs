@@ -14,7 +14,7 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 16] = [
+const FILES: [(&str, &str, &[u8]); 17] = [
     ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
     ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
     ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
@@ -28,8 +28,9 @@ const FILES: [(&str, &str, &[u8]); 16] = [
     ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_bytes!("../shell/vendor/split-grid.js")),
     ("manifest.webmanifest", "application/manifest+json", include_bytes!("../shell/manifest.webmanifest")),
     ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
-    // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
+    // Skyler's light and dark landscapes, shared by the viewer and launcher.
     ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
+    ("wallpaper-dark.jpg", "image/jpeg", include_bytes!("../shell/wallpaper-dark.jpg")),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png", include_bytes!("../shell/agent.png")),
     // the operators' admin page (`/admin`)

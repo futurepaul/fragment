@@ -11,8 +11,8 @@
 // (2026-10-02); what it did not draw is the older prototype's, in its look.
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
-import { appIcon } from "./app-icons.js";
-import { createLayout, store } from "./layout.js";
+import { appIcon, APP_EXAMPLES } from "./app-icons.js";
+import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
 import { billingSections, returning } from "./billing.js";
@@ -21,6 +21,9 @@ const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
 const DEFAULT_AGENT_TIER = "cheap";
 const ICON = {
+  clock: LUCIDE_ICON.clock,
+  cornerDownLeft: LUCIDE_ICON.cornerDownLeft,
+  chevronDown: LUCIDE_ICON.chevronDown,
   rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   invite: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0M19 8v6M16 11h6"/>',
   agent: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
@@ -174,7 +177,7 @@ const viewer = createViewer({
     $("viewer").classList.toggle("is-empty", !keys.length);
     $("viewer-count").hidden = !keys.length;
     $("viewer-count").textContent = keys.length;
-    for (const row of document.querySelectorAll("#apps .row[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
+    for (const row of document.querySelectorAll("#apps .dock-app[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
   },
 });
 $("toggle-left").onclick = () => layout.toggle("left");
@@ -232,12 +235,14 @@ addEventListener("focus", () => {
 });
 // The frames follow this page's light or dark (they may not see its media).
 const dark = matchMedia("(prefers-color-scheme: dark)");
+const mobileChat = matchMedia("(max-width: 760px)");
 function theme(frame) {
   try {
-    frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light" }, "*");
+    frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
   } catch {}
 }
 dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
+mobileChat.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
 // ---- the person's agents, for a page of theirs that asks (a chat's @) ----
 // A frame of a fragment the person owns may ask for their agents
@@ -279,18 +284,21 @@ const roster = () => {
 let rosterSent = "";
 function rosterChanged() {
   const agents = roster();
-  const now = JSON.stringify(agents);
+  const now = JSON.stringify([agents, initialSetup]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
   for (const [win, origin] of rosterTo) {
     if (!live.has(win)) rosterTo.delete(win);
-    else win.postMessage({ fragment: "agents", agents }, origin);
+    else {
+      const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === win);
+      win.postMessage({ fragment: "agents", agents, setup: setupFor(frame?.dataset.fragment) }, origin);
+    }
   }
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (d?.fragment !== "agents?" && d?.fragment !== "add-agent") return;
+  if (!["agents?", "add-agent", "retry-setup"].includes(d?.fragment)) return;
   // the frame that sent it shows one of the person's own fragments, and
   // the page in it is that fragment's
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
@@ -303,9 +311,13 @@ addEventListener("message", async (event) => {
     return;
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  if (d.fragment === "retry-setup") {
+    if (name === initialSetup?.chat && initialSetup.phase === "error") creatingAgent();
+    return;
+  }
   if (d.fragment === "agents?") {
     rosterTo.set(event.source, origin);
-    event.source.postMessage({ fragment: "agents", agents: roster() }, origin);
+    event.source.postMessage({ fragment: "agents", agents: roster(), setup: setupFor(name) }, origin);
     return;
   }
   const asker = event.source;
@@ -407,17 +419,63 @@ sheet.onclose = () => { sheet.replaceChildren(); load().catch(() => {}); };
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
+const menuEdge = el("div", "agent-menu-edge");
+menuEdge.hidden = true;
+menuEdge.setAttribute("aria-hidden", "true");
+document.body.append(menuEdge);
 let menuFor = null;
-function closeMenu() {
+let menuClosing = false;
+let menuAnimations = [];
+let menuParts = [];
+let menuMotionId = 0;
+function cancelMenuMotion() {
+  ++menuMotionId;
+  for (const animation of menuAnimations) animation.cancel();
+  menuAnimations = [];
+}
+function finishMenuClose() {
+  cancelMenuMotion();
   if (!menuFor) return;
   menuFor.button.setAttribute("aria-expanded", "false");
   menuFor = null;
   menu.hidden = true;
+  menuEdge.hidden = true;
+  menu.inert = false;
+  menuClosing = false;
+  menu.classList.remove("agent-menu");
+  menu.style.removeProperty("width");
+  menu.style.removeProperty("max-height");
+  updateSidebarEdge();
 }
+function animateMenu(opening) {
+  const current = menuParts.map(({ node }) => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }));
+  cancelMenuMotion();
+  if (reducedMotion.matches) { if (!opening) finishMenuClose(); return; }
+  const id = menuMotionId;
+  menuAnimations = menuParts.map(({ node, origin }, i) => node.animate(opening
+    ? springFrames(t => ({ opacity: node === menuFor.button ? 1 : Math.min(1, t), transform: `scale(${.97 + .03 * t})`, transformOrigin: origin }))
+    : [{ ...current[i], transformOrigin: origin }, { opacity: node === menuFor.button ? 1 : 0, transform: node === menuFor.button ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
+  { duration: opening ? 280 : 160, easing: opening ? "linear" : "cubic-bezier(.4, 0, 1, 1)", fill: "both" }));
+  Promise.all(menuAnimations.map(a => a.finished)).then(() => {
+    if (id !== menuMotionId) return;
+    if (opening) cancelMenuMotion(); else finishMenuClose();
+  }).catch(() => {});
+}
+function closeMenu(immediate = false) {
+  if (!menuFor) return;
+  if (immediate === true || reducedMotion.matches) return finishMenuClose();
+  if (menuClosing) return;
+  menuClosing = true;
+  menu.inert = true;
+  animateMenu(false);
+}
+reducedMotion.addEventListener("change", () => {
+  if (reducedMotion.matches) { if (menuClosing) finishMenuClose(); else cancelMenuMotion(); }
+});
 function openMenu(button, items) {
-  const again = menuFor?.button === button;
-  closeMenu();
-  if (again) return;
+  const again = menuFor?.button === button && !menuClosing;
+  if (again) return closeMenu();
+  closeMenu(true);
   menuFor = { button };
   menu.replaceChildren(...items.map((it) => {
     const b = el("button");
@@ -429,15 +487,36 @@ function openMenu(button, items) {
     return b;
   }));
   button.setAttribute("aria-expanded", "true");
+  const attached = button.id === "sidebar-agent";
+  menu.classList.toggle("agent-menu", attached);
   menu.hidden = false;
   const r = button.getBoundingClientRect();
-  menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
-  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  if (attached) {
+    menu.style.width = `${r.width}px`;
+    menu.style.maxHeight = `${Math.max(0, innerHeight - r.bottom - 8)}px`;
+    menu.style.top = `${r.bottom - 1}px`;
+    menu.style.left = `${r.left}px`;
+    menuEdge.style.left = `${r.left}px`;
+    menuEdge.style.top = `${r.top}px`;
+    menuEdge.style.width = `${r.width}px`;
+    menuEdge.style.height = `${menu.getBoundingClientRect().bottom - r.top}px`;
+    menuEdge.hidden = false;
+  } else {
+    menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
+    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  }
   menu.querySelector("button")?.focus();
+  updateSidebarEdge();
+  const bounds = attached ? menuEdge.getBoundingClientRect() : menu.getBoundingClientRect();
+  menuParts = (attached ? [menu, button, menuEdge] : [menu]).map(node => {
+    const rect = node.getBoundingClientRect();
+    return { node, origin: `${bounds.left + bounds.width / 2 - rect.left}px ${bounds.top + bounds.height / 2 - rect.top}px` };
+  });
+  animateMenu(true);
 }
 addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && !menuFor.button.contains(e.target)) closeMenu(); });
 addEventListener("keydown", (e) => {
-  if (!menuFor) return;
+  if (!menuFor || menuClosing) return;
   if (e.key === "Escape") {
     const trigger = menuFor.button;
     closeMenu();
@@ -451,22 +530,29 @@ addEventListener("keydown", (e) => {
   } else if (e.key === "Tab") closeMenu();
 });
 addEventListener("blur", closeMenu);
-addEventListener("resize", closeMenu);
+addEventListener("resize", () => closeMenu(true));
 
 // ---- agents: each a chat, the open one in the middle column ----
+function chatTitle(name) {
+  return isAgentsOwnChat(name) ? "Getting started" : titleOf(name);
+}
 function renderHeading() {
-  const open = state.current && byName(state.current) && !state.page;
-  $("agent-heading").hidden = !open;
-  $("page-title").hidden = !state.page;
+  const live = state.current && byName(state.current) && !state.page;
+  const exampleTopic = state.page && EXAMPLE_TOPICS.find(topic => topic.chats.some(chat => chat[0] === state.page));
+  const open = live || exampleTopic;
+  $("chat-heading").hidden = !open;
+  $("page-title").hidden = !state.page || !!exampleTopic;
   $("page-title").textContent = state.page ?? "";
-  $("new-chat").hidden = !open || state.guest || !chatAgentOf(state.current);
+  $("new-chat").hidden = !live || state.guest || !chatAgentOf(state.current);
+  $("chat-options").hidden = !live;
   if (!open) return;
-  const who = identity(state.current);
-  $("chat-title").textContent = who.title;
-  $("chat-title").title = who.title;
-  $("agent-mark").replaceChildren(mark(state.current, "small"));
-  const frame = state.frames.get(state.current);
-  if (frame) frame.setAttribute("aria-label", who.title);
+  const title = exampleTopic ? state.page : chatTitle(state.current);
+  $("chat-title").textContent = title;
+  $("chat-title").title = title;
+  if (live) {
+    const frame = state.frames.get(state.current);
+    if (frame) frame.setAttribute("aria-label", title);
+  }
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
@@ -479,23 +565,192 @@ function unreadMark(f) {
   b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
   return [b];
 }
+// UI examples only: never saved as fragments, messages, or agent memory.
+// Topic labels and emojis are illustrative until agent-authored topics land.
+const EXAMPLE_TOPICS = [
+  { id: "ideas", emoji: "✨", title: "Ideas & projects", chats: [
+    ["A little side project", "I want to make something small and useful this weekend.", "Let's start with something you would use yourself. A reading list, a tiny habit tracker, or a place to collect your favorite walks?"],
+    ["Website inspiration", "I'd like my website to feel a little more personal.", "A warm palette, a few photos, and short notes about what you're making would be a lovely starting point."],
+    ["Names for the new thing", "Can we brainstorm a few names?", "How about Fieldwork, Little Things, or Commonplace? Each leaves room for the idea to grow."]
+  ] },
+  { id: "weekend", emoji: "🌿", title: "Life & little things", chats: [
+    ["The balcony garden", "What could I grow on a sunny balcony?", "Start with basil, rosemary, and cherry tomatoes. Three pots, plenty of sunlight, and a little watering routine."],
+    ["Something good for dinner", "Let's think of an easy dinner for friends.", "How about a big tray of roasted vegetables, lemony couscous, and warm bread? Most of it can be ready before they arrive."]
+  ] },
+  { id: "travel", emoji: "🗺️", title: "Places to go", chats: [
+    ["A weekend by the coast", "I'd love a slow weekend somewhere by the water.", "Let's make room for a beach walk, a good book, and one dinner worth lingering over. What coast are you thinking of?"],
+    ["Japan, someday", "Help me start a wishlist for Japan.", "A few days exploring Tokyo, a quiet stay in Kyoto, and a little time in the mountains. We can collect ideas here as you find them."]
+  ] }
+];
+const showExamples = store.get("shell.examples.v1", true);
+// Visual samples only; real chats keep their actual unread state.
+const EXAMPLE_CHAT_ACTIVITY = {
+  "A little side project": { kind: "working", label: "Agent is working" },
+  "Website inspiration": { kind: "working", label: "Writing a reply" },
+  "Names for the new thing": { kind: "attention", label: "Needs your answer" },
+  "The balcony garden": { kind: "waiting", label: "Waiting to start" },
+  "A weekend by the coast": { kind: "attention", label: "Needs your approval" },
+};
+// Loading UI's dots-ring adapted to plain DOM. MIT: vendor/loading-ui-LICENSE.
+// https://www.loading-ui.com/docs/components/dots-ring
+function dotsRing() {
+  const ring = el("span", "dots-ring");
+  ring.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 8; i++) {
+    const angle = i / 8 * Math.PI * 2;
+    const dot = el("span", "dots-ring-position");
+    dot.style.left = `${(50 + Math.sin(angle) * 34).toFixed(2)}%`;
+    dot.style.top = `${(50 - Math.cos(angle) * 34).toFixed(2)}%`;
+    const pulse = el("span", "dots-ring-pulse");
+    pulse.style.animationDelay = `${(i - 8) / 8}s`;
+    dot.append(pulse);
+    ring.append(dot);
+  }
+  return ring;
+}
+function exampleActivityMark(activity) {
+  const mark = el("span", `chat-activity ${activity.kind}`);
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", `${activity.label} (example)`);
+  mark.dataset.tooltip = activity.label;
+  if (activity.kind === "working") mark.append(dotsRing());
+  else if (activity.kind === "waiting") mark.innerHTML = svg("clock");
+  return mark;
+}
+function primaryChat() {
+  const list = shown(chats());
+  return list.find(f => own(f) && isAgentsOwnChat(f.name)) || list.find(f => own(f)) || list[0];
+}
 function renderChats() {
   const list = shown(chats());
-  patch($("chats"), list.length ? list.map((f) => {
-    const who = identity(f.name);
-    const unread = unreadMark(f);
-    const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}${unread.length ? " has-unread" : ""}`);
+  const primary = primaryChat();
+  const agentRows = [];
+  if (primary) {
+    const agent = agentOfChat(primary.name);
+    const row = el("button", "agent-heading sidebar-agent");
+    row.id = "sidebar-agent";
+    row.type = "button";
+    row.dataset.key = primary.name;
+    row.setAttribute("aria-label", "Your agent menu");
+    row.setAttribute("aria-haspopup", "menu");
+    row.setAttribute("aria-controls", "menu");
+    row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
+    const face = el("span", "sidebar-agent-mark");
+    face.append(mark(primary.name, "small"));
+    row.append(face, el("strong", "title", agent ? titleOf(agent) : titleOf(primary.name)));
+    row.onclick = () => openAgentMenu(primary.name, row);
+    agentRows.push(row);
+  }
+  patch($("primary-agent"), agentRows);
+  // The shared launcher also preserves search for guests and during setup.
+  const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
+  $("sidebar-new-chat").title = `${launcherLabel} (⌘K)`;
+  $("sidebar-new-chat").dataset.tooltip = `${launcherLabel} (⌘K)`;
+  $("sidebar-new-chat").setAttribute("aria-label", launcherLabel);
+  const rows = [];
+  const liveRows = list.map(f => {
+    const active = f.name === state.current && !state.page;
+    const row = el("button", `row chat-row${active ? " active" : ""}`);
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
-    if (isGroup(f.name)) row.dataset.group = String(agentsOf(f.name).length);
-    row.setAttribute("aria-current", f.name === state.current && !state.page ? "page" : "false");
-    const text = el("span", "agent-copy");
-    text.append(el("span", "label", who.title), el("span", "agent-preview", who.preview || (own(f) ? "Say hello" : f.role)));
-    row.append(mark(f.name), text, ...badges(f), ...unread);
+    row.setAttribute("aria-current", active ? "page" : "false");
+    row.append(el("span", "label", chatTitle(f.name)), ...unreadMark(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your first agent starts here")]);
+  });
+  if (showExamples && primary && !state.guest) for (const topic of EXAMPLE_TOPICS) {
+    rows.push(...topic.chats.map(chat => {
+      const row = el("button", `row chat-row${state.page === chat[0] ? " active" : ""}`);
+      row.type = "button";
+      row.dataset.key = `example:${topic.id}:${chat[0]}`;
+      row.setAttribute("aria-current", state.page === chat[0] ? "page" : "false");
+      row.append(el("span", "label", chat[0]));
+      const activity = EXAMPLE_CHAT_ACTIVITY[chat[0]];
+      if (activity) {
+        row.append(exampleActivityMark(activity));
+        row.setAttribute("aria-description", activity.label);
+      }
+      row.onclick = () => openExampleChat(topic, chat);
+      return row;
+    }));
+  }
+  rows.push(...liveRows);
+  patch($("chats"), rows.length ? rows : [el("div", "empty-row", "Your chats will appear here")]);
 }
+function openExampleChat(topic, chat) {
+  const primary = primaryChat();
+  if (!primary) return;
+  at("/");
+  state.page = chat[0];
+  $("layout").classList.remove("settings-view");
+  $("settings-page").hidden = true;
+  $("frames").hidden = false;
+  $("notice").hidden = true;
+  for (const frame of state.frames.values()) frame.hidden = true;
+  $("example-chat")?.remove();
+  const preview = el("section", "example-conversation");
+  preview.id = "example-chat";
+  const tag = el("div", "example-caption", `${topic.emoji} ${topic.title} · Example chat`);
+  const messages = el("div", "example-messages");
+  const response = el("div", "example-response");
+  response.append(mark(primary.name, "small"), el("p", null, chat[2]));
+  messages.append(el("p", "example-user", chat[1]), response);
+  const footer = el("div", "example-footer");
+  const go = el("button", "example-continue", "Start a real chat");
+  go.type = "button";
+  go.disabled = !chatAgentOf(primary.name);
+  go.onclick = () => newChat(chatAgentOf(primary.name));
+  footer.append(el("span", null, "A sample conversation to try the new layout."), go);
+  preview.append(tag, messages, footer);
+  $("frames").append(preview);
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+}
+$("sidebar-new-chat").onclick = () => openSearch($("sidebar-new-chat"));
+// Match the chat composer's edge reflection, including its 64px falloff.
+// Follow the pointer across the sidebar and its fixed-position agent menu.
+const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
+let sidebarEdgeFrame = 0;
+let sidebarEdgePointer = null;
+const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-agent, .sidebar-new-chat");
+// Keep transient styles off the rendered pill so roster updates preserve its node.
+const expandedAgentEdge = control => control.id === "sidebar-agent" && !menu.hidden && menu.classList.contains("agent-menu");
+const sidebarEdgeSurface = control => expandedAgentEdge(control) ? menuEdge : control.id === "sidebar-agent" ? $("primary-agent") : control;
+function clearSidebarEdge() {
+  cancelAnimationFrame(sidebarEdgeFrame);
+  sidebarEdgeFrame = 0;
+  for (const control of sidebarEdgeControls()) sidebarEdgeSurface(control).style.setProperty("--edge-light", "0");
+}
+function updateSidebarEdge() {
+  if (!sidebarEdgePointer || !sidebarHoverPointer.matches) return;
+  for (const control of sidebarEdgeControls()) {
+    const bounds = control.getBoundingClientRect();
+    const rect = { left: bounds.left, top: bounds.top, width: bounds.width, height: expandedAgentEdge(control) ? menu.getBoundingClientRect().bottom - bounds.top : bounds.height };
+    const x = sidebarEdgePointer.x - rect.left, y = sidebarEdgePointer.y - rect.top;
+    const radius = Math.min(rect.width / 2, rect.height / 2, parseFloat(getComputedStyle(control).borderTopLeftRadius));
+    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
+    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
+    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
+    const proximity = Math.max(0, 1 - distance / 64);
+    const surface = sidebarEdgeSurface(control);
+    surface.style.setProperty("--edge-x", `${x}px`);
+    surface.style.setProperty("--edge-y", `${y}px`);
+    surface.style.setProperty("--edge-light", String(proximity * proximity));
+  }
+}
+document.addEventListener("pointermove", event => {
+  if (!sidebarHoverPointer.matches || event.pointerType === "touch") return;
+  sidebarEdgePointer = { x: event.clientX, y: event.clientY };
+  if (sidebarEdgeFrame) return;
+  sidebarEdgeFrame = requestAnimationFrame(() => {
+    sidebarEdgeFrame = 0;
+    updateSidebarEdge();
+  });
+});
+document.addEventListener("pointerleave", clearSidebarEdge);
+sidebarHoverPointer.addEventListener("change", clearSidebarEdge);
+addEventListener("blur", clearSidebarEdge);
 // The open chat, on screen, is seen (`PUT /api/fragments/{name}/seen`): its
 // row counts nothing unread, here and in the person's other tabs and
 // devices (their list tells them). Asked again whenever the list counts
@@ -515,8 +770,8 @@ function markSeen() {
     .finally(() => { marking = null; });
 }
 document.addEventListener("visibilitychange", markSeen);
-$("agent-heading").onclick = () => {
-  const name = state.current;
+$("chat-options").onclick = () => openAgentMenu(state.current, $("chat-options"));
+function openAgentMenu(name, trigger) {
   const group = isGroup(name);
   const agent = agentOfChat(name);
   const mine = chatAgentOf(name);
@@ -528,7 +783,7 @@ $("agent-heading").onclick = () => {
   const screens = !state.computer ? [] : group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
     : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
-  openMenu($("agent-heading"), [
+  openMenu(trigger, [
     ...(mine && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(mine) }] : []),
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     { icon: "invite", text: "Invite…", onClick: () => share(name) },
@@ -536,7 +791,7 @@ $("agent-heading").onclick = () => {
     ...screens,
     archiveItem(name),
   ]);
-};
+}
 // The identity of the person's own agent a direct chat is with (its row's
 // one agent), or of the agent whose title it carries while its row names
 // none; null for a group, or a chat with someone else's agent.
@@ -563,13 +818,14 @@ function openChat(name, push = true) {
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
+  $("example-chat")?.remove();
   $("settings-page").hidden = true;
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name), titleOf(name), name);
+    const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
     $("frames").append(frame);
     state.frames.set(name, frame);
   }
@@ -648,25 +904,54 @@ function showPeek(row, name) {
   peek.firstChild.src = card.url;
   peek.hidden = false;
   const r = row.getBoundingClientRect();
-  const edge = Math.max(r.right, $("sidebar").getBoundingClientRect().right);
-  peek.style.left = `${Math.max(8, Math.min(edge + 12, innerWidth - peek.offsetWidth - 8))}px`;
-  peek.style.top = `${Math.max(8, Math.min(r.top + r.height / 2 - peek.offsetHeight / 2, innerHeight - peek.offsetHeight - 8))}px`;
+  peek.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - peek.offsetWidth / 2, innerWidth - peek.offsetWidth - 8))}px`;
+  peek.style.top = `${Math.max(8, r.top - peek.offsetHeight - 12)}px`;
 }
 const hidePeek = () => { peek.hidden = true; };
+function dockButton(key, title, art, onClick) {
+  const row = el("button", `dock-app${viewer.keys.includes(key) ? " open" : ""}`);
+  row.type = "button";
+  row.dataset.key = key;
+  row.title = title;
+  const box = el("span", "dock-art");
+  box.append(art);
+  row.append(box, el("span", "label", title));
+  row.onclick = onClick;
+  return row;
+}
 function renderApps() {
   hidePeek();
-  const list = shown(apps());
-  patch($("apps"), list.length ? list.map((f) => {
-    const row = el("button", `row app-row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
-    row.type = "button";
-    row.dataset.key = `app:${f.name}`;
-    row.append(cardOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
-    if (!own(f)) row.append(el("span", "meta", f.role));
-    row.onclick = () => { hidePeek(); openApp(f.name); leaveSidebar(); };
-    row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
+  const rows = shown(apps()).map(f => {
+    const row = dockButton(`app:${f.name}`, titleOf(f.name), iconOf(f.name), () => openApp(f.name));
+    row.onpointerenter = e => { if (e.pointerType !== "touch") showPeek(row, f.name); };
     row.onpointerleave = hidePeek;
     return row;
-  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : state.guest ? "Apps shared with you show here" : "No apps yet")]);
+  });
+  if (showExamples && !state.guest) for (const app of APP_EXAMPLES) {
+    rows.push(dockButton(`example:${app.id}`, app.title, appIcon(app.id), () => openExampleApp(app)));
+  }
+  patch($("apps"), rows);
+  $("apps").parentElement.hidden = !rows.length;
+}
+function openExampleApp(app) {
+  const body = el("div", `example-app example-${app.id}`);
+  body.append(el("span", "example-caption", "Example app"));
+  if (app.id === "notes") {
+    body.append(el("h2", null, "Little things worth keeping"), el("p", "example-date", "A page for the everyday"), el("p", null, "A sunny balcony. A dinner with friends. An idea that won't leave you alone."), el("p", null, "Leave a little room in the week for something unplanned."));
+  } else if (app.id === "tasks") {
+    body.append(el("h2", null, "A little progress"), el("p", null, "A few good things for this week."));
+    for (const title of ["Collect website inspiration", "Pick up herbs for the balcony", "Plan a weekend by the coast"]) {
+      const label = el("label", "example-task");
+      const check = el("input"); check.type = "checkbox";
+      label.append(check, el("span", null, title)); body.append(label);
+    }
+  } else {
+    body.append(el("h2", null, "A slower Saturday"), el("p", "example-date", "Your weekend, with room to breathe"));
+    for (const [time, title] of [["9:00", "Coffee & a morning walk"], ["12:30", "Lunch at the market"], ["18:00", "Dinner with friends"]]) {
+      const event = el("div", "example-event"); event.append(el("span", null, time), el("strong", null, title)); body.append(event);
+    }
+  }
+  show({ key: `example:${app.id}`, title: app.title, subtitle: "Example", icon: appIcon(app.id), body, persist: false });
 }
 // An app's window, at `path` (a link's, from a chat). One its row has not
 // reached yet (an agent's app, just made) opens all the same, by its name:
@@ -844,8 +1129,6 @@ function newAgent() {
   $("new-agent-job").focus();
   prewake();
 }
-$("new-agent").onclick = newAgent;
-$("new-agent-top").onclick = newAgent;
 $("new-agent-cancel").onclick = () => dialog.close();
 $("new-agent-form").onsubmit = async (e) => {
   e.preventDefault();
@@ -879,7 +1162,7 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
 let starting = false;
-async function newChat(identity) {
+async function newChat(identity, { quiet = false } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
@@ -894,7 +1177,9 @@ async function newChat(identity) {
     }
     openChat(name);
     leaveSidebar();
+    return name;
   } catch (e) {
+    if (quiet) throw e;
     notice("The chat was not made", e.message);
   } finally {
     starting = false;
@@ -902,7 +1187,7 @@ async function newChat(identity) {
 }
 $("new-chat").onclick = () => {
   const id = chatAgentOf(state.current);
-  if (id) newChat(id);
+  if (id) openSearch($("new-chat"), id);
 };
 // A chat of the person's still titled UNTITLED that has a message is titled
 // from its first message with words (its first line's words, cut to
@@ -970,7 +1255,6 @@ function newGroup() {
   groupDialog.showModal();
   prewake();
 }
-$("new-group").onclick = newGroup;
 $("new-group-cancel").onclick = () => groupDialog.close();
 $("new-group-form").onsubmit = async (e) => {
   e.preventDefault();
@@ -1059,16 +1343,14 @@ function showCatalog() {
   }));
   show({ key: "catalog", title: "Add an app", icon: paneIcon("grid"), body: box, persist: false });
 }
-$("add-app").onclick = () => { showCatalog(); leaveSidebar(); };
 
-// ---- search: the person's chats, apps and messages (decision 9) ----
-// Empty, it lists what the sidebar does; with words, it asks the person's
-// list (`GET /api/search`: titles and names, then messages, newest first,
-// archived ones included). A message opens its chat; it does not scroll to
-// the message (docs/api.md, Search).
+// ---- one input for starting something or finding it again ----
+// Empty stays quiet. Words search the person's list (including archived
+// chats); Enter sends those exact words as the first message of a new chat.
+// Requests for apps/topics are ordinary agent requests, not hidden commands.
 const isChat = (name) => byName(name)?.kind === "chat";
 function openFound(name) {
-  $("search-dialog").close();
+  closeSearch();
   if (isChat(name)) openChat(name); else openApp(name);
   leaveSidebar();
 }
@@ -1093,6 +1375,22 @@ const when = (at) => {
 function renderFound(fragments, messages) {
   const results = $("search-results");
   results.replaceChildren();
+  const q = $("workspace-search").value.trim();
+  if (!q) return;
+  if (canLaunch()) {
+    const action = el("button", "row search-result search-start");
+    action.type = "button";
+    const icon = el("span", "search-action-icon");
+    icon.innerHTML = svg("newChat");
+    const copy = el("span", "agent-copy");
+    copy.append(el("span", "label", "Start a new chat"), el("span", "agent-preview", q));
+    const enter = el("span", "meta search-enter");
+    enter.title = "Enter";
+    enter.innerHTML = svg("cornerDownLeft");
+    action.append(icon, copy, enter);
+    action.onclick = startFromSearch;
+    results.append(action);
+  }
   const groups = [
     ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
     ["Agents", fragments.filter((f) => f.kind === "agent").map((f) => foundRow(f.name, ""))],
@@ -1111,39 +1409,163 @@ function renderFound(fragments, messages) {
     count += rows.length;
     results.append(el("h3", null, heading), ...rows);
   }
-  $("search-status").textContent = count ? `${count} result${count === 1 ? "" : "s"}` : "Nothing found.";
+  // The illustrative chats remain useful search targets during this UI preview.
+  if (showExamples && !state.guest) {
+    const examples = EXAMPLE_TOPICS.flatMap(topic => topic.chats.filter(chat => `${topic.title} ${chat.join(" ")}`.toLowerCase().includes(q.toLowerCase())).map(chat => {
+      const row = el("button", "row search-result");
+      row.type = "button";
+      const copy = el("span", "agent-copy");
+      copy.append(el("span", "label", chat[0]), el("span", "agent-preview", `${topic.title} · Example`));
+      row.append(el("span", "search-action-icon", topic.emoji), copy);
+      row.onclick = () => { closeSearch(); openExampleChat(topic, chat); leaveSidebar(); };
+      return row;
+    }));
+    if (examples.length) results.append(el("h3", null, "Example chats"), ...examples);
+    count += examples.length;
+  }
+  $("search-status").textContent = !count && !canLaunch() ? "No matches yet." : "";
 }
 let asked = 0;
 let typing = null;
+let searchIdentity = null;
+let searchTrigger = null;
+let launching = false;
+let closingSearch = false;
+// Keep the same chat and record id after an uncertain send, so retry cannot
+// duplicate the first message. This is only the current dialog's draft.
+let pendingLaunch = null;
+const canLaunch = () => !state.guest && !!state.agents.get(searchIdentity);
 async function search() {
   const q = $("workspace-search").value.trim();
   const mine = ++asked;
-  if (!q) return renderFound([...shown(chats()), ...shown(apps())], []);
+  if (!q) return renderFound([], []);
   try {
-    const found = await api("GET", `/api/search?q=${encodeURIComponent(q)}`);
+    // A prompt can be longer than the search API's eight words / 256 bytes.
+    // Only the search hint is bounded; the complete prompt is sent to the chat.
+    const hint = [...q.split(/\s+/).slice(0, 8).join(" ")];
+    while (new TextEncoder().encode(hint.join("")).length > 256) hint.pop();
+    const found = await api("GET", `/api/search?q=${encodeURIComponent(hint.join(""))}`);
     // a slower answer to an older query never replaces a newer one's
     if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
   } catch (e) {
     if (mine === asked) $("search-status").textContent = e.message;
   }
 }
-$("search-agents").onclick = () => {
-  $("workspace-search").value = "";
-  search();
+function openSearch(trigger, identity) {
+  if ($("search-dialog").open || launching) return;
+  closeMenu(true);
+  searchTrigger = trigger;
+  searchIdentity = identity || chatAgentOf(primaryChat()?.name);
+  $("workspace-search").value = pendingLaunch?.text || "";
+  updateSearch();
   $("search-dialog").showModal();
-  $("search-agents").setAttribute("aria-expanded", "true");
+  trigger?.setAttribute("aria-expanded", "true");
   $("workspace-search").focus();
-};
-$("search-close").onclick = () => $("search-dialog").close();
-$("search-dialog").addEventListener("close", () => $("search-agents").setAttribute("aria-expanded", "false"));
-$("workspace-search").addEventListener("input", () => {
+}
+async function closeSearch(force = false) {
+  const dialog = $("search-dialog");
+  if (!dialog.open || closingSearch || launching && !force) return;
+  closingSearch = true;
+  ++asked;
   clearTimeout(typing);
-  typing = setTimeout(search, 150);
+  const panel = dialog.querySelector(".search-panel");
+  // Start at the current visual state, even if Escape interrupts the entrance.
+  const animations = matchMedia("(prefers-reduced-motion: reduce)").matches ? [] : [
+    dialog.animate([{ opacity: getComputedStyle(dialog).opacity }, { opacity: 0 }], { duration: 280, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
+    panel.animate([{ opacity: getComputedStyle(panel).opacity, transform: getComputedStyle(panel).transform }, { opacity: 0, transform: "translateY(8px)" }], { duration: 240, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
+  ];
+  dialog.inert = true;
+  await Promise.allSettled(animations.map(animation => animation.finished));
+  dialog.close();
+  for (const animation of animations) animation.cancel();
+  dialog.inert = false;
+  closingSearch = false;
+}
+async function startFromSearch() {
+  const text = $("workspace-search").value.trim();
+  if (!text || !canLaunch() || launching || closingSearch) return;
+  launching = true;
+  ++asked;
+  clearTimeout(typing);
+  $("workspace-search").readOnly = true;
+  $("search-send").disabled = true;
+  $("search-results").inert = true;
+  $("search-status").textContent = "Starting your chat…";
+  try {
+    if (!pendingLaunch || pendingLaunch.text !== text || pendingLaunch.identity !== searchIdentity) pendingLaunch = { text, identity: searchIdentity, id: crypto.randomUUID(), chat: null };
+    pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true });
+    if (!pendingLaunch.chat) throw new Error("Your agent is still getting ready. Try again in a moment.");
+    await api("POST", `/api/f/${seg(pendingLaunch.chat)}/channels/chat`, { id: pendingLaunch.id, body: { text } });
+    openChat(pendingLaunch.chat);
+    pendingLaunch = null;
+    await closeSearch(true);
+    leaveSidebar();
+  } catch (e) {
+    $("search-status").textContent = `Your message wasn't sent. ${e.message}`;
+  } finally {
+    launching = false;
+    $("workspace-search").readOnly = false;
+    $("search-results").inert = false;
+    $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
+    if ($("search-dialog").open) $("workspace-search").focus();
+  }
+}
+function updateSearch() {
+  ++asked; // Invalidate in-flight responses immediately, before the debounce.
+  clearTimeout(typing);
+  $("search-status").textContent = "";
+  $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
+  renderFound([], []);
+  if ($("workspace-search").value.trim()) typing = setTimeout(search, 150);
+}
+for (const id of ["sidebar-new-chat", "new-chat"]) {
+  $(id).setAttribute("aria-keyshortcuts", "Meta+K Control+K");
+  $(id).dataset.tooltip = "Search or start a new chat (⌘K)";
+  $(id).setAttribute("aria-haspopup", "dialog");
+  $(id).setAttribute("aria-controls", "search-dialog");
+  $(id).setAttribute("aria-expanded", "false");
+}
+function launcherShortcut(e) {
+  if (e.isComposing || e.repeat || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.code !== "KeyK" || $("layout").hidden) return;
+  e.preventDefault();
+  if ($("search-dialog").open) { $("workspace-search").focus(); return; }
+  openSearch($("sidebar-new-chat"));
+}
+addEventListener("keydown", launcherShortcut);
+// Keyboard events inside the chat iframe cannot bubble to the desktop.
+addEventListener("message", async event => {
+  if (event.data?.fragment !== "open-launcher" || $("layout").hidden) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find(f => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || !byName(name) || document.activeElement !== frame) return;
+  try { if (event.origin !== await originOf(name)) return; } catch { return; }
+  if (frame.contentWindow === event.source && document.activeElement === frame) openSearch($("sidebar-new-chat"));
 });
+$("search-dialog").addEventListener("click", (e) => {
+  if (e.target === $("search-dialog")) closeSearch();
+});
+$("search-dialog").addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
+$("search-dialog").addEventListener("close", () => {
+  ++asked;
+  clearTimeout(typing);
+  searchTrigger?.setAttribute("aria-expanded", "false");
+});
+$("search-form").onsubmit = (e) => { e.preventDefault(); startFromSearch(); };
+$("workspace-search").addEventListener("input", updateSearch);
 $("workspace-search").addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
   const first = $("search-results").querySelector("button");
   if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
-  if (e.key === "Enter" && first) { e.preventDefault(); first.click(); }
+  if (e.key === "Enter") { e.preventDefault(); if (canLaunch()) startFromSearch(); else first?.click(); }
+});
+$("search-results").addEventListener("keydown", (e) => {
+  if (!["ArrowDown", "ArrowUp"].includes(e.key)) return;
+  const rows = [...$("search-results").querySelectorAll("button")];
+  const index = rows.indexOf(document.activeElement);
+  if (index < 0) return;
+  e.preventDefault();
+  if (e.key === "ArrowUp" && index === 0) $("workspace-search").focus();
+  else rows[Math.min(rows.length - 1, index + (e.key === "ArrowDown" ? 1 : -1))]?.focus();
 });
 
 // ---- the computer: awake while the person is here, and its updates ----
@@ -1168,6 +1590,7 @@ async function warmComputer() {
 // starts kept failing, so the next is theirs to ask for (Restart, in its
 // notice), never one every visit pays for unasked.
 function prewake() {
+  if (initialSetup && initialSetup.phase !== "ready" && !initialSetup.joined) return;
   const c = state.computer;
   if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
   woke = Date.now();
@@ -1404,6 +1827,7 @@ function say(text) {
 }
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
+  $("example-chat")?.remove();
   state.page = "Settings";
   $("frames").hidden = true;
   const page = $("settings-page");
@@ -1864,9 +2288,8 @@ async function skillsSection() {
   });
   return s;
 }
-// The wallpaper's photographer, credited. A photo of the person's own
-// (later) is credited to no one: `credited(null)` is no section.
-const WALLPAPER = { by: "Teo Badini", at: "https://www.pexels.com/@teobadini/", on: "Pexels" };
+// User-supplied landscapes have no external photographer credit.
+const WALLPAPER = null;
 function credited(photo) {
   if (!photo) return [];
   const who = el("a", null, photo.by);
@@ -1902,47 +2325,68 @@ async function firstAgentOnceSeated() {
   }
   location.assign("/");
 }
-// The first agent (Paul, 2026-10-03): no question asked. It is the
-// person's default agent, in charge, made with its computer and its chat
-// while this screen waits, so the chat opens with it ready, saying hello,
-// and the first message is answered at once, not after a computer's first
-// start.
+// First run opens the real chat before provisioning its agent. Setup is
+// presentation state, kept per person so a reload resumes the same work.
+// The two scripted messages never enter the chat's channels or model context.
 const SETUP_WAIT_MS = 4 * 60_000;
+let initialSetup = null;
+let setupRun = null;
+const setupKey = () => `shell.setup.v1:${state.me.id}`;
+function setupFor(name) {
+  if (!initialSetup || initialSetup.chat !== name) return null;
+  const { phase, joined, title, id, error } = initialSetup;
+  return { phase, joined, title, id, error };
+}
+function setupChanged(change) {
+  Object.assign(initialSetup, change);
+  store.set(setupKey(), initialSetup);
+  rosterChanged();
+}
 const firstSoul = (name, owner) => `You are ${name}, ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
-// Each step reuses what an earlier try made: a retry picks up where it stopped.
-async function defaultAgent(step) {
+// Each step reuses what an earlier try made, including a create whose
+// response was lost. Opening the frame happens once: a draft stays put.
+async function defaultAgent() {
   await load();
   const owner = state.me.email || "your person";
-  step("agent");
-  // the managed skills its computer installs at its first start (decision 17)
-  await skillsFragment();
-  const computer = await computerOf();
-  let agent = state.fragments.find((f) => f.kind === "agent" && f.role === "owner");
-  if (!agent) {
-    const title = pickName();
-    const made = await api("POST", "/api/fragments", { label: freeLabel(slug(title)), template: "agent", title });
-    agent = { name: made.name, title };
+  if (!initialSetup) {
+    const existing = state.fragments.find((f) => f.kind === "agent" && own(f));
+    const title = existing?.title || pickName();
+    initialSetup = { title, label: existing ? labelOf(existing.name) : freeLabel(slug(title)), phase: "agent", joined: false };
   }
-  const title = agent.title || labelOf(agent.name);
-  // assigned before its computer's first start, which then runs it
+  setupChanged({ phase: "agent", error: null });
+  const { title, label } = initialSetup;
+  const chatLabel = `${label}-chat`;
+  const chatName = state.fragments.find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === chatLabel)?.name ??
+    (await api("POST", "/api/fragments", { label: chatLabel, template: "chat", title })).name;
+  setupChanged({ chat: chatName, joined: initialSetup.chat === chatName && initialSetup.joined });
+  await load();
+  if (!state.frames.has(chatName)) openChat(chatName);
+
+  // These can run together once the chat is on screen. The computer is
+  // assigned before it wakes, with the agent's configuration deployed.
+  const prepared = await Promise.allSettled([skillsFragment(), computerOf()]);
+  // Finish both before offering Retry: no previous create is left in flight.
+  for (const result of prepared) if (result.status === "rejected") throw result.reason;
+  const computer = prepared[1].value;
+  let agent = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
+  if (!agent) agent = await api("POST", "/api/fragments", { label, template: "agent", title });
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   if (!id) throw new Error("its computer did not take it");
+  setupChanged({ id });
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-default",
     message: "the default agent",
     files: [{ path: "SOUL.md", text: firstSoul(title, owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  // its chat, by its label (a retry finds the one an earlier try made)
-  const chatLabel = `${labelOf(agent.name)}-chat`;
-  const chatName =
-    state.fragments.find((f) => f.kind === "chat" && f.role === "owner" && labelOf(f.name) === chatLabel)?.name ??
-    (await api("POST", "/api/fragments", { label: chatLabel, template: "chat", title })).name;
-  // adding it to its chat is what wakes the computer (the platform's `joined`)
+  // A message posted before membership would be skipped by the bridge.
+  // Enable Send only after adding the agent; typing can begin immediately.
   await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
+  setupChanged({ phase: "computer", joined: true });
   await hello(agent.name, chatName);
   api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
+  await load();
   return { chat: chatName, id, computer: computer.computer };
 }
 // Ready: its computer awake, and the agent following its chat (its wake
@@ -1957,32 +2401,15 @@ async function agentReady({ chat, id, computer }) {
   return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
 }
 function creatingAgent() {
-  const steps = [["agent", "Making your agent"], ["computer", "Starting its computer"]];
-  const list = el("ol", "creating-steps");
-  const items = new Map(steps.map(([key, text]) => { const li = el("li", null, text); list.append(li); return [key, li]; }));
-  let current = null;
-  const step = (key) => {
-    if (current) items.get(current).className = "done";
-    current = key;
-    items.get(key).className = "doing";
-  };
-  const note = el("p", "muted", "It starts once, now, so it answers you at once after.");
-  const error = el("p", "form-error");
-  error.hidden = true;
-  const retry = el("button", "primary", "Try again");
-  retry.type = "button";
-  retry.hidden = true;
-  retry.onclick = () => creatingAgent();
-  const anyway = el("button", "quiet", "Open the chat now");
-  anyway.type = "button";
-  anyway.hidden = true;
-  firstRun(el("h1", null, "Creating your agent…"), note, list, error, retry, anyway);
-  (async () => {
-    const made = await defaultAgent(step);
-    step("computer");
-    anyway.onclick = () => start(made.chat);
+  if (setupRun) return setupRun;
+  $("first-run").hidden = true;
+  $("layout").hidden = false;
+  // Only the chat fragment's creation precedes opening it, never the
+  // computer's boot. Errors before that are still inside the chat column.
+  if (!initialSetup?.chat || !state.frames.has(initialSetup.chat)) notice("Making your agent…");
+  setupRun = (async () => {
+    const made = await defaultAgent();
     const t0 = Date.now();
-    // one look every 1.5 s; past SETUP_WAIT_MS the person may go on without it
     for (;;) {
       let ready = false;
       try {
@@ -1991,20 +2418,21 @@ function creatingAgent() {
         if (e.refused) throw e;
       }
       if (ready) break;
-      if (Date.now() - t0 > SETUP_WAIT_MS && anyway.hidden) {
-        note.textContent = "It's taking longer than usual. It answers once its computer is up.";
-        anyway.hidden = false;
-      }
+      if (Date.now() - t0 > SETUP_WAIT_MS) throw new Error("Starting is taking longer than usual. Try again to check on your agent.");
       await new Promise((r) => setTimeout(r, 1500));
     }
-    items.get("computer").className = "done";
-    await start(made.chat);
+    setupChanged({ phase: "ready", error: null });
+    await load();
   })().catch((err) => {
-    if (current) items.get(current).className = "failed";
-    error.textContent = err.message;
-    error.hidden = false;
-    retry.hidden = false;
-  });
+    if (initialSetup) setupChanged({ phase: "error", error: err.message });
+    if (!initialSetup?.chat || !state.frames.has(initialSetup.chat)) {
+      const retry = el("button", "primary", "Try again");
+      retry.type = "button";
+      retry.onclick = () => creatingAgent();
+      notice("Your agent could not start", err.message, retry);
+    }
+  }).finally(() => { setupRun = null; });
+  return setupRun;
 }
 
 // ---- the person's things, read again whenever they may have changed ----
@@ -2088,6 +2516,7 @@ async function start(open) {
     throw e;
   }
   state.me = me;
+  initialSetup = store.get(setupKey(), null);
   const [, ledger] = await Promise.all([load(), api("GET", "/api/ledger").catch(() => null)]);
   setGuest(ledger?.plan === "guest");
   watchList();
@@ -2095,7 +2524,7 @@ async function start(open) {
   // a guest makes nothing (decision 49), so their home is what is shared
   // with them, and a seat offered
   const settings = !open && location.pathname === SETTINGS;
-  if (!chats().length && !open && !settings && !state.guest) return creatingAgent();
+  if (!open && !settings && !state.guest && (!chats().length || initialSetup && initialSetup.phase !== "ready")) return creatingAgent();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
@@ -2110,7 +2539,6 @@ async function start(open) {
 // nothing (decision 49), so no button offers to make something ----
 function setGuest(guest) {
   state.guest = guest;
-  for (const id of ["new-agent", "new-agent-top", "new-group", "add-app"]) $(id).hidden = guest;
   renderChats();
   renderApps();
   renderHeading();

@@ -276,6 +276,15 @@ impl Browser {
         self.open_at(context.as_deref(), url)
     }
 
+    /// A browser-only transport fault installed before the page starts.
+    pub fn open_with_script(&mut self, url: &str, script: &str) -> Result<Page> {
+        let page = self.open("about:blank")?;
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": script }), Some(&page.session))?;
+        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        Ok(page)
+    }
+
     /// Opens a page in another of the lease's contexts (`another_context`).
     pub fn open_in(&mut self, context: &BrowserContext, url: &str) -> Result<Page> {
         self.open_at(Some(&context.0), url)

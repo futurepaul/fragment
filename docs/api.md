@@ -1792,6 +1792,19 @@ anyone but its own owner's agents to its own fragment, which is an
 owner's share with their own agent (decision 36). It names no template;
 the chat's `@` is its user (docs/chat-records.md, "The page").
 
+**First-run setup in its chat.** The shell makes the first chat before
+provisioning its default agent, then opens it with `?setup=1`. For this
+owned chat alone, the `agents` answer also carries `setup`:
+`{phase: "agent"|"computer"|"ready"|"error", joined, title, id?, error?}`.
+The shell remembers it per person in this browser and resumes incomplete
+setup after reload. Other frames receive `setup: null`. The chat renders
+scripted setup messages and allows drafting immediately; Send waits for
+`joined: true`. The frame can ask `{fragment: "retry-setup"}`. The shell
+checks its source, its fragment's canonical origin and ownership as for
+`agents?`, and retries only its own first chat's failed setup. Retries
+reuse the chat and agent and never reload the frame or discard a draft.
+These messages create no channel records or additional platform APIs.
+
 **A page may ask for a window.** A frame the shell made may
 `postMessage({fragment: "open", url})`. A URL of the frame's own origin
 is a file's window (the files viewer's, `__files` above). A page of
