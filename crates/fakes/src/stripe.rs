@@ -55,6 +55,8 @@ struct Session {
     trial_days: Option<i64>,
     client_reference_id: Option<String>,
     success_url: String,
+    /// Where its page's Back goes, as Stripe's does: nothing bought.
+    cancel_url: String,
     status: String,
     subscription: Option<String>,
     amount: i64,
@@ -461,6 +463,7 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
                 trial_days: f.get("subscription_data[trial_period_days]").and_then(|d| d.parse().ok()),
                 client_reference_id: f.get("client_reference_id").cloned(),
                 success_url: f.get("success_url").cloned().unwrap_or_default(),
+                cancel_url: f.get("cancel_url").cloned().unwrap_or_default(),
                 status: "open".into(),
                 subscription: None,
                 amount,
@@ -588,13 +591,15 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
 }
 
 /// `GET /pay/<id>`: a page with a Pay button; its POST completes the
-/// session and sends the browser to the session's success URL.
+/// session and sends the browser to the session's success URL. Its Back
+/// link goes to the cancel URL, as Stripe's back arrow does.
 fn pay_page(st: &Arc<Mutex<State>>, req: &Request, id: &str, base: &str) -> Response {
     if req.method == "GET" {
         let s = st.lock().expect("stripe state");
         let Some(session) = s.sessions.get(id) else { return error(404, "invalid_request_error", "no such session") };
+        let back = session.cancel_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
         let page = format!(
-            r#"<!doctype html><title>Stripe Checkout (fake)</title><form method="post"><p>The Stripe fake: pay {} (test card)</p><button>Pay</button></form>"#,
+            r#"<!doctype html><title>Stripe Checkout (fake)</title><form method="post"><p>The Stripe fake: pay {} (test card)</p><button>Pay</button></form><p><a id="back" href="{back}">Back</a></p>"#,
             match session.trial_days {
                 Some(d) => format!("nothing today, a {d}-day trial"),
                 None => format!("${:.2}", session.amount as f64 / 100.0),

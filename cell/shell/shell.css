@@ -336,7 +336,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .first-run { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; background: var(--bg-sidebar); }
 .first-run-card { width: min(100%, 460px); display: flex; flex-direction: column; gap: 14px; }
 .first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 18px; padding: 0; }
-.first-run-card > .primary { align-self: flex-start; }
+.first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
 .first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; }
 .first-run-card p { margin: 0; }
 .first-run-form { display: flex; flex-direction: column; gap: 10px; }
@@ -347,6 +347,19 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 }
 .first-run-form input:focus, .first-run-form textarea:focus, .rename-agent textarea:focus { outline: 1px solid var(--border-strong); }
 .first-run-form .primary { align-self: flex-start; margin-top: 4px; }
+/* the welcome: the seats, a trial code, who is signed in (shell.js welcome, billing.js seatOffer) */
+.plans { display: flex; flex-direction: column; gap: 10px; }
+.plan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 14px; background: none; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.plan:hover:not(:disabled) { background: var(--bg-active); }
+.plan:disabled { opacity: .6; cursor: default; }
+.plan strong { font-weight: 600; }
+.plan span { color: var(--text-secondary); font-size: 13px; }
+.trial-code { display: flex; gap: 8px; }
+.trial-code input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
+.trial-code button:disabled { opacity: .6; }
+.welcome-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; }
+.welcome-foot > .muted { margin-right: auto; }
+.welcome-foot form { margin: 0; }
 /* settings: a page in the middle column */
 .page { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); padding: 24px 16px 64px; }
 .settings-section { max-width: 640px; margin: 0 auto 28px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }

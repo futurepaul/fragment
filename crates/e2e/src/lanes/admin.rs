@@ -67,8 +67,12 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.hosted() {
         let mail = s.mail.sent_to(&to);
         s.ok(
-            "an operator mails a trial: its days, its code, and where to start it",
-            sent.status == 200 && mail.len() == 1 && mail[0].text.contains("14 days") && mail[0].text.contains(code.body["code"].as_str().unwrap_or("?")) && mail[0].text.contains("/settings?trial="),
+            "an operator mails a trial: its days, its code, and where to start it, the welcome with its code",
+            sent.status == 200
+                && mail.len() == 1
+                && mail[0].text.contains("14 days")
+                && mail[0].text.contains(code.body["code"].as_str().unwrap_or("?"))
+                && mail[0].text.contains(&format!("/welcome?trial={}\n", code.body["code"].as_str().unwrap_or("?"))),
             format!("{sent} {mail:?}"),
         );
     }
