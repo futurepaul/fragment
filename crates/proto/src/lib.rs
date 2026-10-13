@@ -740,6 +740,10 @@ pub struct ListedFragment {
     /// holds it (none when it holds none: docs/api.md, Search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// With `preview`: when its message was said (ms), so a list can put
+    /// its chats newest first.
+    #[serde(default, rename = "previewAt", skip_serializing_if = "Option::is_none")]
+    pub preview_at: Option<i64>,
     /// A chat's messages the signer's search holds that came after the
     /// last they saw (`PUT /api/fragments/{name}/seen`), at most
     /// `limits::LISTED_UNREAD_MAX`; left out at 0.
@@ -1736,15 +1740,15 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, unread: 0, sharing: None, archived: false, owned: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["npub1juniper".into()], preview: Some("hi".into()), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "previewAt": 1_760_000_000_000_i64, "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true }] })
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();

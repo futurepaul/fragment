@@ -60,7 +60,7 @@ pub fn shell(name: &str) -> Option<&'static File> {
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
-const SHELL_PUBLISHED: [(&str, &str); 16] = [
+const SHELL_PUBLISHED: [(&str, &str); 17] = [
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
@@ -74,8 +74,9 @@ const SHELL_PUBLISHED: [(&str, &str); 16] = [
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
     ("icon.svg", "image/svg+xml"),
-    // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
+    // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
     ("wallpaper.jpg", "image/jpeg"),
+    ("wallpaper-dark.jpg", "image/jpeg"),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png"),
     // the operators' admin page (`/admin`)

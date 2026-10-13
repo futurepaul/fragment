@@ -1,5 +1,5 @@
 // Shared action tooltips for the desktop and its chat frames.
-const selector = "button.icon-button, button.pane-action, button.send";
+const selector = "button.icon-button, button.pane-action, button.send, [data-tooltip]";
 const tooltip = document.createElement("div");
 tooltip.id = "action-tooltip";
 tooltip.className = "action-tooltip";
@@ -28,13 +28,14 @@ function show(button) {
     if (!button.hasAttribute("aria-label")) button.setAttribute("aria-label", button.title);
     button.removeAttribute("title");
   }
-  const label = button.getAttribute("aria-label") || button.dataset.actionTitle;
+  const label = button.dataset.tooltip || button.getAttribute("aria-label") || button.dataset.actionTitle;
   if (!label) return;
   active = button;
   timer = setTimeout(() => {
     if (!button.isConnected) return hide();
     if (!tooltip.isConnected) document.body.append(tooltip);
     tooltip.textContent = label.replace(/…$/, "");
+    tooltip.classList.toggle("is-description", !!button.dataset.tooltip);
     tooltip.hidden = false;
     const rect = button.getBoundingClientRect();
     const size = tooltip.getBoundingClientRect();
@@ -56,7 +57,7 @@ document.addEventListener("pointerout", event => {
   if (active && active.contains(event.target) && !active.contains(event.relatedTarget)) hide();
 });
 document.addEventListener("focusin", event => {
-  const button = event.target.closest(selector);
+  const button = event.target.closest(selector) || event.target.querySelector("[data-tooltip]");
   if (button) show(button);
 });
 document.addEventListener("focusout", hide);

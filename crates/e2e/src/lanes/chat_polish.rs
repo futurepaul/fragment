@@ -116,6 +116,21 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let page = chrome.open(&api.site_url(&name, ""))?;
     anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('say')?.dataset.ready === '1'"), "the failure page is ready");
     anyhow::ensure!(super::shows(chrome, &page, "[...document.querySelectorAll('.msg.user')].some(m => m.querySelector('.bubble')?.textContent === 'History 414' && !!m.querySelector('.reply'))"), "the quoted message has loaded");
+    // Sending, then sent (Paul, 2026-10-13: nothing looks sent before the
+    // platform has it): its post held, the message shows as sending, with
+    // no time and no Reply, and the platform has no record of it; let go,
+    // it is sent, once.
+    chrome.eval(&page, "(() => { const real = window.fetch; window.fetch = async (url, o) => { if (String(url).includes('__op/channels/chat') && !window.__held) { window.__held = true; await new Promise((r) => { window.__release = r; }); } return real(url, o); }; return true; })()")?;
+    chrome.eval(&page, "(() => { const t = document.getElementById('text'); t.value = 'Held for a moment'; t.dispatchEvent(new Event('input')); document.getElementById('say').requestSubmit(); return true; })()")?;
+    let held = "(() => { const m = [...document.querySelectorAll('.msg.user.mine')].filter((m) => m.querySelector('.bubble')?.textContent === 'Held for a moment'); return m.length === 1 && m[0].classList.contains('sending') && m[0].querySelector('.time')?.textContent === 'Sending…' && !m[0].querySelector('.reply') && typeof window.__release === 'function'; })()";
+    let sending = super::shows(chrome, &page, held);
+    let unsent = super::super::jobs::records(api, owner, &name, "chat").iter().all(|r| r["body"]["text"] != "Held for a moment");
+    chrome.screenshot(&page, &shots.join("sending.png"))?;
+    s.ok("a message the platform has not answered shows as sending (dimmed, Sending… for its time, no Reply), and it has no record yet", sending && unsent, "");
+    chrome.eval(&page, "(window.__release(), true)")?;
+    let sent = super::shows(chrome, &page, "(() => { const m = [...document.querySelectorAll('.msg.user.mine')].filter((m) => m.querySelector('.bubble')?.textContent === 'Held for a moment'); return m.length === 1 && !m[0].classList.contains('sending') && /\\d/.test(m[0].querySelector('.time')?.textContent ?? '') && !!m[0].querySelector('.reply') && !!m[0].dataset.post; })()");
+    let stored = super::super::jobs::records(api, owner, &name, "chat").iter().filter(|r| r["body"]["text"] == "Held for a moment").count();
+    s.ok("its record come, it shows as sent (its time, Reply), the same post, stored once", sent && stored == 1, stored);
     let quoted_seq = chrome.eval(&page, "(() => { const m = [...document.querySelectorAll('.msg.user')].find(m => m.querySelector('.bubble')?.textContent === 'History 414'); m.querySelector('.reply').click(); return Number(m.dataset.seq); })()")?;
     chrome.offline(&page, true)?;
     chrome.eval(&page, "(() => { document.getElementById('text').value = 'Retry my message'; document.getElementById('say').requestSubmit(); return true; })()")?;

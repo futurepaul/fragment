@@ -37,7 +37,7 @@
 //!   only entries of rows that name a role. At most
 //!   `SEARCH_ENTRIES_PER_FRAGMENT_MAX` a fragment and `SEARCH_ENTRIES_MAX` in
 //!   all are kept, the oldest going first. A chat's newest entry is its
-//!   row's `preview`; a chat with none here (no message every member may
+//!   row's `preview` (and `previewAt`, when it was said); a chat with none here (no message every member may
 //!   read, or its entries gone past the total) shows none.
 //! - **Watching** (`GET /api/fragments/watch`; Paul on p5, 2026-10-05: an
 //!   app his agent made did not show in his sidebar until he reloaded):
@@ -110,12 +110,14 @@ const HELLO: &str = r#"{"type":"hello"}"#;
 const CHANGED: &str = r#"{"type":"changed"}"#;
 
 /// The columns `/list` and a search read of a row, a chat's newest search
-/// entry (`said`), read by its place in its fragment's log, and its entries
+/// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
 /// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
+  CASE WHEN json_extract(face, '$.kind') = 'chat'
+    THEN (SELECT at FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said_at,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT COUNT(*) FROM (SELECT 1 FROM search_entries e WHERE e.fragment = m.fragment
       AND e.n > COALESCE((SELECT n FROM seen s WHERE s.fragment = m.fragment), 0) LIMIT ?)) ELSE 0 END AS unread
@@ -188,6 +190,7 @@ struct Listed {
     face: Option<String>,
     archived: i64,
     said: Option<String>,
+    said_at: Option<i64>,
     unread: i64,
 }
 
@@ -735,7 +738,8 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
     let (kind, title, agents) = face.map_or((FragmentKind::App, None, Vec::new()), |f| (f.kind, f.title, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
+    let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
     let unread = unread.ok_or_else(|| CellError::host(format!("{}'s unread count {} is outside its bound", r.name, r.unread)))?;
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, unread, sharing, archived: r.archived != 0, owned: false })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, owned: false })
 }

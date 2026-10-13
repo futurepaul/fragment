@@ -415,23 +415,27 @@ settings page)").
 
 - **Who sees it:** a guest with nothing shared with them, who lands
   there from `/`. It holds a line of what this is, the two seats and a
-  trial-code field, then Checkout, and who is signed in, with Sign out.
+  trial-code field, then Checkout, and who is signed in, with Sign out:
+  one card on the landscape, as the launcher's panel is (Skyler's look).
 - **What comes back to it:** Checkout's return
   (`?checkout=<session>`), its Back (`?checkout=canceled`, said), and a
   mailed trial's link (`?trial=<code>`, filled in). Signed out, sign-in
   comes back to it with its query. A refusal (a code that is none, a
   full one) is said under the seats.
-- **A paid return** goes on to the first run, at `/`, in three steps:
-  - *Setting up your seat:* the Checkout applied
+- **A paid return** sets up the seat, then goes on to the first run, at
+  `/`, in its chat:
+  - *Setting up your seat,* on the welcome's card: the Checkout applied
     (`POST /api/billing/sessions/<id>`), kept in the address until its
     seat holds, so a reload applies it again; then the seat's plan
     reaching the ledger, a moment after (at most 30 s). A seat that does
     not come (a Checkout not theirs, or unpaid) is said, with Try again
     and Choose a seat.
-  - *Making your agent:* their default agent, its computer and its
-    chat, each made once (a retry or a reload reuses what was made).
-  - *Starting its computer:* then their chat opens (past 4 minutes,
-    "Open the chat now").
+  - *Then the first agent, in its chat* (docs/api.md, "The first run, in
+    its chat"; Skyler's design, Paul, 2026-10-13): the chat opens at
+    once with a card of the making as the platform says it (the agent
+    made, in the chat, its computer's phase); the person may type at
+    once, and send once the agent is in the chat. Each thing is made
+    once (a retry or a reload reuses what was made).
 - **Who skips it:** someone holding a seat (bought, an org's claimed at
   sign-in, or the deployment's plan) goes straight to the first run.
   Someone with a chat of their own goes home, a lapsed seat's

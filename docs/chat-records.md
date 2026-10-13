@@ -390,6 +390,36 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
+**Sending, then sent.** A message or command sent from the page shows
+at once as **sending**: its bubble dimmed, "Sending…" where its time
+goes, no Reply, never queued. It is sent once the platform answers with
+its record (or the socket brings the record first: the same body from
+the same person ends its sending), and then shows as any message does;
+one the platform refused, or that never reached it, shows its error and
+Retry (the same id: one record however often it is tried). Nothing looks
+sent before the platform has it. As it shows, it rises straight up from
+the composer into the thread at its final horizontal position (no
+sideways movement, no scaling): a visual copy crosses the scroll
+boundary, as dim as the bubble is, while the real message keeps its
+layout and accessibility; its record replacing it on the way keeps the
+same entrance. Incoming messages, history and failed sends do not
+replay it; reduced motion skips it; scrolling or resizing ends it.
+
+**The first run.** The shell opens its person's first chat before their
+first agent is in it (`?setup=1`; docs/api.md, "The first run, in its
+chat"). The page then shows a card above the chat, "Setting up your
+agent", with the steps the shell sends with its roster (`setup: {steps:
+[{text, state}], error}`, at most 6 steps of 120 characters, `state`
+one of `done`, `doing`, `todo`, `failed`): what the platform says of
+the making, never a message, and nothing in the agent's name. The
+composer takes typing at once; Send (and Enter) wait until the page's
+own member list has an agent, so nothing is posted before the agent
+joined (a message from before then starts nothing: above). When the
+shell says a step changed, the page reads `__members` again. A failed
+step says why, with Try again (`{fragment: "retry-setup"}` to the
+shell), in the same frame, keeping what was typed. When the shell sends
+`setup: null` the card goes.
+
 The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
@@ -495,8 +525,18 @@ Who is who comes from the fragment: `__members` lists the chat's agents
 agent fragment's label, which `@mentions` it). An agent's color is one
 of six, chosen by its identity until agents carry one; the chat takes
 its lead's. The shell that frames it may send `postMessage({fragment:
-"theme", mode: "light"|"dark"})`; otherwise it follows
-`prefers-color-scheme`.
+"theme", mode: "light"|"dark", mobile: boolean})`; otherwise it follows
+`prefers-color-scheme`. The optional `mobile` flag follows the shell's 760px
+breakpoint, so a narrow desktop chat does not pick up the phone's rounded
+composer and larger input text. Mobile inputs use 16px text to avoid focus
+zoom; messages remain 14px. The shell reserves the home-indicator safe area,
+and the mobile composer adds bottom clearance.
+
+**Desktop launcher.** Command K (or Control K) opens the shell's shared
+search/new-chat input, including while typing in the framed chat. The chat
+sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
+only from its focused, listed fragment iframe with the expected origin.
+Standalone chats leave the shortcut to the browser.
 
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a

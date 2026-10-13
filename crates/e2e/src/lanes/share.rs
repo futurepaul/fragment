@@ -605,19 +605,32 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- the shell, the one page that frames the sheet: an app's Share
     // opens it in a dialog, and Done closes it (at /settings, which the
-    // shell opens whether or not the person has a chat yet)
+    // shell opens whether or not the person has a chat yet; the launcher
+    // finds the app there and opens its window on the desktop)
     let home = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&home, 1280, 800, false)?;
-    let row = format!("#apps .row[data-key={:?}]", format!("app:{chat}"));
+    let row = format!("#apps [data-key={:?}]", format!("app:{chat}"));
+    let found = format!("#search-results .search-result[data-fragment={chat:?}]");
     let share = "#stack button[aria-label='Share…']";
     // A hand's click lands where the button is drawn: only once the page has
-    // loaded and its fonts are in, or a layout still moving puts the click
-    // elsewhere.
-    let settled = |selector: &str| format!("document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({selector:?})");
-    // (the sidebar laid out open, as a desktop's is)
-    let listed = chrome.until(&home, &format!("{} && document.getElementById('layout').classList.contains('left-open')", settled(&row)), wait);
+    // loaded, its fonts are in and its panels and windows have stopped
+    // moving (the desktop springs open), or a layout still moving puts the
+    // click elsewhere.
+    let settled = |selector: &str| {
+        format!(
+            "document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({selector:?}) \
+             && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"
+        )
+    };
+    // (the sidebar laid out open, as a desktop's is, and the app in the list)
+    let mut listed = chrome.until(&home, &format!("{} && {} && document.getElementById('layout').classList.contains('left-open')", settled("#sidebar-new-chat"), settled(&row)), wait);
     if listed {
-        chrome.click(&home, &row)?;
+        chrome.click(&home, "#sidebar-new-chat")?;
+        chrome.eval(&home, "(() => { const i = document.getElementById('workspace-search'); i.value = 'Todo'; i.dispatchEvent(new Event('input')); return true; })()")?;
+        listed = chrome.until(&home, &settled(&found), wait);
+    }
+    if listed {
+        chrome.click(&home, &found)?;
     }
     let windowed = listed && chrome.until(&home, &settled(share), wait);
     if windowed {
@@ -710,9 +723,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
     let theirs = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&theirs, 1280, 800, false)?;
-    let listed = chrome.until(&theirs, &format!("{} && document.getElementById('layout').classList.contains('left-open')", settled(&row)), wait);
+    // (the launcher finds it from settings, and opens its window on the desktop)
+    let mut listed = chrome.until(&theirs, &format!("{} && {} && document.getElementById('layout').classList.contains('left-open')", settled("#sidebar-new-chat"), settled(&row)), wait);
     if listed {
-        chrome.click(&theirs, &row)?;
+        chrome.click(&theirs, "#sidebar-new-chat")?;
+        chrome.eval(&theirs, "(() => { const i = document.getElementById('workspace-search'); i.value = 'Todo'; i.dispatchEvent(new Event('input')); return true; })()")?;
+        listed = chrome.until(&theirs, &settled(&found), wait);
+    }
+    if listed {
+        chrome.click(&theirs, &found)?;
     }
     let more = "#stack button[aria-label='More']";
     let windowed = listed && chrome.until(&theirs, &settled(more), wait);

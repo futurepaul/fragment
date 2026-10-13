@@ -12,7 +12,7 @@
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
 import { appIcon } from "./app-icons.js";
-import { createLayout, store } from "./layout.js";
+import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
 import { billingSections, returning, seatOffer } from "./billing.js";
@@ -21,6 +21,8 @@ const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
 const DEFAULT_AGENT_TIER = "cheap";
 const ICON = {
+  cornerDownLeft: LUCIDE_ICON.cornerDownLeft,
+  plus: '<path d="M12 5v14M5 12h14"/>',
   rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   invite: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0M19 8v6M16 11h6"/>',
   agent: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
@@ -175,7 +177,7 @@ const viewer = createViewer({
     $("viewer").classList.toggle("is-empty", !keys.length);
     $("viewer-count").hidden = !keys.length;
     $("viewer-count").textContent = keys.length;
-    for (const row of document.querySelectorAll("#apps .row[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
+    for (const row of document.querySelectorAll("#apps .dock-app[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
   },
 });
 $("toggle-left").onclick = () => layout.toggle("left");
@@ -238,12 +240,14 @@ addEventListener("focus", () => {
 });
 // The frames follow this page's light or dark (they may not see its media).
 const dark = matchMedia("(prefers-color-scheme: dark)");
+const mobileChat = matchMedia("(max-width: 760px)");
 function theme(frame) {
   try {
-    frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light" }, "*");
+    frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
   } catch {}
 }
 dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
+mobileChat.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
 // ---- the person's agents, for a page of theirs that asks (a chat's @) ----
 // A frame of a fragment the person owns may ask for their agents
@@ -285,18 +289,21 @@ const roster = () => {
 let rosterSent = "";
 function rosterChanged() {
   const agents = roster();
-  const now = JSON.stringify(agents);
+  const now = JSON.stringify([agents, setup && setupFor(setup.chat)]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
   for (const [win, origin] of rosterTo) {
     if (!live.has(win)) rosterTo.delete(win);
-    else win.postMessage({ fragment: "agents", agents }, origin);
+    else {
+      const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === win);
+      win.postMessage({ fragment: "agents", agents, setup: setupFor(frame?.dataset.fragment) }, origin);
+    }
   }
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (d?.fragment !== "agents?" && d?.fragment !== "add-agent") return;
+  if (!["agents?", "add-agent", "retry-setup"].includes(d?.fragment)) return;
   // the frame that sent it shows one of the person's own fragments, and
   // the page in it is that fragment's
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
@@ -309,9 +316,13 @@ addEventListener("message", async (event) => {
     return;
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  if (d.fragment === "retry-setup") {
+    if (name === setup?.chat && setup.error) creatingAgent();
+    return;
+  }
   if (d.fragment === "agents?") {
     rosterTo.set(event.source, origin);
-    event.source.postMessage({ fragment: "agents", agents: roster() }, origin);
+    event.source.postMessage({ fragment: "agents", agents: roster(), setup: setupFor(name) }, origin);
     return;
   }
   const asker = event.source;
@@ -426,17 +437,63 @@ sheet.onclose = () => {
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
+const menuEdge = el("div", "agent-menu-edge");
+menuEdge.hidden = true;
+menuEdge.setAttribute("aria-hidden", "true");
+document.body.append(menuEdge);
 let menuFor = null;
-function closeMenu() {
+let menuClosing = false;
+let menuAnimations = [];
+let menuParts = [];
+let menuMotionId = 0;
+function cancelMenuMotion() {
+  ++menuMotionId;
+  for (const animation of menuAnimations) animation.cancel();
+  menuAnimations = [];
+}
+function finishMenuClose() {
+  cancelMenuMotion();
   if (!menuFor) return;
   menuFor.button.setAttribute("aria-expanded", "false");
   menuFor = null;
   menu.hidden = true;
+  menuEdge.hidden = true;
+  menu.inert = false;
+  menuClosing = false;
+  menu.classList.remove("agent-menu");
+  menu.style.removeProperty("width");
+  menu.style.removeProperty("max-height");
+  updateSidebarEdge();
 }
+function animateMenu(opening) {
+  const current = menuParts.map(({ node }) => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }));
+  cancelMenuMotion();
+  if (reducedMotion.matches) { if (!opening) finishMenuClose(); return; }
+  const id = menuMotionId;
+  menuAnimations = menuParts.map(({ node, origin }, i) => node.animate(opening
+    ? springFrames(t => ({ opacity: node === menuFor.button ? 1 : Math.min(1, t), transform: `scale(${.97 + .03 * t})`, transformOrigin: origin }))
+    : [{ ...current[i], transformOrigin: origin }, { opacity: node === menuFor.button ? 1 : 0, transform: node === menuFor.button ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
+  { duration: opening ? 280 : 160, easing: opening ? "linear" : "cubic-bezier(.4, 0, 1, 1)", fill: "both" }));
+  Promise.all(menuAnimations.map(a => a.finished)).then(() => {
+    if (id !== menuMotionId) return;
+    if (opening) cancelMenuMotion(); else finishMenuClose();
+  }).catch(() => {});
+}
+function closeMenu(immediate = false) {
+  if (!menuFor) return;
+  if (immediate === true || reducedMotion.matches) return finishMenuClose();
+  if (menuClosing) return;
+  menuClosing = true;
+  menu.inert = true;
+  animateMenu(false);
+}
+reducedMotion.addEventListener("change", () => {
+  if (reducedMotion.matches) { if (menuClosing) finishMenuClose(); else cancelMenuMotion(); }
+});
 function openMenu(button, items) {
-  const again = menuFor?.button === button;
-  closeMenu();
-  if (again) return;
+  const again = menuFor?.button === button && !menuClosing;
+  if (again) return closeMenu();
+  closeMenu(true);
   menuFor = { button };
   menu.replaceChildren(...items.map((it) => {
     const b = el("button");
@@ -448,15 +505,36 @@ function openMenu(button, items) {
     return b;
   }));
   button.setAttribute("aria-expanded", "true");
+  const attached = button.id === "sidebar-agent";
+  menu.classList.toggle("agent-menu", attached);
   menu.hidden = false;
   const r = button.getBoundingClientRect();
-  menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
-  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  if (attached) {
+    menu.style.width = `${r.width}px`;
+    menu.style.maxHeight = `${Math.max(0, innerHeight - r.bottom - 8)}px`;
+    menu.style.top = `${r.bottom - 1}px`;
+    menu.style.left = `${r.left}px`;
+    menuEdge.style.left = `${r.left}px`;
+    menuEdge.style.top = `${r.top}px`;
+    menuEdge.style.width = `${r.width}px`;
+    menuEdge.style.height = `${menu.getBoundingClientRect().bottom - r.top}px`;
+    menuEdge.hidden = false;
+  } else {
+    menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
+    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  }
   menu.querySelector("button")?.focus();
+  updateSidebarEdge();
+  const bounds = attached ? menuEdge.getBoundingClientRect() : menu.getBoundingClientRect();
+  menuParts = (attached ? [menu, button, menuEdge] : [menu]).map(node => {
+    const rect = node.getBoundingClientRect();
+    return { node, origin: `${bounds.left + bounds.width / 2 - rect.left}px ${bounds.top + bounds.height / 2 - rect.top}px` };
+  });
+  animateMenu(true);
 }
 addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && !menuFor.button.contains(e.target)) closeMenu(); });
 addEventListener("keydown", (e) => {
-  if (!menuFor) return;
+  if (!menuFor || menuClosing) return;
   if (e.key === "Escape") {
     const trigger = menuFor.button;
     closeMenu();
@@ -470,22 +548,22 @@ addEventListener("keydown", (e) => {
   } else if (e.key === "Tab") closeMenu();
 });
 addEventListener("blur", closeMenu);
-addEventListener("resize", closeMenu);
+addEventListener("resize", () => closeMenu(true));
 
-// ---- agents: each a chat, the open one in the middle column ----
+// ---- chats: one flat list, newest first, the open one in the middle column ----
 function renderHeading() {
   const open = state.current && byName(state.current) && !state.page;
-  $("agent-heading").hidden = !open;
+  $("chat-heading").hidden = !open;
   $("page-title").hidden = !state.page;
   $("page-title").textContent = state.page ?? "";
-  $("new-chat").hidden = !open || state.guest || !chatAgentOf(state.current);
+  $("new-chat").hidden = !open || state.guest || !primaryAgent()?.identity;
+  $("chat-options").hidden = !open;
   if (!open) return;
-  const who = identity(state.current);
-  $("chat-title").textContent = who.title;
-  $("chat-title").title = who.title;
-  $("agent-mark").replaceChildren(mark(state.current, "small"));
+  const title = titleOf(state.current);
+  $("chat-title").textContent = title;
+  $("chat-title").title = title;
   const frame = state.frames.get(state.current);
-  if (frame) frame.setAttribute("aria-label", who.title);
+  if (frame) frame.setAttribute("aria-label", title);
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
@@ -498,23 +576,116 @@ function unreadMark(f) {
   b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
   return [b];
 }
+// The person's one agent (Paul, 2026-10-13: "just one", a setting later):
+// their first, the one the first run makes (`defaultAgent`): the first
+// their computer took (its view lists its agents in the order it took
+// them), or, before it took one, their agent fragment. New chats are with
+// it. Any other agents they have stay out of the sidebar; their chats are
+// chats, so they list and search as any other.
+function primaryAgent() {
+  const first = [...state.agents.values()].find((a) => byName(a.fragment)?.role === "owner");
+  if (first) return { fragment: first.fragment, identity: first.identity };
+  const f = state.fragments.find((x) => x.kind === "agent" && own(x));
+  return f ? { fragment: f.name, identity: null } : null;
+}
+// Newest first: a chat by when its newest message was said (its row's
+// `previewAt`); one with nothing said yet (just made) above them all.
+const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
 function renderChats() {
-  const list = shown(chats());
-  patch($("chats"), list.length ? list.map((f) => {
-    const who = identity(f.name);
-    const unread = unreadMark(f);
-    const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}${unread.length ? " has-unread" : ""}`);
+  const primary = primaryAgent();
+  const agentRows = [];
+  if (primary) {
+    const row = el("button", "agent-heading sidebar-agent");
+    row.id = "sidebar-agent";
+    row.type = "button";
+    row.dataset.key = primary.fragment;
+    row.setAttribute("aria-label", `${titleOf(primary.fragment)}: your agent's menu`);
+    row.setAttribute("aria-haspopup", "menu");
+    row.setAttribute("aria-controls", "menu");
+    row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
+    const face = el("span", "sidebar-agent-mark");
+    face.append(avatar({ color: colorOf(primary.identity) }, "small"));
+    row.append(face, el("strong", "title", titleOf(primary.fragment)));
+    row.onclick = () => openPrimaryMenu(row);
+    agentRows.push(row);
+  }
+  patch($("primary-agent"), agentRows);
+  // the launcher: a guest's searches; a seat's also starts a chat
+  const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
+  for (const id of ["sidebar-new-chat", "new-chat"]) {
+    $(id).title = `${launcherLabel} (⌘K)`;
+    $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
+    $(id).setAttribute("aria-label", launcherLabel);
+  }
+  const rows = shown(chats()).sort(newest).map((f) => {
+    const active = f.name === state.current && !state.page;
+    const row = el("button", `row chat-row${active ? " active" : ""}`);
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
-    if (isGroup(f.name)) row.dataset.group = String(agentsOf(f.name).length);
-    row.setAttribute("aria-current", f.name === state.current && !state.page ? "page" : "false");
-    const text = el("span", "agent-copy");
-    text.append(el("span", "label", who.title), el("span", "agent-preview", who.preview || (own(f) ? "Say hello" : f.role)));
-    row.append(mark(f.name), text, ...badges(f), ...unread);
+    row.setAttribute("aria-current", active ? "page" : "false");
+    row.append(el("span", "label", titleOf(f.name)), ...unreadMark(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your first agent starts here")]);
+  });
+  patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
 }
+// The agent's own menu: another chat with it, its name, its profile and
+// its screen. A chat's own (Rename, Invite, Archive) is the chat's ⋯.
+function openPrimaryMenu(trigger) {
+  const primary = primaryAgent();
+  if (!primary) return;
+  const itsChat = agentsOwnChat(primary.fragment);
+  openMenu(trigger, [
+    ...(primary.identity && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
+    ...(itsChat ? [{ icon: "rename", text: "Rename…", onClick: () => rename(itsChat.name) }] : []),
+    { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
+    ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(primary.fragment) }] : []),
+  ]);
+}
+$("sidebar-new-chat").onclick = () => openSearch($("sidebar-new-chat"));
+// Match the chat composer's edge reflection, including its 64px falloff.
+// Follow the pointer across the sidebar and its fixed-position agent menu.
+const sidebarHoverPointer = matchMedia("(hover: hover) and (pointer: fine)");
+let sidebarEdgeFrame = 0;
+let sidebarEdgePointer = null;
+const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".sidebar-agent, .sidebar-new-chat");
+// Keep transient styles off the rendered pill so roster updates preserve its node.
+const expandedAgentEdge = control => control.id === "sidebar-agent" && !menu.hidden && menu.classList.contains("agent-menu");
+const sidebarEdgeSurface = control => expandedAgentEdge(control) ? menuEdge : control.id === "sidebar-agent" ? $("primary-agent") : control;
+function clearSidebarEdge() {
+  cancelAnimationFrame(sidebarEdgeFrame);
+  sidebarEdgeFrame = 0;
+  for (const control of sidebarEdgeControls()) sidebarEdgeSurface(control).style.setProperty("--edge-light", "0");
+}
+function updateSidebarEdge() {
+  if (!sidebarEdgePointer || !sidebarHoverPointer.matches) return;
+  for (const control of sidebarEdgeControls()) {
+    const bounds = control.getBoundingClientRect();
+    const rect = { left: bounds.left, top: bounds.top, width: bounds.width, height: expandedAgentEdge(control) ? menu.getBoundingClientRect().bottom - bounds.top : bounds.height };
+    const x = sidebarEdgePointer.x - rect.left, y = sidebarEdgePointer.y - rect.top;
+    const radius = Math.min(rect.width / 2, rect.height / 2, parseFloat(getComputedStyle(control).borderTopLeftRadius));
+    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
+    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
+    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
+    const proximity = Math.max(0, 1 - distance / 64);
+    const surface = sidebarEdgeSurface(control);
+    surface.style.setProperty("--edge-x", `${x}px`);
+    surface.style.setProperty("--edge-y", `${y}px`);
+    surface.style.setProperty("--edge-light", String(proximity * proximity));
+  }
+}
+document.addEventListener("pointermove", event => {
+  if (!sidebarHoverPointer.matches || event.pointerType === "touch") return;
+  sidebarEdgePointer = { x: event.clientX, y: event.clientY };
+  if (sidebarEdgeFrame) return;
+  sidebarEdgeFrame = requestAnimationFrame(() => {
+    sidebarEdgeFrame = 0;
+    updateSidebarEdge();
+  });
+});
+document.addEventListener("pointerleave", clearSidebarEdge);
+sidebarHoverPointer.addEventListener("change", clearSidebarEdge);
+addEventListener("blur", clearSidebarEdge);
 // The open chat, on screen, is seen (`PUT /api/fragments/{name}/seen`): its
 // row counts nothing unread, here and in the person's other tabs and
 // devices (their list tells them). Asked again whenever the list counts
@@ -534,11 +705,13 @@ function markSeen() {
     .finally(() => { marking = null; });
 }
 document.addEventListener("visibilitychange", markSeen);
-$("agent-heading").onclick = () => {
-  const name = state.current;
+// The open chat's ⋯: its name, its people, its agents' profiles and
+// screens, and archiving. New chats are the launcher's, with the person's
+// one agent (`primaryAgent`), whichever chat is open.
+$("chat-options").onclick = () => openChatMenu(state.current, $("chat-options"));
+function openChatMenu(name, trigger) {
   const group = isGroup(name);
   const agent = agentOfChat(name);
-  const mine = chatAgentOf(name);
   // a group's agents each have a profile; a direct chat's agent has one
   const profiles = group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
@@ -547,15 +720,14 @@ $("agent-heading").onclick = () => {
   const screens = !state.computer ? [] : group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
     : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
-  openMenu($("agent-heading"), [
-    ...(mine && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(mine) }] : []),
+  openMenu(trigger, [
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     shareItem(name),
     ...profiles,
     ...screens,
     archiveItem(name),
   ]);
-};
+}
 // The identity of the person's own agent a direct chat is with (its row's
 // one agent), or of the agent whose title it carries while its row names
 // none; null for a group, or a chat with someone else's agent.
@@ -569,13 +741,15 @@ function chatAgentOf(name) {
 // the agent fragment a direct chat is with (a group's agents keep names of their own)
 const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? null;
 // An agent's own chat: the one the shell made with it, `<label>-chat` beside
-// its `<label>` (makeAgent), which its title follows (rename), Hermes' Bot
+// its `<label>` (defaultAgent), which its title follows (rename), Hermes' Bot
 // Mode messages (images/hermes/boot/src/bots.rs, `bot_chat`) and `fragment
 // ask` finds; any other chat with it ("New chat") is titled on its own.
 const isAgentsOwnChat = (name) => {
   const agent = agentOfChat(name);
   return !!agent && labelOf(name) === `${labelOf(agent)}-chat`;
 };
+// the person's own chat that is `agent`'s own (by its label), made or not yet
+const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
@@ -588,7 +762,7 @@ function openChat(name, push = true) {
   store.set(CURRENT, name);
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name), titleOf(name), name);
+    const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
     $("frames").append(frame);
     state.frames.set(name, frame);
   }
@@ -608,20 +782,8 @@ function paneIcon(name) {
 const iconOf = (name) => appIcon(labelOf(name));
 // An app's card: its page as the platform shot it after its last deploy
 // (`GET /api/f/<name>/card`, read with this page's session and shown as a
-// blob URL), or its icon until it has one.
+// blob URL), shown larger over its dock icon (`showPeek`).
 const cards = new Map();
-function cardOf(name) {
-  const box = el("span", "app-card");
-  const card = cards.get(name);
-  if (card) {
-    const img = el("img");
-    img.src = card.url;
-    img.alt = "";
-    box.classList.add("shot");
-    box.append(img);
-  } else box.append(iconOf(name));
-  return box;
-}
 // "new", "same", or "none" (no card yet)
 async function loadCard(name) {
   const known = cards.get(name);
@@ -655,7 +817,7 @@ async function loadCards(only = null) {
   }
 }
 addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
-// a pointer over an app's row shows its card larger, beside the sidebar
+// a pointer over an app's icon in the dock shows its card larger, above it
 const peek = el("div", "card-peek");
 peek.hidden = true;
 peek.setAttribute("aria-hidden", "true");
@@ -667,25 +829,73 @@ function showPeek(row, name) {
   peek.firstChild.src = card.url;
   peek.hidden = false;
   const r = row.getBoundingClientRect();
-  const edge = Math.max(r.right, $("sidebar").getBoundingClientRect().right);
-  peek.style.left = `${Math.max(8, Math.min(edge + 12, innerWidth - peek.offsetWidth - 8))}px`;
-  peek.style.top = `${Math.max(8, Math.min(r.top + r.height / 2 - peek.offsetHeight / 2, innerHeight - peek.offsetHeight - 8))}px`;
+  peek.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - peek.offsetWidth / 2, innerWidth - peek.offsetWidth - 8))}px`;
+  peek.style.top = `${Math.max(8, r.top - peek.offsetHeight - 12)}px`;
 }
 const hidePeek = () => { peek.hidden = true; };
+// The desktop's dock: the person's apps (their list's, less the archived),
+// each its icon and title, one shared with them saying their role there;
+// then, for a seat, Add (the catalog).
 function renderApps() {
   hidePeek();
-  const list = shown(apps());
-  patch($("apps"), list.length ? list.map((f) => {
-    const row = el("button", `row app-row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
+  const rows = shown(apps()).map((f) => {
+    const key = `app:${f.name}`;
+    const title = titleOf(f.name);
+    const row = el("button", `dock-app${viewer.keys.includes(key) ? " open" : ""}`);
     row.type = "button";
-    row.dataset.key = `app:${f.name}`;
-    row.append(cardOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
-    if (!own(f)) row.append(el("span", "meta", f.role));
-    row.onclick = () => { hidePeek(); openApp(f.name); leaveSidebar(); };
+    row.dataset.key = key;
+    row.dataset.role = f.role;
+    row.title = own(f) ? title : `${title} (${f.role})`;
+    const art = el("span", "dock-art");
+    art.append(iconOf(f.name));
+    row.append(art, el("span", "label", title));
+    row.onclick = () => { hidePeek(); openApp(f.name); };
     row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
     row.onpointerleave = hidePeek;
     return row;
-  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : state.guest ? "Apps shared with you show here" : "No apps yet")]);
+  });
+  const empty = !rows.length;
+  if (!state.guest) {
+    const add = el("button", "dock-app dock-add");
+    add.type = "button";
+    add.id = "add-app";
+    add.dataset.key = "catalog";
+    add.title = "Add an app";
+    const art = el("span", "dock-art");
+    art.innerHTML = svg("plus");
+    add.append(art, el("span", "label", "Add"));
+    add.onclick = () => { hidePeek(); showCatalog(); leaveSidebar(); };
+    rows.push(add);
+  }
+  patch($("apps"), rows);
+  $("apps").parentElement.hidden = !rows.length;
+  renderDesktopEmpty(empty);
+}
+// A desktop with no apps says what lands there. A seat's also offers a few
+// requests of their agent, each a real one: pressed, it starts a chat with
+// it, its words the first message (the launcher's `startFromSearch`).
+const SUGGESTIONS = ["Make me a to-do list I can share", "Make a page to keep track of what I read", "Make a tracker for this week's habits"];
+function renderDesktopEmpty(empty) {
+  const box = $("desktop-empty");
+  const primary = primaryAgent();
+  const asks = empty && !state.guest && !!primary?.identity;
+  const sig = JSON.stringify([empty, state.guest, asks && titleOf(primary.fragment)]);
+  box.hidden = !empty;
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.replaceChildren();
+  if (!empty) return;
+  box.append(el("p", "desktop-empty-title", state.guest ? "Apps shared with you land here" : "Your apps land here"));
+  if (!asks) return;
+  box.append(el("p", "desktop-empty-text", `Ask ${titleOf(primary.fragment)} for one:`));
+  const list = el("div", "desktop-suggestions");
+  for (const text of SUGGESTIONS) {
+    const b = el("button", "desktop-suggestion", text);
+    b.type = "button";
+    b.onclick = () => { openSearch(b, text); startFromSearch(); };
+    list.append(b);
+  }
+  box.append(list);
 }
 // An app's window, at `path` (a link's, from a chat). One its row has not
 // reached yet (an agent's app, just made) opens all the same, by its name:
@@ -803,7 +1013,7 @@ async function openScreen(agent) {
   }
 }
 
-// ---- making an agent: its fragment, its computer, its chat (decision 10, 16) ----
+// ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
 // A label from a name, short enough that with freeLabel's `-<n>` and a
 // chat's `-chat` its address fits any deployment's hosts (docs/api.md,
 // Names: every deployment leaves 39 bytes for labels); never ending in a
@@ -832,61 +1042,6 @@ const hello = (agent, chat) =>
     id: "hello",
     body: { kind: "routine", chat, text: "You were just made, and this is your chat with the person you work for. Say hello in a sentence or two: who you are, and what you will do for them (your SOUL.md). Start no work until they answer." },
   });
-// Through public APIs only: the agent fragment (the agent template, its job
-// in SOUL.md), assigned to the person's computer; a chat with it (the chat
-// template), the agent added (the platform wakes its computer); and its
-// hello.
-async function makeAgent(job, chosen) {
-  const name = chosen?.trim() || pickName();
-  const label = freeLabel(slug(name));
-  const agent = await api("POST", "/api/fragments", { label, template: "agent", title: name });
-  const computer = await warmComputer();
-  const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
-  const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
-  // its colour is its identity's, as every page that shows it chooses it
-  await api("POST", `/api/f/${agent.name}/files`, {
-    key: "agent-job",
-    message: "its job",
-    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
-  });
-  await api("POST", `/api/f/${agent.name}/deploy`, {});
-  const chat = await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: name });
-  if (id) {
-    await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
-    await hello(agent.name, chat.name);
-  }
-  return chat.name;
-}
-const dialog = $("new-agent-dialog");
-function newAgent() {
-  $("new-agent-form").reset();
-  $("new-agent-error").hidden = true;
-  dialog.showModal();
-  $("new-agent-job").focus();
-  prewake();
-}
-$("new-agent").onclick = newAgent;
-$("new-agent-top").onclick = newAgent;
-$("new-agent-cancel").onclick = () => dialog.close();
-$("new-agent-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const go = $("new-agent-go");
-  go.disabled = true;
-  go.textContent = "Making it…";
-  try {
-    const chat = await makeAgent($("new-agent-job").value, $("new-agent-name").value);
-    dialog.close();
-    await load();
-    openChat(chat);
-  } catch (err) {
-    $("new-agent-error").textContent = err.message;
-    $("new-agent-error").hidden = false;
-  } finally {
-    go.disabled = false;
-    go.textContent = "Make it";
-  }
-};
-
 // ---- another chat with an agent: a fresh start (its context is the chat's:
 // a runtime keys an agent's session by its chat), titled from its first
 // message unless renamed. Its own chat (`<label>-chat`) stays its own. ----
@@ -900,7 +1055,7 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
 let starting = false;
-async function newChat(identity) {
+async function newChat(identity, { quiet = false } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
@@ -915,16 +1070,15 @@ async function newChat(identity) {
     }
     openChat(name);
     leaveSidebar();
+    return name;
   } catch (e) {
+    if (quiet) throw e;
     notice("The chat was not made", e.message);
   } finally {
     starting = false;
   }
 }
-$("new-chat").onclick = () => {
-  const id = chatAgentOf(state.current);
-  if (id) newChat(id);
-};
+$("new-chat").onclick = () => openSearch($("new-chat"));
 // A chat of the person's still titled UNTITLED that has a message is titled
 // from its first message with words (its first line's words, cut to
 // TITLE_MAX_CHARS); one renamed in the meantime keeps its name. Once per
@@ -948,69 +1102,40 @@ async function titleFromFirst(name) {
   }
 }
 
-// ---- a group chat: several of the person's agents in one chat (decision 8) ----
-// Through public APIs only, as makeAgent: a chat fragment on the chat
-// template, titled by its name or its agents' names, and the agents added
-// as editors one at a time in the order picked, so the first is the lead
-// (the first added, by `addedAt`: the chat's page and its agents' bridges
-// read it from the member list).
-async function makeGroup(picked, chosen) {
-  if (picked.length < 2) throw new Error("A group chat has two agents or more.");
-  const name = chosen?.trim() ?? "";
-  const title = name || picked.map((a) => titleOf(a.fragment)).join(", ");
-  const chat = await api("POST", "/api/fragments", { label: freeLabel(slug(name || "group")), template: "chat", title });
-  for (const a of picked) await api("PUT", `/api/f/${chat.name}/members/${seg(a.identity)}`, { role: "editor" });
-  if (state.computer) api("POST", `/api/computers/${seg(state.computer.computer)}/wake`, {}).catch(() => {});
-  return chat.name;
-}
-const groupDialog = $("new-group-dialog");
-let picking = [];
-function renderPicks() {
-  const agents = [...state.agents.values()];
-  $("new-group-agents").replaceChildren(...(agents.length ? agents.map((a) => {
-    const at = picking.findIndex((p) => p.identity === a.identity);
-    const row = el("button", "row pick");
-    row.type = "button";
-    row.setAttribute("aria-pressed", String(at >= 0));
-    row.dataset.identity = a.identity;
-    row.append(avatar({ color: colorOf(a.identity) }, "small"), el("span", "label", titleOf(a.fragment)));
-    if (at >= 0) row.append(el("span", "meta", at === 0 ? "Lead" : String(at + 1)));
-    row.onclick = () => {
-      picking = at >= 0 ? picking.filter((p) => p.identity !== a.identity) : [...picking, a];
-      renderPicks();
+// ---- the catalog: a new app from one of the platform's templates, its
+// window on the desktop (the dock's Add) ----
+function showCatalog() {
+  const box = el("div", "catalog");
+  box.replaceChildren(...CATALOG.map((t) => {
+    const card = el("form", "card");
+    const input = el("input");
+    input.name = "label";
+    input.placeholder = t.template;
+    input.pattern = "[a-z0-9]([a-z0-9\\-]*[a-z0-9])?";
+    input.maxLength = 63;
+    const error = el("div", "error");
+    const add = el("button", null, "Make it");
+    card.append(appIcon(t.template), el("strong", null, t.name), el("p", null, t.about), input, add, error);
+    card.onsubmit = async (e) => {
+      e.preventDefault();
+      add.disabled = true;
+      error.textContent = "";
+      try {
+        const label = input.value.trim();
+        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, title: label || t.name });
+        await load();
+        viewer.close("catalog");
+        openApp(made.name);
+      } catch (err) {
+        error.textContent = err.message;
+      } finally {
+        add.disabled = false;
+      }
     };
-    return row;
-  }) : [el("p", "muted", "Your agents show here once you have some.")]));
-  $("new-group-go").disabled = picking.length < 2;
+    return card;
+  }));
+  show({ key: "catalog", title: "Add an app", icon: paneIcon("grid"), body: box, persist: false });
 }
-function newGroup() {
-  picking = [];
-  $("new-group-form").reset();
-  $("new-group-error").hidden = true;
-  renderPicks();
-  groupDialog.showModal();
-  prewake();
-}
-$("new-group").onclick = newGroup;
-$("new-group-cancel").onclick = () => groupDialog.close();
-$("new-group-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const go = $("new-group-go");
-  go.disabled = true;
-  go.textContent = "Making it…";
-  try {
-    const chat = await makeGroup(picking, $("new-group-name").value);
-    groupDialog.close();
-    await load();
-    openChat(chat);
-  } catch (err) {
-    $("new-group-error").textContent = err.message;
-    $("new-group-error").hidden = false;
-  } finally {
-    go.textContent = "Make it";
-    go.disabled = picking.length < 2;
-  }
-};
 
 // ---- renaming: the chat's title (and, its own chat's, its agent's, so they stay one) ----
 // A fragment's title, its fragment.json's `meta.title`, deployed.
@@ -1047,49 +1172,18 @@ $("rename-form").onsubmit = async (e) => {
   }
 };
 
-// ---- the catalog: a new app from one of the platform's templates ----
-function showCatalog() {
-  const box = el("div", "catalog");
-  box.replaceChildren(...CATALOG.map((t) => {
-    const card = el("form", "card");
-    const input = el("input");
-    input.name = "label";
-    input.placeholder = t.template;
-    input.pattern = "[a-z0-9]([a-z0-9\\-]*[a-z0-9])?";
-    input.maxLength = 63;
-    const error = el("div", "error");
-    const add = el("button", null, "Make it");
-    card.append(appIcon(t.template), el("strong", null, t.name), el("p", null, t.about), input, add, error);
-    card.onsubmit = async (e) => {
-      e.preventDefault();
-      add.disabled = true;
-      error.textContent = "";
-      try {
-        const label = input.value.trim();
-        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, title: label || t.name });
-        await load();
-        viewer.close("catalog");
-        openApp(made.name);
-      } catch (err) {
-        error.textContent = err.message;
-      } finally {
-        add.disabled = false;
-      }
-    };
-    return card;
-  }));
-  show({ key: "catalog", title: "Add an app", icon: paneIcon("grid"), body: box, persist: false });
-}
-$("add-app").onclick = () => { showCatalog(); leaveSidebar(); };
-
-// ---- search: the person's chats, apps and messages (decision 9) ----
-// Empty, it lists what the sidebar does; with words, it asks the person's
-// list (`GET /api/search`: titles and names, then messages, newest first,
-// archived ones included). A message opens its chat; it does not scroll to
-// the message (docs/api.md, Search).
+// ---- the launcher: one input for starting a chat or finding one again ----
+// The sidebar's +, the phone's top bar + and ⌘K (Skyler, 2026-10-12).
+// Empty stays quiet. Words ask the person's search (`GET /api/search`:
+// their chats and apps by title and label, then messages, newest first,
+// archived ones included): a chat found opens in the middle column, an app
+// in the desktop, a message its chat. Enter sends those exact words as the
+// first message of a new chat with their agent (`primaryAgent`), one record
+// however often it is tried (its id, kept). A request for an app is a
+// message like any other: their agent makes it.
 const isChat = (name) => byName(name)?.kind === "chat";
 function openFound(name) {
-  $("search-dialog").close();
+  closeSearch();
   if (isChat(name)) openChat(name); else openApp(name);
   leaveSidebar();
 }
@@ -1114,9 +1208,25 @@ const when = (at) => {
 function renderFound(fragments, messages) {
   const results = $("search-results");
   results.replaceChildren();
+  const q = $("workspace-search").value.trim();
+  if (!q) return;
+  if (canLaunch()) {
+    const action = el("button", "row search-result search-start");
+    action.type = "button";
+    const icon = el("span", "search-action-icon");
+    icon.innerHTML = svg("newChat");
+    const copy = el("span", "agent-copy");
+    copy.append(el("span", "label", `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
+    const enter = el("span", "meta search-enter");
+    enter.title = "Enter";
+    enter.innerHTML = svg("cornerDownLeft");
+    action.append(icon, copy, enter);
+    action.onclick = startFromSearch;
+    results.append(action);
+  }
   const groups = [
     ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
-    ["Agents", fragments.filter((f) => f.kind === "agent").map((f) => foundRow(f.name, ""))],
+    // the desktop's apps, as the dock lists them (`apps`)
     ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
     // a message in a fragment the list has not shown yet is left out until it has
     ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
@@ -1132,63 +1242,173 @@ function renderFound(fragments, messages) {
     count += rows.length;
     results.append(el("h3", null, heading), ...rows);
   }
-  $("search-status").textContent = count ? `${count} result${count === 1 ? "" : "s"}` : "Nothing found.";
+  // a seat's agent not made yet starts nothing: said, not offered
+  const waits = !state.guest && !canLaunch() ? "A new chat can start once your agent is made." : "";
+  $("search-status").textContent = [count || canLaunch() ? "" : "Nothing found.", waits].filter(Boolean).join(" ");
 }
 let asked = 0;
 let typing = null;
+let searchIdentity = null;
+let searchTrigger = null;
+let launching = false;
+let closingSearch = false;
+// Keep the same chat and record id after an uncertain send, so retry cannot
+// duplicate the first message. This is only the current dialog's draft.
+let pendingLaunch = null;
+const canLaunch = () => !state.guest && !!searchIdentity && state.agents.has(searchIdentity);
 async function search() {
   const q = $("workspace-search").value.trim();
   const mine = ++asked;
-  if (!q) return renderFound([...shown(chats()), ...shown(apps())], []);
+  if (!q) return renderFound([], []);
   try {
-    const found = await api("GET", `/api/search?q=${encodeURIComponent(q)}`);
+    // A prompt can be longer than the search API's eight words / 256 bytes.
+    // Only the search hint is bounded; the complete prompt is sent to the chat.
+    const hint = [...q.split(/\s+/).slice(0, 8).join(" ")];
+    while (new TextEncoder().encode(hint.join("")).length > 256) hint.pop();
+    const found = await api("GET", `/api/search?q=${encodeURIComponent(hint.join(""))}`);
     // a slower answer to an older query never replaces a newer one's
     if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
   } catch (e) {
     if (mine === asked) $("search-status").textContent = e.message;
   }
 }
-$("search-agents").onclick = () => {
-  $("workspace-search").value = "";
-  search();
+// `text`: what a suggestion asks, in place of the last unsent one
+function openSearch(trigger, text = null) {
+  if ($("search-dialog").open || launching) return;
+  closeMenu(true);
+  searchTrigger = trigger;
+  searchIdentity = primaryAgent()?.identity ?? null;
+  $("workspace-search").value = text ?? pendingLaunch?.text ?? "";
+  updateSearch();
   $("search-dialog").showModal();
-  $("search-agents").setAttribute("aria-expanded", "true");
+  trigger?.setAttribute("aria-expanded", "true");
   $("workspace-search").focus();
-};
-$("search-close").onclick = () => $("search-dialog").close();
-$("search-dialog").addEventListener("close", () => $("search-agents").setAttribute("aria-expanded", "false"));
-$("workspace-search").addEventListener("input", () => {
+}
+async function closeSearch(force = false) {
+  const dialog = $("search-dialog");
+  if (!dialog.open || closingSearch || launching && !force) return;
+  closingSearch = true;
+  ++asked;
   clearTimeout(typing);
-  typing = setTimeout(search, 150);
+  const panel = dialog.querySelector(".search-panel");
+  // Start at the current visual state, even if Escape interrupts the entrance.
+  const animations = matchMedia("(prefers-reduced-motion: reduce)").matches ? [] : [
+    dialog.animate([{ opacity: getComputedStyle(dialog).opacity }, { opacity: 0 }], { duration: 280, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
+    panel.animate([{ opacity: getComputedStyle(panel).opacity, transform: getComputedStyle(panel).transform }, { opacity: 0, transform: "translateY(8px)" }], { duration: 240, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
+  ];
+  dialog.inert = true;
+  await Promise.allSettled(animations.map(animation => animation.finished));
+  dialog.close();
+  for (const animation of animations) animation.cancel();
+  dialog.inert = false;
+  closingSearch = false;
+}
+async function startFromSearch() {
+  const text = $("workspace-search").value.trim();
+  if (!text || !canLaunch() || launching || closingSearch) return;
+  launching = true;
+  ++asked;
+  clearTimeout(typing);
+  $("workspace-search").readOnly = true;
+  $("search-send").disabled = true;
+  $("search-results").inert = true;
+  $("search-status").textContent = "Starting your chat…";
+  try {
+    if (!pendingLaunch || pendingLaunch.text !== text || pendingLaunch.identity !== searchIdentity) pendingLaunch = { text, identity: searchIdentity, id: crypto.randomUUID(), chat: null };
+    pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true });
+    if (!pendingLaunch.chat) throw new Error("Another new chat is being made; try again in a moment.");
+    await api("POST", `/api/f/${seg(pendingLaunch.chat)}/channels/chat`, { id: pendingLaunch.id, body: { text } });
+    openChat(pendingLaunch.chat);
+    pendingLaunch = null;
+    await closeSearch(true);
+    leaveSidebar();
+  } catch (e) {
+    $("search-status").textContent = `Your message wasn't sent. ${e.message}`;
+  } finally {
+    launching = false;
+    $("workspace-search").readOnly = false;
+    $("search-results").inert = false;
+    $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
+    if ($("search-dialog").open) $("workspace-search").focus();
+  }
+}
+function updateSearch() {
+  ++asked; // Invalidate in-flight responses immediately, before the debounce.
+  clearTimeout(typing);
+  $("search-status").textContent = "";
+  $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
+  renderFound([], []);
+  if ($("workspace-search").value.trim()) typing = setTimeout(search, 150);
+}
+for (const id of ["sidebar-new-chat", "new-chat"]) {
+  $(id).setAttribute("aria-keyshortcuts", "Meta+K Control+K");
+  $(id).dataset.tooltip = "Search or start a new chat (⌘K)";
+  $(id).setAttribute("aria-haspopup", "dialog");
+  $(id).setAttribute("aria-controls", "search-dialog");
+  $(id).setAttribute("aria-expanded", "false");
+}
+function launcherShortcut(e) {
+  if (e.isComposing || e.repeat || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.code !== "KeyK" || $("layout").hidden) return;
+  e.preventDefault();
+  if ($("search-dialog").open) { $("workspace-search").focus(); return; }
+  openSearch($("sidebar-new-chat"));
+}
+addEventListener("keydown", launcherShortcut);
+// Keyboard events inside the chat iframe cannot bubble to the desktop.
+addEventListener("message", async event => {
+  if (event.data?.fragment !== "open-launcher" || $("layout").hidden) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find(f => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || !byName(name) || document.activeElement !== frame) return;
+  try { if (event.origin !== await originOf(name)) return; } catch { return; }
+  if (frame.contentWindow === event.source && document.activeElement === frame) openSearch($("sidebar-new-chat"));
 });
+$("search-dialog").addEventListener("click", (e) => {
+  if (e.target === $("search-dialog")) closeSearch();
+});
+$("search-dialog").addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
+$("search-dialog").addEventListener("close", () => {
+  ++asked;
+  clearTimeout(typing);
+  searchTrigger?.setAttribute("aria-expanded", "false");
+});
+$("search-form").onsubmit = (e) => { e.preventDefault(); startFromSearch(); };
+$("workspace-search").addEventListener("input", updateSearch);
 $("workspace-search").addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
   const first = $("search-results").querySelector("button");
   if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
-  if (e.key === "Enter" && first) { e.preventDefault(); first.click(); }
+  if (e.key === "Enter") { e.preventDefault(); if (canLaunch()) startFromSearch(); else first?.click(); }
+});
+$("search-results").addEventListener("keydown", (e) => {
+  if (!["ArrowDown", "ArrowUp"].includes(e.key)) return;
+  const rows = [...$("search-results").querySelectorAll("button")];
+  const index = rows.indexOf(document.activeElement);
+  if (index < 0) return;
+  e.preventDefault();
+  if (e.key === "ArrowUp" && index === 0) $("workspace-search").focus();
+  else rows[Math.min(rows.length - 1, index + (e.key === "ArrowDown" ? 1 : -1))]?.focus();
 });
 
 // ---- the computer: awake while the person is here, and its updates ----
 let woke = 0;
-// asking for a wake as the person arrives, focuses a chat, or starts a new
-// agent hides the computer's start (decision 39's pre-wake, from the shell)
+// asking for a wake as the person arrives or focuses a chat hides the
+// computer's start (decision 39's pre-wake, from the shell)
 // The person's computer, made once (making it again is the same one:
-// docs/api.md), and a wake of it. A new agent's maker wakes it at once, so
-// the start hides behind the making (decision 39's pre-wake).
+// docs/api.md).
 let making = null;
 function computerOf() {
   making ??= api("POST", "/api/computers", {}).then((c) => { state.computer = c; return c; });
   making.catch(() => { making = null; });
   return making;
 }
-async function warmComputer() {
-  const c = await computerOf();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
-  return c;
-}
 // A computer that won't start is not woken by the person's presence: its
 // starts kept failing, so the next is theirs to ask for (Restart, in its
-// notice), never one every visit pays for unasked.
+// notice), never one every visit pays for unasked. While the first run
+// makes the agent, its computer starts once it is in its chat (the
+// platform's `joined`), with the agent assigned, not before.
 function prewake() {
+  if (setup && !setup.joined) return;
   const c = state.computer;
   if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
   woke = Date.now();
@@ -1518,7 +1738,7 @@ async function openSettings(push = true) {
   const billing = await billingSections(billingHelpers, ledger, back);
   // a guest has no agents to stop, nor a computer, skills or connections
   // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return renderSettingsPage(page, [...billing, account, ...credited(WALLPAPER)]);
+  if (state.guest) return renderSettingsPage(page, [...billing, account]);
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -1594,7 +1814,7 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli, ...credited(WALLPAPER)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli]);
 }
 
 // ---- settings' Sharing: who has access to what the person owns (GET
@@ -2080,19 +2300,6 @@ async function skillsSection() {
   });
   return s;
 }
-// The wallpaper's photographer, credited. A photo of the person's own
-// (later) is credited to no one: `credited(null)` is no section.
-const WALLPAPER = { by: "Teo Badini", at: "https://www.pexels.com/@teobadini/", on: "Pexels" };
-function credited(photo) {
-  if (!photo) return [];
-  const who = el("a", null, photo.by);
-  who.href = photo.at;
-  who.target = "_blank";
-  who.rel = "noopener";
-  const p = el("p", "muted");
-  p.append("Photo by ", who, ` on ${photo.on}`);
-  return [section("Wallpaper", p)];
-}
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
 // ---- first run: sign in, a seat, then the default agent is made
@@ -2182,102 +2389,137 @@ async function seated(session) {
     await new Promise((r) => setTimeout(r, 500));
   }
 }
-// The first agent (Paul, 2026-10-03): no question asked. It is the
-// person's default agent, in charge, made with its computer and its chat
-// while this screen waits, so the chat opens with it ready, saying hello,
-// and the first message is answered at once, not after a computer's first
-// start.
+// The first agent (Paul, 2026-10-03: no question asked): the person's
+// default agent, in charge, made with its computer and its chat. The chat
+// is made first and opens at once (Skyler, 2026-10-12), so they may write
+// while the rest is made; its page sends only once the agent is a member
+// (a message from before its joining starts nothing: docs/chat-records.md).
+// What the chat shows of the making is the platform's word alone (Paul,
+// 2026-10-13: nothing fake or optimistic): a step is done once its call
+// answered, the computer's phase is its view's, and nothing is said in the
+// agent's name. Nothing of it is kept in this browser: a reload reads the
+// list again (`owesFirstAgent`) and goes on from what was made.
 const SETUP_WAIT_MS = 4 * 60_000;
+// the first run while it runs, or after it failed (Try again, in its chat):
+// { label, title, chat, made, joined, ready, error }; null otherwise
+let setup = null;
+let setupRun = null;
+// What the first run's chat shows of it (the roster's `setup`, to that
+// chat's frame alone): each step done, being done, not yet, or failed,
+// and what failed.
+function setupFor(name) {
+  if (!setup || setup.chat !== name) return null;
+  const t = setup.title;
+  const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.error ? "failed" : "doing" });
+  return {
+    steps: [
+      step(setup.made ? `${t} is made` : `Making ${t}`, setup.made, !setup.made),
+      step(setup.joined ? `${t} is in this chat` : `Adding ${t} to this chat`, setup.joined, setup.made && !setup.joined),
+      step(setup.ready ? `${t} is ready` : state.computer?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[state.computer?.phase] ?? "not made yet"}`, setup.ready, setup.joined && !setup.ready),
+    ],
+    error: setup.error,
+  };
+}
+function setupChanged(change) {
+  Object.assign(setup, change);
+  rosterChanged();
+}
 const firstSoul = (name, owner) => `You are ${name}, ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
-// Each step reuses what an earlier try made: a retry picks up where it stopped.
-async function defaultAgent(step) {
+// a chat an earlier try made before its agent: theirs, `<label>-chat`, no agent in it
+const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.name));
+// Whether the first run is owed, from the platform alone: a seat's person
+// with no agent of theirs in a chat of their own. No chats at all; or only
+// the chat an earlier try made; or their agent not on their computer, or
+// not a member of its own chat (asked of the chat: a row may not name its
+// agents yet).
+async function owesFirstAgent() {
+  if (state.guest) return false;
+  if (!chats().length) return true;
+  if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
+  const agent = primaryAgent();
+  if (!agent) return chats().every(unjoined);
+  const { identity: id } = agent;
+  const itsChat = agentsOwnChat(agent.fragment);
+  if (!id || !itsChat) return true;
+  const members = await api("GET", `/api/f/${seg(itsChat.name)}/members`).catch(() => null);
+  return !!members && !(members.members ?? []).some((m) => m.principal === id);
+}
+// Each step reuses what an earlier try made, including a create whose
+// response was lost. The chat's frame opens once: a draft in it stays put.
+async function defaultAgent() {
   await load();
   const owner = state.me.email || "your person";
-  step("agent");
-  // the managed skills its computer installs at its first start (decision 17)
-  await skillsFragment();
-  const computer = await computerOf();
-  let agent = state.fragments.find((f) => f.kind === "agent" && f.role === "owner");
-  if (!agent) {
-    const title = pickName();
-    const made = await api("POST", "/api/fragments", { label: freeLabel(slug(title)), template: "agent", title });
-    agent = { name: made.name, title };
+  if (!setup) {
+    // an earlier try's names, by what it made: its agent, else its chat
+    const agent = primaryAgent();
+    const chat = agent ? agentsOwnChat(agent.fragment) : chats().find(unjoined);
+    const title = (agent && titleOf(agent.fragment)) || chat?.title || pickName();
+    const label = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : freeLabel(slug(title));
+    setup = { label, title, chat: null, made: false, joined: false, ready: false, error: null };
   }
-  const title = agent.title || labelOf(agent.name);
-  // assigned before its computer's first start, which then runs it
+  setupChanged({ error: null });
+  const { title, label } = setup;
+  const chatName = state.fragments.find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
+    (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title })).name;
+  setupChanged({ chat: chatName });
+  await load();
+  if (!state.frames.has(chatName)) openChat(chatName);
+
+  // These can run together once the chat is on screen. The computer is
+  // assigned before it wakes, with the agent's configuration deployed.
+  const prepared = await Promise.allSettled([skillsFragment(), computerOf()]);
+  // Finish both before offering Retry: no previous create is left in flight.
+  for (const result of prepared) if (result.status === "rejected") throw result.reason;
+  const computer = prepared[1].value;
+  let agent = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
+  if (!agent) agent = await api("POST", "/api/fragments", { label, template: "agent", title });
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   if (!id) throw new Error("its computer did not take it");
-  await api("POST", `/api/f/${agent.name}/files`, {
-    key: "agent-default",
-    message: "the default agent",
-    files: [{ path: "SOUL.md", text: firstSoul(title, owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
-  });
+  // its job and colour, written once: an agent already set up keeps its own
+  const written = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
+  if (!written) {
+    await api("POST", `/api/f/${agent.name}/files`, {
+      key: "agent-default",
+      message: "the default agent",
+      files: [{ path: "SOUL.md", text: firstSoul(title, owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
+    });
+  }
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  // its chat, by its label (a retry finds the one an earlier try made)
-  const chatLabel = `${labelOf(agent.name)}-chat`;
-  const chatName =
-    state.fragments.find((f) => f.kind === "chat" && f.role === "owner" && labelOf(f.name) === chatLabel)?.name ??
-    (await api("POST", "/api/fragments", { label: chatLabel, template: "chat", title })).name;
-  // adding it to its chat is what wakes the computer (the platform's `joined`)
+  setupChanged({ made: true });
+  // its joining is what lets the chat's page send (and wakes its computer)
   await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
+  setupChanged({ joined: true });
   await hello(agent.name, chatName);
-  api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
+  api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
+  await load();
   return { chat: chatName, id, computer: computer.computer };
 }
 // Ready: its computer awake, and the agent following its chat (its wake
-// subscription, which its guest makes as it follows: the chat's owner sees it).
+// subscription, which its guest makes as it follows: the chat's owner sees
+// it). The computer as it answered is shown at once (its phase, in the chat).
 async function agentReady({ chat, id, computer }) {
   const [c, subs] = await Promise.all([
     api("GET", "/api/computers").then((v) => v.computers?.find((x) => x.computer === computer)),
     api("GET", `/api/f/${chat}/subscriptions`),
   ]);
+  computerIs(c);
   // a wake refused (its owner's credit) is said, not waited out
   if (c?.why && c.phase !== "awake") throw Object.assign(new Error(c.why), { refused: true });
   return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
 }
-// `seat` (`{session?}`): a seat comes first, as its own step (`seated`).
-// Home's address, but for a Checkout's return until its seat holds.
+// `seat` (`{session?}`): a seat comes first (`seatFirst`), then the agent.
 function creatingAgent(seat = null) {
-  if (!seat?.session) history.replaceState(null, "", "/");
-  const steps = [...(seat ? [["seat", "Setting up your seat"]] : []), ["agent", "Making your agent"], ["computer", "Starting its computer"]];
-  const list = el("ol", "creating-steps");
-  const items = new Map(steps.map(([key, text]) => { const li = el("li", null, text); list.append(li); return [key, li]; }));
-  let current = null;
-  const step = (key) => {
-    if (current) items.get(current).className = "done";
-    current = key;
-    items.get(key).className = "doing";
-  };
-  const note = el("p", "muted", "It starts once, now, so it answers you at once after.");
-  const error = el("p", "form-error");
-  error.hidden = true;
-  const retry = el("button", "primary", "Try again");
-  retry.type = "button";
-  retry.hidden = true;
-  retry.onclick = () => creatingAgent(seat);
-  // a seat that does not come (a Checkout never paid, or not theirs): the welcome's seats again
-  const choose = el("button", "quiet", "Choose a seat");
-  choose.type = "button";
-  choose.hidden = true;
-  choose.onclick = () => {
-    history.replaceState(null, "", WELCOME);
-    welcome().catch((e) => notice("This page did not load", e.message));
-  };
-  const anyway = el("button", "quiet", "Open the chat now");
-  anyway.type = "button";
-  anyway.hidden = true;
-  firstRun(el("h1", null, "Creating your agent…"), note, list, error, retry, choose, anyway);
-  (async () => {
-    if (seat) {
-      step("seat");
-      await seated(seat.session);
-    }
-    const made = await defaultAgent(step);
-    step("computer");
-    anyway.onclick = () => start(made.chat);
+  if (seat) return seatFirst(seat);
+  if (setupRun) return setupRun;
+  history.replaceState(null, "", "/");
+  $("first-run").hidden = true;
+  $("layout").hidden = false;
+  // until its chat is made, the middle column says what is being made
+  if (!setup?.chat || !state.frames.has(setup.chat)) notice("Making your agent…");
+  setupRun = (async () => {
+    const made = await defaultAgent();
     const t0 = Date.now();
-    // one look every 1.5 s; past SETUP_WAIT_MS the person may go on without it
     for (;;) {
       let ready = false;
       try {
@@ -2286,21 +2528,63 @@ function creatingAgent(seat = null) {
         if (e.refused) throw e;
       }
       if (ready) break;
-      if (Date.now() - t0 > SETUP_WAIT_MS && anyway.hidden) {
-        note.textContent = "It's taking longer than usual. It answers once its computer is up.";
-        anyway.hidden = false;
-      }
+      if (Date.now() - t0 > SETUP_WAIT_MS) throw new Error("Its computer is taking longer than usual to start. What you send waits for it; Try again looks again.");
       await new Promise((r) => setTimeout(r, 1500));
     }
-    items.get("computer").className = "done";
-    await start(made.chat);
+    setupChanged({ ready: true });
+    setup = null;
+    rosterChanged();
+    await load();
   })().catch((err) => {
-    if (current) items.get(current).className = "failed";
-    error.textContent = err.message;
-    error.hidden = false;
-    retry.hidden = false;
-    choose.hidden = current !== "seat";
-  });
+    if (setup) setupChanged({ error: err.message || "It did not answer." });
+    if (!setup?.chat || !state.frames.has(setup.chat)) {
+      const retry = el("button", "primary", "Try again");
+      retry.type = "button";
+      retry.onclick = () => creatingAgent();
+      notice("Your agent could not start", err.message, retry);
+    }
+  }).finally(() => { setupRun = null; });
+  return setupRun;
+}
+// A seat before the first agent (the welcome's: a Checkout's return, or a
+// seat given whose plan is on its way): the welcome's card says it is
+// being set up until the platform says it holds (`seated`; Checkout's
+// return stays in the address until then, so a reload applies it again),
+// then the agent is made in its chat (`creatingAgent`). Refused, it says
+// why, with Try again and Choose a seat (the welcome's seats again).
+function seatFirst(seat) {
+  const step = el("li", "doing", "Setting up your seat");
+  const list = el("ol", "creating-steps");
+  list.append(step);
+  const error = el("p", "form-error");
+  error.hidden = true;
+  const retry = el("button", "primary", "Try again");
+  retry.type = "button";
+  retry.hidden = true;
+  retry.onclick = () => creatingAgent(seat);
+  const choose = el("button", "quiet", "Choose a seat");
+  choose.type = "button";
+  choose.hidden = true;
+  choose.onclick = () => {
+    history.replaceState(null, "", WELCOME);
+    welcome().catch((e) => notice("This page did not load", e.message));
+  };
+  firstRun(el("h1", null, "Setting up your seat…"), list, error, retry, choose);
+  seated(seat.session).then(
+    () => {
+      step.className = "done";
+      // a seat now, as the ledger said: the shell offers what a seat makes
+      setGuest(false);
+      return creatingAgent();
+    },
+    (err) => {
+      step.className = "failed";
+      error.textContent = err.message;
+      error.hidden = false;
+      retry.hidden = false;
+      choose.hidden = false;
+    },
+  );
 }
 
 // ---- the person's things, read again whenever they may have changed ----
@@ -2391,7 +2675,7 @@ async function start(open) {
   // their home is the welcome; once something is (an invitee's), it is
   // what is shared with them, and a seat offered
   const settings = !open && location.pathname === SETTINGS;
-  if (!chats().length && !open && !settings && !state.guest) return creatingAgent();
+  if (!open && !settings && await owesFirstAgent()) return creatingAgent();
   if (!state.fragments.length && !open && !settings && state.guest) return welcome();
   $("first-run").hidden = true;
   $("layout").hidden = false;
@@ -2407,7 +2691,6 @@ async function start(open) {
 // nothing (decision 49), so no button offers to make something ----
 function setGuest(guest) {
   state.guest = guest;
-  for (const id of ["new-agent", "new-agent-top", "new-group", "add-app"]) $(id).hidden = guest;
   renderChats();
   renderApps();
   renderHeading();

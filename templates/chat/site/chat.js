@@ -76,6 +76,11 @@ const TIMER_MAX_MS = 2 ** 31 - 1;
 const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
+// A sending message's bubble's opacity (chat.css `.msg.user.sending`).
+const SENDING_OPACITY = 0.55;
+// The first run's steps a shell may show here (its `setup`), and their states.
+const SETUP_STEPS_MAX = 6;
+const SETUP_STEP = ["done", "doing", "todo", "failed"];
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 // A command's name (docs/chat-records.md), and the commands one agent's
 // menu offers, at most.
@@ -280,6 +285,13 @@ function attachmentsOf(body) {
 /// Mounts the chat in `root` (the page's body).
 export function mount(root) {
   const framed = window.parent !== window;
+  // The shell opens its person's first chat before their first agent is in
+  // it (`?setup=1`): the page then shows the making as the shell reads it
+  // from the platform (its roster's `setup`: each step, and what failed),
+  // never as a message, and sends nothing until an agent is a member (a
+  // message from before its joining starts nothing). Typing waits for
+  // nothing.
+  let setup = framed && new URLSearchParams(location.search).has("setup") ? { steps: [], error: null } : null;
   root.classList.add("fragment-chat");
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
@@ -330,17 +342,38 @@ export function mount(root) {
     expandedNotes: new Set(), // turn:step, a commentary someone expanded
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
     failed: new Map(), // post id -> the message and its transport error
+    sending: new Map(), // post id -> a message of this page's the platform has not answered yet
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
   };
+  const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const outgoingOrigins = new Map(); // post id -> the composer's place as it was sent: its bubble's one entrance
+  const sentIds = new Map(); // seq -> the post id of this page's that made it
+  const messageFlights = new Map(); // post id -> its entrance's end
+  // A message or command of this page's, as posted: sending until the
+  // platform answers with its record (or the socket brings it first),
+  // failed if it does not. Never shown as sent before then.
+  const outgoing = (id, body, extra) => ({
+    id, body, seq: `${extra.error ? "failed" : "sending"}:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal,
+    text: body.kind === "command" ? (typeof body.args === "string" ? body.args : "") : body.text ?? "", command: body.kind === "command" ? body.command : null,
+    to: Array.isArray(body.to) ? body.to : [], replyTo: Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null,
+    attachments: attachmentsOf(body), ...extra,
+  });
   fragment.observePosts(({ channel, id, body, status, record, error }) => {
-    if (channel !== "chat" || !body || body.kind && body.kind !== "message") return;
-    if (status === "failed") {
-      state.failed.set(id, { id, body, seq: `failed:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal, text: body.text ?? "", to: Array.isArray(body.to) ? body.to : [], replyTo: Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null, attachments: attachmentsOf(body), error: error.message, retrying: false });
-    } else if (status === "posting") {
-      const message = state.failed.get(id);
-      if (message) message.retrying = true;
+    if (channel !== "chat" || !body || body.kind && body.kind !== "message" && body.kind !== "command") return;
+    const message = body.kind !== "command";
+    if (status === "posting") {
+      const failed = state.failed.get(id);
+      if (failed) failed.retrying = true;
+      else state.sending.set(id, outgoing(id, body, { sending: true }));
+    } else if (status === "failed") {
+      state.sending.delete(id);
+      outgoingOrigins.delete(id);
+      // a command's failure is said in the composer's banner, its words put back
+      if (message) state.failed.set(id, outgoing(id, body, { error: error.message, retrying: false }));
     } else {
+      state.sending.delete(id);
+      sentIds.set(record.seq, id);
       const retried = state.failed.delete(id);
       onChat(record);
       if (retried) {
@@ -558,6 +591,16 @@ export function mount(root) {
     if (state.seen.has(record.seq)) return;
     state.seen.add(record.seq);
     remember("chat", record);
+    // the socket may bring a post's record before its answer does: the same body ends its sending
+    if (!historical && record.principal === state.me?.principal && !sentIds.has(record.seq)) {
+      const said = JSON.stringify(record.body);
+      for (const [id, m] of state.sending) {
+        if (JSON.stringify(m.body) !== said) continue;
+        state.sending.delete(id);
+        sentIds.set(record.seq, id);
+        break;
+      }
+    }
     let body = record.body;
     // a bare string is a message with that text
     if (typeof body === "string") body = { text: body };
@@ -572,7 +615,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null });
+      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -582,7 +625,7 @@ export function mount(root) {
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo });
+    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -699,6 +742,7 @@ export function mount(root) {
       if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
+    for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
     for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
     items.sort((a, b) => a.at - b.at || a.n - b.n);
     const out = [];
@@ -759,6 +803,10 @@ export function mount(root) {
     const { node: anchor, top } = history.anchor ?? (!stuck ? visibleAnchor() : {});
     const used = new Set();
     const shown = [];
+    for (const [key, node] of setupNodes()) {
+      used.add(key);
+      shown.push(node);
+    }
     for (const it of timeline()) {
       const [key, node] = itemNode(it);
       used.add(key);
@@ -783,6 +831,102 @@ export function mount(root) {
     else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
     if (!history.loading) history.anchor = null;
     showLatest();
+    animateSentMessages();
+  }
+
+  // A message sent from this page rises from the composer into the thread
+  // as it shows, sending (its bubble dimmed, "Sending…" for its time): a
+  // visual copy crosses the scroll boundary above the composer while the
+  // real bubble keeps its layout and accessibility, and follows it if its
+  // record replaces it on the way (the same post id) or a reply scrolls it.
+  function animateSentMessages() {
+    const col = $("messages");
+    const of = (id) => col.querySelector(`.msg.user.mine[data-post="${CSS.escape(id)}"]`);
+    for (const [id, origin] of outgoingOrigins) {
+      const message = of(id);
+      if (!message && performance.now() - origin.at < 4000) continue;
+      outgoingOrigins.delete(id);
+      const bubble = message?.querySelector(":scope > .bubble");
+      if (!bubble || sendReducedMotion.matches || document.hidden) continue;
+      const target = bubble.getBoundingClientRect();
+      const viewport = $("scroll").getBoundingClientRect();
+      if (!target.height || target.bottom < viewport.top || target.top > viewport.bottom) continue;
+      const copy = bubble.cloneNode(true);
+      copy.classList.add("send-flight");
+      copy.setAttribute("aria-hidden", "true");
+      copy.style.width = `${target.width}px`;
+      root.append(copy);
+      const recent = performance.now() - origin.at < 1200;
+      const startY = Math.max(recent ? origin.y : 0, target.top + target.height / 2 + 16);
+      const began = performance.now();
+      let frame = 0;
+      const finish = () => {
+        cancelAnimationFrame(frame);
+        copy.remove();
+        of(id)?.classList.remove("send-arriving");
+        messageFlights.delete(id);
+      };
+      const tick = (now) => {
+        const current = of(id);
+        const destination = current?.querySelector(":scope > .bubble");
+        if (!destination || sendReducedMotion.matches || document.hidden) return finish();
+        current.classList.add("send-arriving");
+        const rect = destination.getBoundingClientRect();
+        const t = Math.min(1, (now - began) / 280);
+        // The same restrained spring as the desktop's panels and menus.
+        const p = t === 1 ? 1 : 1 - Math.exp(-8 * t) * (Math.cos(6 * t) + 4 / 3 * Math.sin(6 * t));
+        const y = rect.top + (startY - rect.top - rect.height / 2) * (1 - p);
+        // Start at the bubble's final horizontal position: only travel upward.
+        copy.style.transform = `translate(${rect.left}px, ${y}px)`;
+        // as dim as its bubble is now: sending, then sent (chat.css `.sending`)
+        const dim = current.classList.contains("sending") ? SENDING_OPACITY : 1;
+        copy.style.opacity = String(dim * Math.min(1, .25 + .75 * p));
+        if (t === 1) finish(); else frame = requestAnimationFrame(tick);
+      };
+      messageFlights.set(id, finish);
+      tick(began);
+    }
+    // A record may replace a sending message during its entrance.
+    for (const id of messageFlights.keys()) of(id)?.classList.add("send-arriving");
+  }
+  const stopMessageFlights = () => { for (const finish of [...messageFlights.values()]) finish(); };
+  sendReducedMotion.addEventListener("change", () => { if (sendReducedMotion.matches) stopMessageFlights(); });
+  addEventListener("resize", stopMessageFlights);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopMessageFlights(); });
+  $("scroll").addEventListener("wheel", stopMessageFlights, { passive: true });
+  $("scroll").addEventListener("touchstart", stopMessageFlights, { passive: true });
+
+  // The first run's making, as the shell says the platform has it: one
+  // card above the chat (no one's message), each step done, being done,
+  // not yet, or failed, and Try again when it failed.
+  // Until an agent is a member, nothing is sent.
+  const setupHolds = () => !!setup && !chatAgents().length;
+  function setupNodes() {
+    if (!setup) return [];
+    const key = "setup";
+    return [[key, cached(key, JSON.stringify(setup), () => {
+      const card = el("div", "setup-card");
+      card.setAttribute("role", "status");
+      card.append(el("p", "setup-title", "Setting up your agent"));
+      const steps = el("ol", "setup-steps");
+      for (const s of setup.steps) steps.append(el("li", s.state, s.text));
+      if (setup.steps.length) card.append(steps);
+      if (setup.error) {
+        const error = el("div", "setup-error");
+        error.setAttribute("role", "alert");
+        error.append(el("p", null, setup.error));
+        const retry = el("button", null, "Try again");
+        retry.type = "button";
+        retry.onclick = () => {
+          if (!rosterOrigin) return;
+          retry.disabled = true;
+          window.parent.postMessage({ fragment: "retry-setup" }, rosterOrigin);
+        };
+        error.append(retry);
+        card.append(error);
+      }
+      return card;
+    })]];
   }
 
   // The chat's color (its lead's), its name, Stop, and the placeholder.
@@ -817,6 +961,10 @@ export function mount(root) {
               : `Message ${firstName}`;
     }
     refreshSend();
+    if (setupHolds()) {
+      input.placeholder = "Write your first message…";
+      $("note").textContent = "Send turns on once your agent is in this chat.";
+    } else if (setup) $("note").textContent = "";
   }
 
   function messageNode(m) {
@@ -825,7 +973,7 @@ export function mount(root) {
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? ""].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -834,7 +982,7 @@ export function mount(root) {
   /// one that is not asking them something (its last word before the
   /// message a reply of its own: the message is likely its answer).
   function queued(m) {
-    if (m.command || m.error) return false;
+    if (m.command || m.error || m.sending) return false;
     const turns = [...state.turns.values()];
     if (turns.some((t) => t.cause?.channel === "chat" && t.cause?.seq === m.seq)) return false;
     const named = chatAgents().filter((a) => mentions(m.text).includes(handleOf(a)));
@@ -895,8 +1043,11 @@ export function mount(root) {
   }
 
   function userMessage(m, w, mine, quoted, waits) {
-    const wrap = el("div", `msg user ${mine ? "mine" : "other"}`);
+    const wrap = el("div", `msg user ${mine ? "mine" : "other"}${m.sending ? " sending" : ""}`);
     wrap.dataset.seq = m.seq;
+    // this page's post: the same id while it sends and once it is sent
+    const post = m.sending ? m.id : m.post;
+    if (post) wrap.dataset.post = post;
     if (!mine) wrap.append(byline(m.principal, w));
     if (m.replyTo) wrap.append(quoteNode(m, quoted));
     if (m.attachments.length) wrap.append(attachmentsNode(m.attachments));
@@ -913,7 +1064,7 @@ export function mount(root) {
       wrap.append(bubble);
     }
     const actions = el("div", "actions");
-    if (canPost() && !m.error) actions.append(replyButton(m));
+    if (canPost() && !m.error && !m.sending) actions.append(replyButton(m));
     if (waits) {
       // its agent answers it after the turn it is in now
       const label = el("span", "queued");
@@ -921,7 +1072,8 @@ export function mount(root) {
       label.append("Queued");
       actions.append(label);
     }
-    actions.append(el("span", "time", time(m.at)));
+    // sent once the platform has its record: until then it says so, no time
+    actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
     wrap.append(actions);
     if (m.error) {
       const error = el("div", "message-error");
@@ -1467,7 +1619,7 @@ export function mount(root) {
   let recording = null; // the voice memo being recorded (`startMemo`)
   function refreshSend() {
     const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
-    $("send").disabled = sending || !typed || !canPost();
+    $("send").disabled = sending || !typed || !canPost() || setupHolds();
     // while their turn runs the circle is Stop, until they type: then it
     // sends (what the agent asked them, or more for it)
     const stops = !!$("stop").dataset.turn && !typed;
@@ -1794,6 +1946,17 @@ export function mount(root) {
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
         .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+      if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
+        setup = {
+          steps: d.setup.steps
+            .filter((s) => s && typeof s.text === "string" && SETUP_STEP.includes(s.state))
+            .slice(0, SETUP_STEPS_MAX)
+            .map((s) => ({ text: s.text.slice(0, 120), state: s.state })),
+          error: typeof d.setup.error === "string" ? d.setup.error.slice(0, 1000) : null,
+        };
+        // a step done may be its joining: the members say whether it is in
+        if (setupHolds()) readMembers();
+      } else setup = null;
       schedule();
       if (picking) updateMentions();
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
@@ -1901,7 +2064,7 @@ export function mount(root) {
   // failed and is sent again unchanged is the same record (docs/api.md).
   let unsent = null; // { id, body }
   async function send(text) {
-    if (sending || !canPost()) return;
+    if (sending || !canPost() || setupHolds()) return;
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
@@ -1910,6 +2073,8 @@ export function mount(root) {
     const command = files.length ? null : typedCommand(text);
     sending = true;
     const typed = input.value;
+    const source = input.getBoundingClientRect();
+    const sendOrigin = { y: source.top + Math.min(source.height, 48) / 2, at: performance.now() };
     input.value = "";
     grow();
     setTyping(false);
@@ -1922,6 +2087,7 @@ export function mount(root) {
         const body = { kind: "command", command: command.name, ...(command.args ? { args: command.args } : {}), to: [command.target] };
         const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
         unsent = { id, body };
+        if (!sendReducedMotion.matches) outgoingOrigins.set(id, sendOrigin);
         await fragment.post("chat", body, { id });
         unsent = null;
         $("banner").hidden = true;
@@ -1947,6 +2113,7 @@ export function mount(root) {
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
       const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
       unsent = { id, body };
+      if (!sendReducedMotion.matches) outgoingOrigins.set(id, sendOrigin);
       const record = await fragment.post("chat", body, { id });
       unsent = null;
       attachments = attachments.filter((a) => !files.includes(a));
@@ -2071,11 +2238,19 @@ export function mount(root) {
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
-    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) document.documentElement.dataset.theme = d.mode;
+    if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) {
+      document.documentElement.dataset.theme = d.mode;
+      if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
+    }
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
+  addEventListener("keydown", event => {
+    if (!framed || event.isComposing || event.repeat || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.code !== "KeyK") return;
+    event.preventDefault();
+    window.parent.postMessage({ fragment: "open-launcher" }, rosterOrigin || "*");
+  });
 
   // ---- who this page is, then the channels it may read, and who is here ----
   fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); } });

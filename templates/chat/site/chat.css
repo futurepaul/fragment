@@ -10,7 +10,8 @@
   --chat-composer-shadow: inset 0 1px 2px rgba(0,0,0,.16), inset 0 3px 8px rgba(0,0,0,.08), inset 0 -1px 0 rgba(255,255,255,.025);
   --bg-chat:#181818; --bg-window:#212121; --bg-hover:rgba(255,255,255,.055); --bg-active:#2f2f2f;
   --bg-card:#171615; --surface-subtle:#262625; --surface-muted:#2b2b2a;
-  --chat-user-bubble:#393937; --chat-composer:#323231; --chat-code:#2b2b2b;
+  --chat-user-bubble:#393939; --chat-composer:#323232; --chat-code:#2b2b2b;
+  --tooltip-bg:#363636; --tooltip-shadow:rgba(0,0,0,.2);
   --text-primary:#ececec; --text-secondary:#a6a19d; --text-tertiary:#706d69; --text-icon:#bfbfbf;
   --accent-blue:#8ab4ff; --success:#39d98a;
   --border:rgba(255,255,255,.085); --border-strong:rgba(255,255,255,.16);
@@ -28,7 +29,8 @@
     --chat-composer-shadow: inset 0 1px 2px rgba(35,30,25,.06), inset 0 3px 8px rgba(35,30,25,.035);
     --bg-chat:#ebe9e5; --bg-window:#f7f6f3; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
     --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
-    --chat-user-bubble:#e8e4dc; --chat-composer:#fffdf9; --chat-code:#ece8df;
+    --chat-user-bubble:#d4d4d4; --chat-composer:#fafafa; --chat-code:#ece8df;
+    --tooltip-bg:var(--bg-card); --tooltip-shadow:rgba(0,0,0,.1);
     --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
     --accent-blue:#315fbd; --success:#167a52;
     --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
@@ -42,7 +44,8 @@
   --chat-composer-shadow: inset 0 1px 2px rgba(35,30,25,.06), inset 0 3px 8px rgba(35,30,25,.035);
   --bg-chat:#ebe9e5; --bg-window:#f7f6f3; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
   --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
-  --chat-user-bubble:#e8e4dc; --chat-composer:#fffdf9; --chat-code:#ece8df;
+  --chat-user-bubble:#d4d4d4; --chat-composer:#fafafa; --chat-code:#ece8df;
+  --tooltip-bg:var(--bg-card); --tooltip-shadow:rgba(0,0,0,.1);
   --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
   --accent-blue:#315fbd; --success:#167a52;
   --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
@@ -56,7 +59,7 @@
 html { height: 100%; }
 html, body { margin: 0; background: var(--bg-chat); color: var(--text-primary); }
 .fragment-chat { position: relative; height: 100%; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; overflow: hidden;
-  font: 15px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
+  font: 14px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 /* no weight of their own: a component's rule below sets its color and size */
 :where(.fragment-chat) :where(button, textarea, input) { font: inherit; color: inherit; }
 :where(.fragment-chat) button { cursor: pointer; }
@@ -77,7 +80,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 
 /* action tooltips (tooltips.js) */
 .action-tooltip { position: fixed; z-index: 10000; width: max-content; max-width: calc(100vw - 12px); padding: 4px 7px; border-radius: 5px;
-  background: #363636; color: #f5f5f5; box-shadow: 0 2px 8px rgba(0,0,0,.2); pointer-events: none; font: 500 11px/1.4 var(--font-sans); white-space: nowrap; }
+  background: var(--tooltip-bg); color: var(--text-primary); box-shadow: 0 0 0 1px var(--border), 0 2px 8px var(--tooltip-shadow); pointer-events: none; font: 500 11px/1.4 var(--font-sans); white-space: nowrap; }
 
 /* agents: plain colored circles */
 /* An agent's image (Paul, 2026-10-03): a CRT monitor, whole (no circle),
@@ -109,11 +112,28 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 #latest { position: absolute; bottom: 12px; padding: 9px 15px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 3px 12px #0002; font: inherit; font-size: 13px; cursor: pointer; }
 .column { width: min(760px, calc(100vw - 16px)); margin: 0 0 0 max(8px, calc((100vw - 760px) / 2)); padding: 16px 17px 32px; }
 .msg { margin: 20px 0; }
+/* the first run's making, as the platform has it (chat.js setupNodes): no one's message */
+.setup-card { margin: 20px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: var(--chat-message-radius); background: var(--surface-subtle); font-size: 13px; }
+.setup-title { margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; }
+.setup-steps { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.setup-steps li { display: flex; align-items: center; gap: 10px; color: var(--text-tertiary); }
+.setup-steps li::before { content: ""; flex: none; width: 12px; height: 12px; box-sizing: border-box; border: 2px solid var(--border-strong); border-radius: 50%; }
+.setup-steps li.doing { color: var(--text-primary); }
+.setup-steps li.doing::before { border-color: var(--text-primary); border-right-color: transparent; animation: spin .8s linear infinite; }
+.setup-steps li.done { color: var(--text-secondary); }
+.setup-steps li.done::before { border-color: var(--success); background: var(--success); }
+.setup-steps li.failed { color: var(--danger-text); }
+.setup-steps li.failed::before { border-color: var(--danger-text); }
+.setup-error { margin-top: 12px; color: var(--danger-text); font-size: 13px; }
+.setup-error p { margin: 0 0 8px; }
+.setup-error button { min-height: 34px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; cursor: pointer; }
+.setup-error button:disabled { opacity: .6; cursor: wait; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg.user.other { align-items: flex-start; }
 .msg .who { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .msg.user .who { margin: 0 0 4px 4px; }
 .msg.agent > .who { gap: 9px; margin: 0 0 10px 2px; font-size: 13px; }
+.msg.agent > .who .agent-avatar { width: 20px; height: 20px; }
 /* faces: a person's picture or initial */
 .face { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 50%; overflow: hidden; background: var(--surface-muted); color: var(--text-secondary); font-size: 10px; font-weight: 700; line-height: 1; }
 .face img { width: 100%; height: 100%; object-fit: cover; }
@@ -122,9 +142,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .here .faces { display: inline-flex; }
 .here .faces > * { box-shadow: 0 0 0 2px var(--bg-chat); }
 .here .faces > * + * { margin-left: -5px; }
-/* a person's words: a bubble that hugs them, a subtle mix of the agent's color */
-.bubble { width: fit-content; max-width: min(520px, 82%); padding: 10px 12px; border-radius: var(--chat-message-radius); background: color-mix(in srgb, var(--chat-agent-color, #a88bea) 16%, var(--chat-user-bubble)); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg.user.other .bubble { background: color-mix(in srgb, var(--chat-agent-color, #a88bea) 6%, transparent); border: 1px solid var(--border-strong); }
+/* A person's words use the same body typography as the agent's response. */
+.bubble { width: fit-content; max-width: min(520px, 82%); padding: 10px 12px; border-radius: var(--chat-message-radius); background: var(--chat-user-bubble); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user.other .bubble { background: color-mix(in srgb, var(--text-primary) 6%, transparent); border: 1px solid var(--border-strong); }
+.msg.user.mine.send-arriving > .bubble { opacity: 0; }
+/* a message of this page's the platform has not answered yet: dimmed, "Sending…" for its time */
+.msg.user.sending > .bubble { opacity: .55; }
+.bubble.send-flight { position: fixed; z-index: 10; left: 0; top: 0; max-width: none; margin: 0; pointer-events: none; transform-origin: center; will-change: transform, opacity; }
 .time { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; margin-top: 4px; }
 /* an agent's words: unboxed */
 .msg.agent { line-height: 1.5; overflow-wrap: anywhere; }
@@ -285,7 +309,7 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 
 /* the composer */
 .composer-wrap { position: relative; width: min(760px, calc(100% - 16px)); margin: 0 auto; padding-bottom: 8px; flex: none; }
-.composer { position: relative; --edge-light: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px; border: 1px solid transparent; border-radius: var(--chat-message-radius); background: color-mix(in srgb, var(--chat-agent-color, #a88bea) 16%, var(--chat-composer)); box-shadow: var(--chat-composer-shadow); }
+.composer { position: relative; --edge-light: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px; border: 1px solid transparent; border-radius: var(--chat-message-radius); background: var(--chat-composer); box-shadow: var(--chat-composer-shadow); }
 /* a local glass reflection, clipped to the rim so the input stays quiet */
 .composer::before, .composer::after {
   content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
@@ -337,10 +361,10 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .msg.user .actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .msg.user.mine .actions { flex-direction: row; }
 .msg.user .actions .time { margin: 0; }
-.msg .actions .reply { width: 26px; height: 26px; border-radius: 8px; opacity: 0; transition: opacity .14s; }
-.msg .actions .reply svg { width: 15px; height: 15px; }
-.msg:hover .actions .reply, .msg:focus-within .actions .reply { opacity: 1; }
-@media (hover: none) { .msg .actions .reply { opacity: 1; } }
+.msg .actions .reply { width: 26px; height: 26px; border-radius: 8px; }
+.msg .actions .icon-button { color: color-mix(in srgb, var(--text-icon) 70%, var(--bg-chat)); }
+.msg .actions .icon-button:hover, .msg .actions .icon-button:focus-visible { color: var(--text-icon); }
+.msg .actions .icon-button svg { width: 14px; height: 14px; }
 .queued { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; background: var(--surface-muted); color: var(--text-secondary); font-size: 11px; font-weight: 600; }
 .queued svg { width: 11px; height: 11px; }
 /* what a message quotes, above it; what the composer will quote, above what is typed */
@@ -362,7 +386,14 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 #notify:not([hidden]) ~ .steer, .steer:not([hidden]) ~ .send { margin-left: 0; }
 
 @media (max-width: 680px) { .column { padding-top: 12px; } }
+/* The shell supplies its viewport mode: a narrow desktop panel is not a phone. */
+@media (max-width: 760px) {
+  :root:not([data-mobile="false"]), :root:not([data-mobile="false"]) body { touch-action: pan-x pan-y; }
+  :root:not([data-mobile="false"]) .composer-wrap { width: calc(100% - 24px); padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  :root:not([data-mobile="false"]) .composer { border-radius: 24px; padding: 14px; }
+  :root:not([data-mobile="false"]) .composer textarea { font-size: 16px; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i { animation: none; }
+  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i, .setup-steps li.doing::before { animation: none; }
   .composer::before, .composer::after { transition: none; }
 }

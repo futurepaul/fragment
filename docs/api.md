@@ -786,7 +786,7 @@ title opening its share sheet.
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, unread?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, previewAt?, unread?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
@@ -1762,9 +1762,11 @@ operator key's cost: `GET /api/connections`, the computer's view and its
 `uses`), sharing (who may open each fragment they own, by fragment or
 by person: `GET /api/access`), and pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
-coding agent); its sidebar lists their fragments, each one's share sheet
-(`/share/<name>`) in a dialog (their own's "Share…" or "Invite…";
-someone else's "People…", where they see who is in and may leave), and the catalog makes an app from a
+coding agent); its sidebar shows their agent and lists their chats, its
+desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
+dialog (their own's "Share…" or "Invite…"; someone else's "People…",
+where they see who is in and may leave), and the dock's Add opens the
+catalog, which makes an app from a
 template, titled with the name its maker gives it (or the template's).
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
@@ -1775,10 +1777,22 @@ carry no header, is taken by the platform's exact `Origin` alone.
 Anything else needs a signature as before. Adding a key still needs a
 key.
 
-Its sidebar is the person's list, one read: chats (kind `chat`), each
-with its agents and its newest message (the row's `agents` and
-`preview`), then apps, less the ones they archived (`PUT
-/api/fragments/{name}/archived`, above). It is live: the page holds
+Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
+2026-10-13): their **one agent** above (their first, the one the first
+run makes: the first their computer took, as its view lists its agents in
+the order it took them; a menu of New chat, Rename, its profile and its
+screen), then their chats (kind `chat`) as
+one flat list, newest first (by the row's `previewAt`; one with nothing
+said yet above them all), less the ones they archived (`PUT
+/api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
+are the desktop's: a dock of their icons and titles under the viewer's
+windows, then Add (the catalog, above), open beside the chat on a
+desktop's width, a sheet from the bottom on a phone. Any other agents of
+theirs are in no list (a setting may offer more than one later); a chat
+with one of them is a chat, listed and found as any other. A desktop with
+no apps says what lands there, and for a seat offers a few requests of
+their agent, each a real one: pressed, it starts a chat with those words
+as its first message, as the launcher does (below). It is live: the page holds
 `GET /api/fragments/watch` (above), and on each `changed` (a moment
 after, so a burst is one read) reads the list again and patches the
 sidebar in place, so an app their agent makes, one someone shares with
@@ -1796,19 +1810,18 @@ tab and device of the person's (their list tells them). Kept per person,
 in their list, beside their archiving: the list already holds each chat's
 messages, in order (their search's entries), so a count is one bounded
 read of it, and a mark one row.
-Each app's row shows its preview card (`GET /api/f/{name}/card`, Cards
-above, read with the session and shown as a blob URL), or its icon until
-the first is made: an app without one is asked again, from 2 s apart to
-a minute.
-A chat with two agents or more is a **group** (decision 8): "New group
-chat" makes a chat fragment on the `chat` template, titled by the name
-given or else its agents' names, and adds the agents picked as editors
-one at a time in the order picked, so the first is its lead (the first
-added, by `addedAt`). Which agents a chat has is its member list, as
-its row names them (`agents`), never its name; the sidebar stacks their
-avatars, each in its identity's colour (the chat page's FNV-1a choice).
-**New chat** (the open direct chat's menu, and the top bar) starts
-another chat with the same agent, of the person's own: a chat fragment on
+Each app's preview card (`GET /api/f/{name}/card`, Cards above, read
+with the session and shown as a blob URL) shows larger over its dock icon
+while a pointer is on it: an app without one is asked again, from 2 s
+apart to a minute.
+A chat with two agents or more is a **group** (decision 8; made by the
+CLI, a page's add or an agent, not the shell): which agents a chat has is
+its member list, as its row names them (`agents`), never its name; the
+launcher's results stack their avatars, each in its identity's colour
+(the chat page's FNV-1a choice), and its ⋯ offers each one's profile and
+screen. The open chat's ⋯ renames it, invites people, and archives it.
+**New chat** (the agent's menu in the sidebar, and the launcher) starts
+another chat with the person's agent: a chat fragment on
 the `chat` template labelled `<agent's label>-chat-<n>`, titled "New
 chat", the agent added as an editor (which wakes its computer). Its
 context is its own (an agent's runtime keys its session by its chat). An
@@ -1851,6 +1864,48 @@ either, so it neither learns their agents nor adds one, and no page adds
 anyone but its own owner's agents to its own fragment, which is an
 owner's share with their own agent (decision 36). It names no template;
 the chat's `@` is its user (docs/chat-records.md, "The page").
+
+**The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
+Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
+only from the focused frame of a listed fragment at its own origin) is one
+input over the desktop's landscape. Empty, it shows nothing. Words ask
+`GET /api/search` (Search, below; its first 8 words and 256 bytes): the
+chats and apps whose title or label hold them, then the messages, newest
+first, archived ones marked. A chat found opens in the middle column, an
+app in the desktop, a message its chat. For a seat whose agent is made,
+Enter (or the first row, "Start a new chat with <agent>") makes a new
+chat with it as **New chat** does and posts the words whole as its first
+message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
+kept until it is sent, so trying again after an answer that was lost is
+the same record; the launcher says "Starting your chat…" until the
+platform answers, and opens the chat on its record. A request for an app
+is a message like any other: the agent makes it. A guest's launcher only
+finds.
+
+**The first run, in its chat.** The person's first agent is made with
+its chat (decision 10), once they hold a seat (one bought on the welcome
+is set up on its card first: docs/billing.md, The shell), and the chat
+comes first: the shell makes it and
+opens it at once with `?setup=1`, then makes the agent, assigns it to
+their computer, adds it to the chat (which wakes the computer) and waits
+for it to follow the chat. For that chat's frame alone the `agents`
+answer also carries `setup: {steps: [{text, state}], error}` (`state`
+one of `done`, `doing`, `todo` and `failed`; every other frame gets
+`setup: null`, as that chat does once the agent follows it). Each step is
+what the platform says: made once its calls answered, in the chat once
+the members call answered, and the computer's phase as its view says;
+nothing is said in the agent's name, and nothing of it is kept in the
+browser: a reload reads the person's list, their computer and that
+chat's members again and goes on from what was made (each call reuses
+what an earlier try made, and an agent whose `agent.json` is written
+keeps its files). The page shows the steps as a card above the chat, lets
+the person type at once, and sends nothing until its own member list
+(`__members`) has an agent: a message from before its joining starts
+nothing (docs/chat-records.md). A step that failed says why, with Try
+again: the frame asks `{fragment: "retry-setup"}`, taken as `agents?` is
+(its source, its fragment's own origin, the person's own fragment) and
+only for that chat's failed run; a retry reuses the chat and the agent,
+and never reloads the frame or loses what was typed.
 
 **A page may ask for a window.** A frame the shell made may
 `postMessage({fragment: "open", url})`. A URL of the frame's own origin
@@ -1915,8 +1970,8 @@ A chat's newest entry is also its row's `preview` in the list (above).
 Search holds only what every member may read, so a chat with no such
 message, or whose entries went past the total, shows none.
 
-The shell's search dialog shows the fragments, then the messages; a
-message opens its chat (or app). It does not scroll to the message: the
+The shell's launcher (The shell, above) shows the chats and apps found,
+then the messages; a message opens its chat (or app). It does not scroll to the message: the
 chat's page has no way to be told one yet.
 
 ## Computers (docs/computers.md, phase 4)

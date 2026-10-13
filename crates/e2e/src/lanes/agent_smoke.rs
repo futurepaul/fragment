@@ -519,15 +519,15 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         live.is_some(),
         format!("{}; {}", live.clone().unwrap_or(Value::Null), c.why(&making, live.is_some(), "make the app live", WORK)),
     );
-    let sidebar_label = "an open shell shows the new app in its sidebar, with no reload";
+    let sidebar_label = "an open shell shows the new app in its desktop's dock, with no reload";
     match (chrome.as_mut(), &shell, &live) {
         (None, _, _) => s.skip(sidebar_label, "no Chrome is installed here (set CHROME_BIN)"),
         (Some(_), None, _) => s.skip(sidebar_label, "the shell did not open"),
         (Some(_), Some(_), None) => s.skip(sidebar_label, "the agent made no app to show"),
         (Some(b), Some(page), Some(_)) => {
-            let row = format!("!!document.querySelector('#apps .row[data-key=\"app:{app_name}\"]')");
+            let row = format!("!!document.querySelector('#apps [data-key=\"app:{app_name}\"]')");
             let shown = b.until(page, &row, FOLLOW);
-            let apps = b.eval(page, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key ?? r.textContent)").unwrap_or_default();
+            let apps = b.eval(page, "[...document.querySelectorAll('#apps [data-key]')].map((r) => r.dataset.key ?? r.textContent)").unwrap_or_default();
             let _ = b.screenshot(page, &evidence.join("0-shell-after-the-app.png"));
             s.ok(sidebar_label, shown, format!("not shown {} after it was live; the sidebar's apps: {apps}", mins(FOLLOW)));
         }

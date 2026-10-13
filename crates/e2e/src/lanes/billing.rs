@@ -315,9 +315,11 @@ const WELCOMED: &str = "location.pathname === '/welcome' && !document.getElement
 /// it says went wrong, and the first run's steps.
 const SEEN: &str = "(() => { const card = document.getElementById('first-run-card'); const slot = card.querySelector('[data-slot=import]'); return { path: location.pathname, search: location.search, layout: !document.getElementById('layout').hidden, card: document.getElementById('first-run').hidden ? '' : card.innerText, plans: [...card.querySelectorAll('[data-plan]')].map((b) => b.dataset.plan), enabled: [...card.querySelectorAll('[data-plan], form button')].every((b) => !b.disabled), trial: card.querySelector('input[placeholder=\"Trial code\"]')?.value ?? null, importing: slot ? (slot.hidden ? 'hidden' : 'shown') : 'absent', errors: [...card.querySelectorAll('.form-error')].filter((e) => !e.hidden).map((e) => e.textContent), steps: [...card.querySelectorAll('.creating-steps li')].map((li) => `${li.className}: ${li.textContent}`) }; })()";
 
-/// The first run's seat step is done, at home's address (Checkout's return
-/// applied, its query off).
-const SEATED: &str = "location.pathname === '/' && location.search === '' && [...document.querySelectorAll('#first-run-card .creating-steps li')].some((li) => li.textContent === 'Setting up your seat' && li.className === 'done')";
+/// The first run's seat step is done (Checkout's return applied, its query
+/// off), and the first agent is being made in its chat, at home's address
+/// (the in-chat first run: a guest's creates are refused, so only a seat
+/// gets there).
+const SEATED: &str = "location.pathname === '/' && location.search === '' && document.getElementById('first-run').hidden && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')";
 
 /// Clicks the first run's button (or link) whose text is `text`.
 fn press(text: &str) -> String {
@@ -503,11 +505,22 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         wait,
     );
     let _ = b.screenshot(&page, &shots.join("6-invited-guest.png"));
-    let row = b.eval(&page, &format!("document.querySelector('#apps .row[data-key=\"app:{app}\"] .label')?.textContent ?? null"))?;
-    let makes = b.eval(&page, "['new-agent', 'new-agent-top', 'new-group', 'add-app'].filter((id) => !document.getElementById(id).hidden)")?;
+    let row = b.eval(&page, &format!("document.querySelector('#apps [data-key=\"app:{app}\"] .label')?.textContent ?? null"))?;
+    // every control that makes something (a guest's create is refused: the
+    // dock's Add, the top bar's new chat, the launcher's start and send, the
+    // desktop's requests), the launcher open with words typed: it only finds
+    b.eval(&page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    b.eval(&page, "(() => { const i = document.getElementById('workspace-search'); i.value = 'garden'; i.dispatchEvent(new Event('input')); return true; })()")?;
+    let found = b.until(&page, &format!("!!document.querySelector('#search-results [data-fragment={app:?}]')"), wait);
+    let makes = b.eval(
+        &page,
+        "[document.getElementById('add-app') && 'add-app', !document.getElementById('new-chat').hidden && 'new-chat', !document.getElementById('search-send').disabled && 'search-send', document.querySelector('#search-results .search-start') && 'search-start', document.querySelector('#desktop-empty .desktop-suggestion') && 'suggestion'].filter(Boolean)",
+    )?;
+    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(&page, "!document.getElementById('search-dialog').open", wait);
     s.ok(
-        "an invited guest lands home on what was shared with them, not the welcome: its window open and titled as its owner titled it, a seat offered beside it, and no button that only fails",
-        landed && row == json!("Garden plans") && makes == json!([]),
+        "an invited guest lands home on what was shared with them, not the welcome: its window open and titled as its owner titled it, a seat offered beside it, and no control that only fails (their launcher only finds)",
+        landed && row == json!("Garden plans") && found && makes == json!([]),
         json!({ "row": row, "makes": makes }),
     );
     b.eval(&page, "(document.querySelector('#notice .allow')?.click(), true)")?;
@@ -618,7 +631,12 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
-    let straight = b.until(&page, "location.pathname === '/' && !!document.querySelector('#first-run-card .creating-steps') && !document.querySelector('#first-run-card [data-plan]')", wait);
+    // its seat's own step while its plan is on its way, else the chat at once
+    let straight = b.until(
+        &page,
+        "location.pathname === '/' && !document.querySelector('#first-run-card [data-plan]') && (!!document.querySelector('#first-run-card .creating-steps') || (!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')))",
+        wait,
+    );
     let made = s.eventually(wait, || owned(api, &max, "agent") == 1);
     s.ok(
         "a guest given a seat goes straight to their first run, never the welcome's seats, and it makes their agent",

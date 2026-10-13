@@ -6,7 +6,7 @@
 // through reordering, resizing, collapsing the viewer, maximizing, and other
 // panes closing.
 import Split from "./vendor/split-grid.js";
-import { store } from "./layout.js";
+import { store, reducedMotion, springFrames, frameWriter } from "./layout.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
 
 const KEY = "finite.viewer.v1";
@@ -81,9 +81,43 @@ export function createViewer({ stack, onChange = () => {} }) {
   const panes = []; // { key, el, gutter, size (fr), persist }
   let split = null;
   let solo = null; // key of the maximized pane
+  let equalize = false;
   const restored = new Map(store.get(KEY, []).map((p) => [p.key, p.size])); // sizes from last time, used once
+  const dragStyle = frameWriter();
+  const bounds = () => new Map(panes.filter(p => !p.el.hidden && !p.closing).map(p => [p.key, p.el.getBoundingClientRect()]));
+  const cancelMotion = (p) => { p.motion?.cancel(); p.motion = null; };
+  function animatePane(p, frames, options) {
+    cancelMotion(p);
+    if (reducedMotion.matches || !p.el.getBoundingClientRect().height) return null;
+    const motion = p.el.animate(frames, options);
+    p.motion = motion;
+    motion.onfinish = () => { if (p.motion === motion) { p.motion = null; motion.cancel(); } };
+    return motion;
+  }
+  function settle(previous) {
+    for (const p of panes) {
+      if (p.el.hidden || p.closing) continue;
+      const before = previous.get(p.key), after = p.el.getBoundingClientRect();
+      if (!after.width || !after.height) continue;
+      if (!before?.width || !before.height) {
+        animatePane(p, springFrames(t => ({ opacity: Math.min(1, t), transform: `scale(${.97 + .03 * t})` })), { duration: 280, easing: "linear" });
+      } else {
+        const x = before.left + before.width / 2 - after.left - after.width / 2;
+        const y = before.top + before.height / 2 - after.top - after.height / 2;
+        const sx = before.width / after.width, sy = before.height / after.height;
+        if (Math.abs(x) + Math.abs(y) + Math.abs(before.height - after.height) + Math.abs(before.width - after.width) < 1) continue;
+        animatePane(p, springFrames(t => ({ transform: `translate(${x * (1 - t)}px, ${y * (1 - t)}px) scale(${1 + (sx - 1) * (1 - t)}, ${1 + (sy - 1) * (1 - t)})` })), { duration: 280, easing: "linear" });
+      }
+    }
+  }
+  reducedMotion.addEventListener("change", () => {
+    if (!reducedMotion.matches) return;
+    for (const p of [...panes]) { if (p.closing) finishClose(p); else cancelMotion(p); }
+  });
 
-  function relayout() {
+  function relayout(previous = bounds()) {
+    dragStyle.flush();
+    for (const p of panes) if (!p.closing) cancelMotion(p);
     split?.destroy();
     split = null;
     const tracks = [];
@@ -107,17 +141,24 @@ export function createViewer({ stack, onChange = () => {} }) {
         rowGutters: gutters,
         rowMinSize: MIN_ROW,
         snapOffset: 0,
-        onDragStart: () => document.body.classList.add("resizing", "resizing-row"),
+        writeStyle: dragStyle.write,
+        onDragStart: () => {
+          for (const p of panes) if (!p.closing) cancelMotion(p);
+          document.body.classList.add("resizing", "resizing-row");
+        },
         onDragEnd: () => {
+          dragStyle.flush();
           document.body.classList.remove("resizing", "resizing-row");
           const sizes = stack.style.gridTemplateRows.split(" ").filter((_, i) => i % 2 === 0).map(parseFloat);
           panes.forEach((p, i) => { if (sizes[i] > 0) p.size = sizes[i]; });
           save();
+          if (equalize) { equalize = false; for (const p of panes) p.size = 1; relayout(); }
         },
       });
     }
     save();
     onChange(panes.map((p) => p.key));
+    settle(previous);
   }
 
   function save() {
@@ -134,7 +175,11 @@ export function createViewer({ stack, onChange = () => {} }) {
   // `status` follows the title.
   function open(spec) {
     const existing = panes.find((p) => p.key === spec.key);
-    if (existing) { focus(spec.key); return existing; }
+    if (existing) {
+      if (existing.closing) { existing.closing = false; existing.el.inert = false; cancelMotion(existing); }
+      focus(spec.key); return existing;
+    }
+    const previous = bounds();
     const el = document.createElement("article");
     el.className = "pane";
     el.dataset.key = spec.key;
@@ -171,7 +216,7 @@ export function createViewer({ stack, onChange = () => {} }) {
     gutter.setAttribute("role", "separator");
     gutter.setAttribute("aria-orientation", "horizontal");
     gutter.title = "Drag to resize · double-click to share evenly";
-    gutter.addEventListener("mousedown", (e) => { if (e.detail === 2) { for (const p of panes) p.size = 1; relayout(); } }); // see layout.js on dblclick
+    gutter.addEventListener("mousedown", (e) => { if (e.detail === 2) equalize = true; }); // see layout.js on dblclick
     const avg = panes.length ? panes.reduce((n, p) => n + p.size, 0) / panes.length : 1;
     const size = restored.get(spec.key) || avg;
     restored.delete(spec.key);
@@ -180,8 +225,7 @@ export function createViewer({ stack, onChange = () => {} }) {
     setSolo(null);
     panes.unshift(pane);
     stack.append(gutter, el);
-    relayout();
-    flash(pane);
+    relayout(previous);
     return pane;
   }
 
@@ -238,14 +282,30 @@ export function createViewer({ stack, onChange = () => {} }) {
   }
 
   function close(key) {
-    const i = panes.findIndex((p) => p.key === key);
-    if (i < 0) return;
-    const [p] = panes.splice(i, 1);
+    const p = panes.find(p => p.key === key);
+    if (!p || p.closing) return;
+    p.closing = true;
+    p.el.inert = true;
+    const style = getComputedStyle(p.el);
+    const motion = animatePane(p, [
+      { opacity: style.opacity, transform: style.transform },
+      { opacity: 0, transform: "scale(.97)" },
+    ], { duration: 160, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" });
+    if (motion) motion.onfinish = () => finishClose(p);
+    else finishClose(p);
+  }
+
+  function finishClose(p) {
+    const i = panes.indexOf(p);
+    if (i < 0 || !p.closing) return;
+    const previous = bounds();
+    cancelMotion(p);
+    panes.splice(i, 1);
     p.disposeGlow();
     p.el.remove();
     p.gutter.remove();
-    if (solo === key) solo = null;
-    relayout();
+    if (solo === p.key) setSolo(null);
+    relayout(previous);
   }
 
   function setSolo(key) {
@@ -254,6 +314,7 @@ export function createViewer({ stack, onChange = () => {} }) {
       const on = p.key === solo;
       p.max.innerHTML = svg(on ? "restore" : "max");
       p.max.title = on ? "Restore" : "Maximize";
+      p.max.setAttribute("aria-label", p.max.title);
     }
   }
 
