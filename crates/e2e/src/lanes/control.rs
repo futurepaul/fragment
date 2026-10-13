@@ -175,6 +175,21 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("create names the owner by identity", c["owner"] == owner_id.as_str(), &r);
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
     s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
+    // a chat, and an agent (its SOUL and memories), are its members' alone
+    // unless asked otherwise (Paul, 2026-10-13)
+    let made = |template: &str, visibility: Option<&str>| {
+        let mut body = json!({ "label": s.name(&format!("made-{template}")), "template": template });
+        if let Some(v) = visibility {
+            body["visibility"] = json!(v);
+        }
+        api.create_with(&owner, body).map(|r| (r.status, r.body["visibility"].clone()))
+    };
+    let (chat, agent, todo, asked) = (made("chat", None)?, made("agent", None)?, made("todo", None)?, made("chat", Some("link"))?);
+    s.ok(
+        "a chat and an agent are made members only; a template's app by link; a visibility asked is kept",
+        chat == (200, json!("members")) && agent == (200, json!("members")) && todo == (200, json!("link")) && asked == (200, json!("link")),
+        json!([chat, agent, todo, asked]),
+    );
     s.ok(
         "create returns the share and inbox tokens",
         c["viewToken"].as_str().is_some_and(|t| t.len() == 24) && c["inboxToken"].as_str().is_some_and(|t| t.len() == 32),

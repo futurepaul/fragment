@@ -120,7 +120,7 @@ impl FragmentCell {
                 // skills, routines): it is an editor of its own fragment
                 if self.member_role(&identity)?.is_none() {
                     let as_owner = self.as_owner()?;
-                    self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor, people_only: None }).await?;
+                    self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor }).await?;
                 }
                 self.event("computer.assigned", &format!("runs on {}", b.computer), json!({ "computer": b.computer, "identity": identity }));
                 Ok(json!({ "identity": identity }))

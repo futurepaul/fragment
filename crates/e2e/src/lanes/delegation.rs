@@ -1,11 +1,13 @@
 //! Agents acting for people (docs/cloudflare-v1.md, decision 36): sharing
 //! with a person shares with their agents, never above that person, unless
-//! the share is people only or the agent is held below its owner.
+//! the agent is held below its owner. A share is the person's and their
+//! agents' (Paul, 2026-10-13: "giving all the pubkeys under the umbrella of
+//! this email" access): no share says otherwise.
 //!
 //! Paul shares a fragment with Skyler as an editor; Skyler's agent edits it
 //! acting for Skyler, and alone (as itself, no member) reaches nothing.
-//! Marked people only, the share lends the agent nothing. Held at viewer
-//! by Skyler, it reads and never edits. No one else holds Skyler's agent.
+//! Held at viewer by Skyler, it reads and never edits. No one else holds
+//! Skyler's agent.
 //!
 //! Then an agent shares for its owner (Paul, 2026-10-04): `sharing`.
 
@@ -39,9 +41,10 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     let c = s.create(api, &paul, &name)?;
     ship(s, &c, TODO_APP, TODO_JSON);
     api.signed(&paul, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    let share = |people_only: bool| api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor", "peopleOnly": people_only })));
-    let r = share(false)?;
-    s.ok("Paul shares it with Skyler as an editor", r.status == 200 && r.body["role"] == "editor", &r);
+    let r = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor", "peopleOnly": true })))?;
+    s.ok("a share is the person's and their agents': one that asks otherwise is refused (400)", r.status == 400, &r);
+    let r = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor" })))?;
+    s.ok("Paul shares it with Skyler as an editor", r.status == 200 && r.body["role"] == "editor" && r.body.get("peopleOnly").is_none(), &r);
     let mut n = 0;
     let mut add = |for_skyler: bool| {
         n += 1;
@@ -56,13 +59,8 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     let r = add(false)?;
     s.ok("but alone, as itself, it reaches nothing (it is no member)", r.status == 403, &r);
 
-    let r = share(true)?;
-    s.ok("Paul marks the share people only", r.status == 200 && r.body["peopleOnly"] == true, &r);
-    let r = add(true)?;
-    s.ok("a people-only share lends Skyler's agent nothing", r.status == 403, &r);
     let r = api.op(&skyler, &name, "add_todo", "s1", json!({ "text": "from Skyler" }))?;
-    s.ok("while Skyler still edits", r.status == 200, &r);
-    share(false)?;
+    s.ok("as Skyler does", r.status == 200, &r);
 
     let held = |by: &Keys, held: serde_json::Value| api.signed(by, "PUT", &format!("/api/identities/{juniper_id}/held"), Some(&json!({ "held": held })));
     let r = held(&paul, json!("viewer"))?;
@@ -157,7 +155,7 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let r = hand_for_paul("DELETE", &format!("invites/{invited}"), None)?;
     s.ok("and revokes one", r.status == 200 && r.body["revoked"] == invited.as_str(), &r);
     let r = hand_for_paul("POST", "invites", Some(json!({ "email": Api::email_of(&paul), "role": "viewer" })))?;
-    s.ok("an invite to Paul's own email is 400: the owner is in already", r.status == 400, &r);
+    s.ok("an invite to Paul's own email is 400: Paul owns it", r.status == 400 && r.message().contains("owns it"), &r);
     let closed = api.page(&app, "", None)?;
     let r = hand_for_paul("PUT", "visibility", Some(json!({ "visibility": "public" })))?;
     let mut open = None;
@@ -205,17 +203,15 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
         itself.status == 400 && paul_row.status == 400 && paul_out.status == 400,
         json!({ "itself": itself.body, "paulsRole": paul_row.body, "paulOut": paul_out.body }),
     );
-    let r = hand_for_paul("PUT", &format!("members/{skyler_id}"), Some(json!({ "role": "editor", "peopleOnly": true })))?;
+    let r = hand_for_paul("PUT", &format!("members/{skyler_id}"), Some(json!({ "role": "editor" })))?;
     hand_for_paul("PUT", "visibility", Some(json!({ "visibility": "members" })))?;
     let junipers = ask(&juniper, Some(&skyler_id), "GET", &app, "status", None)?;
     let skylers = api.status(&skyler, &app)?;
     s.ok(
-        "a people-only share it makes lends Skyler's agent nothing, while Skyler edits",
-        r.status == 200 && r.body["peopleOnly"] == true && refused(&junipers) && skylers.status == 200 && skylers.body["role"] == "editor",
+        "a share it makes is Skyler's and their agents': Skyler edits, and Skyler's agent, acting for them, reaches it too",
+        r.status == 200 && junipers.status == 200 && junipers.body["role"] == "editor" && skylers.status == 200 && skylers.body["role"] == "editor",
         json!({ "share": r.body, "agent": junipers.status, "skyler": skylers.body["role"] }),
     );
-    // (a role alone keeps a people-only share one: lending again says so)
-    api.signed(&paul, "PUT", &format!("/api/f/{app}/members/{skyler_id}"), Some(&json!({ "role": "editor", "peopleOnly": false })))?;
 
     // invalid: no one else's authority, and nothing that is the owner's own
     let r = ask(&hand, Some(&skyler_id), "PUT", &app, &format!("members/{bob_id}"), Some(viewer.clone()))?;

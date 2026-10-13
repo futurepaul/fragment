@@ -261,6 +261,19 @@ pub(crate) struct Profiles {
     pub ids: Vec<String>,
     #[serde(default)]
     pub emails_of: Vec<String>,
+    /// People whose agents to name: a share is a person's and their
+    /// agents' (Paul, 2026-10-13), so who has access says them.
+    #[serde(default)]
+    pub agents_of: Vec<String>,
+}
+
+/// A person's agent, as who has access names it.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ProfileAgent {
+    pub id: String,
+    /// Its agent fragment's label, made from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A person's picture, and their email when the caller may show it; an
@@ -280,6 +293,9 @@ pub(crate) struct Profile {
     /// page asks (serve.rs `__people`), never by the registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A person's agents, when the caller named them in `agents_of`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<ProfileAgent>,
 }
 
 #[derive(Serialize, Deserialize)]

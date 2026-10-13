@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessAgent, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde_json::{json, Value};
@@ -282,16 +282,18 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
     serde_json::from_value(v).map_err(|e| CellError::host(format!("{what}: {e}")))
 }
 
-/// Emails and pictures for identities, asked of the registry
-/// `PROFILES_MAX` at a time. One it cannot answer shows as its id. Their
-/// emails are shown: the sheet and the access view are of a fragment's
-/// people, shown to its members (docs/cloudflare-v1.md, decision 48), and
-/// an agent member's owner, who reads what it reads.
+/// Emails and pictures for identities, and a person's agents, asked of
+/// the registry `PROFILES_MAX` at a time. One it cannot answer shows as its
+/// id. Their emails are shown: the sheet and the access view are of a
+/// fragment's people, shown to its members (docs/cloudflare-v1.md,
+/// decision 48), and an agent member's owner, who reads what it reads. A
+/// person's agents are named: they reach what the person does (Paul,
+/// 2026-10-13).
 async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {
-        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec() };
+        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec(), agents_of: chunk.to_vec() };
         async move { ask_registry(env, &call).await }
     });
     let mut all = BTreeMap::new();
@@ -322,8 +324,8 @@ fn name_of(id: &str, p: Option<&Profile>) -> String {
 }
 
 /// Someone as a page shows them: a picture (or an initial), their email
-/// or an agent's name, and under it what they are to the fragment (an
-/// agent's owner, a share that lends their agents nothing).
+/// or an agent's name, and under it what they are to the fragment: an
+/// agent's owner, or a person's own agents, who reach what they do.
 fn person(m: &Member, sheet: &Sheet) -> String {
     let p = sheet.profiles.get(&m.principal);
     let (name, initial) = match p {
@@ -338,6 +340,9 @@ fn person(m: &Member, sheet: &Sheet) -> String {
     let you = if m.principal == sheet.me { " <span class=\"role\">(you)</span>" } else { "" };
     let agent = matches!(p, Some(Profile { kind: IdentityKind::Agent, .. })) || m.kind == Some(IdentityKind::Agent);
     let mut under = vec![];
+    if sheet.chat_agent.as_deref() == Some(m.principal.as_str()) {
+        under.push("This chat's own agent".to_string());
+    }
     if agent {
         under.push(match m.owner.as_deref() {
             Some(o) if o == sheet.me => "Your agent".to_string(),
@@ -345,8 +350,9 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
-    if m.people_only {
-        under.push("Their agents can't use it".to_string());
+    let theirs: Vec<String> = p.map_or(&[][..], |p| &p.agents[..]).iter().map(|a| esc(a.name.as_deref().unwrap_or(&npub::display(&a.id)))).collect();
+    if !theirs.is_empty() {
+        under.push(format!("With their agent{} {}", if theirs.len() == 1 { "" } else { "s" }, theirs.join(", ")));
     }
     let under = if under.is_empty() { String::new() } else { format!("<small>{}</small>", under.join(" · ")) };
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
@@ -363,6 +369,9 @@ struct Sheet {
     visibility: Visibility,
     /// Its title, else its label.
     title: String,
+    /// A chat's own agent, its lead (the first agent in it): it stays an
+    /// editor and is not removed (members.rs `chat_agent`).
+    chat_agent: Option<String>,
     /// The share link: the owner's only.
     link: Option<String>,
     /// Its address, which opens it for the people in it.
@@ -410,6 +419,10 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     };
     let visibility: Visibility = decoded(status["visibility"].clone(), "the status's visibility")?;
     let title = status["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(label(name)).to_string();
+    let chat_agent = match status["kind"].as_str() {
+        Some("chat") => members.members.iter().find(|m| m.kind == Some(IdentityKind::Agent)).map(|m| m.principal.clone()),
+        _ => None,
+    };
     let canonical = cfg.canonical(url, name);
     let link = match (role, status["viewToken"].as_str()) {
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
@@ -435,6 +448,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         invites,
         visibility,
         title,
+        chat_agent,
         link,
         canonical,
         profiles,
@@ -547,7 +561,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     for m in &sheet.members {
         out += "<li>";
         out += &person(m, sheet);
-        if sheet.owner() && m.role != Role::Owner {
+        if sheet.owner() && m.role != Role::Owner && sheet.chat_agent.as_deref() != Some(m.principal.as_str()) {
             let who = name_of(&m.principal, sheet.profiles.get(&m.principal));
             let remove = format!(
                 "{}<button class=\"text away\" data-confirm=\"Remove?\" aria-label=\"Remove {}\" data-arm disabled>Remove</button>",
@@ -859,7 +873,10 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                             name: named.get(&m.principal).and_then(|p| p.name.clone()),
                             owner: m.owner.clone(),
                             owner_email: m.owner.as_deref().and_then(email),
-                            people_only: m.people_only,
+                            agents: named
+                                .get(&m.principal)
+                                .map(|p| p.agents.iter().map(|a| AccessAgent { principal: a.id.clone(), name: a.name.clone() }).collect())
+                                .unwrap_or_default(),
                         })
                         .collect();
                     (Some(listed), more, invites)

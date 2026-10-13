@@ -803,8 +803,22 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && after["invites"].as_array().is_some_and(|a| a.iter().all(|i| i["email"] != invited.as_str())),
         json!([listed, revoked, after]),
     );
+    // someone in already: `members add` is refused, `members role` changes it
+    let bea = api.person()?;
+    let bea_email = Api::email_of(&bea);
+    let added = s.cli_json(api, &home, &["members", "add", &name, &bea_email, "--json"])?;
+    let (again, v) = {
+        let out = s.cli(api, &home, &["members", "add", &name, &bea_email, "--role", "editor", "--json"]);
+        (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or_default())
+    };
+    let changed = s.cli_json(api, &home, &["members", "role", &name, &bea_email, "editor", "--json"])?;
+    s.ok(
+        "fragment members add: someone in already is refused (invalid_request, saying `fragment members role`), which changes their role",
+        added["role"] == "viewer" && again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
+        json!([added, v, changed]),
+    );
     let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
-    s.ok("--people-only with an email is a usage error (it names an npub)", out.status.code() == Some(2), String::from_utf8_lossy(&out.stdout));
+    s.ok("--people-only is no flag now: a share is a person's and their agents'", out.status.code() == Some(2), String::from_utf8_lossy(&out.stderr));
     // `fragment open` names a share link only where one opens it (this
     // chat is public: its address is its link)
     let public = s.cli_json(api, &home, &["open", &name, "--json"])?;

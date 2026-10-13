@@ -209,8 +209,12 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   an HttpOnly cookie on the fragment's origin; the principal is `anon:`
   plus its hash), so their writes are attributed and rate-limited like
   anyone else's. On a `link` or `public` fragment the link holder counts
-  as a viewer. Operation ids belong to their caller: the ledger keys a
-  mutation by principal and id.
+  as a viewer; the link is its owner's to give, and a fragment opened
+  again from `members` gets a new one. A fragment is made `link`, a chat
+  or an agent `members` (2026-10-13). A member's share is theirs and
+  their agents' (Paul, 2026-10-13), each agent capped (R17). Operation
+  ids belong to their caller: the ledger keys a mutation by principal
+  and id.
 - Origins: each fragment is served from
   `<name>.fragment.boats`; the platform (login, the share
   sheet) from `fragment.club`, another site

@@ -1545,9 +1545,12 @@ const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 let accessBy = "fragment";
 // an identity too long to read whole: its npub's ends
 const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id);
-// a member as the view names them, and what they are to the person
+// a member as the view names them, and what they are to the person; a
+// person's agents reach what they do (a share is "all the pubkeys under the
+// umbrella of this email": Paul, 2026-10-13)
+const theirAgents = (m) => (m.agents ?? []).map((a) => a.name ?? shortId(a.principal));
 function accessWho(m) {
-  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: m.peopleOnly ? "their agents can't use it" : "" };
+  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: theirAgents(m).length ? `with their agents ${theirAgents(m).join(", ")}` : "" };
   if (m.owner === state.me.id) {
     const mine = state.agents.get(m.principal);
     return { name: mine ? titleOf(mine.fragment) : m.name ?? shortId(m.principal), about: "your agent" };
@@ -1616,28 +1619,35 @@ function accessByFragment(rows) {
 // their owners, and those anyone may open
 function accessByPerson(rows) {
   const people = new Map();
-  const add = (key, name, about, row, role) => {
-    if (!people.has(key)) people.set(key, { name, about, rows: [] });
+  const add = (key, name, about, row, role, agents = []) => {
+    if (!people.has(key)) people.set(key, { name, about, rows: [], agents: new Set() });
     people.get(key).rows.push({ row, role });
+    for (const a of agents) people.get(key).agents.add(a);
   };
   for (const row of rows) {
     for (const m of row.members ?? []) {
       // the person's own agents see all of theirs anyway (decision 44)
       if (m.kind === "agent" && m.owner === state.me.id) continue;
       const who = accessWho(m);
-      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role);
+      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role, theirAgents(m));
     }
     for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, not signed in yet", row, ROLE[i.role] ?? i.role);
   }
   const anyone = rows.filter((r) => r.sharing?.visibility === "public");
   const linked = rows.filter((r) => r.sharing?.visibility === "link");
   const list = el("div", "access-list");
-  const group = (name, about, entries, open = true) => {
+  const group = (name, about, entries, open = true, agents = []) => {
     const item = el("details", "access-person");
     item.open = open;
     const summary = el("summary");
     summary.append(el("span", "access-who", name), el("span", "muted", [about, `${entries.length} ${entries.length === 1 ? "fragment" : "fragments"}`].filter(Boolean).join(" · ")));
     const ul = el("ul", "access-people");
+    // a person's agents, with the same access as them
+    for (const a of agents) {
+      const li = el("li", "access-agent");
+      li.append(el("span", "access-who", a), el("span", "muted", "their agent, the same access"));
+      ul.append(li);
+    }
     for (const { row, role } of entries) {
       const li = el("li");
       const open = el("button", "access-name", row.title || labelOf(row.name));
@@ -1649,7 +1659,7 @@ function accessByPerson(rows) {
     item.append(summary, ul);
     list.append(item);
   };
-  for (const p of people.values()) group(p.name, p.about, p.rows);
+  for (const p of people.values()) group(p.name, p.about, p.rows, true, [...p.agents]);
   if (anyone.length) group("Everyone", "public: no link needed", anyone.map((row) => ({ row, role: "Viewer" })));
   if (linked.length) group("Anyone with the share link", "you hold the links; each sheet copies its own", linked.map((row) => ({ row, role: "Viewer" })), false);
   if (!list.children.length) list.append(el("p", "muted", "No one else can open anything of yours."));

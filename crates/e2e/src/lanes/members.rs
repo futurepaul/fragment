@@ -33,6 +33,12 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.status(&bob, &name)?;
     s.ok("the viewer reads status", r.status == 200 && r.body["role"] == "viewer", &r);
     s.ok("a viewer does not see the inbox token", r.body["inboxToken"].is_null(), &r);
+    let owners = api.status(&owner, &name)?;
+    s.ok(
+        "nor the share link's: it is its owner's to give, as the share sheet has it",
+        r.body["viewToken"].is_null() && owners.body["viewToken"].as_str().is_some_and(|t| t.len() == 24),
+        json!([r.body["viewToken"], owners.body["viewToken"]]),
+    );
     s.ok("the viewer's list has the fragment", listed(api, &bob, &name)?.as_deref() == Some("viewer"), "");
     let r = api.signed(&bob, "PUT", &path(&format!("members/{}", npub_of(&carol))), Some(&json!({ "role": "viewer" })))?;
     s.ok("a viewer cannot add members", r.status == 403, &r);
@@ -79,7 +85,13 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let r = invite(&Api::email_of(&carol), "editor")?;
-    s.ok("again with another role, it changes their role, as a PUT does", r.status == 200 && r.body["member"]["role"] == "editor", &r);
+    s.ok(
+        "again, at another role, it is refused (400), saying a role changes with PUT members: an invite never changes one",
+        r.status == 400 && r.message().contains("is in it already, as a viewer") && listed(api, &carol, &name)?.as_deref() == Some("viewer"),
+        &r,
+    );
+    let r = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&carol))), Some(&json!({ "role": "editor" })))?;
+    s.ok("PUT members, by their email, changes it", r.status == 200 && r.body["role"] == "editor" && listed(api, &carol, &name)?.as_deref() == Some("editor"), &r);
     let newcomer = Keys::generate();
     let r = invite(&Api::email_of(&newcomer), "viewer")?;
     s.ok(
@@ -132,6 +144,59 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&pending))), None)?;
     let none = counted(api)?;
     s.ok("the owner's list counts the invites waiting: one made, then revoked", one == 1 && none == 0, format!("{one} then {none}"));
+
+    // restricted, then opened by link again: a new share link, the old one
+    // dead (a link holder read `__members`, as the share link lets them)
+    let token = |api: &Api| -> Result<String> { Ok(api.status(&owner, &name)?.body["viewToken"].as_str().unwrap_or("").to_string()) };
+    let by_link = |token: &str| api.page(&name, &format!("__members?view={token}"), None).map(|r| r.status);
+    let before = token(api)?;
+    let opened = by_link(&before)?;
+    let r1 = api.signed(&owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "members" })))?;
+    let r2 = api.signed(&owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "link" })))?;
+    let after = token(api)?;
+    let (old, new) = (by_link(&before)?, by_link(&after)?);
+    s.ok(
+        "restricted, then opened by link again, it has a new share link: the old one stays dead",
+        opened == 200 && r1.status == 200 && r2.status == 200 && !after.is_empty() && after != before && old == 401 && new == 200,
+        json!({ "opened": opened, "old": old, "new": new, "renewed": after != before }),
+    );
+    let r1 = api.signed(&owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "public" })))?;
+    let r2 = api.signed(&owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "link" })))?;
+    s.ok("public and back keeps the link: it never stopped working", r1.status == 200 && r2.status == 200 && token(api)? == after, "");
+
+    // a chat's own agent (its lead, the first agent added) keeps its place:
+    // its replies and steps make the chat
+    let talk = s.named(api, &owner, "members-talk")?;
+    let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200 && r.body["visibility"] == "members", "the chat: {r}");
+    let is_chat = s.eventually(Duration::from_secs(20), || api.status(&owner, &talk).is_ok_and(|r| r.body["kind"] == "chat"));
+    anyhow::ensure!(is_chat, "{talk} never said it is a chat");
+    let reg = "/api/identities";
+    let agent = || -> Result<(Keys, String)> {
+        let keys = Keys::generate();
+        let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&keys, "POST", reg, &owner) })))?;
+        anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+        let id = r.body["id"].as_str().unwrap_or("").to_string();
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{talk}/members/{id}"), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "{id} joins {talk}: {r}");
+        Ok((keys, id))
+    };
+    let ((lead, lead_id), (_, second_id)) = (agent()?, agent()?);
+    let talk_path = |rest: &str| format!("/api/f/{talk}/{rest}");
+    let demoted = api.signed(&owner, "PUT", &talk_path(&format!("members/{lead_id}")), Some(&json!({ "role": "viewer" })))?;
+    let removed = api.signed(&owner, "DELETE", &talk_path(&format!("members/{lead_id}")), None)?;
+    let r = api.signed(&owner, "GET", &talk_path("members"), None)?;
+    let leads = r.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == lead_id.as_str()).map(|m| m["role"].clone());
+    s.ok(
+        "its owner can neither lower a chat's own agent below editor nor remove it (400), saying why",
+        demoted.status == 400 && removed.status == 400 && demoted.message().contains("this chat's own agent") && removed.message().contains("this chat's own agent") && leads == Some(json!("editor")),
+        format!("{demoted} {removed}"),
+    );
+    let lowered = api.signed(&owner, "PUT", &talk_path(&format!("members/{second_id}")), Some(&json!({ "role": "viewer" })))?;
+    let gone = api.signed(&owner, "DELETE", &talk_path(&format!("members/{second_id}")), None)?;
+    s.ok("another agent in it is lowered and removed as any member is", lowered.status == 200 && gone.status == 200, format!("{lowered} {gone}"));
+    let left = api.signed(&lead, "DELETE", &talk_path("members/me"), None)?;
+    s.ok("the chat's own agent may leave it itself (as its owner's wipe has it do)", left.status == 200, &left);
 
     // who has access to what: the owner's view of all they own (GET /api/access)
     let mine = s.named(api, &owner, "members-alone")?;

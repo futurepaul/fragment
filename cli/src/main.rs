@@ -535,9 +535,10 @@ enum BlobCmd {
 enum MembersCmd {
     /// List members and their roles
     List { name: String },
-    /// Add a member, or change their role (the owner, or their agent for
-    /// them). An email no one signs in as yet is mailed an invite: they
-    /// are in once they sign in as it
+    /// Add a member (the owner, or their agent for them): a person and
+    /// their agents, by email, or an identity by npub. An email no one
+    /// signs in as yet is mailed an invite: they are in once they sign in
+    /// as it. Someone in already is refused: `members role` changes a role
     Add {
         name: String,
         /// an email, or an identity or key (an npub, or 64 hex)
@@ -545,9 +546,14 @@ enum MembersCmd {
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
         role: String,
-        /// Lend the member's agents nothing: only the person acts with it
-        #[arg(long)]
-        people_only: bool,
+    },
+    /// Change a member's role (the owner, or their agent for them): an
+    /// email, or an npub
+    Role {
+        name: String,
+        who: String,
+        /// viewer | editor
+        role: String,
     },
     /// Remove a member (the owner, or their agent for them): an email, or an npub
     Rm { name: String, who: String },
@@ -1249,7 +1255,11 @@ fn run(cli: Cli) -> Result<()> {
                         (Some(o), None) => format!("\tagent of {o}"),
                         _ => String::new(),
                     };
-                    println!("  {}\t{who}{whose}{}", m.role.as_str(), if m.people_only { "\tpeople only" } else { "" });
+                    println!("  {}\t{who}{whose}", m.role.as_str());
+                    // a person's agents reach what they do
+                    for a in &m.agents {
+                        println!("  {}\t  their agent {}", m.role.as_str(), a.name.as_deref().unwrap_or(&a.principal));
+                    }
                 }
                 if f.more > 0 {
                     println!("  and {} more: `fragment members list {}`", f.more, f.name);
@@ -1653,19 +1663,20 @@ fn run(cli: Cli) -> Result<()> {
             let v: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = &v.urls.canonical;
             // what opens it for someone not in it: a link fragment's share
-            // link, a public one's address; a members one has none (its
-            // `?view=` opens nothing, as its share sheet says)
-            let link = match v.visibility {
-                Visibility::Public => Some(canon.clone()),
-                Visibility::Link => Some(format!("{canon}?view={}", v.view_token.as_deref().unwrap_or(""))),
-                Visibility::Members => None,
+            // link, its owner's to give; a public one's address; a members
+            // one has none (its `?view=` opens nothing, as its sheet says)
+            let link = match (v.visibility, v.view_token.as_deref()) {
+                (Visibility::Public, _) => Some(canon.clone()),
+                (Visibility::Link, Some(token)) => Some(format!("{canon}?view={token}")),
+                (Visibility::Link, None) | (Visibility::Members, _) => None,
             };
             let webhook = format!("{}/api/f/{}/inbox?t={}", platform_of(&c, &v), v.name, v.inbox_token.as_deref().unwrap_or(""));
             json_exit(j, &json!({ "canonical": canon, "shareLink": link, "webhookUrl": webhook }));
             println!("address:     {canon}   (opens it for the people in it)");
-            match &link {
-                Some(link) => println!("share link:  {link}"),
-                None => println!("share link:  none: it is members only (`fragment visibility {name} link` makes one work)"),
+            match (&link, v.visibility) {
+                (Some(link), _) => println!("share link:  {link}"),
+                (None, Visibility::Link) => println!("share link:  its owner's to give: ask them, or ask them to add you by email"),
+                (None, _) => println!("share link:  none: it is members only (`fragment visibility {name} link` makes one work)"),
             }
             println!("webhook URL: {webhook}");
         }
@@ -1683,10 +1694,9 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{}\t{}{owned}", m.role.as_str(), m.principal);
                 }
             }
-            MembersCmd::Add { name, who, role, people_only } => {
+            MembersCmd::Add { name, who, role } => {
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = match auth::member_of(&who)? {
-                    auth::Member::Email(_) if people_only => return Err(usage("--people-only names an npub: an invite by email lends what the person's role does")),
                     auth::Member::Email(email) => {
                         let body = fragment_proto::CreateInvite { email: email.clone(), role };
                         match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
@@ -1700,13 +1710,20 @@ fn run(cli: Cli) -> Result<()> {
                             }
                         }
                     }
-                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only: Some(people_only) })?)?)?,
+                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?,
                 };
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
                     println!("  an agent: its owner {owner} can read {name} too");
                 }
+            }
+            MembersCmd::Role { name, who, role } => {
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("a role is viewer or editor, not {role:?}")))?;
+                let who = auth::member_of(&who)?;
+                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
+                json_exit(j, &v);
+                println!("{} is now {} on {name}", v.principal, v.role.as_str());
             }
             MembersCmd::Rm { name, who } => {
                 let who = auth::member_of(&who)?;

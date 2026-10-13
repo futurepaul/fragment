@@ -110,7 +110,9 @@ fragment.club until cutover (decisions 34–35).
   columns never had a migration (#116): the Registry's
   `identities.held` (a Registry made before it, one object for the whole
   deployment, refuses every sign-in and key) and a fragment's
-  `members.people_only`. A wipe no longer waits on its person's own lists
+  `members.people_only` (unread and unwritten since people-only shares
+  went, 2026-10-13: its table keeps it, at its default, until the
+  fragment is made again). A wipe no longer waits on its person's own lists
   (ended.rs), so this holds no wipe; everything else of such an object
   stays refused.
 - **Risk:** p5's (and the e2e preview's) objects made before those

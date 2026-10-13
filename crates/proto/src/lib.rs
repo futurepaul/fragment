@@ -550,6 +550,17 @@ impl Visibility {
             _ => None,
         }
     }
+
+    /// Who may open a fragment made from `template` with no visibility
+    /// asked: a chat or an agent (its SOUL and memories) only its members
+    /// (Paul, 2026-10-13); anything else anyone with its share link
+    /// (decision 48).
+    pub fn made_from(template: Option<&str>) -> Visibility {
+        match template {
+            Some("chat" | "agent") => Visibility::Members,
+            _ => Visibility::Link,
+        }
+    }
 }
 
 /// `POST /api/fragments`. The fragment's own key is made by the node's
@@ -638,7 +649,10 @@ pub struct Urls {
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
-    /// Its title, as its live `fragment.json` last said (none until it has).
+    /// What it is, and its title, as its live `fragment.json` last said
+    /// (an app with no title until it has).
+    #[serde(default)]
+    pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub npub: String,
@@ -650,7 +664,9 @@ pub struct FragmentStatus {
     pub pins: Pins,
     pub counts: Counts,
     pub code: CodeStatus,
-    /// Viewers and up see the share link's token.
+    /// The share link's token: its owner's alone (and their agent's,
+    /// sharing for them), as the share sheet shows it. A member does not
+    /// share by link: they ask its owner.
     pub view_token: Option<String>,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
@@ -870,8 +886,20 @@ pub struct AccessMember {
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_email: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub people_only: bool,
+    /// A person's agents, who reach what the person does (Paul,
+    /// 2026-10-13: a share is "all the pubkeys under the umbrella of this
+    /// email"), each acting with at most its cap (R17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AccessAgent>,
+}
+
+/// A member's agent, as the access view names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessAgent {
+    pub principal: String,
+    /// Its agent fragment's label, when it was made from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// `GET /api/fragments` (any signer).
@@ -895,9 +923,6 @@ pub struct Member {
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// The share lends the member's agents nothing.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub people_only: bool,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -1072,11 +1097,6 @@ pub struct IdentityView {
 #[serde(rename_all = "camelCase")]
 pub struct SetRole {
     pub role: Role,
-    /// The share lends the member's agents nothing (decision 36): only the
-    /// person acts with it. Absent, a member keeps what they had (a new
-    /// one's is `false`): a role changed is all that changes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub people_only: Option<bool>,
 }
 
 /// `POST /api/f/<name>/invites` (owner): share with whoever signs in as
@@ -1736,10 +1756,13 @@ mod tests {
         assert!(!Sharing { invites: Some(0), ..old }.with_others());
         assert!(Sharing { invites: Some(1), ..old }.with_others());
         assert!(Sharing { guests: 1, invites: Some(0), ..old }.with_others());
-        // a role changed without `peopleOnly` sends none: the member keeps theirs
-        assert_eq!(value(&SetRole { role: Role::Editor, people_only: None }), serde_json::json!({ "role": "editor" }));
-        let kept: SetRole = serde_json::from_value(serde_json::json!({ "role": "viewer" })).unwrap();
-        assert_eq!(kept.people_only, None);
+        // a chat and an agent are made members only; the rest by link
+        assert_eq!([Some("chat"), Some("agent")].map(Visibility::made_from), [Visibility::Members; 2]);
+        assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
+        // a share is the person's and their agents' (Paul, 2026-10-13): no
+        // field says otherwise, and one that tries is refused
+        assert_eq!(value(&SetRole { role: Role::Editor }), serde_json::json!({ "role": "editor" }));
+        assert!(serde_json::from_value::<SetRole>(serde_json::json!({ "role": "viewer", "peopleOnly": true })).is_err());
         let found = SearchAnswer {
             fragments: vec![],
             messages: vec![MessageHit { fragment: "talk.ann".into(), channel: "chat".into(), seq: 4, at: 1, snippet: "water the tomatoes".into() }],

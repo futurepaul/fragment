@@ -489,12 +489,17 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
             && their_row["preview"] == "Basil wants water too",
         json!([my_row, their_row]),
     );
-    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
-    let (my_row, their_row) = rows()?;
-    s.ok("the lead removed, every row names the agent left", removed.status == 200 && my_row["agents"] == json!([second]) && their_row["agents"] == json!([second]), json!([my_row, their_row]));
     let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{second}"), None, &[])?;
     let (my_row, their_row) = rows()?;
-    s.ok("and the last, none", removed.status == 200 && my_row["agents"].is_null() && their_row["agents"].is_null(), json!([my_row, their_row]));
+    s.ok("the second removed, every row names the lead left", removed.status == 200 && my_row["agents"] == json!([lead]) && their_row["agents"] == json!([lead]), json!([my_row, their_row]));
+    // the lead is the chat's own agent: its owner keeps it (members.rs `chat_agent`)
+    let refused = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok(
+        "the lead, the chat's own agent, is not removed (400, saying why), and every row still names it",
+        refused.status == 400 && refused.message().contains("this chat's own agent") && my_row["agents"] == json!([lead]) && their_row["agents"] == json!([lead]),
+        json!([refused.body, my_row, their_row]),
+    );
     let own = s.named(api, &outsider, "plot")?;
     let r = api.create_with(&outsider, json!({ "name": own, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "the outsider's chat: {r}");

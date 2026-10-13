@@ -368,20 +368,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &owner_name.to_uppercase()), ("role", "viewer")])?;
     s.ok("adding the owner's own email says it is them, and changes nothing", r.status == 200 && r.text.contains(&format!("<b>{owner_name}</b> is you")), &r);
-    // a role changed on the sheet keeps a people-only share one
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer", "peopleOnly": true })))?;
-    anyhow::ensure!(r.status == 200 && r.body["peopleOnly"] == true, "{member_name} made people-only: {r}");
+    // the API refuses it as the sheet does: an invite adds, a role changes with PUT members
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": member_name, "role": "editor" })))?;
+    let own = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": owner_name, "role": "viewer" })))?;
+    s.ok(
+        "an invite to someone in already is refused (400), saying they are in and how a role changes; the owner's own email, that they own it",
+        r.status == 400 && r.message().contains("is in it already, as a viewer") && r.message().contains("PUT members") && role_of(&member_id)?.as_deref() == Some("viewer")
+            && own.status == 400 && own.message().contains("owns it"),
+        format!("{r} {own}"),
+    );
+    // a share is the person's and their agents' (Paul, 2026-10-13): the sheet names them
+    let theirs = Keys::generate();
+    let reg = "/api/identities";
+    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&theirs, "POST", reg, &member) })))?;
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "editor")])?;
-    let now = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?;
-    let theirs = now.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == member_id.as_str()).cloned().unwrap_or_default();
     let shown = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
-        "the owner's role change on the sheet changes the role alone: a people-only share stays one (the sheet says their agents can't use it)",
-        r.status == 303 && theirs["role"] == "editor" && theirs["peopleOnly"] == true && shown.text.contains("Their agents can't use it"),
-        format!("{r} {theirs}"),
+        "the owner changes a role on the sheet; a person's agents are named beside them, with the same access",
+        made.status == 200 && r.status == 303 && role_of(&member_id)?.as_deref() == Some("editor") && shown.text.contains("With their agent"),
+        format!("{r} {made}"),
     );
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer", "peopleOnly": false })))?;
-    anyhow::ensure!(r.status == 200 && r.body["peopleOnly"].is_null(), "{member_name} lent their agents again: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["role"] == "viewer", "{member_name} a viewer again: {r}");
 
     // ---- a revoked invite admits no one
     let late = Keys::generate();
@@ -443,6 +451,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && invites_for(&stranger_name)?.is_empty()
             && invites_for(&waiting)?.len() == 1,
         format!("{answers:?}"),
+    );
+
+    // ---- a chat: made members only, and its own agent keeps its place on the sheet
+    let talk = api.qualified(&owner, &s.name("stalk"))?;
+    let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "the owner's chat: {r}");
+    let is_chat = s.eventually(wait, || api.status(&owner, &talk).is_ok_and(|r| r.body["kind"] == "chat"));
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{talk}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(is_chat && r.status == 200, "the owner's agent joins {talk}: {r}");
+    let r = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    let controls = r.text.matches(&format!("name=\"member\" value=\"{agent}\"")).count();
+    s.ok(
+        "a chat is made members only, and its sheet keeps its own agent's place: no role buttons, no Remove, saying why",
+        r.status == 200 && r.text.contains("This chat's own agent") && controls == 0 && r.text.contains("value=\"members\" aria-pressed=\"true\""),
+        &r,
     );
 
     // ---- the owner sets who can open it, and makes a new link

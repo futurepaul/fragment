@@ -83,7 +83,7 @@ pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
   principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
-  kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0);
+  kind TEXT, owner TEXT);
 CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
   email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -761,18 +761,16 @@ impl FragmentCell {
             agent: i64,
             agent_role: Option<String>,
             owner_role: Option<String>,
-            people_only: Option<i64>,
         }
         let rows: Vec<Row> = self.typed(
             "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
-             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role, \
-             (SELECT people_only FROM members WHERE principal = ?) AS people_only",
-            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into(), owner.into()],
+             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
+            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
         let member = role(row.role);
-        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role), people_only: row.people_only == Some(1) };
+        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
     }
 
@@ -1114,7 +1112,7 @@ impl FragmentCell {
         };
         let now = js::now_ms();
         let fragment_npub = npub::encode(&fragment_pub);
-        let visibility = body.visibility.unwrap_or(Visibility::Link);
+        let visibility = body.visibility.unwrap_or_else(|| Visibility::made_from(body.template.as_deref()));
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
@@ -1201,6 +1199,7 @@ impl FragmentCell {
         let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
         let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
         json_response(&FragmentStatus {
+            kind: self.kind()?,
             title: self.title()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
@@ -1214,7 +1213,8 @@ impl FragmentCell {
                 members: self.count("SELECT COUNT(*) AS n FROM members")?,
             },
             code: self.code_status()?,
-            view_token: Some(facts.view_token),
+            // the share link is its owner's to give (and their agent's, sharing for them): a member asks them
+            view_token: self.shares(caller).then_some(facts.view_token),
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
