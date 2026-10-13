@@ -963,7 +963,7 @@ export function mount(root) {
     refreshSend();
     if (setupHolds()) {
       input.placeholder = "Write your first message…";
-      $("note").textContent = "You can write now. Send turns on once your agent is in this chat.";
+      $("note").textContent = "Send turns on once your agent is in this chat.";
     } else if (setup) $("note").textContent = "";
   }
 

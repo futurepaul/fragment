@@ -1721,7 +1721,8 @@ operator key's cost: `GET /api/connections`, the computer's view and its
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent); its sidebar shows their agent and lists their chats, its
 desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
-dialog.
+dialog, and the dock's Add opens the catalog, which makes an app from a
+template, titled with the name its maker gives it (or the template's).
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
@@ -1739,7 +1740,8 @@ one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
-windows, open beside the chat on a desktop's width. Any other agents of
+windows, then Add (the catalog, above), open beside the chat on a
+desktop's width, a sheet from the bottom on a phone. Any other agents of
 theirs are in no list (a setting may offer more than one later); a chat
 with one of them is a chat, listed and found as any other. A desktop with
 no apps says what lands there, and for a seat offers a few requests of
