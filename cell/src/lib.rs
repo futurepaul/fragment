@@ -590,7 +590,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
             // the asker's own view (their search's preview and unread, their archiving) stays theirs
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, unread: 0, archived: false, owned, ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
