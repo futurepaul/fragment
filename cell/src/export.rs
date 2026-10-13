@@ -372,7 +372,10 @@ struct Open {
 /// are, what it has, and its part of the archive so far.
 #[derive(Serialize, Deserialize)]
 struct Frag {
-    meta: core::FragmentMeta,
+    /// Its `meta.json`, a `core::FragmentMeta` once its facts are read, kept
+    /// as JSON: the job is read back each slice, and a typed reading of the
+    /// meta costs the cell's Wasm more than its budget leaves.
+    meta: Value,
     names: BTreeMap<String, String>,
     /// Its channels, and the newest record of each as its facts were read.
     channels: Vec<(String, i64)>,
@@ -1012,7 +1015,7 @@ impl PrincipalCell {
             let f = run.job.frag();
             f.bytes += n;
             if f.bytes > limits::FRAGMENT_MAX_BYTES {
-                let name = f.meta.name.clone();
+                let name = f.meta["name"].as_str().unwrap_or("").to_string();
                 return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
             }
         }
@@ -1088,7 +1091,7 @@ impl PrincipalCell {
             return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(run.archive_max))));
         }
         if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > limits::FRAGMENT_MAX_BYTES) {
-            let name = run.job.frag().meta.name.clone();
+            let name = run.job.frag().meta["name"].as_str().unwrap_or("").to_string();
             return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
         }
         if run.piece.len() >= run.piece_bytes {
@@ -1357,7 +1360,7 @@ impl PrincipalCell {
         match step {
             FragStep::Facts => {
                 run.job.frag = Some(self.facts(&person, &item).await?);
-                let gone = run.job.frag().meta.npub.is_none();
+                let gone = run.job.frag().meta["npub"].is_null();
                 run.job.at = At::Fragment { i, step: if gone { FragStep::Meta } else { FragStep::Files { after: None } } };
             }
             FragStep::Files { after } => {
@@ -1378,7 +1381,7 @@ impl PrincipalCell {
                     if own.len() > limits::FILES_MAX {
                         return Err(fail(ExportFailure::TooMany, format!("{name} holds {} files; an export takes at most {} a fragment", own.len(), limits::FILES_MAX)));
                     }
-                    run.job.frag().meta.files.reference = listing["ref"].as_str().map(str::to_string);
+                    run.job.frag().meta["files"]["ref"] = json!(listing["ref"].as_str());
                     run.files = Some((i, std::rc::Rc::new(own)));
                 }
                 let files = run.files.as_ref().map(|(_, f)| std::rc::Rc::clone(f)).unwrap_or_default();
@@ -1432,8 +1435,8 @@ impl PrincipalCell {
                 if let Some(schema) = run.job.frag().schema.clone().filter(|s| !s.is_empty()) {
                     self.entry(run, &core::schema_path(&name), schema.as_bytes(), true).await?;
                 }
-                if run.job.frag().tables.is_some() {
-                    run.job.frag().meta.database.get_or_insert_with(Vec::new);
+                if run.job.frag().tables.is_some() && run.job.frag().meta["database"].is_null() {
+                    run.job.frag().meta["database"] = json!([]);
                 }
                 let next = if run.job.frag().tables.is_some() { FragStep::Tables { table: 0, offset: 0 } } else { FragStep::Channels { channel: 0, after: 0 } };
                 run.job.at = At::Fragment { i, step: next };
@@ -1473,7 +1476,7 @@ impl PrincipalCell {
                     _ => {
                         self.close(run).await?;
                         let counted = run.job.frag().counted;
-                        run.job.frag().meta.database.get_or_insert_with(Vec::new).push(core::Counted { name: t.clone(), count: counted, file: core::within(&core::table_path(&name, &t), &core::fragment_dir(&name)) });
+                        note(run, "database", core::Counted { name: t.clone(), count: counted, file: core::within(&core::table_path(&name, &t), &core::fragment_dir(&name)) });
                         run.job.at = At::Fragment { i, step: FragStep::Tables { table: table + 1, offset: 0 } };
                     }
                 }
@@ -1503,7 +1506,7 @@ impl PrincipalCell {
                 if page.len() < limits::CHANNEL_PAGE || last >= newest {
                     self.close(run).await?;
                     let counted = run.job.frag().counted;
-                    run.job.frag().meta.channels.push(core::Counted { name: c.clone(), count: counted, file: core::within(&core::channel_path(&name, &c), &core::fragment_dir(&name)) });
+                    note(run, "channels", core::Counted { name: c.clone(), count: counted, file: core::within(&core::channel_path(&name, &c), &core::fragment_dir(&name)) });
                     run.job.at = At::Fragment { i, step: FragStep::Channels { channel: channel + 1, after: 0 } };
                 } else {
                     run.job.at = At::Fragment { i, step: FragStep::Channels { channel, after: last } };
@@ -1552,7 +1555,7 @@ impl PrincipalCell {
                 self.more(run, out.as_bytes()).await?;
                 if chat_end && work_end && ai == a.len() && bi == b.len() {
                     self.close(run).await?;
-                    run.job.frag().meta.transcript = Some(core::within(&core::transcript_path(&name), &core::fragment_dir(&name)));
+                    run.job.frag().meta["transcript"] = json!(core::within(&core::transcript_path(&name), &core::fragment_dir(&name)));
                     run.job.at = At::Fragment { i, step: FragStep::Blobs { after: String::new() } };
                 } else {
                     run.job.at = At::Fragment { i, step: FragStep::Transcript { chat: chat_at, work: work_at } };
@@ -1568,7 +1571,7 @@ impl PrincipalCell {
                 let size = resp.headers().get("content-length")?.and_then(|l| l.parse::<u64>().ok());
                 match (resp.status_code(), size) {
                     (200, Some(size)) => {
-                        run.job.frag().meta.blobs.push(core::BlobCounted { sha256: sha.clone(), size });
+                        note(run, "blobs", core::BlobCounted { sha256: sha.clone(), size });
                         self.stored(run, &core::blob_path(&name, &sha), Source::Blob { fragment: name.clone(), sha: sha.clone() }, size, true).await?;
                     }
                     (s, _) if s >= 500 || s == 429 => return Err(Stop::Retry(format!("{name}'s blob {sha} answered {s}"))),
@@ -1616,12 +1619,12 @@ impl PrincipalCell {
             transcript: None,
             skipped: vec![],
         };
-        let mut frag = Frag { meta: meta.clone(), names: BTreeMap::new(), channels: vec![], tables: None, schema: None, bytes: 0, counted: 0, blobs: 0 };
+        let mut frag = Frag { meta: Value::Null, names: BTreeMap::new(), channels: vec![], tables: None, schema: None, bytes: 0, counted: 0, blobs: 0 };
         let status = match self.read_json(person, name, "status", "").await? {
             Ok(s) => s,
             Err(e) => {
                 meta.skipped.push(core::Skipped { part: "the fragment".into(), why: format!("{}: it is gone, or no longer theirs, since the export began", e.message) });
-                frag.meta = meta;
+                frag.meta = json!(meta);
                 return Ok(frag);
             }
         };
@@ -1708,7 +1711,7 @@ impl PrincipalCell {
             Err(e) if e.code == ErrorCode::NoCode => {}
             Err(e) => skip_meta(&mut meta, "database", &e),
         }
-        frag.meta = meta;
+        frag.meta = json!(meta);
         Ok(frag)
     }
 
@@ -1821,15 +1824,23 @@ struct Record {
 }
 
 fn count_file(run: &mut Run, size: u64) {
-    let f = &mut run.job.frag().meta.files;
-    f.count += 1;
-    f.bytes += size;
+    let f = &mut run.job.frag().meta["files"];
+    f["count"] = json!(f["count"].as_u64().unwrap_or(0) + 1);
+    f["bytes"] = json!(f["bytes"].as_u64().unwrap_or(0) + size);
+}
+
+/// Onto one of the lists of the current fragment's meta.
+fn note(run: &mut Run, list: &str, entry: impl Serialize) {
+    let Value::Array(entries) = &mut run.job.frag().meta[list] else {
+        panic!("a fragment's meta holds {list} as a list");
+    };
+    entries.push(json!(entry));
 }
 
 /// A part of the current fragment its person may not read, or that is
 /// not there, named in its meta.
 fn skip(run: &mut Run, part: &str, why: &CellError) {
-    skip_meta(&mut run.job.frag().meta, part, why);
+    note(run, "skipped", core::Skipped { part: part.to_string(), why: format!("{:?}: {}", why.code, why.message) });
 }
 
 fn skip_meta(meta: &mut core::FragmentMeta, part: &str, why: &CellError) {
