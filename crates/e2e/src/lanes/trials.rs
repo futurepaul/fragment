@@ -56,8 +56,10 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a code as typed (any case, spaces) opens a Checkout: Stripe's 7-day trial of its kind, a card first, no discount on top",
+        "a code as typed (any case, spaces) opens a Checkout: Stripe's 7-day trial of its kind, a card first, no discount on top, back to the welcome paid or canceled",
         r.status == 200
+            && f("success_url").ends_with("/welcome?checkout={CHECKOUT_SESSION_ID}")
+            && f("cancel_url").ends_with("/welcome?checkout=canceled")
             && f("subscription_data[trial_period_days]") == "7"
             && f("subscription_data[trial_settings][end_behavior][missing_payment_method]") == "cancel"
             && f("payment_method_collection") == "always"

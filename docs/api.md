@@ -331,7 +331,7 @@ no one holds by its npub: a grant's `by`, and the log's.
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, and ledger command, written in its own turn; the newest 10,000 kept |
-| `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/settings?trial=<code>`; an ended code is 400 |
+| `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
 Comps, orgs' views and trial codes are under Seats and orgs.
 
@@ -475,7 +475,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, and for someone new it makes their first agent; at `/settings` it opens its settings |
+| `GET /`, `GET /settings`, `GET /welcome` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in (and back to the same address, its query included); for a new guest it is the welcome, and for a seat with no chat it makes their first agent; at `/settings` it opens its settings, at `/welcome` the welcome |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
@@ -1377,7 +1377,7 @@ and orgs).
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout, for 31 minutes. With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days for its kind (a `kind` other than the code's is 400), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, or past its expiry), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
-| `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (`/settings?checkout={id}`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
+| `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
 | `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
 | `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |
@@ -1689,26 +1689,35 @@ the computer's swap, each with a placeholder of its own
 
 ## The shell (phase 5)
 
-The platform's one page is `/`, and `/settings` (cell/shell/, its files at
-`/__shell/<file>`, the release's: Serving, The release's files): its
-script reads the path, opening its settings at
-`/settings` and the person's chats at `/`, and puts the view it shows in
-the address, so a reload stays put. A guest (their ledger's plan) makes
-nothing (decision 49), so the shell offers them nothing to make: their
-home is what is shared with them (a chat in the middle, else the first
-app in its window), beside a note of what a guest may do and what a seat
-gives, whose Get a seat opens their Billing; their settings are their
-Billing, then their account. Its settings hold the person's
-account (email, sign-ins, identity id, picture, `/auth/link` to add
-another sign-in, a POST to `/auth/logout`), their Billing
-(cell/shell/billing.js: a guest's two seats to buy and a trial code,
-which a mailed trial's `/settings?trial=<code>` fills in; a seat's kind,
+The platform's one page is `/`, `/settings` and `/welcome` (cell/shell/,
+its files at `/__shell/<file>`, the release's: Serving, The release's
+files): its script reads the path, opening its
+settings at `/settings`, the welcome at `/welcome`, and the person's
+chats at `/`, and puts the view it shows in the address, so a reload
+stays put. A new person's first run never goes through settings
+(docs/billing.md, "The shell"): a guest with nothing shared with them
+lands on the welcome, the two seats and a trial code
+(cell/shell/billing.js `seatOffer`), which a mailed trial's
+`/welcome?trial=<code>` fills in, then Stripe's Checkout, whose return
+(`/welcome?checkout=<id>`, or `canceled`) comes back to it: applied
+(`POST /api/billing/sessions/<id>`), the seat's plan waited for, then
+their first agent made; a seat (bought, an org's, or the deployment's
+plan) with no chat makes it at once at `/`. A guest (their ledger's
+plan) makes nothing (decision 49), so the shell offers them nothing to
+make: once something is shared with them, their home is what is shared
+(a chat in the middle, else the first app in its window), beside a note
+of what a guest may do and what a seat gives, whose Get a seat opens the
+welcome; their settings are their Billing, then their account. Its
+settings hold the person's account (email, sign-ins, identity id,
+picture, `/auth/link` to add another sign-in, a POST to
+`/auth/logout`), their Billing (cell/shell/billing.js: for a guest, Get
+a seat, to the welcome; a seat's kind,
 org, trial's end and lapse, "let it sleep" for a $200 seat, this month's
 credit and a $25 pack; for an org's admin, its seats and admins to add,
 change and remove, and Stripe's portal, the org shown once someone else
 is in it: its admin alone sees Payment and invoices and "Add seats for
-others", which shows it; Checkout's return,
-`/settings?checkout=<id>` or `?pack=<id>`, applied as the page opens),
+others", which shows it; a pack's Checkout's return,
+`/settings?pack=<id>`, applied as the page opens),
 what their standing stops, their computer and agents, their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the

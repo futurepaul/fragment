@@ -1002,8 +1002,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings
-        (Method::Get, [""] | ["settings"]) => shell::page(env, cfg, &url).await,
+        // `/settings` opens its settings, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(env, cfg, &url).await,
         (Method::Get, ["admin"]) => shell::admin_page(env).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();

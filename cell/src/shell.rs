@@ -1,7 +1,7 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/` and `/settings`, and its files at `/__shell/<file>`, the
-//! release's (cell/shell/), read from its Static Assets (assets.rs). It
-//! holds no key: its script calls the API with
+//! page, at `/`, `/settings` and `/welcome`, and its files at
+//! `/__shell/<file>`, the release's (cell/shell/), read from its Static
+//! Assets (assets.rs). It holds no key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
 //!
@@ -39,8 +39,9 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     format!("'self' {platform} {scheme}://*.{}{port}", cfg.host_suffix)
 }
 
-/// `GET /` and `GET /settings`: the shell's page, for anyone (signed out,
-/// it asks them to sign in; the shell opens the view its path names).
+/// `GET /`, `GET /settings` and `GET /welcome`: the shell's page, for
+/// anyone (signed out, it asks them to sign in; the shell opens the view
+/// its path names).
 pub async fn page(env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;

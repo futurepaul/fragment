@@ -184,7 +184,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
                 SeatKind::Seat => "a seat",
             };
             let text = format!(
-                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/settings?trial={}\n\nYour code: {}\n",
+                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/welcome?trial={}\n\nYour code: {}\n",
                 code.days,
                 cfg.platform(),
                 code.code,
