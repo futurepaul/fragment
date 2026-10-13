@@ -96,7 +96,6 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .sidebar > * { position: relative; }
 .sidebar-top { display: flex; align-items: center; justify-content: space-between; margin: -4px 0 8px; }
 .brand { font-weight: 600; font-size: 15px; padding: 0 8px; }
-.section-label { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); padding: 12px 0 6px 8px; }
 .rows { display: flex; flex-direction: column; gap: 1px; max-height: 38vh; overflow-y: auto; scrollbar-width: thin; }
 .row { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 8px; background: none; text-align: left; font-size: 14px; color: var(--text-primary); transition: background .12s; }
 .row:hover { background: var(--bg-hover); }
@@ -209,12 +208,15 @@ body.reordering iframe { pointer-events: none; }
 .pane-action svg { width: var(--icon-size); height: var(--icon-size); }
 .pane-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; scrollbar-width: thin; }
 .pane-body > iframe { flex: 1; width: 100%; border: 0; background: var(--bg-window); }
+/* the catalog, a window on the desktop (shell.js showCatalog) */
 .catalog { padding: 14px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; align-content: start; }
 .card { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); }
 .card strong { font-size: 15px; }
 .card p { margin: 0; font-size: 13px; color: var(--text-secondary); flex: 1; }
 .card button { align-self: flex-start; border: 1px solid var(--border-strong); background: none; border-radius: 999px; padding: 4px 14px; font-size: 13px; font-weight: 600; }
 .card button:disabled { opacity: .48; }
+.card input { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-window); color: var(--text-primary); width: 100%; }
+.card .error { color: var(--danger-text); font-size: 12px; min-height: 1em; }
 
 /* ---- narrow: the sides become overlays over the chat ---- */
 .scrim { display: none; }
@@ -232,8 +234,6 @@ body.reordering iframe { pointer-events: none; }
   .layout.narrow.left-open .when-left-closed { display: inline-grid; }
   .scrim.on { display: block; position: fixed; inset: 0; z-index: 9; background: rgba(0,0,0,.42); }
 }
-.card input { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-window); color: var(--text-primary); width: 100%; }
-.card .error { color: var(--danger-text); font-size: 12px; min-height: 1em; }
 
 /* Each conversation is presented as its own agent. */
 .sidebar { height: 100%; min-height: 0; padding: 12px 12px 14px; border-radius: 12px; background: var(--bg-window); }
@@ -241,16 +241,11 @@ body.reordering iframe { pointer-events: none; }
 .brand { font-size: 15px; letter-spacing: -.25px; }
 #chats { max-height: none; min-height: 60px; flex: 1; gap: 3px; }
 .sidebar > .spacer { flex: none; }
-#chats .agent-row { width: 100%; gap: 10px; padding: 10px 12px; min-height: 60px; border-radius: 12px; }
-#chats .agent-avatar { width: 36px; height: 36px; }
-.agents-label { padding-top: 2px; padding-bottom: 4px; }
 .agent-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.agent-row .label { flex: none; font-size: 15px; font-weight: 600; line-height: 1.25; }
 .agent-preview { font-size: 13px; line-height: 1.3; color: var(--text-secondary); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #chats .row.active { background: var(--bg-active); }
-/* a chat's unread (shell.js `unreadMark`): a count, its title and newest line brighter */
+/* a chat's unread (shell.js `unreadMark`): a count */
 .row .unread { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-blue); color: var(--bg-window); font: 700 11px/20px var(--font-sans); text-align: center; }
-.agent-row.has-unread .agent-preview { color: var(--text-primary); }
 .topbar { min-height: 76px; gap: 10px; }
 .agent-heading { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 60%; padding: 8px 13px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-primary); background: var(--bg-sidebar); }
 .agent-heading:hover { background: var(--bg-active); }
@@ -272,16 +267,10 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 /* Small, flat favicon-style app marks. */
 .app-icon { --app-color: #8f88bc; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 3px; background: var(--app-color); color: #fff; flex: none; overflow: hidden; }
 .app-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-/* an app's card in the sidebar: its page at 1280×800 (16:10) as the
-   platform shot it after its last deploy, or its icon on the card's ground */
-.app-card { flex: none; display: inline-grid; place-items: center; width: 48px; height: 30px; border-radius: 5px; overflow: hidden; background: var(--surface-subtle); box-shadow: inset 0 0 0 1px var(--border); }
-.app-card.shot { background: var(--bg-card); box-shadow: 0 0 0 1px var(--border-strong); }
-.app-card img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
-/* the same card larger, beside the sidebar, while a pointer is over its row */
+/* an app's card: its page at 1280×800 (16:10) as the platform shot it
+   after its last deploy, over its dock icon while a pointer is on it */
 .card-peek { position: fixed; z-index: 30; width: 320px; aspect-ratio: 16 / 10; border-radius: 10px; overflow: hidden; background: var(--bg-card); box-shadow: 0 0 0 1px var(--border-strong), 0 10px 28px rgba(0,0,0,.35); pointer-events: none; }
-.card-peek img { display: block; width: 100%; height: 100%; object-fit: cover; }#apps { gap: 0; flex-shrink: 0; margin-bottom: 12px; }
-#apps .row { min-height: 32px; gap: 8px; padding: 5px 10px; font-size: 13px; }
-#apps .label { font-weight: 500; }
+.card-peek img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
 /* Center the conversation title when space allows; reserve room for its actions. */
 .topbar { display: grid; grid-template-columns: minmax(32px, 1fr) minmax(0, auto) minmax(70px, 1fr); }
@@ -345,12 +334,6 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(1) { left: calc((var(--stack) - var(--dot)) / 2); }
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(2) { left: 0; right: auto; }
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(3) { right: 0; bottom: 0; z-index: 1; }
-.section-actions { display: inline-flex; align-items: center; gap: 2px; }
-/* the new group chat's agents, picked in order (the first leads) */
-.pick-agents { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; max-height: 40vh; overflow-y: auto; }
-.pick-agents .row { width: 100%; border: 1px solid transparent; }
-.pick-agents .row[aria-pressed="true"] { background: var(--bg-active); border-color: var(--border-strong); }
-.pick-agents .meta { flex: none; }
 .rename-actions button:disabled { opacity: .5; cursor: default; }
 
 /* ---- what the handoff did not draw, in its look ---- */
@@ -540,21 +523,6 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
   #chats { gap: 0; margin-right: -10px; padding-right: 10px; scrollbar-gutter: stable; }
   #chats .chat-row { min-height: 44px; padding-top: 10px; padding-bottom: 10px; }
 }
-.chat-activity { display: inline-grid; place-items: center; flex: none; width: 16px; height: 16px; color: var(--text-secondary); }
-.chat-activity svg { width: 14px; height: 14px; }
-.chat-activity.waiting { color: var(--text-tertiary); }
-.chat-activity.attention::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-blue); }
-/* Loading UI dots-ring pulse; MIT: vendor/loading-ui-LICENSE. */
-.dots-ring { position: relative; display: block; width: 16px; height: 16px; }
-.dots-ring-position { position: absolute; width: 20%; height: 20%; transform: translate(-50%, -50%); }
-.dots-ring-pulse { display: block; width: 100%; height: 100%; border-radius: 50%; background: currentColor; animation: dots-ring-pulse 1s linear infinite; }
-@keyframes dots-ring-pulse {
-  0%, 100% { opacity: .25; transform: scale(.65); }
-  12.5% { opacity: 1; transform: scale(1); }
-  25% { opacity: .75; transform: scale(.85); }
-  50% { opacity: .35; transform: scale(.7); }
-}
-@media (prefers-reduced-motion: reduce) { .dots-ring-pulse { animation: none; opacity: .65; } }
 .viewer { position: relative; isolation: isolate; }
 .viewer::before { content: ""; position: absolute; z-index: -1; inset: auto 0 0; height: 140px; background: linear-gradient(to top, rgba(0,0,0,.34), rgba(0,0,0,.14) 45%, transparent); pointer-events: none; }
 .viewer.is-empty .desktop-dock { margin-top: auto; }
@@ -566,25 +534,17 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .dock-art .app-icon { width: 40px; height: 40px; border-radius: 11px; background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
 .dock-art .app-icon svg { width: 25px; height: 25px; stroke-width: 1.6; }
 .dock-app .label { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-size: 9px; line-height: 1.25; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,.7), 0 2px 5px rgba(0,0,0,.35); }
+.dock-add .dock-art { border: 1px dashed rgba(255,255,255,.6); background: rgba(20,20,20,.28); filter: none; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.dock-add .dock-art svg { width: 20px; height: 20px; color: #fff; }
 .dock-app.open { padding-bottom: 7px; }
 .dock-app.open::after { content: ""; position: absolute; bottom: 0; width: 3px; height: 3px; border-radius: 50%; background: #fff; }
-.example-conversation { display: flex; flex-direction: column; height: 100%; padding: 12px clamp(20px, 4vw, 64px) 24px; overflow: auto; }
-.example-caption { color: var(--text-tertiary); font-size: 12px; }
-.example-messages { display: flex; flex-direction: column; gap: 24px; margin: 40px 0; font-size: 14px; line-height: 1.5; }
-.example-user { align-self: flex-end; max-width: 88%; padding: 12px 18px; margin: 0; background: var(--chat-composer); border-radius: 20px 20px 5px 20px; }
-.example-response { display: flex; align-items: flex-start; gap: 12px; }
-.example-response .agent-avatar { flex: none; margin-top: 5px; }
-.example-response p { margin: 0; }
-.example-footer { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: auto; padding-top: 32px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
-.example-continue { min-height: 38px; padding: 8px 16px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; }
-.example-app { padding: 30px 26px; font-size: 14px; line-height: 1.65; }
-.example-app h2 { font-size: 23px; line-height: 1.25; font-weight: 600; letter-spacing: -.5px; }
-.example-app p { color: var(--text-secondary); }
-.example-date { font-size: 12px; }
-.example-task { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.example-task input { width: 18px; height: 18px; margin: 3px 0 0; accent-color: #5d7bc3; }
-.example-task:has(input:checked) span { text-decoration: line-through; color: var(--text-tertiary); }
-.example-event { display: flex; gap: 20px; margin-top: 20px; padding-left: 12px; border-left: 3px solid #c9625e; }
-.example-event span { color: var(--text-tertiary); font-size: 12px; }
-.example-event strong { font-size: 14px; font-weight: 500; }
+/* an empty desktop: what lands on it, and requests of their agent (shell.js renderDesktopEmpty) */
+.viewer.is-empty .desktop-empty:not([hidden]) { display: flex; }
+.desktop-empty { display: none; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 0; padding: 24px; color: #fff; text-align: center; text-shadow: 0 1px 2px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.3); }
+.desktop-empty p { margin: 0; }
+.desktop-empty-title { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.desktop-empty-text { font-size: 13px; opacity: .9; }
+.desktop-suggestions { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 4px; }
+.desktop-suggestion { max-width: 100%; min-height: 36px; padding: 7px 16px; border: 1px solid rgba(255,255,255,.28); border-radius: 999px; background: rgba(20,20,20,.38); color: #fff; font-size: 13px; text-shadow: none; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); transition: background .15s; }
+.desktop-suggestion:hover, .desktop-suggestion:focus-visible { background: rgba(20,20,20,.56); }
 @media (max-width: 760px) { .desktop-dock { margin-bottom: max(8px, env(safe-area-inset-bottom)); } }

@@ -1,19 +1,16 @@
-export const APP_EXAMPLES = [
-  { id: 'notes', title: 'Notes', color: '#b18a30' },
-  { id: 'tasks', title: 'Tasks', color: '#5d7bc3' },
-  { id: 'calendar', title: 'Calendar', color: '#c9625e' },
-];
-const glyphs = {
-  notes: '<path d="M7 7h10M7 12h10M7 17h7"/>',
-  tasks: '<path d="m6 12 4 4 8-9"/>',
-  calendar: '<rect x="5" y="6" width="14" height="14" rx="2"/><path d="M8 4v4M16 4v4M5 11h14"/>',
-};
-export function appIcon(id) {
-  const app = APP_EXAMPLES.find(app => app.id === id);
+// An app's icon in the desktop's dock and its window: one glyph for every
+// app (the person's list says nothing more of what an app is), in a colour
+// chosen by its label (FNV-1a, as an agent's colour is chosen by its
+// identity), so the same app is the same colour wherever it shows.
+const COLORS = ["#b18a30", "#5d7bc3", "#c9625e", "#4f9a7a", "#8f88bc", "#c4743d"];
+const GLYPH = '<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M5 10h14"/>';
+export function appIcon(label) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < label.length; i++) h = Math.imul(h ^ label.charCodeAt(i), 0x01000193) >>> 0;
   const icon = document.createElement('span');
   icon.className = 'app-icon';
   icon.setAttribute('aria-hidden', 'true');
-  icon.style.setProperty('--app-color', app?.color ?? '#8f88bc');
-  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none">${glyphs[id] ?? '<rect x="6" y="6" width="12" height="12" rx="2"/>'}</svg>`;
+  icon.style.setProperty('--app-color', COLORS[h % COLORS.length]);
+  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none">${GLYPH}</svg>`;
   return icon;
 }

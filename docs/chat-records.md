@@ -390,26 +390,35 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
-Locally sent text and commands appear at their final horizontal position
-and spring straight upward from the composer into the thread, without
-sideways movement or scaling. A temporary visual copy crosses
-the scroll boundary while the real message keeps its layout and accessibility.
-Incoming messages, history and failed sends do not replay this entrance;
-reduced motion skips it. Scrolling or resizing interrupts it cleanly.
+**Sending, then sent.** A message or command sent from the page shows
+at once as **sending**: its bubble dimmed, "Sending…" where its time
+goes, no Reply, never queued. It is sent once the platform answers with
+its record (or the socket brings the record first: the same body from
+the same person ends its sending), and then shows as any message does;
+one the platform refused, or that never reached it, shows its error and
+Retry (the same id: one record however often it is tried). Nothing looks
+sent before the platform has it. As it shows, it rises straight up from
+the composer into the thread at its final horizontal position (no
+sideways movement, no scaling): a visual copy crosses the scroll
+boundary, as dim as the bubble is, while the real message keeps its
+layout and accessibility; its record replacing it on the way keeps the
+same entrance. Incoming messages, history and failed sends do not
+replay it; reduced motion skips it; scrolling or resizing ends it.
 
-**First-run setup.** The shell opens the first chat before provisioning
-its agent. The page shows two scripted agent messages ahead of the
-transcript: "Making your agent…", then "Starting your agent…" once the
-agent has joined. These are presentation only, never channel records,
-model context, notifications or search results. The shell sends this
-chat's setup state with its roster (`setup`: `phase`, `joined`, `title`,
-optional `id` and `error`; docs/api.md). The composer accepts typing at
-once; Send, including Enter, waits for membership so the bridge cannot
-skip a message posted before the agent joined. The same frame and draft
-survive readiness and Retry; an error offers Retry inside the chat.
-The shell remembers setup per person in this browser, resuming an
-unfinished setup after reload and keeping the two introductory messages
-when this browser reopens the first chat. Other chats have no setup copy.
+**The first run.** The shell opens its person's first chat before their
+first agent is in it (`?setup=1`; docs/api.md, "The first run, in its
+chat"). The page then shows a card above the chat, "Setting up your
+agent", with the steps the shell sends with its roster (`setup: {steps:
+[{text, state}], error}`, at most 6 steps of 120 characters, `state`
+one of `done`, `doing`, `todo`, `failed`): what the platform says of
+the making, never a message, and nothing in the agent's name. The
+composer takes typing at once; Send (and Enter) wait until the page's
+own member list has an agent, so nothing is posted before the agent
+joined (a message from before then starts nothing: above). When the
+shell says a step changed, the page reads `__members` again. A failed
+step says why, with Try again (`{fragment: "retry-setup"}` to the
+shell), in the same frame, keeping what was typed. When the shell sends
+`setup: null` the card goes.
 
 The chat template's page reads and writes only these records. It
 follows `chat` from its last 400 records and, for a viewer, `work` from

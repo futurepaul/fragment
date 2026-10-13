@@ -100,25 +100,22 @@ speaking Cloudflare's APIs) returns once this product works.
    apps); the open chat fragment; a side panel whose tabs are other
    open fragments and a computer's screen. On a phone: the list, then a
    chat, then a sheet. It installs as a PWA.
-   UI iteration, 2026-10-12 (Skyler): one primary agent card above a
-   compact, flat chat list; apps move to a
-   square-icon dock on the landscape desktop, open by default on wide
-   screens. Illustrative chats show working, waiting and attention states,
-   alongside Notes, Tasks, and Calendar previews. Examples are labeled
-   when opened; activity and real unread marks have short tooltips.
-   These are local UI samples, never fragments or conversation records.
-   Existing agents and group chats remain accessible through search.
-   The sidebar plus (a bottom-right FAB on mobile), mobile chat-header plus,
-   and Command K
-   open the same search dialog: a single input over the full landscape,
-   empty until typed into. Typing finds chats, apps and messages; selecting
-   a result resumes it. Enter starts a chat with the primary (or current)
-   agent and posts the words as its first message, with the same record id
-   on retry. App/topic requests are sent as ordinary prompts; this does not
-   add a topic persistence or agent-generated grouping API.
-   Light and dark landscapes share one viewport-fixed, horizontally
-   mirrored crop across the desktop and launcher. Panels reveal that
-   background as they move. Spring transitions respect reduced motion.
+   UI iteration, 2026-10-12 (Skyler), with Paul's cuts of 2026-10-13
+   ("remove anything fake but keep his design"; nothing optimistic): the
+   person's one agent above a flat list of their chats, newest first (no
+   agent list, no New agent or New group; any other agents they have stay
+   out of the sidebar, their chats listed and found as any other; more
+   than one agent may be a setting later); apps in a square-icon dock on
+   the landscape desktop, open by default on wide screens, an empty one
+   offering a few real requests of the agent. The sidebar plus (a
+   bottom-right button on a phone), the phone's chat-header plus and
+   Command K open one launcher over the landscape: typing asks search
+   (chats, apps and messages), a result resumes its chat or opens its
+   app, and Enter starts a chat with the person's agent, the words its
+   first message (one record however often it is tried). A message shows
+   as sending until its record comes. Light and dark landscapes share one
+   viewport-fixed, horizontally mirrored crop across the desktop and
+   launcher; spring transitions respect reduced motion.
 8. **Chats are chat fragments**, with you and your agents as members:
    a direct chat with one agent, or a group of several. In a group, an
    `@mention` picks who answers; otherwise the lead (the first agent
@@ -1236,18 +1233,20 @@ exit says.
    - Built:
      - **The shell** at `/` and `/settings` (cell/shell/; the server's
        pages went):
-       - First run (Skyler, 2026-10-12): open the chat as soon as its
-         fragment exists, before making the default agent and starting its
-         computer. Its first two messages are scripted setup copy, "Making
-         your agent…" and "Starting your agent…", separate from channel
-         records. Typing starts immediately; Send waits only for the agent
-         to join. Readiness and retries happen in the same chat, preserving
-         the draft. Setup resumes on reload and never asks for a job.
-       - A primary agent above a flat chat list, apps in the desktop dock;
-         per-person archive, with existing agents and group chats searchable.
-       - Search over titles and messages (FTS5 in the Principal).
+       - First run (Skyler, 2026-10-12; Paul, 2026-10-13): the chat
+         opens as soon as its fragment exists, before the default agent is
+         made and its computer starts, with a card of the making as the
+         platform says it (each step's answer, the computer's phase; never
+         a message in the agent's name, nothing kept in the browser).
+         Typing starts at once; Send waits until the agent is a member.
+         Retries happen in the same chat, keeping what was typed; a
+         reload goes on from what was made. It never asks for a job.
+       - The person's one agent above a flat chat list (newest first),
+         apps in the desktop dock; per-person archive.
+       - Search over titles and messages (FTS5 in the Principal), from
+         the launcher.
        - Settings: the account, credit, computer, agents, connections,
-         the CLI, and the wallpaper's credit.
+         and the CLI, in sections with a section list.
        - An update prompt when the computer's image is behind.
        - It calls the API with the platform session (docs/api.md, The
          shell).

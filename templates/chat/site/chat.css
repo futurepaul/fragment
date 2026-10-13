@@ -112,8 +112,21 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 #latest { position: absolute; bottom: 12px; padding: 9px 15px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 3px 12px #0002; font: inherit; font-size: 13px; cursor: pointer; }
 .column { width: min(760px, calc(100vw - 16px)); margin: 0 0 0 max(8px, calc((100vw - 760px) / 2)); padding: 16px 17px 32px; }
 .msg { margin: 20px 0; }
-.setup-error { color: var(--danger-text); font-size: 14px; }
-.setup-error button { min-height: 36px; padding: 7px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-card); color: var(--text-primary); font: inherit; cursor: pointer; }
+/* the first run's making, as the platform has it (chat.js setupNodes): no one's message */
+.setup-card { margin: 20px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: var(--chat-message-radius); background: var(--surface-subtle); font-size: 13px; }
+.setup-title { margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; }
+.setup-steps { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.setup-steps li { display: flex; align-items: center; gap: 10px; color: var(--text-tertiary); }
+.setup-steps li::before { content: ""; flex: none; width: 12px; height: 12px; box-sizing: border-box; border: 2px solid var(--border-strong); border-radius: 50%; }
+.setup-steps li.doing { color: var(--text-primary); }
+.setup-steps li.doing::before { border-color: var(--text-primary); border-right-color: transparent; animation: spin .8s linear infinite; }
+.setup-steps li.done { color: var(--text-secondary); }
+.setup-steps li.done::before { border-color: var(--success); background: var(--success); }
+.setup-steps li.failed { color: var(--danger-text); }
+.setup-steps li.failed::before { border-color: var(--danger-text); }
+.setup-error { margin-top: 12px; color: var(--danger-text); font-size: 13px; }
+.setup-error p { margin: 0 0 8px; }
+.setup-error button { min-height: 34px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; cursor: pointer; }
 .setup-error button:disabled { opacity: .6; cursor: wait; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg.user.other { align-items: flex-start; }
@@ -132,7 +145,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 /* A person's words use the same body typography as the agent's response. */
 .bubble { width: fit-content; max-width: min(520px, 82%); padding: 10px 12px; border-radius: var(--chat-message-radius); background: var(--chat-user-bubble); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.user.other .bubble { background: color-mix(in srgb, var(--text-primary) 6%, transparent); border: 1px solid var(--border-strong); }
-.send-arriving > .bubble { opacity: 0; }
+.msg.user.mine.send-arriving > .bubble { opacity: 0; }
+/* a message of this page's the platform has not answered yet: dimmed, "Sending…" for its time */
+.msg.user.sending > .bubble { opacity: .55; }
 .bubble.send-flight { position: fixed; z-index: 10; left: 0; top: 0; max-width: none; margin: 0; pointer-events: none; transform-origin: center; will-change: transform, opacity; }
 .time { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; margin-top: 4px; }
 /* an agent's words: unboxed */
@@ -379,6 +394,6 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
   :root:not([data-mobile="false"]) .composer textarea { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i { animation: none; }
+  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i, .setup-steps li.doing::before { animation: none; }
   .composer::before, .composer::after { transition: none; }
 }

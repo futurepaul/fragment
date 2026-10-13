@@ -69,6 +69,8 @@
     <div class="gutter gutter-col" id="gutter-right" role="separator" aria-orientation="vertical" aria-label="Resize viewer" title="Drag to resize · double-click to reset"></div>
     <section class="viewer is-empty" id="viewer" aria-label="Viewer">
       <div class="stack" id="stack"></div>
+      <!-- an empty desktop: what lands here, and a few real requests (shell.js renderDesktopEmpty) -->
+      <div class="desktop-empty" id="desktop-empty" hidden></div>
       <div class="desktop-dock" aria-label="App dock">
         <nav id="apps" aria-label="Apps"></nav>
       </div>
@@ -84,30 +86,6 @@
   <div class="menu" id="menu" role="menu" hidden></div>
   <!-- the platform's share sheet (/share/<name>), framed here: it is this origin's -->
   <dialog class="sheet" id="sheet"></dialog>
-  <dialog class="rename-agent" id="new-agent-dialog" aria-labelledby="new-agent-title">
-    <form id="new-agent-form">
-      <h2 id="new-agent-title">A new agent</h2>
-      <p>What should it do? It takes the job, and says hello in its chat.</p>
-      <label for="new-agent-job">Its job</label>
-      <textarea id="new-agent-job" name="job" rows="4" maxlength="4000" required placeholder="Keep an eye on my garden: what to plant, when to water."></textarea>
-      <label for="new-agent-name">A name (optional)</label>
-      <input id="new-agent-name" name="name" maxlength="48" autocomplete="off" placeholder="It picks one if you don't">
-      <p id="new-agent-error" class="form-error" role="alert" hidden></p>
-      <div class="rename-actions"><button id="new-agent-cancel" type="button">Cancel</button><button type="submit" id="new-agent-go">Make it</button></div>
-    </form>
-  </dialog>
-  <!-- a group chat: two or more of the person's agents, the first picked its lead (decision 8) -->
-  <dialog class="rename-agent" id="new-group-dialog" aria-labelledby="new-group-title">
-    <form id="new-group-form">
-      <h2 id="new-group-title">A new group chat</h2>
-      <p>Pick two agents or more. The first you pick leads: it answers unless you @mention another.</p>
-      <div class="pick-agents" id="new-group-agents" role="group" aria-label="Its agents"></div>
-      <label for="new-group-name">A name (optional)</label>
-      <input id="new-group-name" name="name" maxlength="48" autocomplete="off" placeholder="Its agents' names if you don't">
-      <p id="new-group-error" class="form-error" role="alert" hidden></p>
-      <div class="rename-actions"><button id="new-group-cancel" type="button">Cancel</button><button type="submit" id="new-group-go" disabled>Make it</button></div>
-    </form>
-  </dialog>
   <dialog class="rename-agent" id="rename-agent" aria-labelledby="rename-title">
     <form id="rename-form">
       <h2 id="rename-title">Name your agent</h2>
@@ -130,7 +108,7 @@
   <dialog class="search-dialog" id="search-dialog" aria-label="Ask anything or find a chat">
     <div class="search-panel">
       <form class="search-input-wrap" id="search-form">
-        <input id="workspace-search" type="text" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results">
+        <input id="workspace-search" type="text" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results">
         <button class="icon-button search-send" id="search-send" type="submit" aria-label="Start a new chat" title="Start a new chat" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
       </form>
       <div class="search-results" id="search-results"></div>
