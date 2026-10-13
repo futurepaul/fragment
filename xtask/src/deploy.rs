@@ -22,6 +22,11 @@
 //! fragments are `<name>--b.<zone>` (one wildcard DNS record
 //! and certificate cover them all). Its repos are named `b--…` in the
 //! code.storage org, so it never touches another deployment's.
+//!
+//! A deployment of its own names its hosts instead of a zone: the
+//! platform's (`platform_host`) and the fragments' suffix
+//! (`fragment_suffix`), each a zone's own name, so its routes are in two
+//! zones (or one, named twice), each in its host's.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,11 +47,13 @@ use serde_json::{json, Value};
 struct Deployment {
     /// The Cloudflare account it deploys to.
     account_id: String,
-    /// The zone its routes are on (it must be proxied by Cloudflare).
-    zone: String,
+    /// A branch deployment's zone, which its routes are on: its platform is
+    /// `<branch>.<zone>`. A deployment of its own names none (refused).
+    zone: Option<String>,
     /// The platform's host and the fragments' suffix, for a deployment of
-    /// its own (production: `fragment.club`, `fragment.boats`). A branch
-    /// deployment's come from the zone.
+    /// its own (production: `fragment.club`, `fragment.boats`): each a
+    /// zone's own name on the account (the same one, for one zone for
+    /// both), and each route is in its host's zone.
     platform_host: Option<String>,
     fragment_suffix: Option<String>,
     /// A Cloudflare API token with DNS Edit on the zones, by path: with it,
@@ -348,17 +355,25 @@ struct Names {
     suffix: String,
     /// `--<branch>`, for a branch.
     label_suffix: Option<String>,
-    routes: Vec<String>,
+    routes: Vec<Route>,
     /// The hosts those routes answer on, which must be proxied.
     dns: Vec<crate::dns::Wanted>,
     /// Repos this deployment makes are named with this before them.
     repo_prefix: Option<String>,
 }
 
+/// A Worker route, and the zone it is in (wrangler's `zone_name`).
+#[derive(Debug, PartialEq, Eq)]
+struct Route {
+    pattern: String,
+    zone: String,
+}
+
 fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
     match (branch, &d.platform_host, &d.fragment_suffix) {
         (Some(b), None, None) => {
             anyhow::ensure!(valid_branch(b), "a branch is 1-16 of a-z, 0-9 and single dashes inside, not {b:?}");
+            let zone = d.zone.as_deref().context("a --branch deploys at <branch>.<zone>: the config names its zone")?;
             Ok(Names {
                 cell: format!("fragment-{b}"),
                 jobs: format!("fragment-jobs-{b}"),
@@ -366,34 +381,39 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: format!("fragment-deliveries-dead-{b}"),
                 ledger: format!("fragment-ledger-{b}"),
                 bucket: format!("fragment-blobs-{b}"),
-                platform_host: format!("{b}.{}", d.zone),
-                suffix: d.zone.clone(),
+                platform_host: format!("{b}.{zone}"),
+                suffix: zone.to_string(),
                 label_suffix: Some(format!("--{b}")),
-                routes: vec![format!("{b}.{}/*", d.zone), format!("*--{b}.{}/*", d.zone)],
+                routes: vec![Route { pattern: format!("{b}.{zone}/*"), zone: zone.into() }, Route { pattern: format!("*--{b}.{zone}/*"), zone: zone.into() }],
                 // one wildcard covers every branch's platform and fragments
-                dns: vec![crate::dns::Wanted { zone: d.zone.clone(), name: format!("*.{}", d.zone) }],
+                dns: vec![crate::dns::Wanted { zone: zone.into(), name: format!("*.{zone}") }],
                 repo_prefix: Some(format!("{b}--")),
             })
         }
-        (None, Some(platform), Some(suffix)) => Ok(Names {
-            cell: "fragment".into(),
-            jobs: "fragment-jobs".into(),
-            deliveries: "fragment-deliveries".into(),
-            dead: "fragment-deliveries-dead".into(),
-            ledger: "fragment-ledger".into(),
-            bucket: "fragment-blobs".into(),
-            platform_host: platform.clone(),
-            suffix: suffix.clone(),
-            label_suffix: None,
-            routes: vec![format!("{platform}/*"), format!("*.{suffix}/*")],
-            // each its own zone on the account (the config's comment says so)
-            dns: vec![
-                crate::dns::Wanted { zone: platform.clone(), name: platform.clone() },
-                crate::dns::Wanted { zone: suffix.clone(), name: format!("*.{suffix}") },
-            ],
-            repo_prefix: None,
-        }),
-        (Some(_), _, _) => bail!("a config with platform_host and fragment_suffix deploys one deployment of its own: no --branch"),
+        (None, Some(platform), Some(suffix)) => {
+            if let Some(zone) = &d.zone {
+                bail!("zone ({zone}) is a branch deployment's: a deployment of its own is on its hosts' zones, platform_host's and fragment_suffix's. Remove it");
+            }
+            Ok(Names {
+                cell: "fragment".into(),
+                jobs: "fragment-jobs".into(),
+                deliveries: "fragment-deliveries".into(),
+                dead: "fragment-deliveries-dead".into(),
+                ledger: "fragment-ledger".into(),
+                bucket: "fragment-blobs".into(),
+                platform_host: platform.clone(),
+                suffix: suffix.clone(),
+                label_suffix: None,
+                // each host a zone's own name: its route is in that zone
+                routes: vec![Route { pattern: format!("{platform}/*"), zone: platform.clone() }, Route { pattern: format!("*.{suffix}/*"), zone: suffix.clone() }],
+                dns: vec![
+                    crate::dns::Wanted { zone: platform.clone(), name: platform.clone() },
+                    crate::dns::Wanted { zone: suffix.clone(), name: format!("*.{suffix}") },
+                ],
+                repo_prefix: None,
+            })
+        }
+        (Some(_), _, _) => bail!("a config naming platform_host or fragment_suffix deploys one deployment of its own: no --branch"),
         (None, _, _) => bail!("name a --branch (or give the config both platform_host and fragment_suffix)"),
     }
 }
@@ -685,7 +705,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     c.insert("workers_dev".into(), json!(false));
     c.insert("preview_urls".into(), json!(false));
     c.insert("observability".into(), json!({ "enabled": true }));
-    c.insert("routes".into(), json!(n.routes.iter().map(|p| json!({ "pattern": p, "zone_name": d.zone })).collect::<Vec<_>>()));
+    c.insert("routes".into(), json!(n.routes.iter().map(|r| json!({ "pattern": r.pattern, "zone_name": r.zone })).collect::<Vec<_>>()));
     c.insert("workflows".into(), json!([{ "name": n.jobs, "binding": "JOBS", "class_name": "Job" }]));
     c.insert("r2_buckets".into(), json!([{ "binding": "BLOBS", "bucket_name": n.bucket }]));
     // every queue the checked-in config names, renamed for this deployment
@@ -827,8 +847,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let (config, branch) = (config.ok_or_else(usage)?, branch.ok_or_else(usage)?);
     let d = load(&config)?;
     // a deployment of its own takes no --branch: production never runs it
-    names(&d, Some(&branch)).context("the hosted lane runs on a branch deployment (a preview)")?;
-    let mut args = vec!["--hosted".to_string(), "--zone".into(), d.zone.clone(), "--branch".into(), branch.clone()];
+    let n = names(&d, Some(&branch)).context("the hosted lane runs on a branch deployment (a preview)")?;
+    // a branch's suffix is its zone
+    let mut args = vec!["--hosted".to_string(), "--zone".into(), n.suffix, "--branch".into(), branch.clone()];
     if let Some(file) = test_secret_file(&d, Some(&branch))? {
         args.extend(["--secret-file".to_string(), expand(file).to_string_lossy().into_owned()]);
     }
@@ -874,10 +895,12 @@ pub fn teardown(rest: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A branch config (on the zone finite.place) with neither host, else a
+    /// deployment of its own's (no zone).
     fn deployment(platform: Option<&str>, suffix: Option<&str>) -> Deployment {
         Deployment {
             account_id: "acct".into(),
-            zone: "finite.place".into(),
+            zone: (platform.is_none() && suffix.is_none()).then(|| "finite.place".into()),
             platform_host: platform.map(str::to_string),
             fragment_suffix: suffix.map(str::to_string),
             dns_token_file: None,
@@ -999,31 +1022,58 @@ mod tests {
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");
-        assert_eq!(n.routes, ["dev.finite.place/*", "*--dev.finite.place/*"]);
+        // both routes in the one zone, as the Worker's config renders them
+        let cell = worker_config(&deployment(None, None), &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        assert_eq!(cell["routes"], json!([{ "pattern": "dev.finite.place/*", "zone_name": "finite.place" }, { "pattern": "*--dev.finite.place/*", "zone_name": "finite.place" }]));
         // one wildcard in the zone covers the platform and every fragment
         assert_eq!(n.dns, [crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() }]);
         assert_eq!((n.label_suffix.as_deref(), n.repo_prefix.as_deref()), (Some("--dev"), Some("dev--")));
         for bad in ["", "Dev", "a--b", "-a", "a-", "a.b", "seventeen-letters"] {
             assert!(names(&deployment(None, None), Some(bad)).is_err(), "{bad:?}");
         }
+        // a branch is at <branch>.<zone>: a config without a zone has none
+        let mut zoneless = deployment(None, None);
+        zoneless.zone = None;
+        let refused = names(&zoneless, Some("dev")).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("names its zone"), "{refused}");
     }
 
+    /// A deployment of its own is on two zones: the platform's route and
+    /// record in the platform's, the fragments' in the suffix's. It names
+    /// no zone of its own, takes no branch, and names both hosts.
     #[test]
-    fn a_deployment_of_its_own_takes_no_branch() {
-        let d = deployment(Some("fragment.club"), Some("fragment.boats"));
+    fn a_deployment_of_its_own_routes_each_host_in_its_zone() {
+        let d = deployment(Some("finite.chat"), Some("finite.place"));
         let n = names(&d, None).unwrap();
-        assert_eq!(n.routes, ["fragment.club/*", "*.fragment.boats/*"]);
+        assert_eq!((n.platform_host.as_str(), n.suffix.as_str()), ("finite.chat", "finite.place"));
+        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        assert_eq!(cell["routes"], json!([{ "pattern": "finite.chat/*", "zone_name": "finite.chat" }, { "pattern": "*.finite.place/*", "zone_name": "finite.place" }]));
+        assert_eq!((cell["vars"]["FRAGMENT_PLATFORM_URL"].as_str(), cell["vars"]["FRAGMENT_HOST_SUFFIX"].as_str()), (Some("https://finite.chat"), Some("finite.place")));
+        assert!(cell["vars"].get("FRAGMENT_HOST_LABEL_SUFFIX").is_none() && cell["vars"].get("CODESTORAGE_REPO_PREFIX").is_none());
         assert_eq!(
             n.dns,
             [
-                crate::dns::Wanted { zone: "fragment.club".into(), name: "fragment.club".into() },
-                crate::dns::Wanted { zone: "fragment.boats".into(), name: "*.fragment.boats".into() },
+                crate::dns::Wanted { zone: "finite.chat".into(), name: "finite.chat".into() },
+                crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() },
             ]
         );
         assert_eq!((n.label_suffix, n.repo_prefix), (None, None));
+        // one zone for both: each route in it
+        let one = deployment(Some("example.dev"), Some("example.dev"));
+        let n = names(&one, None).unwrap();
+        assert_eq!(n.routes, [Route { pattern: "example.dev/*".into(), zone: "example.dev".into() }, Route { pattern: "*.example.dev/*".into(), zone: "example.dev".into() }]);
+        // a zone beside its hosts is a branch config's: refused, never ignored
+        let mut zoned = deployment(Some("finite.chat"), Some("finite.place"));
+        zoned.zone = Some("finite.place".into());
+        let refused = names(&zoned, None).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("zone (finite.place) is a branch deployment's"), "{refused}");
         assert!(names(&d, Some("b")).is_err());
         assert!(names(&deployment(None, None), None).is_err());
-        assert!(names(&deployment(Some("fragment.club"), None), None).is_err());
+        // one host alone is neither kind, with a branch or without
+        for half in [deployment(Some("finite.chat"), None), deployment(None, Some("finite.place"))] {
+            assert!(names(&half, None).err().is_some_and(|e| e.to_string().contains("both platform_host and fragment_suffix")));
+            assert!(names(&half, Some("b")).err().is_some_and(|e| e.to_string().contains("no --branch")));
+        }
     }
 
     /// The example and the hosted e2e's configs parse and check, each with
