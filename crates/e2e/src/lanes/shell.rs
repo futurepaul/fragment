@@ -897,7 +897,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(document.getElementById('settings-page').scrollTop = 1e6, true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-end.png"));
     b.reload(&page)?;
-    let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
+    let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Account')", wait);
     s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
     b.click(&page, "#chats .agent-row")?;
     let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
@@ -906,6 +906,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "history.forward(), true")?;
     let forward = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
     s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname")?);
+    // settings fill the work area: a window opened there (an agent's Open)
+    // goes back to the open chat, the window beside it, seen
+    b.click(&page, "#settings")?;
+    let listed = b.until(&page, "location.pathname === '/settings' && [...document.querySelectorAll('#settings-page .settings-section button.row')].some((b) => b.textContent === 'Open')", wait);
+    b.eval(&page, "([...document.querySelectorAll('#settings-page .settings-section button.row')].find((b) => b.textContent === 'Open')?.click(), true)")?;
+    let seen = b.until(
+        &page,
+        "location.pathname === '/' && !document.getElementById('layout').classList.contains('settings-view') && document.getElementById('viewer').getBoundingClientRect().width > 0 && !!document.querySelector('#stack .pane iframe')",
+        wait,
+    );
+    s.ok("an agent's Open in settings goes back to the chat, its window beside it", listed && seen, b.eval(&page, "({ path: location.pathname, view: document.getElementById('layout').className, panes: [...document.querySelectorAll('#stack .pane')].map((p) => p.dataset.key) })")?);
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;
@@ -1223,8 +1234,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = first[2].as_array().cloned().unwrap_or_default();
     s.ok(
-        "then each agent offers the provider's models, after Workers AI's (included), which it runs on now",
-        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI (included)") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
+        "then each agent offers the provider's models, after Workers AI's, which it runs on now",
+        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
         &pickers,
     );
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);

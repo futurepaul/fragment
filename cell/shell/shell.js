@@ -187,7 +187,12 @@ addEventListener("keydown", (e) => {
   layout.toggle(e.altKey ? "right" : "left");
 });
 const leaveSidebar = () => { if (layout.narrow) layout.hide("left"); };
+// A window is seen beside the chat: settings fill the work area, so one
+// opened from there (an agent's Open, a screen, the skills) goes back to
+// the open chat first, or, with none, lets the viewer show beside them.
 function show(spec) {
+  if (state.page && byName(state.current)) openChat(state.current);
+  else $("layout").classList.remove("settings-view");
   viewer.open(spec);
   layout.show("right");
 }
@@ -576,6 +581,7 @@ function openChat(name, push = true) {
   if (!byName(name)) return;
   if (push) at("/");
   state.page = null;
+  $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
   $("frames").hidden = false;
   state.current = name;
@@ -1382,10 +1388,27 @@ function section(title, ...children) {
   s.append(el("h2", null, title), ...children);
   return s;
 }
-function line(label, value) {
-  const p = el("p", "settings-line");
-  p.append(el("span", "settings-key", label), el("span", "settings-value", value));
+function line(label, value, action) {
+  const p = el(action ? "div" : "p", action ? "settings-line settings-line-with-action" : "settings-line");
+  const key = el("span", "settings-key", label);
+  const text = el("span", "settings-value", value);
+  if (action) {
+    const info = el("div", "settings-info");
+    info.append(key, text);
+    const control = el("div", "settings-control");
+    control.append(action);
+    p.append(info, control);
+  } else p.append(key, text);
   return p;
+}
+function actionLine(label, ...actions) {
+  const row = el("div", "settings-line settings-action-line");
+  const key = el("span", "settings-key");
+  key.append(label);
+  const control = el("div", "settings-control");
+  control.append(...actions);
+  row.append(key, control);
+  return row;
 }
 // a sentence whose `quoted` parts are code
 function say(text) {
@@ -1393,9 +1416,48 @@ function say(text) {
   text.split("`").forEach((part, i) => p.append(i % 2 ? el("code", null, part) : part));
   return p;
 }
+function renderSettingsPage(page, sections) {
+  const layout = el("div", "settings-layout");
+  const nav = el("nav", "settings-nav");
+  nav.setAttribute("aria-label", "Settings sections");
+  nav.append(el("span", "settings-nav-title", "Settings"));
+  const content = el("div", "settings-content");
+  const intro = el("header", "settings-intro");
+  intro.append(el("h1", null, "Settings"), el("p", null, state.guest ? "Manage your account and billing." : "Manage your account, your computer, and the tools your agents use."));
+  content.append(intro);
+  const links = [];
+  sections.forEach((section, index) => {
+    const heading = section.querySelector(":scope > h2");
+    if (heading) {
+      if (!section.id) section.id = `settings-section-${index}`;
+      heading.tabIndex = -1;
+      const jump = el("button", "settings-nav-link", heading.textContent);
+      jump.type = "button";
+      jump.onclick = () => {
+        section.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+        heading.focus({ preventScroll: true });
+      };
+      nav.append(jump);
+      links.push([section, jump]);
+    }
+    content.append(section);
+  });
+  layout.append(nav, content);
+  page.replaceChildren(layout);
+  page.onscroll = () => {
+    const top = page.getBoundingClientRect().top + 130;
+    const current = [...links].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
+    for (const [, button] of links) {
+      if (button === current) button.setAttribute("aria-current", "location");
+      else button.removeAttribute("aria-current");
+    }
+  };
+  page.onscroll();
+}
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
   state.page = "Settings";
+  $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
@@ -1404,7 +1466,7 @@ async function openSettings(push = true) {
   renderChats();
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read
-  const billingHelpers = { api, el, section, line, usd, reopen: () => openSettings(false) };
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false) };
   const back = await returning(billingHelpers);
   const [ledger, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
@@ -1441,9 +1503,8 @@ async function openSettings(push = true) {
       openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
-  account.append(picture);
+  account.append(actionLine("Picture", picture));
   // another sign-in (an email, a provider) that is this person too, and signing out
-  const actions = el("div", "settings-actions");
   const link = el("a", "quiet", "Add another sign-in");
   link.href = `/auth/link?return=${encodeURIComponent(SETTINGS)}`;
   const signout = el("form");
@@ -1452,13 +1513,12 @@ async function openSettings(push = true) {
   const out = el("button", "quiet", "Sign out");
   out.type = "submit";
   signout.append(out);
-  actions.append(link, signout);
-  account.append(actions);
+  account.append(actionLine("Sign-ins", link), actionLine("Session", signout));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, back);
   // a guest has no agents to stop, nor a computer, skills or connections
   // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return page.replaceChildren(...billing, account, ...credited(WALLPAPER));
+  if (state.guest) return renderSettingsPage(page, [...billing, account, ...credited(WALLPAPER)]);
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -1481,17 +1541,19 @@ async function openSettings(push = true) {
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   // each agent's own desktop
+  const screens = [];
   for (const a of c ? state.agents.values() : []) {
     const screen = el("button", "quiet", `Open ${titleOf(a.fragment)}'s screen`);
     screen.type = "button";
     screen.onclick = () => openScreen(a.fragment);
-    computer.append(screen);
+    screens.push(screen);
   }
+  if (screens.length) computer.append(actionLine("Screens", ...screens));
   // the way back to working when something is wrong with it: asked once
   // more before it cuts what its agents are doing
   if (c) {
     computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
-    const row = el("div", "settings-actions");
+    const row = el("span", "settings-actions");
     const go = el("button", "quiet", "Restart computer");
     go.type = "button";
     go.dataset.action = "restart-ask";
@@ -1506,7 +1568,7 @@ async function openSettings(push = true) {
       row.replaceChildren(sure, cancel);
     };
     row.append(go);
-    computer.append(row);
+    computer.append(actionLine("Restart", row));
   }
   const agents = section("Agents");
   const mine = [...state.agents.values()];
@@ -1514,11 +1576,13 @@ async function openSettings(push = true) {
   const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
   if (mine.length && modeled.length) agents.append(say("Each agent runs on Workers AI's model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
   agents.append(...(mine.length ? mine.map((a) => {
-    const row = el("button", "row");
+    const row = el("button", "row", "Open");
     row.type = "button";
-    row.append(avatar({ color: colorOf(a.identity) }, "small"), el("span", "label", titleOf(a.fragment)));
     row.onclick = () => openApp(a.fragment);
-    return modeled.length ? modelPicker(a, row, modeled) : row;
+    const name = el("span", "settings-agent-name");
+    name.append(avatar({ color: colorOf(a.identity) }, "small"), titleOf(a.fragment));
+    const agentRow = actionLine(name, row);
+    return modeled.length ? modelPicker(a, agentRow, modeled) : agentRow;
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
@@ -1530,7 +1594,7 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, ...billing, computer, agents, accessSection(access), skills, connections, cli, ...credited(WALLPAPER));
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli, ...credited(WALLPAPER)]);
 }
 
 // ---- settings' Sharing: who has access to what the person owns (GET
@@ -1687,7 +1751,7 @@ function accessSection(access) {
     tabs.append(b);
   }
   draw();
-  s.append(tabs, body);
+  s.append(actionLine("Show", tabs), body);
   return s;
 }
 
@@ -1708,7 +1772,7 @@ function modelPicker(a, row, modeled) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
-  pick.append(modelOption("", "Workers AI (included)"));
+  pick.append(modelOption("", "Workers AI"));
   for (const p of modeled) {
     const group = el("optgroup");
     group.label = `${providerName(p.provider)} (your account)`;
@@ -1789,14 +1853,17 @@ function connectionsSection(linked, uses) {
     row.dataset.kind = p.kind;
     row.dataset.state = p.state;
     const head = el("div", "provider-head");
+    const identity = el("div", "provider-identity");
     // an own key signed in to is the person's account there, its models theirs to pick
     const kind = p.signIn ? (p.models?.length ? "Your account: its models for your agents" : "Your account") : PROVIDER_KIND[p.kind] ?? p.kind;
-    head.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
+    identity.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
     const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
     const st = el("span", `provider-state ${p.state}`, stateName);
-    head.append(st);
+    identity.append(st);
+    head.append(identity);
     row.append(head);
     const actions = el("div", "settings-actions");
+    const details = [];
     if (p.kind === "connection" && p.state !== "connected") {
       const go = el("button", "quiet", p.state === "needs_reauthorization" ? "Connect again" : "Connect");
       go.type = "button";
@@ -1835,7 +1902,7 @@ function connectionsSection(linked, uses) {
           }
         };
         actions.append(go);
-        if (p.models?.length) actions.append(el("span", "muted", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
+        if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
       } else {
         const off = el("button", "quiet", "Disconnect");
         off.type = "button";
@@ -1884,9 +1951,10 @@ function connectionsSection(linked, uses) {
       }
     }
     if (p.kind === "operator" && p.price) {
-      actions.append(el("span", "muted", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
+      details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
     }
-    if (actions.childElementCount) row.append(actions);
+    if (actions.childElementCount) head.append(actions);
+    row.append(...details);
     // which agents may use it: all by default; one narrowed to a list uses those
     if (agents.length) {
       const who = el("div", "provider-agents");
@@ -1980,7 +2048,7 @@ async function skillsSection() {
     const add = el("button", "quiet", "Add the managed skills");
     add.type = "button";
     add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
-    s.append(el("p", "muted", "Your agents have no managed skills yet."), add);
+    s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
   } else {
     const paths = await filesOf(mine.name);
     if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
@@ -1997,7 +2065,7 @@ async function skillsSection() {
       const open = el("button", "quiet", "Open your skills");
       open.type = "button";
       open.onclick = () => openApp(mine.name);
-      s.append(open);
+      s.append(actionLine("Managed skills", open));
     }
   }
   // each agent's own skills, from its fragment
