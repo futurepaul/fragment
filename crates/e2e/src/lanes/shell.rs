@@ -1047,10 +1047,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     // the list: the sidebar over the chat, its + the launcher, bottom right
     b.click(&page, "#toggle-left")?;
-    let list = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2", wait);
-    let fab = b.eval(&page, "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()")?;
+    // (once the list has slid in: its + is fixed within it while it moves)
+    let fab_expr = "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()";
+    let list = b.until(&page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {fab_expr}"), wait);
+    let fab = b.eval(&page, &format!("({{ fab: {fab_expr}, at: (() => {{ const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; }})() }})"))?;
     let _ = b.screenshot(&page, &shots.join("phone-list.png"));
-    s.ok("on a phone the list covers the chat, its + the launcher at its bottom right, a thumb's size", list && fab == true, &fab);
+    s.ok("on a phone the list covers the chat, its + the launcher at its bottom right, a thumb's size", list && fab["fab"] == true, &fab);
     b.eval(&page, "(document.getElementById('scrim').click(), true)")?;
     b.until(&page, "!document.getElementById('layout').classList.contains('left-open')", wait);
     // an app's window on a phone: the desktop is a sheet from the bottom, the
