@@ -59,7 +59,7 @@ const CATALOG = [
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity
-const state = { me: null, guest: false, fragments: [], computer: null, defaultImage: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1330,32 +1330,6 @@ async function updateLater(version, button) {
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
 }
-function renderUpdate() {
-  const c = state.computer;
-  const due = !!(c && state.defaultImage && c.image !== state.defaultImage);
-  $("update").hidden = !due;
-}
-$("update-pill").onclick = () => { $("update-confirm").hidden = false; $("update-pill").hidden = true; };
-$("update-cancel").onclick = () => { $("update-confirm").hidden = true; $("update-pill").hidden = false; };
-// an update is the person's to start (a new version applies at a wake):
-// pinned to the default, it sleeps and wakes on the new image
-$("update-go").onclick = async () => {
-  const c = state.computer;
-  $("update-go").disabled = true;
-  try {
-    await api("PUT", `/api/computers/${seg(c.computer)}/image`, { image: state.defaultImage });
-    await api("POST", `/api/computers/${seg(c.computer)}/sleep`, {});
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/wake`, {}));
-    $("update-confirm").hidden = true;
-    $("update-pill").hidden = false;
-    renderUpdate();
-  } catch (e) {
-    $("update-text").textContent = `The update did not finish: ${e.message}`;
-  } finally {
-    $("update-go").disabled = false;
-  }
-};
-
 // ---- where the page is: `/` its chats, `/settings` its settings,
 // `/welcome` a new person's welcome; each view says so in the address, so
 // a reload or a link stays put ----
@@ -2101,13 +2075,11 @@ async function load(changed = false) {
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
   state.computer = computers.computers?.[0] ?? null;
-  state.defaultImage = computers.defaultImage ?? null;
   state.support = computers.support ?? null;
   state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   renderChats();
   renderApps();
   renderHeading();
-  renderUpdate();
   renderComputer();
   rosterChanged();
   markSeen();

@@ -119,7 +119,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
 | **A deploy that changes its image** (the common update: the same name, a new image) | the deploy pushes it; awake, it keeps the image it started on until its next sleep or a restart | nothing: it ran the old image until it slept, and its owner restarted it to be sure | an `update` notice while it is awake and no turn runs: an update is ready, Restart (about a minute; its chats and work kept), or Later; nothing while it sleeps or is asleep, since its next start takes it. Settings shows the version it runs and the latest |
-| **A pin to another image** (a renamed default, a canary, a rollback) | its owner's pin | the update pill (pinned to the default, then a sleep and a wake) | the same; awake on the old image, the `update` notice too |
+| **A pin to another image** (a canary, a rollback: below, "Stable and canary") | its owner's pin | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
 
 **The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
 proto's `ComputerNotice`), the most pressing first, each derived from the
@@ -223,9 +223,10 @@ for days.
   version it runs (`9f86d081884c`; asleep, the one it starts on)
   and, running an older one, the latest.
 
-The update pill stays for the deployment's default image renamed, which
-the notice does not cover: pinned to the old name, a computer's restart
-starts that one again. The pill pins it to the new name first.
+A default is never renamed (a promotion moves the name: below, "Stable
+and canary"), so the shell's update pill, which pinned a computer to a
+renamed default, went (2026-10-13): pinned to a canary, its person would
+have been offered stable as an update.
 
 **Does use extend the bound? No: it never stops a computer in use.** A
 computer is stopped for its bound only at a sleep, and a sleep is tried
@@ -266,6 +267,73 @@ address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
 `support`). The shell links it once a restart has failed too; without
 one, the notice shows the computer's id and the platform's words, to give
 whoever runs it.
+
+## Stable and canary
+
+A new image reaches a few people first, and everyone after it has proved
+itself (decision 19: a canary is a per-computer pin; Paul, 2026-10-13:
+"a few rounds of successful upgrades to the hermes image so we know
+that's seamless for users (including a canary path)"). A deployment's
+config names two images (xtask/src/deploy.rs, `computers.images`):
+
+```jsonc
+"default_image": "hermes",
+"images": {
+  "hermes":        { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
+  "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+}
+```
+
+- **Stable** is the default, kept at a digest: wrangler builds nothing
+  for it, prepares the image the account's registry already holds, and
+  refuses the deploy when it does not hold it; the deploy refuses, before
+  it builds anything, a reference that is no digest in its own account's
+  registry. It changes only when its line does, so a deploy tells the
+  computers on it nothing. New computers start on it.
+- **The canary** is built from the tree at every deploy (on the preview,
+  master's). A computer pinned to it is on the canary: every deploy that
+  changes its image tells it an update is ready, as any deploy that
+  changes an image tells (above).
+- **Where a digest comes from.** A deploy names each image's reference as
+  wrangler prepares it (`hermes-canary is ready to run`, then
+  `registry.cloudflare.com/…@sha256:…`); the version Settings shows is its
+  digest's first 12 hex digits.
+- **Promotion**: the canary's digest becomes stable's line, and a deploy.
+  Every computer on stable then runs another version than the one its
+  next start runs: asleep, its next wake takes it (from the image and its
+  save: the snapshot is of the old image), paying the new image's pull;
+  awake, its owner is told an update is ready (Restart, or Later, or its
+  next sleep); always on, only told. The canary's computers are told
+  nothing: they run that digest already.
+- **Rollback**: a canary computer is pinned back to `hermes`, told as any
+  pin is (the `update` notice; "an update" is another version, older or
+  newer). Stable goes back by its previous line, and a deploy. Keep the
+  line a promotion replaced, commented, for that.
+- **A name stays.** A computer pinned to a name the deployment no longer
+  has has no image to start. `hermes-canary` is kept: between rounds its
+  digest is stable's, or master's ahead of it.
+- **The cell is ahead of stable.** The cell deploys from the tree at every
+  deploy; stable lags by a round. An awake computer already runs its old
+  image across a deploy, for days if always on, but a round makes that
+  the rule: a change to what the guest relies on (this contract, the
+  bridge's routes, the CLI's) is additive, and what it replaces goes only
+  once stable has moved past it.
+- **A Hermes release is forward only** (Paul, 2026-10-13). Launch-week
+  rounds change only our layers (the bridge, hermes-boot, the CLI and the
+  image's own files) on Hermes v0.21.6's base, so a computer pinned back
+  runs the older image on a `/data` the newer wrote, files our code reads
+  either way. A new Hermes release may move its databases' schema
+  forward, and a computer keeps three saves, each turn's end replacing the
+  oldest, so within a day no save from before the canary is left (decision
+  19's point-in-time restore has none to go back to): pinned back, an
+  older Hermes would start on a newer schema. So a bad Hermes release is
+  fixed by the next one, until a computer keeps the save an image change
+  started from (docs/technical-debt-ledger.md).
+- **Production** keeps its images in its own account's registry, which
+  holds none of the preview's digests (the deploy refuses another
+  account's). Its first deploy builds `hermes` from the release commit;
+  its line is then pinned to the digest that deploy names, and its own
+  canary group goes ahead of it as the preview's does.
 
 ## The guest's contract
 
