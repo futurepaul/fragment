@@ -563,15 +563,16 @@ function unreadMark(f) {
   return [b];
 }
 // The person's one agent (Paul, 2026-10-13: "just one", a setting later):
-// their first agent fragment, as their list orders it, the one the first
-// run makes (`defaultAgent`), with its identity once their computer runs
-// it. New chats are with it. Any other agents they have stay out of the
-// sidebar; their chats are chats, so they list and search as any other.
+// their first, the one the first run makes (`defaultAgent`): the first
+// their computer took (its view lists its agents in the order it took
+// them), or, before it took one, their agent fragment. New chats are with
+// it. Any other agents they have stay out of the sidebar; their chats are
+// chats, so they list and search as any other.
 function primaryAgent() {
+  const first = [...state.agents.values()].find((a) => byName(a.fragment)?.role === "owner");
+  if (first) return { fragment: first.fragment, identity: first.identity };
   const f = state.fragments.find((x) => x.kind === "agent" && own(x));
-  if (!f) return null;
-  const a = [...state.agents.values()].find((x) => x.fragment === f.name);
-  return { fragment: f.name, identity: a?.identity ?? null };
+  return f ? { fragment: f.name, identity: null } : null;
 }
 // Newest first: a chat by when its newest message was said (its row's
 // `previewAt`); one with nothing said yet (just made) above them all.
@@ -2222,10 +2223,10 @@ async function owesFirstAgent() {
   if (state.guest) return false;
   if (!chats().length) return true;
   if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
-  const agent = state.fragments.find((f) => f.kind === "agent" && own(f));
+  const agent = primaryAgent();
   if (!agent) return chats().every(unjoined);
-  const id = [...state.agents.values()].find((a) => a.fragment === agent.name)?.identity;
-  const itsChat = agentsOwnChat(agent.name);
+  const { identity: id } = agent;
+  const itsChat = agentsOwnChat(agent.fragment);
   if (!id || !itsChat) return true;
   const members = await api("GET", `/api/f/${seg(itsChat.name)}/members`).catch(() => null);
   return !!members && !(members.members ?? []).some((m) => m.principal === id);
@@ -2237,10 +2238,10 @@ async function defaultAgent() {
   const owner = state.me.email || "your person";
   if (!setup) {
     // an earlier try's names, by what it made: its agent, else its chat
-    const agent = state.fragments.find((f) => f.kind === "agent" && own(f));
-    const chat = agent ? agentsOwnChat(agent.name) : chats().find(unjoined);
-    const title = agent?.title || chat?.title || pickName();
-    const label = agent ? labelOf(agent.name) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : freeLabel(slug(title));
+    const agent = primaryAgent();
+    const chat = agent ? agentsOwnChat(agent.fragment) : chats().find(unjoined);
+    const title = (agent && titleOf(agent.fragment)) || chat?.title || pickName();
+    const label = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : freeLabel(slug(title));
     setup = { label, title, chat: null, made: false, joined: false, ready: false, error: null };
   }
   setupChanged({ error: null });

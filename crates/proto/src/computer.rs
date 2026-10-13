@@ -243,6 +243,8 @@ pub struct ComputerView {
     /// ready. Its owner's view only (the guest's is empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<ComputerNotice>,
+    /// Its agents, in the order it took them: its owner's first is first
+    /// (the shell's one agent: docs/api.md, The shell).
     pub agents: Vec<ComputerAgent>,
     /// Its own origin, where its ports are served.
     pub origin: String,

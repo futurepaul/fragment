@@ -1733,9 +1733,10 @@ Anything else needs a signature as before. Adding a key still needs a
 key.
 
 Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
-2026-10-13): their **one agent** above (their first agent fragment as
-the list orders it, the one the first run makes; a menu of New chat,
-Rename, its profile and its screen), then their chats (kind `chat`) as
+2026-10-13): their **one agent** above (their first, the one the first
+run makes: the first their computer took, as its view lists its agents in
+the order it took them; a menu of New chat, Rename, its profile and its
+screen), then their chats (kind `chat`) as
 one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
