@@ -1745,13 +1745,18 @@ impl Images {
     }
 }
 
-/// The version of the image a computer runs now: its running start's, once
-/// it came up (awake, or going to sleep); none while it runs nothing.
-pub fn version_running(life: &Lifecycle, saves: &Saves) -> Option<String> {
+/// The reference of the image a computer runs now: its running start's,
+/// once it came up (awake, or going to sleep); none while it runs nothing.
+pub fn image_running<'a>(life: &Lifecycle, saves: &'a Saves) -> Option<&'a str> {
     match life.phase {
-        Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => saves.image_of(generation).map(version_of),
+        Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => saves.image_of(generation),
         Phase::Asleep | Phase::Starting { .. } | Phase::Failed { .. } => None,
     }
+}
+
+/// The version of the image a computer runs now (`image_running`'s).
+pub fn version_running(life: &Lifecycle, saves: &Saves) -> Option<String> {
+    image_running(life, saves).map(version_of)
 }
 
 /// A support link is at most this long.

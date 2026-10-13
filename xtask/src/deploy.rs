@@ -131,9 +131,12 @@ struct Deployment {
 struct Computers {
     /// The image a new computer is pinned to (one of `images`).
     default_image: String,
-    /// By name: each image's Dockerfile and build context, relative to the
-    /// repo (`images/hermes/Dockerfile`, `.`: the Hermes image carries the CLI,
-    /// so it builds from the repo root), and its build variables.
+    /// By name: each image built at every deploy (its Dockerfile and build
+    /// context, relative to the repo: `images/hermes/Dockerfile`, `.`, as the
+    /// Hermes image carries the CLI and builds from the repo root; and its
+    /// build variables), or kept at a digest the account's registry holds
+    /// (`{"image": …@sha256:…}`): the stable image a canary is ahead of
+    /// (docs/computers.md, "Stable and canary").
     images: BTreeMap<String, Image>,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; thirty
@@ -146,13 +149,53 @@ struct Computers {
     // refuses `instance_type` for one.
 }
 
+/// One image computers may be pinned to, as wrangler takes a Durable
+/// Object container's named image: built from the tree at every deploy, or
+/// a digest already in the account's registry, which a deploy keeps as it
+/// is (wrangler skips its build and prepares it, and refuses the deploy
+/// when the account's registry does not have it).
+#[derive(Deserialize, serde::Serialize)]
+#[serde(untagged)]
+enum Image {
+    Built(Built),
+    Pinned(Pinned),
+}
+
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct Image {
+struct Built {
     dockerfile: String,
     build_context: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     build_vars: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Pinned {
+    /// `registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>`: a
+    /// reference a deploy printed, or a computer's (docs/computers.md).
+    image: String,
+}
+
+/// The registry wrangler pushes a deployment's images to.
+const REGISTRY: &str = "registry.cloudflare.com";
+
+/// Whether `reference` is an image pinned by digest in `account`'s
+/// registry: `registry.cloudflare.com/<account>/<repository>@sha256:` and 64
+/// lowercase hex digits, its repository's components lowercase letters and
+/// digits joined by `.`, `_` or `-` (what wrangler takes). Another
+/// account's image (a preview's, at a production deploy) is refused here:
+/// the account deployed to could not run it.
+fn pinned_ok(reference: &str, account: &str) -> bool {
+    let Some((repository, hex)) = reference.strip_prefix(REGISTRY).and_then(|r| r.strip_prefix('/')).and_then(|r| r.strip_prefix(account)).and_then(|r| r.strip_prefix('/')).and_then(|r| r.split_once("@sha256:")) else {
+        return false;
+    };
+    let component = |c: &str| {
+        let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+        !c.is_empty() && c.bytes().all(|b| alnum(b) || b"._-".contains(&b)) && c.bytes().next().is_some_and(alnum) && c.bytes().last().is_some_and(alnum)
+    };
+    !account.is_empty() && repository.split('/').all(component) && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The deployment's catalog, and the store secret each operator key's
@@ -485,6 +528,13 @@ fn checked(d: Deployment) -> Result<Deployment> {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
         }
+        for (name, image) in &c.images {
+            if let Image::Pinned(p) = image {
+                if !pinned_ok(&p.image, &d.account_id) {
+                    bail!("computers: the image {name:?} is {:?}, not one pinned by digest in this account's registry ({REGISTRY}/{}/<repository>@sha256:<64 hex>)", p.image, d.account_id);
+                }
+            }
+        }
     }
     if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
         bail!("support_url: {u:?} is no https: page or mailto: address of at most {} visible characters", fragment_core::computer::SUPPORT_URL_MAX_BYTES);
@@ -732,15 +782,18 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
             }
         }
     }
-    // the deployment's own images in place of the e2e's stubs, or none
+    // the deployment's own images in place of the e2e's stubs, or none: one
+    // built from the tree, or kept at its digest
     match &d.computers {
         Some(computers) => {
             let container = &mut c["containers"][0];
             let mut images = serde_json::Map::new();
             for (name, image) in &computers.images {
                 let mut i = json!(image);
-                i["dockerfile"] = json!(root.join(&image.dockerfile));
-                i["build_context"] = json!(root.join(&image.build_context));
+                if let Image::Built(b) = image {
+                    i["dockerfile"] = json!(root.join(&b.dockerfile));
+                    i["build_context"] = json!(root.join(&b.build_context));
+                }
                 images.insert(name.clone(), i);
             }
             container["images"] = Value::Object(images);
@@ -814,18 +867,19 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
 /// --except …] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls
-/// <n>]`: the suite's
+/// <n>] [--candidate <image>]`: the suite's
 /// own arguments for that branch deployment, from its config: the zone, the
 /// test secret's file (named, never read here), and what the deployment
 /// offers (computers, models). A deployment of its own is refused: the
-/// hosted lane runs on a preview.
+/// hosted lane runs on a preview. A candidate is one of the config's
+/// images other than its default (docs/computers.md, "Stable and canary").
 pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let usage = || {
         anyhow::anyhow!(
-            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>]"
+            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>] [--candidate <image>]"
         )
     };
-    let (mut config, mut branch, mut passed, mut operator_key_file) = (None, None, vec![], None);
+    let (mut config, mut branch, mut passed, mut operator_key_file, mut candidate) = (None, None, vec![], None, None);
     let mut it = rest.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(a) = it.next() {
@@ -836,6 +890,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
             // an operator key's file (`fragment operator key` makes one): the
             // runner reads it by path; the deployment lists its npub
             "--operator-key-file" => operator_key_file = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
+            "--candidate" => candidate = Some(it.next().ok_or_else(usage)?.clone()),
             "--only" | "--except" | "--max-paid-calls" => {
                 passed.push(a.clone());
                 passed.push(it.next().ok_or_else(usage)?.clone());
@@ -867,6 +922,14 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
+    }
+    // a round's candidate: an image of the config's that new computers do
+    // not start on, or there is nothing to try
+    if let Some(image) = candidate {
+        let c = d.computers.as_ref().context("--candidate names one of the deployment's computer images: its config has no `computers`")?;
+        anyhow::ensure!(c.images.contains_key(&image), "--candidate {image:?} is not one of the config's images ({})", c.images.keys().cloned().collect::<Vec<_>>().join(", "));
+        anyhow::ensure!(image != c.default_image, "--candidate {image:?} is the default image, which the hosted lane runs anyway: name the canary");
+        args.extend(["--candidate".to_string(), image]);
     }
     args.extend(passed);
     Ok(args)
@@ -1010,6 +1073,17 @@ mod tests {
         v["operators"] = json!([]);
         let path = config_file("hosted-args-operator-unlisted", &v);
         assert!(args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--operator-key-file", "/k"]).is_err(), "a key among no operators");
+        // a round's candidate: one of the config's images, not its default
+        let candidate = |v: &Value, test: &str, image: &str| {
+            let path = config_file(test, v);
+            args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--candidate", image, "--only", "agent-restart"])
+        };
+        assert!(candidate(&v, "hosted-args-candidate-no-computers", "hermes-canary").is_err(), "a deployment that makes no computers");
+        let build = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
+        v["computers"] = json!({ "default_image": "hermes", "images": { "hermes": build, "hermes-canary": build } });
+        assert_eq!(candidate(&v, "hosted-args-candidate", "hermes-canary").unwrap(), with(&["--offers", "computers", "--candidate", "hermes-canary", "--only", "agent-restart"]));
+        assert!(candidate(&v, "hosted-args-candidate-default", "hermes").is_err(), "the default is what runs anyway");
+        assert!(candidate(&v, "hosted-args-candidate-unknown", "stub-next").is_err(), "an image the config does not name");
         // production: a deployment of its own runs no hosted lane
         v["platform_host"] = json!("fragment.club");
         v["fragment_suffix"] = json!("fragment.boats");
@@ -1280,6 +1354,53 @@ mod tests {
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
+    }
+
+    /// Stable kept at its digest beside a canary built from the tree
+    /// (docs/computers.md, "Stable and canary"): the pinned image is given
+    /// to wrangler as it is, nothing to build, and the built one with its
+    /// paths made the repo's; a pinned image that is not a digest in this
+    /// account's registry is refused before anything is built, and so is an
+    /// entry that is both or neither.
+    #[test]
+    fn a_stable_image_is_kept_at_its_digest() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let account = v["account_id"].as_str().unwrap().to_string();
+        let digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let stable = format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{digest}");
+        let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
+        v["computers"]["images"] = json!({ "hermes": { "image": stable }, "hermes-canary": built });
+        let d = load(&config_file("pinned-stable", &v)).unwrap();
+        let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let images = &cell["containers"][0]["images"];
+        assert_eq!(images["hermes"], json!({ "image": stable }), "kept as it is: nothing to build");
+        assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
+        assert_eq!(images["hermes-canary"]["build_context"], json!(devstack::repo_root().join(".")));
+        assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes", "new computers start on stable");
+
+        let refused = |hermes: Value, test: &str| {
+            let mut v = v.clone();
+            v["computers"]["images"]["hermes"] = hermes;
+            load(&config_file(test, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default()
+        };
+        for (bad, test) in [
+            (format!("registry.cloudflare.com/{account}/fragment-preview-hermes:latest"), "pinned-tag"),
+            (format!("registry.cloudflare.com/ffffffffffffffffffffffffffffffff/fragment-preview-hermes@sha256:{digest}"), "pinned-other-account"),
+            (format!("docker.io/{account}/fragment-preview-hermes@sha256:{digest}"), "pinned-other-registry"),
+            (format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{}", &digest[..12]), "pinned-short"),
+            (format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{}", digest.to_uppercase()), "pinned-upper"),
+            (format!("registry.cloudflare.com/{account}/Hermes@sha256:{digest}"), "pinned-repo-case"),
+            (format!("registry.cloudflare.com/{account}/@sha256:{digest}"), "pinned-no-repo"),
+        ] {
+            let why = refused(json!({ "image": bad }), test);
+            assert!(why.contains("computers: the image \"hermes\" is") && why.contains("not one pinned by digest in this account's registry"), "{bad}: {why}");
+        }
+        let both = refused(json!({ "image": stable, "dockerfile": "images/hermes/Dockerfile", "build_context": "." }), "pinned-and-built");
+        assert!(both.contains("parse"), "both: {both}");
+        assert!(refused(json!({}), "pinned-neither").contains("parse"), "neither");
+        assert!(pinned_ok(&format!("registry.cloudflare.com/{account}/a/b.c_d-e@sha256:{digest}"), &account));
+        assert!(!pinned_ok(&stable, ""), "no account");
     }
 
     /// The deployment's mail: its `mail_from` is the cell's

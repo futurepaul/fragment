@@ -85,6 +85,8 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
     let price = price(&stripe, kind).await?;
     let platform = cfg.platform();
+    // back to the shell's welcome, which applies it and makes their first
+    // agent (or, with chats of their own, goes home)
     let mut form = Form::new()
         .push("mode", "subscription")
         .push("customer", customer)
@@ -92,8 +94,8 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
         .push("line_items[0][price]", price)
         .push("line_items[0][quantity]", "1")
         .push("payment_method_collection", "always")
-        .push("success_url", format!("{platform}/settings?checkout={{CHECKOUT_SESSION_ID}}"))
-        .push("cancel_url", format!("{platform}/settings?checkout=canceled"))
+        .push("success_url", format!("{platform}/welcome?checkout={{CHECKOUT_SESSION_ID}}"))
+        .push("cancel_url", format!("{platform}/welcome?checkout=canceled"))
         .push("expires_at", expires_at_s.to_string())
         .push(format!("metadata[{META_DEPLOYMENT}]"), deployment)
         .push(format!("metadata[{META_ORG}]"), plan.org.clone())

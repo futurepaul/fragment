@@ -15,7 +15,7 @@ import { appIcon } from "./app-icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
-import { billingSections, returning } from "./billing.js";
+import { billingSections, returning, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -61,7 +61,7 @@ const CATALOG = [
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity
-const state = { me: null, guest: false, fragments: [], computer: null, defaultImage: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1556,42 +1556,18 @@ async function updateLater(version, button) {
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
 }
-function renderUpdate() {
-  const c = state.computer;
-  const due = !!(c && state.defaultImage && c.image !== state.defaultImage);
-  $("update").hidden = !due;
-}
-$("update-pill").onclick = () => { $("update-confirm").hidden = false; $("update-pill").hidden = true; };
-$("update-cancel").onclick = () => { $("update-confirm").hidden = true; $("update-pill").hidden = false; };
-// an update is the person's to start (a new version applies at a wake):
-// pinned to the default, it sleeps and wakes on the new image
-$("update-go").onclick = async () => {
-  const c = state.computer;
-  $("update-go").disabled = true;
-  try {
-    await api("PUT", `/api/computers/${seg(c.computer)}/image`, { image: state.defaultImage });
-    await api("POST", `/api/computers/${seg(c.computer)}/sleep`, {});
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/wake`, {}));
-    $("update-confirm").hidden = true;
-    $("update-pill").hidden = false;
-    renderUpdate();
-  } catch (e) {
-    $("update-text").textContent = `The update did not finish: ${e.message}`;
-  } finally {
-    $("update-go").disabled = false;
-  }
-};
-
-// ---- where the page is: `/` its chats, `/settings` its settings; each
-// view says so in the address, so a reload or a link stays put ----
+// ---- where the page is: `/` its chats, `/settings` its settings,
+// `/welcome` a new person's welcome; each view says so in the address, so
+// a reload or a link stays put ----
 const SETTINGS = "/settings";
+const WELCOME = "/welcome";
 function at(path) {
   if (location.pathname !== path) history.pushState(null, "", path);
 }
 addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
-  else if (shown && location.pathname !== SETTINGS && byName(state.current)) openChat(state.current, false);
+  else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else start().catch((e) => notice("This page did not load", e.message));
 });
 
@@ -1693,10 +1669,8 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  // Checkout's return, or a trial mailed, before the ledger is read
-  // with no chat of their own yet (one shared with them is not theirs), a
-  // seat's Billing offers the first run (home makes the first agent: `start`)
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), firstAgent: chats().some(own) ? null : firstAgentOnceSeated };
+  // a credit pack's Checkout returning, before the ledger is read
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false) };
   const back = await returning(billingHelpers);
   const [ledger, linked, uses] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
@@ -2153,28 +2127,92 @@ async function skillsSection() {
 }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
-// ---- first run: sign in, then the default agent is made (decision 10) ----
+// ---- first run: sign in, a seat, then the default agent is made
+// (decision 10); it never goes through settings ----
 function firstRun(...children) {
   $("layout").hidden = true;
   $("first-run").hidden = false;
   $("first-run-card").replaceChildren(el("div", "brand", $("brand").textContent), ...children);
 }
+const PITCH = "Agents that work for you, and the apps they make.";
 function signIn() {
   const go = el("a", "primary", "Sign in");
-  go.href = `/auth/login?return=${encodeURIComponent(location.pathname)}`;
-  firstRun(el("h1", null, "Agents that work for you, and the apps they make."), el("p", "muted", "Sign in to start."), go);
+  // back to this view, with what its address carries (a mailed trial's code)
+  go.href = `/auth/login?return=${encodeURIComponent(location.pathname + location.search)}`;
+  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go);
 }
-// A seat bought (or given) before any chat: home's first run, once the
-// seat's plan has reached the ledger (the registry pushes it from its
-// alarm, a moment after), so the first run's creates are a seat's. Bounded:
-// ten seconds, then home anyway, which shows Billing again if it has not.
-async function firstAgentOnceSeated() {
-  for (let i = 0; i < 20; i++) {
+// A new person's welcome (docs/billing.md, "The shell"): what this is, the
+// two seats and a trial code, then Stripe's Checkout, whose return comes
+// back here (`?checkout=<session>`, or `?checkout=canceled`), as a mailed
+// trial's link does (`?trial=<code>`). A seat already held (bought, an
+// org's claimed at sign-in, or the deployment's plan) goes on to the first
+// agent; someone with a chat of their own goes home.
+async function welcome() {
+  const q = new URLSearchParams(location.search);
+  const back = q.get("checkout");
+  const paid = back && back !== "canceled" ? back : null;
+  if (chats().some(own)) {
+    // a lapsed seat paid again: applied, then home
+    if (paid) await api("POST", `/api/billing/sessions/${encodeURIComponent(paid)}`, {}).catch(() => {});
+    history.replaceState(null, "", "/");
+    return start();
+  }
+  if (paid) return creatingAgent({ session: paid });
+  if (!state.guest) return creatingAgent();
+  const mine = await api("GET", "/api/seat").catch(() => null);
+  if (mine?.seat?.good) return creatingAgent({});
+  history.replaceState(null, "", WELCOME);
+  // LATER (fbfc's import; not built): "Import your finite.computer agent",
+  // a choice beside the seats for someone moving their agent here. Its
+  // place is kept, hidden, until the import is built.
+  const imports = el("button", "plan", "Import your finite.computer agent");
+  imports.type = "button";
+  imports.dataset.slot = "import";
+  imports.hidden = true;
+  const foot = el("div", "welcome-foot");
+  foot.append(el("span", "muted", `Signed in as ${state.me.email}`));
+  // someone shared something with them first: it is still theirs to open
+  if (state.fragments.length) {
+    const home = el("a", "quiet", "Not now");
+    home.href = "/";
+    foot.append(home);
+  }
+  const out = el("form");
+  out.method = "post";
+  out.action = "/auth/logout";
+  const leave = el("button", "quiet", "Sign out");
+  leave.type = "submit";
+  out.append(leave);
+  foot.append(out);
+  firstRun(
+    el("h1", null, PITCH),
+    el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Choose a seat to start."),
+    ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
+    ...seatOffer({ api, el }, mine, q.get("trial")),
+    imports,
+    foot,
+  );
+}
+// A seat before the first agent. Checkout's return names its session,
+// applied at once (whatever Stripe's webhook's timing; again, it changes
+// nothing) and kept in the address until its seat holds, so a reload
+// applies it again. Then the seat's plan reaches the ledger from the
+// registry, a moment after, and the first run's creates are a seat's.
+// Bounded: SEAT_WAIT_MS.
+const SEAT_WAIT_MS = 30_000;
+async function seated(session) {
+  if (session) {
+    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {});
+    if (!mine.seat?.good) throw new Error("Your payment has not reached us yet: try again in a moment.");
+    history.replaceState(null, "", "/");
+  }
+  const t0 = Date.now();
+  for (;;) {
     const ledger = await api("GET", "/api/ledger").catch(() => null);
-    if (ledger && ledger.plan !== "guest") break;
+    if (ledger && ledger.plan !== "guest") return;
+    if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat has not reached your account yet: try again in a moment.");
     await new Promise((r) => setTimeout(r, 500));
   }
-  location.assign("/");
 }
 // The first agent (Paul, 2026-10-03: no question asked): the person's
 // default agent, in charge, made with its computer and its chat. The chat
@@ -2295,8 +2333,11 @@ async function agentReady({ chat, id, computer }) {
   if (c?.why && c.phase !== "awake") throw Object.assign(new Error(c.why), { refused: true });
   return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
 }
-function creatingAgent() {
+// `seat` (`{session?}`): a seat comes first (`seatFirst`), then the agent.
+function creatingAgent(seat = null) {
+  if (seat) return seatFirst(seat);
   if (setupRun) return setupRun;
+  history.replaceState(null, "", "/");
   $("first-run").hidden = true;
   $("layout").hidden = false;
   // until its chat is made, the middle column says what is being made
@@ -2330,6 +2371,46 @@ function creatingAgent() {
   }).finally(() => { setupRun = null; });
   return setupRun;
 }
+// A seat before the first agent (the welcome's: a Checkout's return, or a
+// seat given whose plan is on its way): the welcome's card says it is
+// being set up until the platform says it holds (`seated`; Checkout's
+// return stays in the address until then, so a reload applies it again),
+// then the agent is made in its chat (`creatingAgent`). Refused, it says
+// why, with Try again and Choose a seat (the welcome's seats again).
+function seatFirst(seat) {
+  const step = el("li", "doing", "Setting up your seat");
+  const list = el("ol", "creating-steps");
+  list.append(step);
+  const error = el("p", "form-error");
+  error.hidden = true;
+  const retry = el("button", "primary", "Try again");
+  retry.type = "button";
+  retry.hidden = true;
+  retry.onclick = () => creatingAgent(seat);
+  const choose = el("button", "quiet", "Choose a seat");
+  choose.type = "button";
+  choose.hidden = true;
+  choose.onclick = () => {
+    history.replaceState(null, "", WELCOME);
+    welcome().catch((e) => notice("This page did not load", e.message));
+  };
+  firstRun(el("h1", null, "Setting up your seat…"), list, error, retry, choose);
+  seated(seat.session).then(
+    () => {
+      step.className = "done";
+      // a seat now, as the ledger said: the shell offers what a seat makes
+      setGuest(false);
+      return creatingAgent();
+    },
+    (err) => {
+      step.className = "failed";
+      error.textContent = err.message;
+      error.hidden = false;
+      retry.hidden = false;
+      choose.hidden = false;
+    },
+  );
+}
 
 // ---- the person's things, read again whenever they may have changed ----
 // One read of their list is the sidebar: each chat's row names its agents
@@ -2346,13 +2427,11 @@ async function load(changed = false) {
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
   state.computer = computers.computers?.[0] ?? null;
-  state.defaultImage = computers.defaultImage ?? null;
   state.support = computers.support ?? null;
   state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   renderChats();
   renderApps();
   renderHeading();
-  renderUpdate();
   renderComputer();
   rosterChanged();
   markSeen();
@@ -2415,11 +2494,14 @@ async function start(open) {
   const [, ledger] = await Promise.all([load(), api("GET", "/api/ledger").catch(() => null)]);
   setGuest(ledger?.plan === "guest");
   watchList();
+  if (!open && location.pathname === WELCOME) return welcome();
   // the first agent is made at home; settings open as asked, chats or not;
-  // a guest makes nothing (decision 49), so their home is what is shared
-  // with them, and a seat offered
+  // a guest makes nothing (decision 49): with nothing shared with them,
+  // their home is the welcome; once something is (an invitee's), it is
+  // what is shared with them, and a seat offered
   const settings = !open && location.pathname === SETTINGS;
   if (!open && !settings && await owesFirstAgent()) return creatingAgent();
+  if (!state.fragments.length && !open && !settings && state.guest) return welcome();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
@@ -2439,15 +2521,16 @@ function setGuest(guest) {
   renderHeading();
 }
 // With no chat to show: the first app shared with them in its window, and
-// beside it what a guest may do, and what a seat gives.
+// beside it what a guest may do, and what a seat gives (the welcome's).
 function guestHome() {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
   const seat = el("a", "allow", "Get a seat");
-  seat.href = SETTINGS;
+  seat.href = WELCOME;
   seat.onclick = (e) => {
     e.preventDefault();
-    openSettings().catch((err) => notice("Settings did not open", err.message));
+    at(WELCOME);
+    welcome().catch((err) => notice("This page did not load", err.message));
   };
   notice("You're a guest", "You see and edit what people share with you: it shows in the sidebar as they share it. A seat, from $100 a month, gives you agents of your own, the computer they run on, and apps of your own.", seat);
 }

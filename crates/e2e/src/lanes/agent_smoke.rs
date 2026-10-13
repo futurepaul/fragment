@@ -398,6 +398,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let t_asleep = Instant::now();
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    super::computers::on_candidate(s, api, &keys, &id)?;
     let agent_label = s.name("agent");
     let agent = api.create_with(&keys, json!({ "label": agent_label, "template": "agent", "title": TITLE }))?;
     let agent_name = agent.body["name"].as_str().unwrap_or("").to_string();

@@ -119,7 +119,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
 | **A deploy that changes its image** (the common update: the same name, a new image) | the deploy pushes it; awake, it keeps the image it started on until its next sleep or a restart | nothing: it ran the old image until it slept, and its owner restarted it to be sure | an `update` notice while it is awake and no turn runs: an update is ready, Restart (about a minute; its chats and work kept), or Later; nothing while it sleeps or is asleep, since its next start takes it. Settings shows the version it runs and the latest |
-| **A pin to another image** (a renamed default, a canary, a rollback) | its owner's pin | the update pill (pinned to the default, then a sleep and a wake) | the same; awake on the old image, the `update` notice too |
+| **A pin to another image** (a canary, a rollback: below, "Stable and canary") | its owner's pin, or an operator's | the update pill (pinned to the default, then a sleep and a wake) | the `update` notice while it is awake on the old image; nothing asleep, since its next start takes it (the pill went with the renamed default it served) |
 
 **The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
 proto's `ComputerNotice`), the most pressing first, each derived from the
@@ -223,9 +223,10 @@ for days.
   version it runs (`9f86d081884c`; asleep, the one it starts on)
   and, running an older one, the latest.
 
-The update pill stays for the deployment's default image renamed, which
-the notice does not cover: pinned to the old name, a computer's restart
-starts that one again. The pill pins it to the new name first.
+A default is never renamed (a promotion moves the name: below, "Stable
+and canary"), so the shell's update pill, which pinned a computer to a
+renamed default, went (2026-10-13): pinned to a canary, its person would
+have been offered stable as an update.
 
 **Does use extend the bound? No: it never stops a computer in use.** A
 computer is stopped for its bound only at a sleep, and a sleep is tried
@@ -266,6 +267,131 @@ address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
 `support`). The shell links it once a restart has failed too; without
 one, the notice shows the computer's id and the platform's words, to give
 whoever runs it.
+
+## Stable and canary
+
+A new image reaches a few people first, and everyone after it has proved
+itself (decision 19: a canary is a per-computer pin; Paul, 2026-10-13:
+"a few rounds of successful upgrades to the hermes image so we know
+that's seamless for users (including a canary path)"). A deployment's
+config names two images (xtask/src/deploy.rs, `computers.images`):
+
+```jsonc
+"default_image": "hermes",
+"images": {
+  "hermes":        { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
+  "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+}
+```
+
+- **Stable** is the default, kept at a digest: wrangler builds nothing
+  for it, prepares the image the account's registry already holds, and
+  refuses the deploy when it does not hold it; the deploy refuses, before
+  it builds anything, a reference that is no digest in its own account's
+  registry. It changes only when its line does, so a deploy tells the
+  computers on it nothing. New computers start on it.
+- **The canary** is built from the tree at every deploy (on the preview,
+  master's). A computer pinned to it is on the canary: every deploy that
+  changes its image tells it an update is ready, as any deploy that
+  changes an image tells (above).
+- **Who is on it** is the operators' to say, a person at a time: `fragment
+  operator pin <npub> hermes-canary` (`PUT
+  /api/admin/people/{npub}/computer/image`, logged as `pin`; docs/api.md,
+  Operators) pins their computer as its owner's pin does. The pin is the
+  one record of what a computer runs, so there is no list beside it; the
+  group (the finite team, by npub, an email found with `fragment operator
+  people --q`) is the operators', outside the repo.
+- **Where a digest comes from.** A deploy names each image's reference as
+  wrangler prepares it (`hermes-canary is ready to run`, then
+  `registry.cloudflare.com/…@sha256:…`), and an operator's view of a person
+  (`fragment operator person <npub>`) names the whole reference their
+  computer runs and the one its next start runs (`references.running`,
+  `references.next`); the version Settings shows is a digest's first 12
+  hex digits.
+- **Promotion**: the canary's digest becomes stable's line, and a deploy.
+  Every computer on stable then runs another version than the one its
+  next start runs: asleep, its next wake takes it (from the image and its
+  save: the snapshot is of the old image), paying the new image's pull;
+  awake, its owner is told an update is ready (Restart, or Later, or its
+  next sleep); always on, only told. The canary's computers are told
+  nothing: they run that digest already.
+- **Rollback**: a canary computer is pinned back to `hermes` (`fragment
+  operator pin <npub> hermes`), told as any pin is (the `update` notice;
+  "an update" is another version, older or newer). Stable goes back by
+  its previous line, and a deploy. Keep the line a promotion replaced,
+  commented, for that.
+- **A name stays.** A computer pinned to a name the deployment no longer
+  has has no image to start. `hermes-canary` is kept: between rounds its
+  digest is stable's, or master's ahead of it.
+- **The cell is ahead of stable.** The cell deploys from the tree at every
+  deploy; stable lags by a round. An awake computer already runs its old
+  image across a deploy, for days if always on, but a round makes that
+  the rule: a change to what the guest relies on (this contract, the
+  bridge's routes, the CLI's) is additive, and what it replaces goes only
+  once stable has moved past it.
+- **A Hermes release is forward only** (Paul, 2026-10-13). Launch-week
+  rounds change only our layers (the bridge, hermes-boot, the CLI and the
+  image's own files) on Hermes v0.21.6's base, so a computer pinned back
+  runs the older image on a `/data` the newer wrote, files our code reads
+  either way. A new Hermes release may move its databases' schema
+  forward, and a computer keeps three saves, each turn's end replacing the
+  oldest, so within a day no save from before the canary is left (decision
+  19's point-in-time restore has none to go back to): pinned back, an
+  older Hermes would start on a newer schema. So a bad Hermes release is
+  fixed by the next one, until a computer keeps the save an image change
+  started from (docs/technical-debt-ledger.md).
+- **Production** keeps its images in its own account's registry, which
+  holds none of the preview's digests (the deploy refuses another
+  account's). Its first deploy builds `hermes` from the release commit;
+  its line is then pinned to the digest that deploy names, and its own
+  canary group goes ahead of it as the preview's does.
+
+### One round
+
+On the preview (`preview.finite.build`, master deployed continuously),
+with the operators' key (`--key-file`, or `FRAGMENT_OPERATOR_KEY_FILE`)
+and `FRAGMENT_HOST` naming it. Once: stable's line is the digest its
+computers run (`references.running` of one awake on it), the canary's is
+the build, and the canary group is pinned to `hermes-canary`.
+
+1. **The change lands** on master; its deploy rebuilds the canary. Its
+   version: `fragment operator person <npub> --json | jq -r .computer.latest`
+   for one of the group.
+2. **The group takes it**: awake, each is told an update is ready and
+   presses Restart (the path under test); asleep, its next wake takes it.
+   Each checks, on their own computer: an old chat goes on where it was;
+   a new chat recalls a memory; their own skills are listed and used; a
+   routine fires after the update; the screen opens and Take over works;
+   Google answers (Gmail or Calendar); a Bot Chat goes on; Settings shows
+   the canary's version and no notice of going back. These are a lived-in
+   computer's, which no hosted run has: its people are new.
+3. **The hosted runs** (`cargo xtask e2e --hosted --config <the preview's
+   config> --branch preview`), each followed by `--sweep`: the candidate,
+   `--candidate hermes-canary --only
+   computers,agent-restart,agent-smoke,agent-ask,bot-mode --max-paid-calls
+   190` (new computers on it: a routine, the CLI and managed skills, an
+   app, the screen, an approval, saves held across a sleep and a wake,
+   agents asking each other, Bot Mode; and agent-restart's upgrade from
+   stable into it, the chat going on, and its rollback); then stable under
+   the new cell, `--only computers,agent-restart --max-paid-calls 50`.
+4. **Watch** each canary computer (`fragment operator person <npub>`):
+   `computer.version == computer.latest`, `rollbacks` unchanged, every
+   save `held`, and no `wont_wake`, `unsaved` or `went_back` notice (a
+   `went_back` of cause `unusable` is the new image refusing the old
+   save); `fragment operator health`; the Computer DO's lines in the
+   Workers logs (a start that failed, `restored`); the ledger for spend
+   out of the ordinary.
+5. **The soak** (Paul, 2026-10-13): 24 hours, every canary computer woken
+   on the canary and having answered a turn on it, and the hosted runs
+   green.
+6. **Promote**: the reference a watched canary computer runs
+   (`fragment operator person <npub> --json | jq -r .references.running`,
+   its first 12 hex digits the version step 1 named) becomes `hermes`'s
+   `image` in the preview's config, the old line kept commented; deploy.
+   One computer on stable awake is told; one asleep wakes onto it.
+7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
+   group (a Hermes release is forward only, above); after a promotion,
+   the commented line back, and a deploy.
 
 ## The guest's contract
 
@@ -1696,12 +1822,25 @@ for a host) and finds the same `HOME`, `~` and modes.
   running from its newest save, the restart's own and held, from the image
   and not a snapshot, with no rollback; the same press again restarts
   nothing; and its agent answers after it, nothing left to tell its owner.
+  Given a round's candidate (`--candidate`), that restart is the upgrade:
+  pinned to the candidate awake after a reply that gave it a word, told
+  an update is ready, restarted onto the candidate's version from its own
+  save, and the same chat names the word; then pinned back, told again,
+  restarted onto the default's version, and the word named once more
+  (the rollback). The candidate's other real-agent sections (agent-smoke,
+  agent-ask, bot-mode) and the hosted `computers` start their computers on
+  it.
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer
   from that step, its saves gone, its owner's next identity's computer a
   new one that restores nothing and reads no such file; hosted, the same
   on the deployment's own image.
+- The e2e's `admin` section: an operator pins a person's computer (none
+  yet is 404) to the stub's next build, its view and the person's page
+  naming it and both images' whole references; an image the deployment
+  lacks is 400, anyone else 403; `fragment operator pin` pins it back, and
+  the log holds both pins.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
   first's turn runs included, and an install as root (a `.deb` through

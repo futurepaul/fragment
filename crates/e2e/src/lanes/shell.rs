@@ -743,9 +743,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.viewport(&page, 1280, 800, false)?;
 
     // first run: the default agent, made with no question asked (Paul,
-    // 2026-10-03), its chat first and in the open (Skyler, 2026-10-12)
+    // 2026-10-03), its chat first and in the open (Skyler, 2026-10-12),
+    // and nothing to choose before it: a seat (the e2e's people are the
+    // deployment's plan's) skips the welcome
     let creating = b.until(&page, "!document.getElementById('layout').hidden && document.getElementById('first-run').hidden", wait);
-    s.ok("signed in, the shell makes their default agent at once, asking nothing, in the chat's column (no screen of its own)", creating, "");
+    let first = b.eval(&page, "({ path: location.pathname, seats: document.querySelectorAll('#first-run-card [data-plan]').length, steps: [...document.querySelectorAll('#first-run-card .creating-steps li')].map((li) => li.textContent) })")?;
+    s.ok(
+        "signed in, a seat's shell makes their default agent at once, asking nothing, in the chat's column: no welcome, no seat to choose or wait for, at home's address",
+        creating && first["path"] == "/" && first["seats"] == 0 && first["steps"] == json!([]),
+        &first,
+    );
     let opened = b.until(&page, "document.querySelectorAll('#chats .chat-row').length === 1 && !!document.querySelector('#frames iframe')", agent_wait);
     if !opened {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));

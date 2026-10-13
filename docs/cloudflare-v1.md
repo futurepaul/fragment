@@ -334,6 +334,14 @@ speaking Cloudflare's APIs) returns once this product works.
     and restarts it to take it, or its next sleep does (Paul, 2026-10-09:
     a notice, never a restart behind their back; docs/computers.md, "What
     its owner is told").
+
+    *Status (2026-10-13).* Stable and canary are two names of a
+    deployment's images: the default kept at a digest, the canary built
+    at every deploy; a promotion moves the default's digest, a rollback
+    pins back (docs/computers.md, "Stable and canary"). The point-in-time
+    restore is not built: three rotating saves keep none from before a
+    canary, so a Hermes release is forward only for now (Paul, 2026-10-13;
+    docs/technical-debt-ledger.md, "A Hermes release has no rollback").
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy to the dev account with one command: its own Workers, DOs,
     Workflows, Queues, containers and R2 prefix. It is routed on the dev
