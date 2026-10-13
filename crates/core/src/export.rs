@@ -467,7 +467,7 @@ pub struct FragmentMeta {
     /// Its members, each with their email (people) or name (agents) as its members see them.
     pub members: Vec<Value>,
     /// The invites waiting on an email.
-    pub invites: Vec<fragment_proto::Invite>,
+    pub invites: Vec<Value>,
     /// Its secrets' names: their values never leave.
     pub secrets: Vec<String>,
     /// Its files at `ref` (main's commit), and their bytes.

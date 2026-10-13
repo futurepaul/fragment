@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use fragment_core::export::{self as core, limits, Begun, Start, Tail};
 use fragment_proto::export::{download_path, valid_export_id, ExportError, ExportFailure, ExportProgress, ExportState, ExportStatus, ExportView};
-use fragment_proto::{ErrorCode, FragmentKind, FragmentList, FragmentStatus, Identity, IdentityKind, InviteList, MemberList, Role};
+use fragment_proto::{ErrorCode, FragmentKind, FragmentList, Identity, IdentityKind, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
@@ -145,7 +145,7 @@ impl FragmentCell {
         let facet = self.facet()?;
         let schema: Dumped = dumped(&facet.call("__dump", &[Value::Null, json!(0), json!(0), json!(0)]).await?)?;
         let entries = schema.schema.ok_or_else(|| app_dump("its schema"))?;
-        let tables: Vec<String> = entries.iter().filter(|e| e.kind == "table").map(|e| e.name.clone()).collect();
+        let tables: Vec<String> = entries.iter().filter(|e| e["type"] == "table").filter_map(|e| e["name"].as_str().map(str::to_string)).collect();
         let Some(table) = table else {
             return json_response(&json!({ "schema": entries, "tables": tables }));
         };
@@ -168,24 +168,13 @@ impl FragmentCell {
 /// What `__dump` answers: the schema, or a page of rows.
 #[derive(Deserialize)]
 struct Dumped {
+    /// Each statement: `{type, name, table, sql}`.
     #[serde(default)]
-    schema: Option<Vec<SchemaEntry>>,
+    schema: Option<Vec<Value>>,
     #[serde(default)]
     rows: Option<Vec<Box<RawValue>>>,
     #[serde(default)]
     more: bool,
-}
-
-/// One statement of the app's schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchemaEntry {
-    #[serde(rename = "type")]
-    kind: String,
-    name: String,
-    #[serde(default)]
-    table: Option<String>,
-    #[serde(default)]
-    sql: Option<String>,
 }
 
 fn dumped(v: &Value) -> CellResult<Dumped> {
@@ -319,7 +308,7 @@ struct Item {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "at", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 enum At {
     Plan,
     Owners { next: usize },
@@ -332,7 +321,7 @@ enum At {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "step", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 enum FragStep {
     Facts,
     Files { after: Option<String> },
@@ -345,7 +334,7 @@ enum FragStep {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "step", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 enum CompStep {
     Facts,
     Records { record: usize },
@@ -364,7 +353,7 @@ struct Copy {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "from", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 enum Source {
     Spool { n: u32 },
     Blob { fragment: String, sha: String },
@@ -526,17 +515,7 @@ impl PrincipalCell {
     /// the last (its archive is deleted).
     async fn start_export(&self, person: &str) -> CellResult<ExportView> {
         let now = js::now_ms();
-        #[derive(Deserialize)]
-        struct B {
-            id: String,
-            started_at: i64,
-            state: String,
-        }
-        let begun: Vec<Begun> = self
-            .rows_of::<B>("SELECT id, started_at, state FROM exports", vec![])?
-            .into_iter()
-            .map(|b| Begun { building: b.state == "building", id: b.id, started_at: b.started_at })
-            .collect();
+        let begun: Vec<Begun> = self.rows_of::<Row>(ROW, vec![])?.into_iter().map(|b| Begun { building: b.state == "building", id: b.id, started_at: b.started_at }).collect();
         let id = match core::start(&begun, now) {
             Start::Replay(id) => id,
             Start::Refused { next_at } => {
@@ -634,11 +613,8 @@ impl PrincipalCell {
         if !self.test_hooks {
             return Ok(None);
         }
-        #[derive(Deserialize)]
-        struct P {
-            value: i64,
-        }
-        Ok(self.rows_of::<P>("SELECT value FROM export_levers WHERE name = ?", vec![name.into()])?.first().map(|p| p.value.clamp(0, i64::from(u32::MAX)) as u32))
+        let rows = self.rows_of::<Value>("SELECT value FROM export_levers WHERE name = ?", vec![name.into()])?;
+        Ok(rows.first().and_then(|p| p["value"].as_i64()).map(|v| v.clamp(0, i64::from(u32::MAX)) as u32))
     }
 
     fn pace(&self) -> CellResult<Option<u32>> {
@@ -916,12 +892,8 @@ impl PrincipalCell {
         if !last.is_empty() || run.job.parts == 0 {
             self.upload_part(&mut run, last).await?;
         }
-        #[derive(Deserialize)]
-        struct P {
-            part: i64,
-            etag: String,
-        }
-        let mut parts: BTreeMap<u32, String> = self.rows_of::<P>("SELECT part, etag FROM export_parts WHERE export = ?", vec![run.id.as_str().into()])?.into_iter().map(|p| (p.part as u32, p.etag)).collect();
+        let kept = self.rows_of::<Value>("SELECT part, etag FROM export_parts WHERE export = ?", vec![run.id.as_str().into()])?;
+        let mut parts: BTreeMap<u32, String> = kept.iter().filter_map(|p| Some((p["part"].as_u64()? as u32, p["etag"].as_str()?.to_string()))).collect();
         parts.extend(run.new_parts.iter().cloned());
         let parts: Vec<(u16, String)> = parts.into_iter().filter(|(n, _)| *n <= run.job.parts).map(|(n, e)| (n as u16, e)).collect();
         if parts.len() as u32 != run.job.parts {
@@ -1234,24 +1206,33 @@ impl PrincipalCell {
         Ok(self.env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(req).await?)
     }
 
-    /// A fragment's JSON route as the person: its answer, or its refusal
+    /// A fragment's route as the person: its answer's bytes, or its refusal
     /// (a 4xx: the step decides); a failure that may pass is the slice's.
-    async fn read_as<T: serde::de::DeserializeOwned>(&self, person: &str, name: &str, path: &str, query: &str) -> Step<Result<T, CellError>> {
+    /// (Untyped, so the cell's Wasm holds one reader, not one a type.)
+    async fn read_bytes(&self, person: &str, name: &str, path: &str, query: &str) -> Step<Result<Vec<u8>, CellError>> {
         let mut resp = self.as_person(person, name, Method::Get, path, query, None).await?;
         let status = resp.status_code();
         let bytes = resp.bytes().await?;
         if status == 200 {
-            return serde_json::from_slice(&bytes).map(Ok).map_err(|e| Stop::Retry(format!("{name}'s {path}: {e}")));
+            return Ok(Ok(bytes));
         }
-        let refusal: Option<fragment_proto::ErrorBody> = serde_json::from_slice(&bytes).ok();
-        let e = match refusal {
-            Some(r) => CellError::new(r.error, r.message),
-            None => CellError::host(format!("{name}'s {path} answered {status}")),
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let e = match (refusal["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(json!(c)).ok()), refusal["message"].as_str()) {
+            (Some(code), Some(message)) => CellError::new(code, message),
+            _ => CellError::host(format!("{name}'s {path} answered {status}")),
         };
         if status >= 500 || status == 429 {
             return Err(Stop::Retry(e.message));
         }
         Ok(Err(e))
+    }
+
+    /// `read_bytes`, its answer JSON.
+    async fn read_json(&self, person: &str, name: &str, path: &str, query: &str) -> Step<Result<Value, CellError>> {
+        match self.read_bytes(person, name, path, query).await? {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Ok).map_err(|e| Stop::Retry(format!("{name}'s {path}: {e}"))),
+            Err(e) => Ok(Err(e)),
+        }
     }
 
     // ---- the plan ----
@@ -1309,20 +1290,14 @@ impl PrincipalCell {
 
     /// This list's own rows (the person's), as `GET /api/fragments` lists them.
     fn own_list(&self) -> CellResult<FragmentList> {
-        #[derive(Deserialize)]
-        struct R {
-            fragment: String,
-            role: String,
-            face: Option<String>,
-        }
-        let rows: Vec<R> = self.rows_of("SELECT fragment, role, face FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+        let rows: Vec<Value> = self.rows_of("SELECT fragment, role, face FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
         let fragments = rows
             .into_iter()
             .filter_map(|r| {
-                let face: Value = r.face.as_deref().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(Value::Null);
+                let face: Value = r["face"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(Value::Null);
                 Some(fragment_proto::ListedFragment {
-                    name: r.fragment,
-                    role: Role::parse(&r.role)?,
+                    name: r["fragment"].as_str()?.to_string(),
+                    role: Role::parse(r["role"].as_str()?)?,
                     kind: serde_json::from_value(face["kind"].clone()).unwrap_or_default(),
                     title: face["title"].as_str().map(str::to_string),
                     agents: vec![],
@@ -1344,8 +1319,8 @@ impl PrincipalCell {
         let mut i = next;
         while i < count && js::now_ms() <= deadline {
             let name = run.job.plan().shared[i].name.clone();
-            let owner = match self.read_as::<FragmentStatus>(&person, &name, "status", "").await? {
-                Ok(s) => Some(s.owner),
+            let owner = match self.read_json(&person, &name, "status", "").await? {
+                Ok(s) => s["owner"].as_str().map(str::to_string),
                 Err(_) => None,
             };
             run.job.plan.as_mut().expect("planned").shared[i].owner = owner;
@@ -1387,13 +1362,7 @@ impl PrincipalCell {
             }
             FragStep::Files { after } => {
                 if run.files.as_ref().is_none_or(|(at, _)| *at != i) {
-                    #[derive(Deserialize)]
-                    struct Listing {
-                        #[serde(rename = "ref")]
-                        reference: Option<String>,
-                        files: Vec<Value>,
-                    }
-                    let listing = match self.read_as::<Listing>(&person, &name, "files", "").await? {
+                    let mut listing = match self.read_json(&person, &name, "files", "").await? {
                         Ok(l) => l,
                         Err(e) => {
                             skip(run, "files", &e);
@@ -1401,11 +1370,15 @@ impl PrincipalCell {
                             return Ok(());
                         }
                     };
-                    let own: Vec<Value> = listing.files.into_iter().filter(|f| f["release"] != true).collect();
+                    let files = match listing["files"].take() {
+                        Value::Array(files) => files,
+                        _ => return Err(Stop::Retry(format!("{name}'s files listed no files"))),
+                    };
+                    let own: Vec<Value> = files.into_iter().filter(|f| f["release"] != true).collect();
                     if own.len() > limits::FILES_MAX {
                         return Err(fail(ExportFailure::TooMany, format!("{name} holds {} files; an export takes at most {} a fragment", own.len(), limits::FILES_MAX)));
                     }
-                    run.job.frag().meta.files.reference = listing.reference;
+                    run.job.frag().meta.files.reference = listing["ref"].as_str().map(str::to_string);
                     run.files = Some((i, std::rc::Rc::new(own)));
                 }
                 let files = run.files.as_ref().map(|(_, f)| std::rc::Rc::clone(f)).unwrap_or_default();
@@ -1481,8 +1454,8 @@ impl PrincipalCell {
                     next: Option<u64>,
                 }
                 let q = format!("?table={}&offset={offset}", url::form_urlencoded::byte_serialize(t.as_bytes()).collect::<String>());
-                let page = match self.read_as::<Page>(&person, &name, "database", &q).await? {
-                    Ok(p) => p,
+                let page = match self.read_bytes(&person, &name, "database", &q).await? {
+                    Ok(bytes) => serde_json::from_slice::<Page>(&bytes).map_err(|e| Stop::Retry(format!("{name}'s {t} rows: {e}")))?,
                     Err(e) => {
                         skip(run, &format!("database/{t}"), &e);
                         Page { rows: vec![], next: None }
@@ -1586,12 +1559,8 @@ impl PrincipalCell {
                 }
             }
             FragStep::Blobs { after } => {
-                #[derive(Deserialize)]
-                struct S {
-                    sha: String,
-                }
-                let next: Option<S> = self.rows_of::<S>("SELECT sha FROM export_blobs WHERE export = ? AND fragment = ? AND sha > ? ORDER BY sha LIMIT 1", vec![run.id.as_str().into(), name.as_str().into(), after.as_str().into()])?.into_iter().next();
-                let Some(S { sha }) = next else {
+                let next = self.rows_of::<Value>("SELECT sha FROM export_blobs WHERE export = ? AND fragment = ? AND sha > ? ORDER BY sha LIMIT 1", vec![run.id.as_str().into(), name.as_str().into(), after.as_str().into()])?;
+                let Some(sha) = next.first().and_then(|r| r["sha"].as_str()).map(str::to_string) else {
                     run.job.at = At::Fragment { i, step: FragStep::Meta };
                     return Ok(());
                 };
@@ -1648,7 +1617,7 @@ impl PrincipalCell {
             skipped: vec![],
         };
         let mut frag = Frag { meta: meta.clone(), names: BTreeMap::new(), channels: vec![], tables: None, schema: None, bytes: 0, counted: 0, blobs: 0 };
-        let status = match self.read_as::<FragmentStatus>(person, name, "status", "").await? {
+        let status = match self.read_json(person, name, "status", "").await? {
             Ok(s) => s,
             Err(e) => {
                 meta.skipped.push(core::Skipped { part: "the fragment".into(), why: format!("{}: it is gone, or no longer theirs, since the export began", e.message) });
@@ -1656,85 +1625,80 @@ impl PrincipalCell {
                 return Ok(frag);
             }
         };
-        meta.npub = Some(status.npub.clone());
-        meta.owner = Some(status.owner.clone());
-        meta.visibility = Some(status.visibility);
-        meta.share_link = status.view_token.is_some() && status.visibility != fragment_proto::Visibility::Members;
-        meta.inbox_token = status.inbox_token.is_some();
-        meta.pins = Some(status.pins.clone());
-        meta.code = status.code.id.clone();
-        meta.code_error = status.code.error.clone();
-        meta.template = status.code.id.as_deref().and_then(|id| id.strip_prefix("blessed:")).map(|t| t.split('@').next().unwrap_or(t).to_string());
-        let members = match self.read_as::<MemberList>(person, name, "members", "").await? {
-            Ok(m) => m.members,
+        let text = |v: &Value| v.as_str().map(str::to_string);
+        let visibility = status["visibility"].as_str().and_then(fragment_proto::Visibility::parse);
+        meta.npub = text(&status["npub"]);
+        meta.owner = text(&status["owner"]);
+        meta.visibility = visibility;
+        meta.share_link = status["viewToken"].is_string() && visibility != Some(fragment_proto::Visibility::Members);
+        meta.inbox_token = status["inboxToken"].is_string();
+        meta.pins = Some(fragment_proto::Pins { main: text(&status["pins"]["main"]), live: text(&status["pins"]["live"]) });
+        meta.code = text(&status["code"]["id"]);
+        meta.code_error = text(&status["code"]["error"]);
+        meta.template = meta.code.as_deref().and_then(|id| id.strip_prefix("blessed:")).map(|t| t.split('@').next().unwrap_or(t).to_string());
+        if meta.npub.is_none() {
+            return Err(Stop::Retry(format!("{name}'s status names no npub")));
+        }
+        let members: Vec<Value> = match self.read_json(person, name, "members", "").await? {
+            Ok(mut m) => match m["members"].take() {
+                Value::Array(list) => list,
+                _ => vec![],
+            },
             Err(e) => {
                 skip_meta(&mut meta, "members", &e);
                 vec![]
             }
         };
         // names as its members see them: a person's email, an agent's name
-        let mut profiles: BTreeMap<String, Value> = BTreeMap::new();
+        let mut profiles = serde_json::Map::new();
         for chunk in members.chunks(64) {
-            let q: String = chunk.iter().map(|m| format!("id={}", m.principal)).collect::<Vec<_>>().join("&");
-            #[derive(Deserialize)]
-            struct People {
-                profiles: BTreeMap<String, Value>,
-            }
-            if let Ok(p) = self.read_as::<People>(person, name, "serve/__people", &format!("?{q}")).await? {
-                profiles.extend(p.profiles);
+            let q: String = chunk.iter().filter_map(|m| m["principal"].as_str()).map(|p| format!("id={p}")).collect::<Vec<_>>().join("&");
+            if let Ok(mut p) = self.read_json(person, name, "serve/__people", &format!("?{q}")).await? {
+                if let Value::Object(found) = p["profiles"].take() {
+                    profiles.extend(found);
+                }
             }
         }
-        for m in &members {
-            let p = profiles.get(&m.principal);
+        for mut m in members {
+            let principal = m["principal"].as_str().unwrap_or("").to_string();
+            let p = profiles.get(&principal);
             let email = p.and_then(|p| p["email"].as_str()).map(str::to_string);
             let shown = p.and_then(|p| p["title"].as_str().or(p["name"].as_str())).map(str::to_string);
             if let Some(n) = email.clone().or(shown.clone()) {
-                frag.names.insert(m.principal.clone(), n);
+                frag.names.insert(principal, n);
             }
-            let mut v = serde_json::to_value(m).map_err(|e| Stop::Retry(e.to_string()))?;
-            v["email"] = json!(email);
-            v["name"] = json!(shown);
-            meta.members.push(v);
+            m["email"] = json!(email);
+            m["name"] = json!(shown);
+            meta.members.push(m);
         }
-        match self.read_as::<InviteList>(person, name, "invites", "").await? {
-            Ok(l) => meta.invites = l.invites,
+        match self.read_json(person, name, "invites", "").await? {
+            Ok(mut l) => meta.invites = if let Value::Array(list) = l["invites"].take() { list } else { vec![] },
             Err(e) => skip_meta(&mut meta, "invites", &e),
         }
-        #[derive(Deserialize)]
-        struct Names {
-            names: Vec<String>,
-        }
-        match self.read_as::<Names>(person, name, "secrets", "").await? {
-            Ok(n) => meta.secrets = n.names,
+        match self.read_json(person, name, "secrets", "").await? {
+            Ok(n) => meta.secrets = n["names"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect(),
             Err(e) => skip_meta(&mut meta, "secrets", &e),
         }
-        #[derive(Deserialize)]
-        struct Channels {
-            channels: Vec<Value>,
-        }
-        match self.read_as::<Channels>(person, name, "channels", "").await? {
-            Ok(c) => frag.channels = c.channels.iter().filter_map(|c| Some((c["name"].as_str()?.to_string(), c["seq"].as_i64().unwrap_or(0)))).filter(|(n, _)| fragment_proto::valid_channel_name(n)).collect(),
+        match self.read_json(person, name, "channels", "").await? {
+            Ok(c) => {
+                let listed = c["channels"].as_array().into_iter().flatten();
+                frag.channels = listed.filter_map(|c| Some((c["name"].as_str()?.to_string(), c["seq"].as_i64().unwrap_or(0)))).filter(|(n, _)| fragment_proto::valid_channel_name(n)).collect();
+            }
             Err(e) => skip_meta(&mut meta, "channels", &e),
         }
-        #[derive(Deserialize)]
-        struct Schema {
-            schema: Vec<SchemaEntry>,
-            tables: Vec<String>,
-        }
-        match self.read_as::<Schema>(person, name, "database", "").await? {
+        match self.read_json(person, name, "database", "").await? {
             Ok(s) => {
-                if s.tables.len() > limits::TABLES_MAX {
-                    return Err(fail(ExportFailure::TooMany, format!("{name}'s app has {} tables; an export takes at most {}", s.tables.len(), limits::TABLES_MAX)));
+                let tables: Vec<String> = s["tables"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
+                if tables.len() > limits::TABLES_MAX {
+                    return Err(fail(ExportFailure::TooMany, format!("{name}'s app has {} tables; an export takes at most {}", tables.len(), limits::TABLES_MAX)));
                 }
                 let mut sql = String::new();
-                for e in &s.schema {
-                    if let Some(stmt) = &e.sql {
-                        sql.push_str(stmt.trim_end_matches(';'));
-                        sql.push_str(";\n");
-                    }
+                for stmt in s["schema"].as_array().into_iter().flatten().filter_map(|e| e["sql"].as_str()) {
+                    sql.push_str(stmt.trim_end_matches(';'));
+                    sql.push_str(";\n");
                 }
                 frag.schema = Some(sql);
-                frag.tables = Some(s.tables);
+                frag.tables = Some(tables);
             }
             Err(e) if e.code == ErrorCode::NoCode => {}
             Err(e) => skip_meta(&mut meta, "database", &e),
@@ -1749,8 +1713,8 @@ impl PrincipalCell {
         struct Page {
             records: Vec<Record>,
         }
-        match self.read_as::<Page>(person, name, &format!("channels/{channel}"), &format!("?after={after}&limit={}", limits::CHANNEL_PAGE)).await? {
-            Ok(p) => Ok(p.records),
+        match self.read_bytes(person, name, &format!("channels/{channel}"), &format!("?after={after}&limit={}", limits::CHANNEL_PAGE)).await? {
+            Ok(bytes) => serde_json::from_slice::<Page>(&bytes).map(|p| p.records).map_err(|e| Stop::Retry(format!("{name}'s {channel} records: {e}"))),
             Err(e) => {
                 skip(run, &format!("channels/{channel}"), &e);
                 Ok(vec![])
