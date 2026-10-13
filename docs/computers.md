@@ -872,7 +872,7 @@ offered (decision 60 says why, with the vendors' words).
   as the agent's in the computer's `uses` and charged nothing (no platform
   fee: Paul).
 - **Picking a model.** Settings' Agents section offers each agent the
-  connected provider's models beside "Workers AI (included)". The pick
+  connected provider's models beside "Workers AI" (included in their credit). The pick
   is written to the agent fragment's `agent.json`: `"model": {"provider":
   "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
   "Workers AI" removes `model`. Any model the provider serves may be named
