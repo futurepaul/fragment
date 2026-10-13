@@ -354,7 +354,8 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .layout.settings-view.left-open:not(.narrow) .topbar { display: none; }
 .layout.settings-view.left-open:not(.narrow) .page { border-top: 0; }
 .layout.settings-view:not(.left-open) .topbar { min-height: 52px; }
-.page { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); padding: 0; scroll-padding-top: 20px; }
+/* its width, not the window's, lays settings out: a window opened beside them narrows it */
+.page { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); padding: 0; scroll-padding-top: 20px; container: settings / inline-size; }
 .settings-layout { display: grid; grid-template-columns: 176px minmax(0, 720px); justify-content: center; gap: clamp(28px, 4vw, 64px); max-width: 1160px; min-height: 100%; margin: 0 auto; padding: 34px clamp(24px, 4vw, 56px) 88px; }
 .settings-nav { position: sticky; top: 24px; align-self: start; display: flex; flex-direction: column; gap: 2px; }
 .settings-nav-title { padding: 10px 12px 14px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
@@ -397,7 +398,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-section pre.command { width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
 .settings-section .picture { margin-top: 12px; margin-bottom: 2px; }
 .settings-section .picture img { width: 24px; height: 24px; }
-@media (max-width: 1150px) {
+@container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
   .settings-nav::-webkit-scrollbar { display: none; }
@@ -405,7 +406,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
   .settings-nav-link { flex: none; white-space: nowrap; }
   .settings-section { scroll-margin-top: 118px; }
 }
-@media (max-width: 640px) {
+@container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
   .settings-nav { margin: -16px -20px 22px; padding: 10px 20px; }
   .settings-section .settings-line:not(.settings-action-line):not(.settings-line-with-action) { flex-direction: column; align-items: flex-start; gap: 2px; }
