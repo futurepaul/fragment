@@ -214,7 +214,7 @@ impl FragmentCell {
                 Some(p) if self.member_role(p)?.is_some() => self.members_among(&ids)?,
                 _ => vec![],
             };
-            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of }).await?;
+            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of, agents_of: vec![] }).await?;
             let platform = self.cfg.platform();
             // bounded: the registry answers at most 64 profiles
             for p in answer.profiles.values_mut() {

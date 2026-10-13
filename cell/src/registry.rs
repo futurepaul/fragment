@@ -53,7 +53,7 @@ pub(crate) mod trials;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
     TEST_HOLD_MAX_MS,
 };
@@ -369,7 +369,7 @@ impl RegistryCell {
     /// from an agent fragment, its name and fragment). An id the registry
     /// does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
-        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX {
+        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX || b.agents_of.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
         }
         let mut profiles = BTreeMap::new();
@@ -389,9 +389,30 @@ impl RegistryCell {
             };
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None });
+            // a person's agents, asked: at most AGENTS_PER_OWNER_MAX
+            let agents = match who.kind {
+                IdentityKind::Person if b.agents_of.contains(&id) => self.agents_of(&id)?,
+                _ => vec![],
+            };
+            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None, agents });
         }
         Ok(ProfilesAnswer { profiles })
+    }
+
+    /// A person's agents, the first made first, each by its agent
+    /// fragment's label when it was made from one.
+    fn agents_of(&self, person: &str) -> CellResult<Vec<ProfileAgent>> {
+        let rows = self.rows::<IdRow>(
+            "SELECT id FROM identities WHERE owner = ? AND kind = 'agent' ORDER BY created_at, id LIMIT ?",
+            vec![person.into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
+        )?;
+        assert!(rows.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person owns a bounded number of agents");
+        rows.into_iter()
+            .map(|r| {
+                let name = self.agent_fragment(&r.id)?.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
+                Ok(ProfileAgent { id: r.id, name })
+            })
+            .collect()
     }
 
     /// The agent fragment an agent was made from, if it was.
