@@ -363,23 +363,33 @@ the build, and the canary group is pinned to `hermes-canary`.
    a new chat recalls a memory; their own skills are listed and used; a
    routine fires after the update; the screen opens and Take over works;
    Google answers (Gmail or Calendar); a Bot Chat goes on; Settings shows
-   the canary's version and no notice of going back.
-3. **Watch** each canary computer (`fragment operator person <npub>`):
+   the canary's version and no notice of going back. These are a lived-in
+   computer's, which no hosted run has: its people are new.
+3. **The hosted runs** (`cargo xtask e2e --hosted --config <the preview's
+   config> --branch preview`), each followed by `--sweep`: the candidate,
+   `--candidate hermes-canary --only
+   computers,agent-restart,agent-smoke,agent-ask,bot-mode --max-paid-calls
+   190` (new computers on it: a routine, the CLI and managed skills, an
+   app, the screen, an approval, saves held across a sleep and a wake,
+   agents asking each other, Bot Mode; and agent-restart's upgrade from
+   stable into it, the chat going on, and its rollback); then stable under
+   the new cell, `--only computers,agent-restart --max-paid-calls 50`.
+4. **Watch** each canary computer (`fragment operator person <npub>`):
    `computer.version == computer.latest`, `rollbacks` unchanged, every
    save `held`, and no `wont_wake`, `unsaved` or `went_back` notice (a
    `went_back` of cause `unusable` is the new image refusing the old
    save); `fragment operator health`; the Computer DO's lines in the
    Workers logs (a start that failed, `restored`); the ledger for spend
    out of the ordinary.
-4. **The soak** (Paul, 2026-10-13): 24 hours, every canary computer woken
+5. **The soak** (Paul, 2026-10-13): 24 hours, every canary computer woken
    on the canary and having answered a turn on it, and the hosted runs
    green.
-5. **Promote**: the reference a watched canary computer runs
+6. **Promote**: the reference a watched canary computer runs
    (`fragment operator person <npub> --json | jq -r .references.running`,
    its first 12 hex digits the version step 1 named) becomes `hermes`'s
    `image` in the preview's config, the old line kept commented; deploy.
    One computer on stable awake is told; one asleep wakes onto it.
-6. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
+7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
    the commented line back, and a deploy.
 
@@ -1812,6 +1822,14 @@ for a host) and finds the same `HOME`, `~` and modes.
   running from its newest save, the restart's own and held, from the image
   and not a snapshot, with no rollback; the same press again restarts
   nothing; and its agent answers after it, nothing left to tell its owner.
+  Given a round's candidate (`--candidate`), that restart is the upgrade:
+  pinned to the candidate awake after a reply that gave it a word, told
+  an update is ready, restarted onto the candidate's version from its own
+  save, and the same chat names the word; then pinned back, told again,
+  restarted onto the default's version, and the word named once more
+  (the rollback). The candidate's other real-agent sections (agent-smoke,
+  agent-ask, bot-mode) and the hosted `computers` start their computers on
+  it.
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer

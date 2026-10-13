@@ -77,6 +77,16 @@ pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) 
     records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined" && r["body"]["fragment"] == fragment).collect()
 }
 
+/// A hosted round's candidate (`--candidate`: docs/computers.md, "Stable
+/// and canary"): the computer `id`, made asleep, pinned to it before its
+/// first start, so its section runs on the candidate. None: nothing.
+pub(super) fn on_candidate(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
+    let Some(image) = s.candidate.clone() else { return Ok(()) };
+    let r = api.signed(owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": image })))?;
+    s.ok(&format!("its computer is pinned to the candidate, {image}, before its first start"), r.status == 200 && r.body["image"] == image.as_str() && r.body["phase"] == "asleep", &r);
+    Ok(())
+}
+
 /// A view's notice of `kind` (docs/computers.md, "What its owner is told"),
 /// or null.
 pub(super) fn notice(v: &Value, kind: &str) -> Value {
@@ -630,6 +640,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
+    on_candidate(s, api, &owner, &id)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.

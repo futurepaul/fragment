@@ -129,6 +129,7 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     let skills = api.create_with(&keys, json!({ "label": s.name("skills"), "template": "skills" }))?;
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    super::computers::on_candidate(s, api, &keys, &id)?;
     let (juniper, juniper_id, jchat) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {email}'s agent. You talk with {email} and hand building work to your teammates.\n"))?;
     let (maple, maple_id, mchat) = agent(api, &keys, &id, &s.name("maple"), "Maple", &format!("You are Maple, {email}'s builder. You make and publish small web apps (fragments) with the fragment CLI, and show them in the browser on your desktop.\n"))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));

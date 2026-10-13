@@ -867,18 +867,19 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
 /// --except …] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls
-/// <n>]`: the suite's
+/// <n>] [--candidate <image>]`: the suite's
 /// own arguments for that branch deployment, from its config: the zone, the
 /// test secret's file (named, never read here), and what the deployment
 /// offers (computers, models). A deployment of its own is refused: the
-/// hosted lane runs on a preview.
+/// hosted lane runs on a preview. A candidate is one of the config's
+/// images other than its default (docs/computers.md, "Stable and canary").
 pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let usage = || {
         anyhow::anyhow!(
-            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>]"
+            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>] [--candidate <image>]"
         )
     };
-    let (mut config, mut branch, mut passed, mut operator_key_file) = (None, None, vec![], None);
+    let (mut config, mut branch, mut passed, mut operator_key_file, mut candidate) = (None, None, vec![], None, None);
     let mut it = rest.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(a) = it.next() {
@@ -889,6 +890,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
             // an operator key's file (`fragment operator key` makes one): the
             // runner reads it by path; the deployment lists its npub
             "--operator-key-file" => operator_key_file = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
+            "--candidate" => candidate = Some(it.next().ok_or_else(usage)?.clone()),
             "--only" | "--except" | "--max-paid-calls" => {
                 passed.push(a.clone());
                 passed.push(it.next().ok_or_else(usage)?.clone());
@@ -920,6 +922,14 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
+    }
+    // a round's candidate: an image of the config's that new computers do
+    // not start on, or there is nothing to try
+    if let Some(image) = candidate {
+        let c = d.computers.as_ref().context("--candidate names one of the deployment's computer images: its config has no `computers`")?;
+        anyhow::ensure!(c.images.contains_key(&image), "--candidate {image:?} is not one of the config's images ({})", c.images.keys().cloned().collect::<Vec<_>>().join(", "));
+        anyhow::ensure!(image != c.default_image, "--candidate {image:?} is the default image, which the hosted lane runs anyway: name the canary");
+        args.extend(["--candidate".to_string(), image]);
     }
     args.extend(passed);
     Ok(args)
@@ -1063,6 +1073,17 @@ mod tests {
         v["operators"] = json!([]);
         let path = config_file("hosted-args-operator-unlisted", &v);
         assert!(args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--operator-key-file", "/k"]).is_err(), "a key among no operators");
+        // a round's candidate: one of the config's images, not its default
+        let candidate = |v: &Value, test: &str, image: &str| {
+            let path = config_file(test, v);
+            args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--candidate", image, "--only", "agent-restart"])
+        };
+        assert!(candidate(&v, "hosted-args-candidate-no-computers", "hermes-canary").is_err(), "a deployment that makes no computers");
+        let build = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
+        v["computers"] = json!({ "default_image": "hermes", "images": { "hermes": build, "hermes-canary": build } });
+        assert_eq!(candidate(&v, "hosted-args-candidate", "hermes-canary").unwrap(), with(&["--offers", "computers", "--candidate", "hermes-canary", "--only", "agent-restart"]));
+        assert!(candidate(&v, "hosted-args-candidate-default", "hermes").is_err(), "the default is what runs anyway");
+        assert!(candidate(&v, "hosted-args-candidate-unknown", "stub-next").is_err(), "an image the config does not name");
         // production: a deployment of its own runs no hosted lane
         v["platform_host"] = json!("fragment.club");
         v["fragment_suffix"] = json!("fragment.boats");
