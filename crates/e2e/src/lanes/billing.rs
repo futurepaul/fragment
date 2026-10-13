@@ -14,6 +14,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use crate::api::Api;
+use crate::browser::{Lease, Page};
 use crate::{Need, Suite};
 
 /// How long a seat's push may take to reach a ledger (the registry's alarm).
@@ -321,9 +322,85 @@ const SEEN: &str = "(() => { const card = document.getElementById('first-run-car
 /// gets there).
 const SEATED: &str = "location.pathname === '/' && location.search === '' && document.getElementById('first-run').hidden && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')";
 
-/// Clicks the first run's button (or link) whose text is `text`.
+/// Clicks the first run's button (or link) whose text is `text`; answers
+/// whether there was one.
 fn press(text: &str) -> String {
     format!("(() => {{ const b = [...document.querySelectorAll('#first-run-card button, #first-run-card a')].find((b) => !b.hidden && b.textContent === {text:?}); b?.click(); return !!b; }})()")
+}
+
+/// Clicks the first element `selector` matches; answers whether there was one.
+fn click(selector: &str) -> String {
+    format!("(() => {{ const e = document.querySelector({selector:?}); e?.click(); return !!e; }})()")
+}
+
+/// Clicks the first of the elements `selector` matches whose text is
+/// `text`; answers whether there was one.
+fn click_text(selector: &str, text: &str) -> String {
+    format!("(() => {{ const e = [...document.querySelectorAll({selector:?})].find((e) => e.textContent === {text:?}); e?.click(); return !!e; }})()")
+}
+
+/// Where a page is, what it shows, and which of the shell's files it has.
+/// Resource Timing lists a file once its answer is in, so one the page
+/// lacks is a request that never came back: its modules then never run,
+/// and the page stays blank (CI, 2026-10-13: a page's billing.js and
+/// vendor/split-grid.js never reached the node).
+const PAGE: &str = "({ at: location.href, ready: document.readyState, firstRun: document.getElementById('first-run')?.hidden === false, layout: document.getElementById('layout')?.hidden === false, text: document.body?.innerText.slice(0, 300) ?? '', shell: performance.getEntriesByType('resource').filter((e) => e.name.includes('/__shell/')).map((e) => `${e.name.split('/__shell/')[1]} ${e.responseStatus}`) })";
+
+/// `PAGE` on `page`, or why it could not be read.
+fn page_state(b: &mut Lease, page: &Page) -> Value {
+    b.eval(page, PAGE).unwrap_or_else(|e| json!(format!("{e:#}")))
+}
+
+/// Does `step` on `page`: an action that answers whether it found what it
+/// acts on. When it did not, the step is a FAIL that says where the page is
+/// and what it has, and the caller stops there: each step after it acts on
+/// what this one makes.
+fn act(s: &mut Suite, b: &mut Lease, page: &Page, what: &str, step: &str) -> Result<bool> {
+    if b.eval(page, step)? == json!(true) {
+        return Ok(true);
+    }
+    s.ok(&format!("{what}: it is on the page"), false, page_state(b, page));
+    Ok(false)
+}
+
+/// Clicks `selector` as a person does (Stripe's pages), as `act` does an action.
+fn act_at(s: &mut Suite, b: &mut Lease, page: &Page, what: &str, selector: &str) -> bool {
+    match b.click(page, selector) {
+        Ok(()) => true,
+        Err(e) => {
+            s.ok(&format!("{what}: {e:#}"), false, page_state(b, page));
+            false
+        }
+    }
+}
+
+/// Waits until `expr` holds on `page`, a page of the shell just loaded or
+/// navigated to. `wrangler dev`'s proxy now and then never answers a
+/// request in a page's burst of module loads (CI, 2026-10-13: billing.js
+/// and vendor/split-grid.js, twice, which never reached the node), and the
+/// page's modules then never run. A page whose shell never ran (neither its
+/// first run nor its layout shows) when the wait runs out is said, with
+/// the files it has, and loaded again, once; anything else is the wait's
+/// own answer.
+#[track_caller]
+fn view(b: &mut Lease, page: &Page, expr: &str, wait: Duration) -> bool {
+    if b.until(page, expr, wait) {
+        return true;
+    }
+    let state = page_state(b, page);
+    if state["firstRun"] != false || state["layout"] != false || !state["at"].as_str().is_some_and(|at| at.starts_with("http")) {
+        return false;
+    }
+    println!("      (the shell never ran, a request of its page never answered: {state}; loaded again)");
+    b.reload(page).is_ok() && b.until(page, expr, wait)
+}
+
+/// A page of the person signed in with `session`, open at `path`.
+fn page_of(b: &mut Lease, api: &Api, session: &str, path: &str) -> Result<Page> {
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open(&format!("{}{path}", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+    Ok(page)
 }
 
 /// A new person's first run, and Billing, in Chrome (cell/shell/shell.js
@@ -342,7 +419,9 @@ fn press(text: &str) -> String {
 /// nothing twice, and the webhook come late changes nothing. A trial mailed
 /// brings a signed-out person through sign-in and back with its code. A
 /// guest given a seat goes straight to the first run. Stripe's pages are
-/// the fake's own.
+/// the fake's own. A step that acts on the page does so only on what is
+/// there: one that finds nothing is a FAIL saying where the page is and
+/// what it has, not an error thrown in the page.
 pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node]) {
         return Ok(());
@@ -369,10 +448,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- a new guest: the welcome, never settings
     let gus = guest(api, "billing-page-guest")?;
     let session = api.sign_in(&Api::email_of(&gus))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/", api.base))?;
-    b.viewport(&page, 1280, 800, false)?;
-    let welcomed = b.until(&page, WELCOMED, wait);
+    let page = page_of(&mut b, api, &session, "/")?;
+    let welcomed = view(&mut b, &page, WELCOMED, wait);
     let _ = b.screenshot(&page, &shots.join("1-welcome.png"));
     let seen = b.eval(&page, SEEN)?;
     s.ok(
@@ -388,7 +465,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // settings' Billing manages a seat; a guest's links to the welcome
     b.eval(&page, "(location.assign('/settings'), true)")?;
-    let billing = b.until(&page, "location.pathname === '/settings' && document.querySelector('#settings-page h2')?.textContent === 'Billing' && /You are a guest/.test(document.getElementById('settings-page').innerText)", wait);
+    let billing = view(&mut b, &page, "location.pathname === '/settings' && document.querySelector('#settings-page h2')?.textContent === 'Billing' && /You are a guest/.test(document.getElementById('settings-page').innerText)", wait);
     let offered = b.eval(
         &page,
         "({ links: [...document.querySelectorAll('#settings-page a')].filter((a) => a.textContent === 'Get a seat').map((a) => a.getAttribute('href')), buys: [...document.querySelectorAll('#settings-page button, #settings-page input')].map((b) => b.textContent || b.placeholder).filter((t) => /seat|trial/i.test(t)), headings: [...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent), warned: [...document.querySelectorAll('.settings-warning')].map((w) => w.textContent) })",
@@ -402,21 +479,30 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && offered["headings"].as_array().is_some_and(|h| ["Computer", "Agents", "Skills", "Connections"].iter().all(|x| !h.contains(&json!(x)))),
         &offered,
     );
-    b.eval(&page, "([...document.querySelectorAll('#settings-page a')].find((a) => a.textContent === 'Get a seat').click(), true)")?;
-    let back = b.until(&page, WELCOMED, wait);
+    if !act(s, &mut b, &page, "settings' Get a seat", &click_text("#settings-page a", "Get a seat"))? {
+        return Ok(());
+    }
+    let back = view(&mut b, &page, WELCOMED, wait);
 
     // ---- invalid: Checkout left by its Back; a trial code that is none
-    b.eval(&page, "(document.querySelector('#first-run-card [data-plan=seat]').click(), true)")?;
+    if !act(s, &mut b, &page, "the welcome's $100 seat", &click("#first-run-card [data-plan=seat]"))? {
+        return Ok(());
+    }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
-    b.click(&page, "#back")?;
-    let canceled = b.until(&page, &format!("{WELCOMED} && location.search === '' && /Checkout was canceled: nothing was bought/.test(document.getElementById('first-run-card').innerText)"), wait);
+    if !act_at(s, &mut b, &page, "Stripe's Back", "#back") {
+        return Ok(());
+    }
+    let canceled = view(&mut b, &page, &format!("{WELCOMED} && location.search === '' && /Checkout was canceled: nothing was bought/.test(document.getElementById('first-run-card').innerText)"), wait);
     let _ = b.screenshot(&page, &shots.join("2-canceled.png"));
     s.ok(
         "Get a seat there opens the welcome; its $100 seat goes to Stripe's Checkout, whose Back comes back to the welcome, saying nothing was bought, the seats offered again",
         back && at_stripe && canceled && seat(api, &gus)["seat"].is_null(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": seat(api, &gus) }),
     );
-    b.eval(&page, "(() => { const f = document.querySelector('#first-run-card form.trial-code'); f.querySelector('input').value = 'ZZZZ-ZZZZ-ZZZZ-ZZZZ'; f.requestSubmit(); return true; })()")?;
+    let typed = "(() => { const f = document.querySelector('#first-run-card form.trial-code'); if (!f) return false; f.querySelector('input').value = 'ZZZZ-ZZZZ-ZZZZ-ZZZZ'; f.requestSubmit(); return true; })()";
+    if !act(s, &mut b, &page, "the welcome's trial code", typed)? {
+        return Ok(());
+    }
     let refused = b.until(&page, "[...document.querySelectorAll('#first-run-card .form-error')].some((e) => !e.hidden && /no such trial code/.test(e.textContent))", wait);
     let seen = b.eval(&page, SEEN)?;
     let _ = b.screenshot(&page, &shots.join("3-no-such-code.png"));
@@ -427,11 +513,15 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // ---- valid: the $200 seat paid; its return is the welcome's, then the first run
-    b.eval(&page, "(document.querySelector('#first-run-card [data-plan=seat_always_on]').click(), true)")?;
+    if !act(s, &mut b, &page, "the welcome's $200 seat", &click("#first-run-card [data-plan=seat_always_on]"))? {
+        return Ok(());
+    }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
     let paid = b.eval(&page, "location.pathname.split('/').pop()")?.as_str().unwrap_or("").to_string();
-    b.click(&page, "form button")?;
-    let seated = b.until(&page, SEATED, wait);
+    if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
+        return Ok(());
+    }
+    let seated = view(&mut b, &page, SEATED, wait);
     let _ = b.screenshot(&page, &shots.join("4-paid-creating.png"));
     let made = s.eventually(wait, || owned(api, &gus, "agent") == 1 && owned(api, &gus, "chat") == 1);
     let mine = seat(api, &gus);
@@ -443,7 +533,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- replay: that return again, its first run made, goes home
     let purchased = ledger(api, &gus)["purchasedMicros"].clone();
     b.eval(&page, &format!("(location.assign({:?}), true)", format!("/welcome?checkout={paid}")))?;
-    let home = b.until(&page, "location.pathname === '/' && location.search === '' && document.getElementById('first-run').hidden && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')", wait);
+    let home = view(&mut b, &page, "location.pathname === '/' && location.search === '' && document.getElementById('first-run').hidden && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')", wait);
     let again = seat(api, &gus);
     s.ok(
         "Checkout's return again goes home to their chat: the seat as it was, nothing made or credited twice",
@@ -453,7 +543,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- Billing manages the seat from here
     b.eval(&page, "(location.assign('/settings'), true)")?;
-    let managed = b.until(&page, "location.pathname === '/settings' && /\\$200 always-on seat/.test(document.getElementById('settings-page')?.innerText ?? '') && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')", wait);
+    let managed = view(&mut b, &page, "location.pathname === '/settings' && /\\$200 always-on seat/.test(document.getElementById('settings-page')?.innerText ?? '') && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')", wait);
     let _ = b.screenshot(&page, &shots.join("5-billing.png"));
     let shown = text(&mut b, &page);
     let buttons = b.eval(&page, "[...document.querySelectorAll('#settings-page button')].map((b) => b.textContent)")?;
@@ -465,19 +555,28 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         managed && alone == true && warned == json!([]) && has("Payment and invoices") && has("Add seats for others") && !has("Make your first agent"),
         json!({ "shown": shown, "buttons": buttons, "warned": warned }),
     );
-    b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Add seats for others').click()")?;
+    if !act(s, &mut b, &page, "Billing's Add seats for others", &click_text("#settings-page button", "Add seats for others"))? {
+        return Ok(());
+    }
     let asked = b.until(&page, "!!document.querySelector('.billing-seats') && [...document.querySelectorAll('#settings-page form')].some(f => f.textContent.includes('Add a seat'))", wait);
     s.ok("asked, their org's seats show: theirs alone, and a seat to add by email", asked, text(&mut b, &page));
     let teammate = format!("billing-page-mate-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
-    b.eval(&page, &format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find(f => f.textContent.includes('Add a seat')); f.querySelector('input[type=email]').value = {teammate:?}; f.requestSubmit(); }})()"))?;
+    let typed = format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find(f => f.textContent.includes('Add a seat')); if (!f) return false; f.querySelector('input[type=email]').value = {teammate:?}; f.requestSubmit(); return true; }})()");
+    if !act(s, &mut b, &page, "Billing's Add a seat", &typed)? {
+        return Ok(());
+    }
     let added = b.until(&page, &format!("[...document.querySelectorAll('.billing-seats tr')].some(r => r.textContent.includes({teammate:?}) && r.textContent.includes('invited'))"), wait);
     let unasked = b.eval(&page, "![...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')")?;
     s.ok("as its admin they add a seat by email: it waits, invited, and their org's seats now show unasked", added && unasked == true, text(&mut b, &page));
     let before = ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
-    b.eval(&page, "[...document.querySelectorAll('#settings-page button')].find(b => b.textContent === 'Buy $25 of credit').click()")?;
+    if !act(s, &mut b, &page, "Billing's Buy $25 of credit", &click_text("#settings-page button", "Buy $25 of credit"))? {
+        return Ok(());
+    }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
-    b.click(&page, "form button")?;
-    let credited = b.until(&page, "location.pathname === '/settings' && /Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
+        return Ok(());
+    }
+    let credited = view(&mut b, &page, "location.pathname === '/settings' && /Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
     s.ok(
         "they buy $25 of credit on Stripe's page, and it is theirs as they land back in settings",
         at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + 25_000_000),
@@ -496,10 +595,9 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": Api::email_of(&bea), "role": "editor" })))?;
     anyhow::ensure!(r.status == 200, "sharing it with the guest: {r}");
     let session = api.sign_in(&Api::email_of(&bea))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/", api.base))?;
-    b.viewport(&page, 1280, 800, false)?;
-    let landed = b.until(
+    let page = page_of(&mut b, api, &session, "/")?;
+    let landed = view(
+        &mut b,
         &page,
         &format!("location.pathname === '/' && !!document.querySelector('.viewer iframe[data-fragment={app:?}]') && /Get a seat/.test(document.getElementById('notice')?.innerText ?? '')"),
         wait,
@@ -509,21 +607,28 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     // every control that makes something (a guest's create is refused: the
     // dock's Add, the top bar's new chat, the launcher's start and send, the
     // desktop's requests), the launcher open with words typed: it only finds
-    b.eval(&page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
-    b.eval(&page, "(() => { const i = document.getElementById('workspace-search'); i.value = 'garden'; i.dispatchEvent(new Event('input')); return true; })()")?;
+    if !act(s, &mut b, &page, "the sidebar's new chat", &click("#sidebar-new-chat"))? {
+        return Ok(());
+    }
+    let typed = "(() => { const i = document.getElementById('workspace-search'); if (!i) return false; i.value = 'garden'; i.dispatchEvent(new Event('input')); return true; })()";
+    if !act(s, &mut b, &page, "the launcher's search", typed)? {
+        return Ok(());
+    }
     let found = b.until(&page, &format!("!!document.querySelector('#search-results [data-fragment={app:?}]')"), wait);
     let makes = b.eval(
         &page,
         "[document.getElementById('add-app') && 'add-app', !document.getElementById('new-chat').hidden && 'new-chat', !document.getElementById('search-send').disabled && 'search-send', document.querySelector('#search-results .search-start') && 'search-start', document.querySelector('#desktop-empty .desktop-suggestion') && 'suggestion'].filter(Boolean)",
     )?;
-    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
-    b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, "(document.getElementById('search-dialog')?.dispatchEvent(new Event('cancel')), true)")?;
+    b.until(&page, "!document.getElementById('search-dialog')?.open", wait);
     s.ok(
         "an invited guest lands home on what was shared with them, not the welcome: its window open and titled as its owner titled it, a seat offered beside it, and no control that only fails (their launcher only finds)",
         landed && row == json!("Garden plans") && found && makes == json!([]),
         json!({ "row": row, "makes": makes }),
     );
-    b.eval(&page, "(document.querySelector('#notice .allow')?.click(), true)")?;
+    if !act(s, &mut b, &page, "the guest's Get a seat", &click("#notice .allow"))? {
+        return Ok(());
+    }
     let offered = b.until(&page, &format!("{WELCOMED} && [...document.querySelectorAll('#first-run-card a')].some((a) => a.textContent === 'Not now' && a.getAttribute('href') === '/')"), wait);
     s.ok("their Get a seat opens the welcome, whose Not now goes back to what is shared with them", offered, b.eval(&page, SEEN)?);
     b.close(page)?;
@@ -532,10 +637,9 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     // at Checkout, and no webhook comes; a reload mid-wait; the webhook late
     let ida = guest(api, "billing-page-restart")?;
     let session = api.sign_in(&Api::email_of(&ida))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/welcome?checkout={paid}", api.base))?;
-    b.viewport(&page, 1280, 800, false)?;
-    let failed = b.until(
+    let page = page_of(&mut b, api, &session, &format!("/welcome?checkout={paid}"))?;
+    let failed = view(
+        &mut b,
         &page,
         "[...document.querySelectorAll('#first-run-card .creating-steps li')].some((li) => li.className === 'failed' && li.textContent === 'Setting up your seat') && [...document.querySelectorAll('#first-run-card button')].some((b) => !b.hidden && b.textContent === 'Choose a seat')",
         wait,
@@ -552,14 +656,16 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seat(api, &ida)["seat"].is_null(),
         &seen,
     );
-    b.eval(&page, "(document.querySelector('#first-run-card [data-plan=seat]').click(), true)")?;
+    if !act(s, &mut b, &page, "the welcome's $100 seat", &click("#first-run-card [data-plan=seat]"))? {
+        return Ok(());
+    }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
     // the webhook lost, and the node restarted, while they are on Stripe's page
     s.stripe.hold_events(true);
     let delivered = s.stripe.delivered().len();
     s.stop()?;
     let restarted = s.start(false);
-    let seated = restarted.is_ok() && b.click(&page, "form button").is_ok() && b.until(&page, SEATED, wait);
+    let seated = restarted.is_ok() && b.click(&page, "form button").is_ok() && view(&mut b, &page, SEATED, wait);
     let held = s.stripe.delivered().len() == delivered;
     let api = &restarted?;
     let mine = seat(api, &ida);
@@ -571,15 +677,19 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     // a reload while its computer starts (the first run's longest wait)
     let midway = b.until(&page, "[...document.querySelectorAll('#first-run-card .creating-steps li')].some((li) => li.textContent === 'Starting its computer' && li.className === 'doing') || !document.getElementById('layout').hidden", wait);
     b.reload(&page)?;
-    let resumed = b.until(
+    let resumed = view(
+        &mut b,
         &page,
         "location.pathname === '/' && (document.getElementById('first-run').hidden ? !!document.querySelector('#frames iframe[data-fragment]') : !!document.querySelector('#first-run-card .creating-steps li.doing'))",
         wait,
     );
     let _ = b.screenshot(&page, &shots.join("8-reloaded.png"));
+    // the in-chat first run makes the chat before the agent: the agent may
+    // still be on its way as the reloaded page shows the chat
+    let once = s.eventually(wait, || owned(api, &ida, "agent") == 1 && owned(api, &ida, "chat") == 1);
     s.ok(
         "a reload mid-wait goes on where it stopped, at home's address: one agent, one chat, nothing made twice",
-        midway && resumed && owned(api, &ida, "agent") == 1 && owned(api, &ida, "chat") == 1,
+        midway && resumed && once,
         json!({ "seen": b.eval(&page, SEEN)?, "agents": owned(api, &ida, "agent"), "chats": owned(api, &ida, "chat") }),
     );
     s.stripe.release_events(false);
@@ -599,21 +709,24 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let nobody = b.another_context()?;
     let out = b.open_in(&nobody, &format!("{}/welcome?trial={code}", api.base))?;
     let href = format!("/auth/login?return=%2Fwelcome%3Ftrial%3D{code}");
-    let asked = b.until(&out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {href:?}"), wait);
+    let asked = view(&mut b, &out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {href:?}"), wait);
     s.ok("signed out, a trial's link asks them to sign in, and to come back to the welcome with its code", asked, b.eval(&out, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') ?? null")?);
     b.close(out)?;
     let jo = guest(api, "billing-page-trial")?;
     let session = api.sign_in(&Api::email_of(&jo))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/welcome?trial={code}", api.base))?;
-    b.viewport(&page, 1280, 800, false)?;
-    let filled = b.until(&page, &format!("{WELCOMED} && location.search === '' && document.querySelector('#first-run-card input[placeholder=\"Trial code\"]')?.value === {code:?}"), wait);
+    let page = page_of(&mut b, api, &session, &format!("/welcome?trial={code}"))?;
+    let filled = view(&mut b, &page, &format!("{WELCOMED} && location.search === '' && document.querySelector('#first-run-card input[placeholder=\"Trial code\"]')?.value === {code:?}"), wait);
     // evidence for a person: the welcome as a mailed trial opens it (kept with a run's scratch)
     let _ = b.screenshot(&page, &shots.join("9-trial.png"));
-    b.eval(&page, "(document.querySelector('#first-run-card form.trial-code').requestSubmit(), true)")?;
+    let started = "(() => { const f = document.querySelector('#first-run-card form.trial-code'); f?.requestSubmit(); return !!f; })()";
+    if !act(s, &mut b, &page, "the welcome's Start a trial", started)? {
+        return Ok(());
+    }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /5-day trial/.test(document.body.innerText)", s.stripe.url), wait);
-    b.click(&page, "form button")?;
-    let seated = b.until(&page, SEATED, wait);
+    if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
+        return Ok(());
+    }
+    let seated = view(&mut b, &page, SEATED, wait);
     let mine = seat(api, &jo);
     s.ok(
         "signed in, the link's welcome has its code filled in; its trial takes a card on Stripe's page and comes back to the welcome, which seats them in their trial and goes on to their first agent",
@@ -628,11 +741,10 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let max = guest(api, "billing-page-given")?;
     let given = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&max), "kind": "seat" })))?;
     let session = api.sign_in(&Api::email_of(&max))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = b.open(&format!("{}/", api.base))?;
-    b.viewport(&page, 1280, 800, false)?;
+    let page = page_of(&mut b, api, &session, "/")?;
     // its seat's own step while its plan is on its way, else the chat at once
-    let straight = b.until(
+    let straight = view(
+        &mut b,
         &page,
         "location.pathname === '/' && !document.querySelector('#first-run-card [data-plan]') && (!!document.querySelector('#first-run-card .creating-steps') || (!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]')))",
         wait,
