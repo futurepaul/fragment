@@ -917,6 +917,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "history.forward(), true")?;
     let forward = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
     s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname")?);
+    // settings fill the work area: a window opened there (an agent's Open)
+    // goes back to the open chat, the window beside it, seen
+    b.click(&page, "#settings")?;
+    let listed = b.until(&page, "location.pathname === '/settings' && [...document.querySelectorAll('#settings-page .settings-section button.row')].some((b) => b.textContent === 'Open')", wait);
+    b.eval(&page, "([...document.querySelectorAll('#settings-page .settings-section button.row')].find((b) => b.textContent === 'Open')?.click(), true)")?;
+    let seen = b.until(
+        &page,
+        "location.pathname === '/' && !document.getElementById('layout').classList.contains('settings-view') && document.getElementById('viewer').getBoundingClientRect().width > 0 && !!document.querySelector('#stack .pane iframe')",
+        wait,
+    );
+    s.ok("an agent's Open in settings goes back to the chat, its window beside it", listed && seen, b.eval(&page, "({ path: location.pathname, view: document.getElementById('layout').className, panes: [...document.querySelectorAll('#stack .pane')].map((p) => p.dataset.key) })")?);
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;
