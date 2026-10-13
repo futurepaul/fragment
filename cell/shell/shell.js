@@ -186,7 +186,12 @@ addEventListener("keydown", (e) => {
   layout.toggle(e.altKey ? "right" : "left");
 });
 const leaveSidebar = () => { if (layout.narrow) layout.hide("left"); };
+// A window is seen beside the chat: settings fill the work area, so one
+// opened from there (an agent's Open, a screen, the skills) goes back to
+// the open chat first, or, with none, lets the viewer show beside them.
 function show(spec) {
+  if (state.page && byName(state.current)) openChat(state.current);
+  else $("layout").classList.remove("settings-view");
   viewer.open(spec);
   layout.show("right");
 }
