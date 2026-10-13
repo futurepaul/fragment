@@ -451,12 +451,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let outsider_session = api.sign_in("outsider@e2e.test")?;
     api.approve(&outsider_session, &outsider)?;
     let (f, g) = (s.named(api, &owner, "signin-f")?, s.named(api, &owner, "signin-g")?);
-    let mut f_view = String::new();
     for name in [&f, &g] {
         let c = s.create(api, &owner, name)?;
-        if name == &f {
-            f_view = format!("?view={}", c["viewToken"].as_str().unwrap_or(""));
-        }
         s.commit(
             &c,
             &[
@@ -566,8 +562,11 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let mut mismatches = vec![];
     let mut wrong = vec![];
     let mut decided = 0;
+    // the share link as it is now: opened again from members, a new one
+    let link_of = |f: &str| -> Result<String> { Ok(format!("?view={}", api.status(&owner, f)?.body["viewToken"].as_str().unwrap_or(""))) };
     for visibility in ["public", "link", "members"] {
         api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;
+        let f_view = link_of(&f)?;
         let askers = [
             ("member", Some(member_f2.as_str()), Some(&member), ""),
             ("outsider", Some(outsider_f.as_str()), Some(&outsider), ""),
@@ -623,8 +622,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // who may see the fragment, so the registry is asked only where it decides
     let page = ["", "app.js", "style.css", "__fragment.js", "__fragment.css"];
     let mut costs = vec![];
-    for (visibility, view) in [("public", ""), ("link", f_view.as_str()), ("members", "")] {
+    for visibility in ["public", "link", "members"] {
         api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;
+        let view = if visibility == "link" { link_of(&f)? } else { String::new() };
+        let view = view.as_str();
         let viewed = |cookie: Option<String>, keys: Option<&Keys>| {
             calls_of(api, || {
                 for path in page {

@@ -589,7 +589,13 @@ speaking Cloudflare's APIs) returns once this product works.
     agent can read, and an agent may be held below its owner.
     - Skyler can limit which of his agents act in what is shared with
       him (all of them by default).
-    - The fragment's owner can mark one share "people only".
+    - A share is the person's and their agents' (Paul, 2026-10-13:
+      "Giving a person access should imply giving their agent access.
+      It's basically 'giving all the pubkeys under the umbrella of this
+      email' access"). Each agent still acts with at most its cap (R17)
+      and its owner's hold. The "people only" share this decision had
+      went then, a hard cut. An agent of someone else's added by its
+      npub is still that agent alone.
     - Something an agent makes is owned by its person; the agent is its
       creator.
     - Each agent's own model and compute bill its owner. The fragment's
@@ -782,6 +788,15 @@ runaround".
       `?view=<token>` and can be rotated, and the fragment's bare
       address opens nothing. So an invite always names someone, and
       bearer invites (`/join/<name>?token=` for whoever holds it) go.
+    - Defaults taken 2026-10-13 (the coordinating session, and Paul for
+      the first): a chat or an agent (its SOUL and memories) is made
+      `members` (Paul); the share link is its owner's alone (and their
+      agent's, sharing for them), so a member asks the owner rather than
+      re-sharing by link; a fragment opened again from `members` gets a
+      new share link, so one that stopped working stays dead; an invite
+      adds someone and never changes a member's role (that is `PUT
+      members`); a chat's own agent (its lead) keeps its place, an editor,
+      and only leaves of itself.
 49. **Sign-up is open; creating needs a seat.** This replaced
     invite-only sign-up. Anyone signs in through WorkOS's own sign-in
     methods (fragment mails no login links) and is a guest (decision
@@ -1200,8 +1215,8 @@ exit says.
    - two profiles, and a group `@mention`;
    - a routine (fragment cron) that wakes a sleeping computer on time;
    - delegation (decision 36): another person's agent edits a fragment
-     shared with that person as an editor; a people-only share refuses
-     it; an agent held below its owner is refused;
+     shared with that person as an editor; an agent held below its owner
+     is refused (people-only shares went 2026-10-13);
    - a test that the platform has no Hermes code: the same lane passes
      with a stub image whose bridge speaks the fragment API;
    - drafts: the bridge streams through the channel drafts API, and a
@@ -1216,8 +1231,8 @@ exit says.
      the platform's model route, storage over R2, and the swap:
      connections through WorkOS Pipes per agent, operator keys priced and
      metered); wakes gated on the owner's credit and awake time metered;
-     delegation (decision 36: people-only shares, agents held below their
-     owner); the images (`images/`: the bridge, the stub, our Hermes).
+     delegation (decision 36: agents held below their owner; its
+     people-only shares went 2026-10-13); the images (`images/`: the bridge, the stub, our Hermes).
    - Evidence, all on workerd under `wrangler dev` with Docker, the
      vendors faked at their boundaries (a lower rung):
      - the `computers` section on the stub image: the platform holds no

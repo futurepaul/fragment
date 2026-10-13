@@ -19,10 +19,13 @@
 //! than its owner could, so a key that signs `for` someone else gains
 //! nothing its owner does not hold.
 //!
-//! Decision 36 adds two limits. A share its fragment's owner marked
-//! "people only" lends an agent nothing: its owner's membership there does
-//! not count in the agent's cap. And an agent its owner holds below them
-//! acts with at most its hold, wherever it is and whomever it acts for.
+//! Decision 36 adds a limit: an agent its owner holds below them acts
+//! with at most its hold, wherever it is and whomever it acts for. Its
+//! other, a share marked "people only" that lent the member's agents
+//! nothing, went on 2026-10-13 (Paul: "Giving a person access should imply
+//! giving their agent access. It's basically 'giving all the pubkeys under
+//! the umbrella of this email' access"): a member's agents reach what the
+//! member does, capped as above.
 //!
 //! Some control routes need more than a role (`reserved`). Sharing
 //! (members, invites, visibility, the links) is the owner's, and, since
@@ -63,8 +66,6 @@ pub struct Cap {
     pub agent: Option<Role>,
     /// Its owner's membership.
     pub owner: Option<Role>,
-    /// The owner's share is "people only": it lends the agent nothing.
-    pub people_only: bool,
 }
 
 /// The highest role an agent ever acts with: owning is never its. Sharing
@@ -124,8 +125,7 @@ fn own_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Opt
 /// above `AGENT_ROLE_MAX`.
 fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
     let agent = own_role(visibility, Standing { member: cap.agent, owns_member_agent: false, link, signed: true, cap: None, held: None }, Purpose::Act);
-    let owner = if cap.people_only { None } else { cap.owner };
-    agent.max(owner).map(|r| r.min(AGENT_ROLE_MAX))
+    agent.max(cap.owner).map(|r| r.min(AGENT_ROLE_MAX))
 }
 
 /// The role an agent acting for someone holds in a fragment it lists for
@@ -180,15 +180,6 @@ pub struct Sharer {
     pub held: Option<Role>,
 }
 
-/// The agent's owner's share of a fragment, as the fragment keeps it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OwnerShare {
-    /// The owner's membership.
-    pub role: Option<Role>,
-    /// That share is people only: it lends the owner's agents nothing.
-    pub people_only: bool,
-}
-
 /// Why an agent's request on a reserved route carries no owner's
 /// authority (403).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,8 +193,6 @@ pub enum ShareRefusal {
     /// Its owner does not own the fragment: their own role there caps it,
     /// and only an owner shares.
     NotOwner,
-    /// Its owner's share there is people only: it lends the agent nothing.
-    PeopleOnly,
 }
 
 impl ShareRefusal {
@@ -213,7 +202,6 @@ impl ShareRefusal {
             ShareRefusal::NotForOwner => "an agent shares only acting for its own owner (`for=<its owner>`), never as itself or for anyone else",
             ShareRefusal::Held => "an agent its owner holds below them shares nothing",
             ShareRefusal::NotOwner => "an agent shares only what its owner owns",
-            ShareRefusal::PeopleOnly => "its owner's share here is people only: it lends their agents nothing",
         }
     }
 }
@@ -241,19 +229,14 @@ pub fn agent_may_ask(reserved: Reserved, sharer: Sharer) -> Result<(), ShareRefu
 /// Whether an agent shares a fragment with its owner's authority (Paul,
 /// 2026-10-04: "your agent can share on your behalf"), and the role it
 /// shares with: `owner`, when it acts for its own owner, its owner holds it
-/// at nothing below them, and its owner owns the fragment through a share
-/// that lends it. The role rules still apply to what it does
+/// at nothing below them, and its owner (whose membership is `owner`) owns
+/// the fragment. The role rules still apply to what it does
 /// (`refuse_set_role`, `refuse_remove`): it never makes anyone owner.
 /// Anywhere else its owner's own role caps it, as `effective_role` has it.
-pub fn agent_shares(sharer: Sharer, owner: OwnerShare) -> Result<Role, ShareRefusal> {
+pub fn agent_shares(sharer: Sharer, owner: Option<Role>) -> Result<Role, ShareRefusal> {
     agent_may_ask(Reserved::Sharing, sharer)?;
-    if owner.role != Some(Role::Owner) {
+    if owner != Some(Role::Owner) {
         return Err(ShareRefusal::NotOwner);
-    }
-    // as in `cap_role`: a people-only share lends the agent nothing (an
-    // owner's own share is never one, so this is a tripwire that refuses)
-    if owner.people_only {
-        return Err(ShareRefusal::PeopleOnly);
     }
     Ok(Role::Owner)
 }
@@ -322,24 +305,23 @@ mod tests {
     /// An agent acting for someone whose membership is `asker`, beside its
     /// own membership and its owner's.
     fn acting(asker: Option<Role>, agent: Option<Role>, owner: Option<Role>) -> Standing {
-        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner, people_only: false }), held: None }
+        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner }), held: None }
     }
 
-    /// Goal: decision 36's example and its two limits. Skyler's agent edits
-    /// what Paul shared with Skyler as an editor, acting for Skyler; a
-    /// people-only share lends it nothing; held at viewer it only reads
-    /// with whatever it reaches for whomever it acts, and keeps its own
-    /// memberships.
+    /// Goal: decision 36's example and its limit. Skyler's agent edits
+    /// what Paul shared with Skyler as an editor, acting for Skyler (a
+    /// share is Skyler's and their agents': Paul, 2026-10-13); held at
+    /// viewer it only reads with whatever it reaches for whomever it acts,
+    /// and keeps its own memberships.
     #[test]
     fn delegation_and_its_limits() {
         let d = |s, needs| decide(V::Members, s, Purpose::Act, needs);
         let skylers_agent = acting(Some(Editor), None, Some(Editor));
         assert_eq!(d(skylers_agent, Editor), Decision::Allow(Editor));
-        let people_only = Standing { cap: Some(Cap { agent: None, owner: Some(Editor), people_only: true }), ..skylers_agent };
-        assert_eq!(d(people_only, Viewer), Decision::Forbidden);
-        // its own membership still counts on a people-only share
-        let member_itself = Standing { cap: Some(Cap { agent: Some(Editor), owner: Some(Editor), people_only: true }), ..skylers_agent };
-        assert_eq!(d(member_itself, Editor), Decision::Allow(Editor));
+        // Skyler's viewer share lends it viewer, for Skyler, and no more
+        let skylers_viewer = acting(Some(Viewer), None, Some(Viewer));
+        assert_eq!(d(skylers_viewer, Viewer), Decision::Allow(Viewer));
+        assert_eq!(d(skylers_viewer, Editor), Decision::Forbidden);
         let held = Standing { held: Some(Viewer), ..skylers_agent };
         assert_eq!(d(held, Editor), Decision::Forbidden);
         assert_eq!(d(held, Viewer), Decision::Allow(Viewer));
@@ -425,7 +407,7 @@ mod tests {
 
     #[test]
     fn listing_for_an_asker() {
-        let cap = |agent, owner| Cap { agent, owner, people_only: false };
+        let cap = |agent, owner| Cap { agent, owner };
         assert_eq!(listed_role(Some(Owner), cap(None, Some(Owner))), Some(Editor));
         assert_eq!(listed_role(Some(Viewer), cap(Some(Editor), None)), Some(Viewer));
         assert_eq!(listed_role(Some(Editor), cap(None, None)), None);
@@ -471,7 +453,7 @@ mod tests {
     #[test]
     fn an_agent_shares_for_its_owner() {
         let for_owner = Sharer { for_owner: true, held: None };
-        let owns = OwnerShare { role: Some(Owner), people_only: false };
+        let owns = Some(Owner);
         // valid: the owner's own agent shares the owner's fragment, as its owner
         assert_eq!(agent_may_ask(Reserved::Sharing, for_owner), Ok(()));
         assert_eq!(agent_shares(for_owner, owns), Ok(Owner));
@@ -491,11 +473,11 @@ mod tests {
         assert_eq!(agent_may_ask(Reserved::Sharing, not_for_owner), Err(ShareRefusal::NotForOwner));
         assert_eq!(agent_shares(not_for_owner, owns), Err(ShareRefusal::NotForOwner));
         // another person's agent for its own owner, on what that person only edits
-        let editor = OwnerShare { role: Some(Editor), people_only: false };
+        let editor = Some(Editor);
         assert_eq!(agent_shares(for_owner, editor), Err(ShareRefusal::NotOwner));
         // a fragment its owner merely edits, views, or is not in
         for role in [Some(Editor), Some(Viewer), Some(Public), None] {
-            assert_eq!(agent_shares(for_owner, OwnerShare { role, people_only: false }), Err(ShareRefusal::NotOwner), "{role:?}");
+            assert_eq!(agent_shares(for_owner, role), Err(ShareRefusal::NotOwner), "{role:?}");
         }
         // held below its owner, at any hold: it shares nothing above its hold
         for held in [Viewer, Editor] {
@@ -503,8 +485,6 @@ mod tests {
             assert_eq!(agent_may_ask(Reserved::Sharing, held), Err(ShareRefusal::Held));
             assert_eq!(agent_shares(held, owns), Err(ShareRefusal::Held));
         }
-        // a people-only share lends it nothing, its owner's included
-        assert_eq!(agent_shares(for_owner, OwnerShare { role: Some(Owner), people_only: true }), Err(ShareRefusal::PeopleOnly));
         // deleting and the cap are the owner's own, for whomever it acts
         for sharer in [for_owner, not_for_owner, Sharer { for_owner: true, held: Some(Viewer) }] {
             for (method, rest) in [("DELETE", &[][..]), ("PUT", &["cap"][..])] {

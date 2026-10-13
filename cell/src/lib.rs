@@ -568,7 +568,7 @@ pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
 }
 
 /// An identity's fragments, as its `Principal` cell lists them.
-async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
 }
@@ -586,8 +586,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .fragments
         .into_iter()
         .filter_map(|f| {
-            // a people-only share is the fragment's to know: a call decides again
-            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
+            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their archiving) stays theirs
             let owned = f.role == Role::Owner;
             access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, ..f })
@@ -1031,6 +1030,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             create_fragment(env, cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
+        // who has access to each fragment the signer owns (share.rs)
+        (Method::Get, ["api", "access"]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            json_answer(&share::access(env, &url, &who).await?)
+        }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {

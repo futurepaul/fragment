@@ -20,8 +20,9 @@
 //! The fragment is the authority: a change is written here with an outbox
 //! row in the same turn, then delivered (and retried from the alarm). The
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
-//! open it, its members and guests), made when the row is sent: a change
-//! to members or visibility sends it again (`sharing_changed`), so the
+//! open it, its members and guests, and the invites waiting), made when
+//! the row is sent: a change to members, invites or visibility sends it
+//! again (`sharing_changed`), so the
 //! platform's page reads the owner's list alone. Every row carries the
 //! fragment's face (its kind and title) and its agents, the first added
 //! first: an install that changes the face, or an agent joining or
@@ -62,6 +63,20 @@ pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
 /// waiting on its email; the router never sets it.
 pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 
+/// Why a chat's own agent (`chat_agent`) keeps its place: the chat is its
+/// conversation, and its replies and steps post there as an editor.
+const CHAT_AGENT_STAYS: &str = "it is this chat's own agent, whose replies and steps make the chat: it is not removed (archive or delete the chat instead)";
+const CHAT_AGENT_STAYS_EDITOR: &str = "it is this chat's own agent, whose replies and steps post there as an editor: it stays one (archive or delete the chat instead)";
+
+/// An invite to someone in it already is refused: their role changes with
+/// `PUT members` (the share sheet's list, `fragment members role`).
+fn already_in(email: &str, role: Role) -> String {
+    match role {
+        Role::Owner => format!("{email} owns it"),
+        _ => format!("{email} is in it already, as {}: a role changes with PUT members/{email} (`fragment members role`), not an invite", if role == Role::Editor { "an editor" } else { "a viewer" }),
+    }
+}
+
 fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     if actor_is_owner {
         CellError::invalid(why)
@@ -70,7 +85,7 @@ fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     }
 }
 
-const MEMBER_COLUMNS: &str = "principal, role, added_by, added_at, kind, owner, people_only";
+const MEMBER_COLUMNS: &str = "principal, role, added_by, added_at, kind, owner";
 
 fn member_json(r: &Value) -> CellResult<Member> {
     let s = |k: &str| r[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("members.{k}")));
@@ -81,7 +96,6 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
-        people_only: r["people_only"].as_i64() == Some(1),
     })
 }
 
@@ -316,8 +330,8 @@ impl FragmentCell {
                 let for_owner = owner.is_some() && signed.acting_for.as_deref() == owner;
                 let sharer = access::Sharer { for_owner, held: signed.held };
                 let share = match owner {
-                    Some(owner) => self.owner_share(owner)?,
-                    None => access::OwnerShare { role: None, people_only: false },
+                    Some(owner) => self.member_role(owner)?,
+                    None => None,
                 };
                 match access::agent_shares(sharer, share) {
                     Ok(role) => {
@@ -331,22 +345,6 @@ impl FragmentCell {
         }
     }
 
-    /// `owner`'s share of this fragment: their membership, and whether it
-    /// is people only. One statement.
-    fn owner_share(&self, owner: &str) -> CellResult<access::OwnerShare> {
-        #[derive(serde::Deserialize)]
-        struct Row {
-            role: String,
-            people_only: i64,
-        }
-        let rows: Vec<Row> = self.typed("SELECT role, people_only FROM members WHERE principal = ?", vec![owner.into()])?;
-        let Some(row) = rows.into_iter().next() else {
-            return Ok(access::OwnerShare { role: None, people_only: false });
-        };
-        let role = Role::parse(&row.role).ok_or_else(|| CellError::host(format!("members.role {:?}", row.role)))?;
-        Ok(access::OwnerShare { role: Some(role), people_only: row.people_only == 1 })
-    }
-
     /// The owner, or their agent sharing for them: who they are, or 403.
     fn require_owner(&self, caller: &Caller) -> CellResult<Actor> {
         let actor = self.sharer(caller)?;
@@ -354,6 +352,28 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "only the owner does this"));
         }
         Ok(actor)
+    }
+
+    /// Whether `caller` shares it: its owner, or their agent sharing for
+    /// them. Only they hold its share link (a member asks its owner).
+    pub(crate) fn shares(&self, caller: &Caller) -> bool {
+        self.sharer(caller).is_ok_and(|actor| actor.role == Some(Role::Owner))
+    }
+
+    /// What it is, as its live `fragment.json` last said (an app until it has).
+    pub(crate) fn kind(&self) -> CellResult<FragmentKind> {
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        Ok(face.and_then(|f| serde_json::from_value(f["kind"].clone()).ok()).unwrap_or_default())
+    }
+
+    /// A chat's own agent: its lead, the first agent added, which answers
+    /// when no one is named (docs/chat-records.md) and posts its turns and
+    /// steps to `work`, which takes editors only. None for anything else.
+    fn chat_agent(&self) -> CellResult<Option<String>> {
+        if self.kind()? != FragmentKind::Chat {
+            return Ok(None);
+        }
+        Ok(self.listed_agents()?.into_iter().next())
     }
 
     /// The identity `who` (an npub or 64 hex: an identity, or a key of
@@ -446,12 +466,15 @@ impl FragmentCell {
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
         }
+        if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
+            return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
+        }
         self.check_room(current)?;
         let by = actor.by.as_str();
         let now = js::now_ms();
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = excluded.people_only",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
             vec![
                 target.id.as_str().into(),
                 body.role.as_str().into(),
@@ -459,9 +482,10 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
-                SqlStorageValue::Integer(i64::from(body.people_only)),
             ],
         )?;
+        let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
+        let member = member_json(row.first().ok_or_else(|| CellError::host("a member just written is not there"))?)?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
         // a new agent member's computer hears it joined (runs_on.rs), and
@@ -475,7 +499,7 @@ impl FragmentCell {
             Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
             None => format!("{} is now {}", target.id, body.role.as_str()),
         };
-        let data = json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner, "peopleOnly": body.people_only });
+        let data = json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner });
         self.event("member.set", &format!("{summary}{}", actor.said()), actor.noted(data));
         // A socket's role is fixed when it opens, and it answers queries at
         // that role: a changed role reopens the member's sockets (and their
@@ -489,8 +513,7 @@ impl FragmentCell {
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
         self.flush_joined().await;
-        let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
-        member_json(&row[0])
+        Ok(member)
     }
 
     pub(crate) async fn remove_member(&self, caller: &Caller, who: &str) -> CellResult<Response> {
@@ -517,6 +540,11 @@ impl FragmentCell {
                 None => CellError::new(ErrorCode::NotFound, why),
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
             });
+        }
+        // a chat's own agent is not removed by anyone else (it may leave:
+        // its owner's wipe does so, ended.rs)
+        if !is_self && self.chat_agent()?.as_deref() == Some(target.as_str()) {
+            return Err(refusal(actor.role == Some(Role::Owner), CHAT_AGENT_STAYS));
         }
         let removed = self.rows("SELECT owner, kind FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         let owner = removed.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
@@ -549,7 +577,7 @@ impl FragmentCell {
     }
 
     /// Its title as its members' lists show it, if it has one.
-    fn title(&self) -> CellResult<Option<String>> {
+    pub(crate) fn title(&self) -> CellResult<Option<String>> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
@@ -602,17 +630,24 @@ impl FragmentCell {
         let mine = || self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)]);
         match answer {
             Ok(Invited::Mailed) => {
+                // the owner's list counts the invites waiting
+                self.sharing_changed()?;
                 self.event(
                     "invite.created",
                     &format!("an invite waits on an email, as {}{}", body.role.as_str(), actor.said()),
                     actor.noted(json!({ "role": body.role, "expiresAt": expires_at })),
                 );
+                self.flush_index().await;
                 let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone() };
                 json_response(&Shared::Invited(invite))
             }
             Ok(Invited::Holder(person)) => {
                 mine()?;
-                let member = self.put_member(&actor, &person, SetRole { role: body.role, people_only: false }).await?;
+                // an invite adds someone; it never changes a member's role
+                if let Some(role) = self.member_role(&person.id)? {
+                    return Err(CellError::invalid(already_in(&email, role)));
+                }
+                let member = self.put_member(&actor, &person, SetRole { role: body.role }).await?;
                 json_response(&Shared::Member(member))
             }
             Err(e) => {
@@ -634,7 +669,7 @@ impl FragmentCell {
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
-    pub(crate) fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
+    pub(crate) async fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         let email = email.trim().to_ascii_lowercase();
         self.drop_spent_invites()?;
@@ -642,7 +677,10 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no invite waits on {email}")));
         }
         self.exec("DELETE FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        // the owner's list counts the invites waiting
+        self.sharing_changed()?;
         self.event("invite.revoked", &format!("an invite was revoked{}", actor.said()), actor.noted(json!({})));
+        self.flush_index().await;
         json_response(&json!({ "ok": true, "revoked": email }))
     }
 
@@ -687,7 +725,9 @@ impl FragmentCell {
     }
 
     /// The fragment's sharing, as its owner's list carries it: `guests`
-    /// counts the members who are neither the owner nor an agent of theirs.
+    /// counts the members who are neither the owner nor an agent of theirs,
+    /// and `invites` those waiting on an email (as of this change: one
+    /// that runs out later is counted until the next).
     pub(crate) fn sharing_counts(&self) -> CellResult<Sharing> {
         let visibility = self.visibility()?;
         let owner = self.must(MetaKey::Owner)?;
@@ -695,21 +735,30 @@ impl FragmentCell {
         struct Counts {
             members: u64,
             guests: u64,
+            invites: u64,
         }
         let counts: Vec<Counts> = self.typed(
             "SELECT (SELECT COUNT(*) FROM members) AS members,
-                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests",
-            vec![owner.as_str().into(), owner.as_str().into()],
+                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests,
+                    (SELECT COUNT(*) FROM invites WHERE expires_at > ?) AS invites",
+            vec![owner.as_str().into(), owner.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let counts = counts.into_iter().next().expect("a SELECT without FROM answers one row");
         assert!(counts.guests <= counts.members, "guests are members");
-        Ok(Sharing { visibility, members: counts.members, guests: counts.guests })
+        assert!(counts.invites <= limits::INVITES_MAX as u64, "a fragment holds at most INVITES_MAX invites");
+        Ok(Sharing { visibility, members: counts.members, guests: counts.guests, invites: Some(counts.invites) })
     }
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
+        // opened again from members only, it gets a new share link: one
+        // that stopped working when it was restricted stays dead
+        let renewed = before == Visibility::Members && body.visibility != Visibility::Members;
+        if renewed {
+            self.set_meta(MetaKey::ViewToken, &js::random_hex::<12>())?;
+        }
         self.sharing_changed()?;
         if body.visibility != Visibility::Public {
             self.close_sockets("anon", "the fragment is no longer public");
@@ -719,8 +768,8 @@ impl FragmentCell {
         }
         self.event(
             "visibility",
-            &format!("visibility {} → {}{}", before.as_str(), body.visibility.as_str(), actor.said()),
-            actor.noted(json!({ "from": before, "to": body.visibility })),
+            &format!("visibility {} → {}{}{}", before.as_str(), body.visibility.as_str(), if renewed { ", with a new share link" } else { "" }, actor.said()),
+            actor.noted(json!({ "from": before, "to": body.visibility, "newLink": renewed })),
         );
         self.flush_index().await;
         json_response(&json!({ "ok": true, "visibility": body.visibility }))

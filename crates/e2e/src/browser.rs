@@ -406,12 +406,14 @@ impl Browser {
     }
 
     /// One key pressed and let go on the focused element (`Enter`, `Escape`,
-    /// `Tab`), with Shift held when `shift`.
+    /// `Tab`, `ArrowDown`, `ArrowUp`), with Shift held when `shift`.
     pub fn press(&mut self, page: &Page, key: &str, shift: bool) -> Result<()> {
         let code = match key {
             "Enter" => 13,
             "Escape" => 27,
             "Tab" => 9,
+            "ArrowUp" => 38,
+            "ArrowDown" => 40,
             _ => bail!("no key code for {key}"),
         };
         for kind in ["keyDown", "keyUp"] {

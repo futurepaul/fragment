@@ -493,12 +493,17 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
             && their_row["preview"] == "Basil wants water too",
         json!([my_row, their_row]),
     );
-    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
-    let (my_row, their_row) = rows()?;
-    s.ok("the lead removed, every row names the agent left", removed.status == 200 && my_row["agents"] == json!([second]) && their_row["agents"] == json!([second]), json!([my_row, their_row]));
     let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{second}"), None, &[])?;
     let (my_row, their_row) = rows()?;
-    s.ok("and the last, none", removed.status == 200 && my_row["agents"].is_null() && their_row["agents"].is_null(), json!([my_row, their_row]));
+    s.ok("the second removed, every row names the lead left", removed.status == 200 && my_row["agents"] == json!([lead]) && their_row["agents"] == json!([lead]), json!([my_row, their_row]));
+    // the lead is the chat's own agent: its owner keeps it (members.rs `chat_agent`)
+    let refused = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok(
+        "the lead, the chat's own agent, is not removed (400, saying why), and every row still names it",
+        refused.status == 400 && refused.message().contains("this chat's own agent") && my_row["agents"] == json!([lead]) && their_row["agents"] == json!([lead]),
+        json!([refused.body, my_row, their_row]),
+    );
     let own = s.named(api, &outsider, "plot")?;
     let r = api.create_with(&outsider, json!({ "name": own, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "the outsider's chat: {r}");
@@ -957,7 +962,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // settings, at /settings: what a person needs of their account
     let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
     b.click(&page, "#settings")?;
-    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Connections', 'The command line'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'The command line'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
@@ -972,6 +977,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && text.contains("fragment login")
             && text.contains("fragment skill > ~/.claude/skills/fragment/SKILL.md"),
         &text[..text.len().min(600)],
+    );
+    // Sharing: what they own, each with who can open it (GET /api/access)
+    let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
+    let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);
+    s.ok(
+        "settings' Sharing lists what they own, with who can open each",
+        listed,
+        b.eval(&page, "document.getElementById('settings-access')?.innerText ?? 'no Sharing section'")?,
     );
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;

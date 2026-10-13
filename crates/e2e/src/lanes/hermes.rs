@@ -559,15 +559,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // delegation (decision 36): Skyler shares a fragment with the owner as an
-    // editor, and the owner's agent edits it acting for them (`?for=`); a
-    // people-only share, or the agent held below its owner, refuses it
+    // editor, and the owner's agent edits it acting for them (`?for=`): a
+    // share is the person's and their agents' (Paul, 2026-10-13); the agent
+    // held below its owner is refused
     let skyler = api.person()?;
     let notes_name = s.named(api, &skyler, "garden")?;
     let notes = s.create(api, &skyler, &notes_name)?;
     s.commit(&notes, &[("fragment.json", Some(NOTES_JSON))]);
     s.deploy(&notes);
-    let share = |people_only: bool| api.signed(&skyler, "PUT", &format!("/api/f/{notes_name}/members/{owner_id}"), Some(&json!({ "role": "editor", "peopleOnly": people_only })));
-    share(false)?;
+    api.signed(&skyler, "PUT", &format!("/api/f/{notes_name}/members/{owner_id}"), Some(&json!({ "role": "editor" })))?;
     let post_note = |n: u32| {
         let body = json!({ "id": format!("d{n}"), "body": { "text": "from juniper" } }).to_string();
         format!("run: curl -s -o /dev/null -w 'status %{{http_code}}' -X POST 'http://api.fragment.internal/api/f/{notes_name}/channels/notes?for={owner_id}' -H 'x-fragment-agent: {agent_name}' -H 'content-type: application/json' -d '{body}'")
@@ -582,12 +582,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         status_of(&delegated).as_deref() == Some("200") && wrote,
         json!({ "reply": reply_of(&delegated), "notes": records(api, &skyler, &notes_name, "notes") }),
     );
-    share(true)?;
-    let r = say(8, &post_note(2))?;
-    let refused = turn_for(&r);
-    s.eventually(TURN, || ended(&refused).is_some());
-    s.ok("a people-only share lends its agents nothing", status_of(&refused).as_deref() == Some("403"), json!(reply_of(&refused)));
-    share(false)?;
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": "viewer" })))?;
     let r = say(9, &post_note(3))?;
     let held = turn_for(&r);

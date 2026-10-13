@@ -3,7 +3,9 @@
 //! lists). The fragments are the authority; each delivers its changes here
 //! from an outbox, versioned so a late delivery never undoes a newer one.
 //! A fragment's row in its owner's list also carries its sharing (who may
-//! open it, its members and guests), sent with each change to them, and
+//! open it, its members and guests, the invites waiting), sent with each
+//! change to them (the access view, share.rs, asks a fragment for who
+//! they are only when they count someone else), and
 //! every row its agents (a chat's lead first), sent with each change to
 //! them; a chat's row shows its newest message from this person's search
 //! (below). So the platform's page reads this one cell and wakes no
