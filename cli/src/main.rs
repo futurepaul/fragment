@@ -1098,8 +1098,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::New { dir, template, list } => {
             if list {
-                for (name, files) in TEMPLATES {
-                    println!("{name} ({} files)", files.len());
+                for t in TEMPLATES {
+                    println!("{} ({} files)", t.name, t.files.len());
                 }
                 return Ok(());
             }
@@ -1853,20 +1853,20 @@ fn chrono_like(secs: u64) -> String {
 /// Writes a template's files into `dir`, never over a file that exists:
 /// the paths it wrote, and how many it left alone.
 fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
-    let (_, files) = TEMPLATES.iter().find(|(n, _)| *n == tpl_name).ok_or_else(|| usage(format!("unknown template '{tpl_name}' (use `fragment new --list`)")))?;
+    let t = TEMPLATES.iter().find(|t| t.name == tpl_name).ok_or_else(|| usage(format!("unknown template '{tpl_name}' (use `fragment new --list`)")))?;
     if dir.exists() && !dir.is_dir() {
         anyhow::bail!("{} exists and is not a directory", dir.display());
     }
     let (mut created, mut skipped) = (Vec::new(), 0);
-    for (rel, bytes) in files.iter() {
-        let target = dir.join(rel);
+    for f in t.files {
+        let target = dir.join(f.path);
         if target.exists() {
             skipped += 1;
             continue;
         }
         std::fs::create_dir_all(target.parent().unwrap_or(dir))?;
-        std::fs::write(&target, bytes)?;
-        created.push(*rel);
+        std::fs::write(&target, f.bytes)?;
+        created.push(f.path);
     }
     Ok((created, skipped))
 }
