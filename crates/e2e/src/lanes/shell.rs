@@ -853,7 +853,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // settings, at /settings: what a person needs of their account
     let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
     b.click(&page, "#settings")?;
-    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Connections', 'The command line', 'Wallpaper'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'The command line', 'Wallpaper'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
@@ -868,6 +868,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && text.contains("fragment login")
             && text.contains("fragment skill > ~/.claude/skills/fragment/SKILL.md"),
         &text[..text.len().min(600)],
+    );
+    // Sharing: what they own, each with who can open it (GET /api/access)
+    let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
+    let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);
+    s.ok(
+        "settings' Sharing lists what they own, with who can open each",
+        listed,
+        b.eval(&page, "document.getElementById('settings-access')?.innerText ?? 'no Sharing section'")?,
     );
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;

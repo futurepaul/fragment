@@ -100,6 +100,9 @@ enum Cmd {
     },
     /// List fragments you have a role on
     List,
+    /// Who has access to each fragment you own: who can open it, who is in
+    /// (by email, with their role), and the invites waiting
+    Access,
     /// Status of a fragment (pins, urls, tokens, counts)
     Status { name: String },
     /// Read the event log (--since is an event ID cursor; --tail shows the last N)
@@ -1225,6 +1228,37 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{} ({})", f.name, f.role.as_str());
             }
         }
+        Cmd::Access => {
+            let v: fragment_proto::Access = c.call_as(c.get("/api/access")?)?;
+            json_exit(j, &v);
+            for f in &v.fragments {
+                let open = f.sharing.map_or("?", |s| s.visibility.as_str());
+                println!("{}\t{}\t{open}", f.name, f.kind.as_str());
+                let Some(members) = &f.members else {
+                    // asked of no fragment: no one else is in it, or past the view's bound
+                    match f.sharing {
+                        Some(s) if s.with_others() => println!("  {} people, {} invited: `fragment members list {}`", s.guests, s.invites.unwrap_or(0), f.name),
+                        _ => println!("  only you and your agents"),
+                    }
+                    continue;
+                };
+                for m in members {
+                    let who = m.email.as_deref().or(m.name.as_deref()).unwrap_or(&m.principal);
+                    let whose = match (&m.owner, &m.owner_email) {
+                        (Some(_), Some(e)) => format!("\tagent of {e}"),
+                        (Some(o), None) => format!("\tagent of {o}"),
+                        _ => String::new(),
+                    };
+                    println!("  {}\t{who}{whose}{}", m.role.as_str(), if m.people_only { "\tpeople only" } else { "" });
+                }
+                if f.more > 0 {
+                    println!("  and {} more: `fragment members list {}`", f.more, f.name);
+                }
+                for i in &f.invites {
+                    println!("  invited {}\t{}", i.role.as_str(), i.email);
+                }
+            }
+        }
         Cmd::Status { name } => {
             let v: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             json_exit(j, &v);
@@ -1618,14 +1652,21 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Open { name } => {
             let v: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = &v.urls.canonical;
+            // what opens it for someone not in it: a link fragment's share
+            // link, a public one's address; a members one has none (its
+            // `?view=` opens nothing, as its share sheet says)
             let link = match v.visibility {
-                Visibility::Public => canon.clone(),
-                _ => format!("{canon}?view={}", v.view_token.as_deref().unwrap_or("")),
+                Visibility::Public => Some(canon.clone()),
+                Visibility::Link => Some(format!("{canon}?view={}", v.view_token.as_deref().unwrap_or(""))),
+                Visibility::Members => None,
             };
             let webhook = format!("{}/api/f/{}/inbox?t={}", platform_of(&c, &v), v.name, v.inbox_token.as_deref().unwrap_or(""));
-            json_exit(j, &json!({ "canonical": link, "shareLink": link, "webhookUrl": webhook }));
-            println!("canonical:   {link}");
-            println!("share link:  {link}");
+            json_exit(j, &json!({ "canonical": canon, "shareLink": link, "webhookUrl": webhook }));
+            println!("address:     {canon}   (opens it for the people in it)");
+            match &link {
+                Some(link) => println!("share link:  {link}"),
+                None => println!("share link:  none: it is members only (`fragment visibility {name} link` makes one work)"),
+            }
             println!("webhook URL: {webhook}");
         }
         Cmd::Members { sub } => match sub {
@@ -1659,7 +1700,7 @@ fn run(cli: Cli) -> Result<()> {
                             }
                         }
                     }
-                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?,
+                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only: Some(people_only) })?)?)?,
                 };
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());

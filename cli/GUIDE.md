@@ -474,6 +474,7 @@ fragment members leave my-thing
 fragment invite list my-thing                             # emails no one signs in as yet, mailed and waiting
 fragment invite revoke my-thing bea@example.com
 fragment rotate my-thing --view                            # a new share link
+fragment access                                            # who can open each fragment you own, by email
 ```
 
 Anything with an `@` is an email. Someone who signs in as it is a member
@@ -575,6 +576,7 @@ fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
 fragment manifest <name>                 fragment invite list|revoke ...
+fragment access                          # who can open what you own
 fragment sync <name> [--dir D] [--watch] [--mode M | --live]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--note N]

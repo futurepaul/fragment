@@ -145,9 +145,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.unsigned("GET", &sheet, None)?;
     s.ok("the share sheet sends a signed-out browser to sign in first, and back", r.status == 302 && r.header("location").contains(&format!("/auth/login?return={}", url_enc(&sheet))), &r);
     let r = with_session(api, "GET", &sheet, &owner_session)?;
+    let title = api.status(&owner, &chat)?.body["title"].as_str().unwrap_or("").to_string();
     s.ok(
-        "the owner's sheet shows who is in, by email (their agent too), and the owner's controls",
-        r.status == 200 && r.text.contains(&owner_name) && r.text.contains("(an agent)") && r.text.contains("name=\"email\"") && r.text.contains("General access"),
+        "the owner's sheet, titled with the fragment's title, shows who is in, by email (their agent too, as theirs), and the owner's controls",
+        r.status == 200
+            && !title.is_empty()
+            && r.text.contains(&format!("<h1>Share “{title}”</h1>"))
+            && r.text.contains(&owner_name)
+            && r.text.contains("Your agent")
+            && r.text.contains("name=\"email\"")
+            && r.text.contains("General access"),
         &r,
     );
     s.ok(
@@ -155,12 +162,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         framed_by_platform(&r) && unopened(&r),
         headers(&r),
     );
-    s.ok("its buttons and selects come disabled: they arm a moment after the page shows", r.text.contains("data-arm disabled") && !r.text.contains("data-arm>"), "");
+    s.ok(
+        "every choice on it is a button, none a select (which an arrow key changes in passing), and they come disabled: they arm a moment after the page shows",
+        r.text.contains("data-arm disabled") && !r.text.contains("data-arm>") && !r.text.contains("<select"),
+        "",
+    );
     s.ok("and it offers the share link to copy", r.text.contains(&format!("{}?view=", api.site_url(&chat, ""))), "");
     let r = with_session(api, "GET", &format!("{sheet}?email={}&role=editor&action=invite&visibility=public&form=1", url_enc(&guest_name)), &owner_session)?;
     s.ok(
         "it takes nothing from its URL: a link cannot prefill what a click would approve",
-        r.status == 200 && !r.text.contains(&guest_name) && r.text.contains("value=\"link\" selected") && !r.text.contains("value=\"public\" selected"),
+        r.status == 200 && !r.text.contains(&guest_name) && r.text.contains("value=\"link\" aria-pressed=\"true\"") && !r.text.contains("value=\"public\" aria-pressed=\"true\""),
         &r,
     );
     let r = with_session(api, "GET", &sheet, &stranger_session)?;
@@ -215,12 +226,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         mailed.first().map(|m| format!("{} / {}", m.subject, m.text)).unwrap_or_default(),
     );
     let r = with_session(api, "GET", &sheet, &owner_session)?;
-    s.ok("it waits on the owner's sheet, by email, with its role", r.text.contains(&guest_name) && r.text.contains("invited as editor"), &r);
+    s.ok("it waits on the owner's sheet, by email, with its role", r.text.contains(&guest_name) && r.text.contains("Invited as an editor"), &r);
+    let listed = |name: &str| -> Result<Value> {
+        let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+        Ok(r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default())
+    };
+    s.ok("and the owner's list counts it, beside its members", listed(&chat)?["sharing"]["invites"] == 1, listed(&chat)?);
     let form = armed(api, &sheet, &owner_session)?;
     let r = invite(&form, &owner_session, &platform)?;
     s.ok(
-        "the same invite again renews it: still one waiting, mailed again",
-        r.status == 200 && invites_for(&guest_name)?.len() == 1 && s.mail.sent_to(&guest_name).len() == 2,
+        "the same invite again renews it: still one waiting, mailed again, and the sheet says so",
+        r.status == 200 && r.text.contains("again") && invites_for(&guest_name)?.len() == 1 && s.mail.sent_to(&guest_name).len() == 2,
         &r,
     );
     // a sign-in as another email meets nothing addressed to this one
@@ -280,15 +296,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- the owner's list: who else is in each of their fragments (the
     // fragment sent it as the guest joined), as the platform's page shows
-    let listed = |name: &str| -> Result<Value> {
-        let r = api.signed(&owner, "GET", "/api/fragments", None)?;
-        Ok(r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default())
-    };
     let entry = listed(&chat)?;
     let members = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
     s.ok(
-        "the owner's list reports each fragment's member count and guests (not the owner or their agents), and its visibility",
-        entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1 }) && members == 3,
+        "the owner's list reports each fragment's member count, guests (not the owner or their agents) and invites waiting, and its visibility",
+        entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1, "invites": 0 }) && members == 3,
         &entry,
     );
     // Goal: the list reads no fragment. Method: a test hook adds members
@@ -307,7 +319,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let after = listed(&quiet)?;
     s.ok(
         "the owner's list wakes no fragment: its counts are the list's, not the fragment's own",
-        before["sharing"] == json!({ "visibility": "link", "members": 1, "guests": 0 })
+        before["sharing"] == json!({ "visibility": "link", "members": 1, "guests": 0, "invites": 0 })
             && r.status == 200
             && filled.body["counts"]["members"] == 4
             && after["sharing"] == before["sharing"],
@@ -317,14 +329,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let after = listed(&quiet)?;
     s.ok(
         "and a change to who may open it sends the fragment's sharing to the list",
-        r.status == 200 && after["sharing"] == json!({ "visibility": "public", "members": 4, "guests": 3 }),
+        r.status == 200 && after["sharing"] == json!({ "visibility": "public", "members": 4, "guests": 3, "invites": 0 }),
         &after,
     );
 
     // ---- the owner removes the guest: their socket closes, and the chat is 403 to them
     let form = armed(api, &sheet, &owner_session)?;
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &guest_id), ("role", "remove")])?;
-    s.ok("the owner removes the guest from the sheet (the last choice of their role's menu)", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
+    s.ok("a role that is no role removes no one (400): removing is its own button", r.status == 400 && role_of(&guest_id)?.as_deref() == Some("editor"), &r);
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "remove"), ("member", &guest_id)])?;
+    s.ok("the owner removes the guest from the sheet (its Remove)", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
     let said = "document.getElementById('here')?.textContent ?? ''";
     let closed = chrome.until(&page, &format!("({said}).includes('access changed')"), wait);
     s.ok("the guest's socket closes (their page says its access changed)", closed, chrome.eval(&page, said).unwrap_or_default());
@@ -344,6 +358,30 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.text.contains(&format!("Added <b>{member_name}</b>")) && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty() && s.mail.sent_to(&member_name).is_empty(),
         &r,
     );
+    // Add is for adding: someone in already keeps their role (an Add at
+    // the default, Viewer, once lowered an editor without a word)
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &member_name), ("role", "editor")])?;
+    s.ok(
+        "adding someone in already changes nothing, and says they are in, as what: their role changes in the list",
+        r.status == 200 && r.text.contains(&format!("<b>{member_name}</b> is in already, as a viewer")) && role_of(&member_id)?.as_deref() == Some("viewer"),
+        &r,
+    );
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &owner_name.to_uppercase()), ("role", "viewer")])?;
+    s.ok("adding the owner's own email says it is them, and changes nothing", r.status == 200 && r.text.contains(&format!("<b>{owner_name}</b> is you")), &r);
+    // a role changed on the sheet keeps a people-only share one
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer", "peopleOnly": true })))?;
+    anyhow::ensure!(r.status == 200 && r.body["peopleOnly"] == true, "{member_name} made people-only: {r}");
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "editor")])?;
+    let now = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?;
+    let theirs = now.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == member_id.as_str()).cloned().unwrap_or_default();
+    let shown = with_session(api, "GET", &sheet, &owner_session)?;
+    s.ok(
+        "the owner's role change on the sheet changes the role alone: a people-only share stays one (the sheet says their agents can't use it)",
+        r.status == 303 && theirs["role"] == "editor" && theirs["peopleOnly"] == true && shown.text.contains("Their agents can't use it"),
+        format!("{r} {theirs}"),
+    );
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer", "peopleOnly": false })))?;
+    anyhow::ensure!(r.status == 200 && r.body["peopleOnly"].is_null(), "{member_name} lent their agents again: {r}");
 
     // ---- a revoked invite admits no one
     let late = Keys::generate();
@@ -362,10 +400,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a member sees who is in, and changes nothing
     let r = with_session(api, "GET", &sheet, &member_session)?;
+    let actions: Vec<&str> = r.text.match_indices("name=\"action\" value=\"").map(|(i, m)| r.text[i + m.len()..].split('"').next().unwrap_or("")).collect();
     s.ok(
-        "a member sees who is in, and no controls and no link",
-        r.status == 200 && r.text.contains(&owner_name) && !r.text.contains("name=\"action\"") && !r.text.contains("?view=") && !r.text.contains("name=\"form\""),
-        &r,
+        "a member sees who has access, and no link, and their one control is Leave",
+        r.status == 200
+            && r.text.contains(&format!("<h1>Who has access to “{title}”</h1>"))
+            && r.text.contains(&owner_name)
+            && actions == ["leave"]
+            && !r.text.contains("name=\"email\"")
+            && !r.text.contains("?view="),
+        format!("{actions:?} {r}"),
     );
     // a good token for the member's own session (the harness holds the
     // cookie a browser would), so only the fragment's rule is left to refuse
@@ -408,12 +452,39 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r2 = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "visibility"), ("visibility", "members")])?;
     let now = api.status(&owner, &chat)?;
     s.ok(
-        "the owner makes a new link, and sets who can open it, from the sheet",
-        r.status == 303 && rotated.body["viewToken"] != before.body["viewToken"] && r2.status == 303 && now.body["visibility"] == "members",
+        "the owner makes a new link (the sheet says the old one opens nothing now), and sets who can open it, from the sheet",
+        r.status == 200
+            && r.text.contains("A new share link")
+            && rotated.body["viewToken"] != before.body["viewToken"]
+            && r.text.contains(&format!("?view={}", rotated.body["viewToken"].as_str().unwrap_or("-")))
+            && r2.status == 303
+            && now.body["visibility"] == "members",
         format!("{r} {r2} {now}"),
+    );
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "visibility"), ("visibility", "public")])?;
+    let public = with_session(api, "GET", &sheet, &owner_session)?;
+    s.ok(
+        "a public fragment's Copy link is its address alone: no share link's token rides along",
+        r.status == 303 && public.text.contains(&format!("data-copy=\"{}\"", api.site_url(&chat, ""))) && !public.text.contains("?view="),
+        &public,
     );
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "visibility"), ("visibility", "link")])?;
     anyhow::ensure!(r.status == 303, "visibility back to link: {r}");
+
+    // ---- leaving: a member's own (a viewer of the owner's, here)
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "leave")])?;
+    s.ok("the owner cannot leave (400, the sheet saying why)", r.status == 400 && r.text.contains("flash error") && api.status(&owner, &chat)?.body["role"] == "owner", &r);
+    let leaving = armed(api, &sheet, &member_session)?;
+    let r = post(api, &sheet, &member_session, &platform, &[("form", &leaving), ("action", "leave")])?;
+    s.ok(
+        "a member leaves from the sheet: a page says so, its Done closes it, and they are in it no more",
+        r.status == 200 && r.text.contains(&format!("You left “{title}”")) && r.text.contains("data-done") && role_of(&member_id)?.is_none(),
+        &r,
+    );
+    let r = post(api, &sheet, &member_session, &platform, &[("form", &leaving), ("action", "leave")])?;
+    s.ok("leaving again (the same form sent twice) changes nothing: the sheet is not theirs now (403)", r.status == 403 && r.text.contains("Not yours to share") && role_of(&member_id)?.is_none(), &r);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["member"]["role"] == "viewer", "{member_name} shared with again: {r}");
 
     // ---- a fragment's page cannot share: its code (its author's, or an
     // agent's) runs in the owner's browser, with the platform's session
@@ -539,6 +610,34 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
     );
+
+    // ---- settings' Sharing: who has access to what of the owner's, by
+    // fragment and by person (GET /api/access); a title opens its sheet
+    let r = with_session(api, "GET", "/api/access", &owner_session)?;
+    s.ok("(the access view is the shell's API, not a page's: a session alone, without the shell's header, is 401)", r.status == 401, &r);
+    let access = format!("#settings-access .access-row[data-fragment={chat:?}]");
+    let drawn = chrome.until(&home, &format!("!!document.querySelector({access:?})"), wait);
+    let text = chrome.eval(&home, &format!("document.querySelector({access:?})?.innerText ?? ''"))?;
+    let text = text.as_str().unwrap_or_default();
+    s.ok(
+        "settings' Sharing lists the owner's fragment: its title, who can open it, who is in by email with their role, and the invite waiting",
+        drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("Viewer") && text.contains(&waiting),
+        text,
+    );
+    chrome.click(&home, "#settings-access button[data-by=person]")?;
+    let by_person = chrome.until(
+        &home,
+        &format!("[...document.querySelectorAll('#settings-access .access-person')].some(p => p.innerText.includes({member_name:?}) && p.innerText.includes({title:?}))"),
+        wait,
+    );
+    chrome.screenshot(&home, &s.scratch.join("share-settings-by-person.png"))?;
+    s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
+    chrome.click(&home, "#settings-access button[data-by=fragment]")?;
+    chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
+    let opened = chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = opened && chrome.until(&home, "!document.getElementById('sheet').open && !!document.querySelector('#settings-access')", wait);
+    s.ok("a fragment's title there opens its share sheet, and closing it draws the section again", opened && closed, inside(&mut chrome));
     chrome.close(home)?;
 
     // the sheet as the owner sees it, at a popup's size and a phone's, light
@@ -553,5 +652,63 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
     s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
+
+    // ---- a keyboard: arrow keys over its choices send nothing (a closed
+    // select's did, on Linux and Windows: an ArrowDown on a member's role
+    // removed them, on General access made it public)
+    chrome.viewport(&shown, 480, 900, false)?;
+    chrome.reload(&shown)?;
+    let armed_now = chrome.until(&shown, "!!document.querySelector('footer') && ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait);
+    let before = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
+    for focus in [format!("form:has(input[value={member_id:?}]) button[value=editor]"), "button[value=public]".to_string()] {
+        chrome.eval(&shown, &format!("(document.querySelector({focus:?}).focus(), true)"))?;
+        for key in ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowDown"] {
+            chrome.press(&shown, key, false)?;
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let after = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
+    s.ok("arrow keys over a member's role and over General access change nothing", armed_now && before == after && after.0 == "link", format!("{before:?} → {after:?}"));
+    // Remove asks a second click: the first only says what it does
+    let remove = format!("form:has(input[name=action][value=remove]):has(input[value={member_id:?}]) button");
+    chrome.click(&shown, &remove)?;
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = chrome.eval(&shown, &format!("document.querySelector({remove:?}).textContent"))?;
+    s.ok("one click on Remove removes no one: it asks again", asked == "Remove?" && role_of(&member_id)?.as_deref() == Some("viewer"), &asked);
+    chrome.click(&shown, &remove)?;
+    let gone = s.eventually(wait, || role_of(&member_id).is_ok_and(|r| r.is_none()));
+    s.ok("and the second removes them", gone, "");
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["member"]["role"] == "viewer", "{member_name} shared with again: {r}");
+    chrome.close(shown)?;
+
+    // ---- the member's shell: someone else's app offers People…, its sheet
+    // read-only, with Leave
+    chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
+    let theirs = chrome.open(&format!("{platform}/settings"))?;
+    chrome.viewport(&theirs, 1280, 800, false)?;
+    let listed = chrome.until(&theirs, &format!("{} && document.getElementById('layout').classList.contains('left-open')", settled(&row)), wait);
+    if listed {
+        chrome.click(&theirs, &row)?;
+    }
+    let more = "#stack button[aria-label='More']";
+    let windowed = listed && chrome.until(&theirs, &settled(more), wait);
+    if windowed {
+        chrome.click(&theirs, more)?;
+    }
+    let offered = windowed && chrome.until(&theirs, "[...document.querySelectorAll('#menu button')].some(b => b.textContent === 'People…')", wait);
+    let no_share = chrome.eval(&theirs, "!document.querySelector(\"#stack button[aria-label='Share…']\")")? == json!(true);
+    if offered {
+        chrome.eval(&theirs, "([...document.querySelectorAll('#menu button')].find(b => b.textContent === 'People…').click(), true)")?;
+    }
+    let inside = |chrome: &mut Browser| chrome.eval_in_frame(&theirs, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let shown = offered && chrome.until(&theirs, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
+    chrome.screenshot(&theirs, &s.scratch.join("share-people-member.png"))?;
+    let text = inside(&mut chrome);
+    s.ok(
+        "a member's window of someone else's app offers People… (no Share…): the sheet, read-only, with Leave",
+        no_share && shown && text.contains("Leave") && text.contains("Only its owner changes who has access"),
+        format!("listed {listed} windowed {windowed} offered {offered} shown {shown}: {text}"),
+    );
     Ok(())
 }

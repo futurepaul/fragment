@@ -568,7 +568,7 @@ pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
 }
 
 /// An identity's fragments, as its `Principal` cell lists them.
-async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
 }
@@ -1031,6 +1031,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             create_fragment(env, cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
+        // who has access to each fragment the signer owns (share.rs)
+        (Method::Get, ["api", "access"]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            json_answer(&share::access(env, &url, &who).await?)
+        }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {

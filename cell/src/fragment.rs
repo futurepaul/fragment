@@ -966,7 +966,7 @@ impl FragmentCell {
                 self.create_invite(&caller, body).await
             }
             (Method::Get, ["api", "invites"]) => self.invites(&caller),
-            (Method::Delete, ["api", "invites", email]) => self.revoke_invite(&caller, email),
+            (Method::Delete, ["api", "invites", email]) => self.revoke_invite(&caller, email).await,
             (Method::Put, ["api", "cap"]) => {
                 let body = body_json(&mut req).await?;
                 self.put_cap(&caller, body).await
@@ -1201,6 +1201,7 @@ impl FragmentCell {
         let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
         let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
         json_response(&FragmentStatus {
+            title: self.title()?,
             npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,

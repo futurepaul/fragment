@@ -787,6 +787,13 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let listed = s.cli_json(api, &home, &["invite", "list", &name, "--json"])?;
+    let access = s.cli_json(api, &home, &["access", "--json"])?;
+    let row = access["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str())).cloned().unwrap_or_default();
+    s.ok(
+        "fragment access shows who can open each fragment they own: this one's invite waiting, by email",
+        row["invites"].as_array().is_some_and(|i| i.iter().any(|i| i["email"] == invited.as_str() && i["role"] == "editor")) && row["sharing"]["invites"] == 1,
+        &row,
+    );
     let revoked = s.cli_json(api, &home, &["invite", "revoke", &name, &invited, "--json"])?;
     let after = s.cli_json(api, &home, &["invite", "list", &name, "--json"])?;
     s.ok(
@@ -798,6 +805,22 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
     s.ok("--people-only with an email is a usage error (it names an npub)", out.status.code() == Some(2), String::from_utf8_lossy(&out.stdout));
+    // `fragment open` names a share link only where one opens it (this
+    // chat is public: its address is its link)
+    let public = s.cli_json(api, &home, &["open", &name, "--json"])?;
+    s.cli_json(api, &home, &["visibility", &name, "link", "--json"])?;
+    let linked = s.cli_json(api, &home, &["open", &name, "--json"])?;
+    s.cli_json(api, &home, &["visibility", &name, "members", "--json"])?;
+    let members_only = s.cli_json(api, &home, &["open", &name, "--json"])?;
+    s.cli_json(api, &home, &["visibility", &name, "public", "--json"])?;
+    s.ok(
+        "fragment open: a public fragment's link is its address; a link one's its share link (`?view=`), beside its address; a members one has none (its token opens nothing)",
+        public["shareLink"] == public["canonical"]
+            && linked["shareLink"].as_str().is_some_and(|l| l.contains("?view="))
+            && !linked["canonical"].as_str().unwrap_or("?").contains('?')
+            && members_only["shareLink"].is_null(),
+        json!([public, linked, members_only]),
+    );
     Ok(())
 }
 

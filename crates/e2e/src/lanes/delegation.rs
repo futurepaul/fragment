@@ -214,7 +214,8 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["peopleOnly"] == true && refused(&junipers) && skylers.status == 200 && skylers.body["role"] == "editor",
         json!({ "share": r.body, "agent": junipers.status, "skyler": skylers.body["role"] }),
     );
-    api.signed(&paul, "PUT", &format!("/api/f/{app}/members/{skyler_id}"), Some(&json!({ "role": "editor" })))?;
+    // (a role alone keeps a people-only share one: lending again says so)
+    api.signed(&paul, "PUT", &format!("/api/f/{app}/members/{skyler_id}"), Some(&json!({ "role": "editor", "peopleOnly": false })))?;
 
     // invalid: no one else's authority, and nothing that is the owner's own
     let r = ask(&hand, Some(&skyler_id), "PUT", &app, &format!("members/{bob_id}"), Some(viewer.clone()))?;

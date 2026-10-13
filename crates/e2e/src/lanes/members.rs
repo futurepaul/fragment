@@ -101,6 +101,95 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("revoking it again is 404", r.status == 404, &r);
     first_sign_in(&gone)?;
     s.ok("a revoked invite is met by no one: their sign-in makes them no member", listed(api, &gone, &name)?.is_none(), "");
+    // revoked, then invited again: the new invite is met
+    let back = Keys::generate();
+    let (r1, r2, r3) = (invite(&Api::email_of(&back), "viewer")?, api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&back))), None)?, invite(&Api::email_of(&back), "editor")?);
+    first_sign_in(&back)?;
+    s.ok(
+        "an invite revoked, then made again, is met: their sign-in makes them a member at the new invite's role",
+        r1.status == 200 && r2.status == 200 && r3.status == 200 && listed(api, &back, &name)?.as_deref() == Some("editor"),
+        format!("{r1} {r2} {r3}"),
+    );
+    // an email is an email in any case: an invite typed in capitals waits on
+    // it in lower case, and a sign-in as it meets it
+    let shouted = Keys::generate();
+    let r = invite(&Api::email_of(&shouted).to_uppercase(), "viewer")?;
+    let waits = waiting(&Api::email_of(&shouted))?;
+    first_sign_in(&shouted)?;
+    s.ok(
+        "an invite to an email in capitals waits on it in lower case, and their sign-in meets it",
+        r.status == 200 && r.body["invited"]["email"] == Api::email_of(&shouted).as_str() && waits && listed(api, &shouted, &name)?.as_deref() == Some("viewer"),
+        &r,
+    );
+    // the owner's list counts the invites waiting
+    let counted = |api: &Api| -> Result<serde_json::Value> {
+        let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+        Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).map(|f| f["sharing"]["invites"].clone()).unwrap_or_default())
+    };
+    let pending = Keys::generate();
+    invite(&Api::email_of(&pending), "viewer")?;
+    let one = counted(api)?;
+    api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&pending))), None)?;
+    let none = counted(api)?;
+    s.ok("the owner's list counts the invites waiting: one made, then revoked", one == 1 && none == 0, format!("{one} then {none}"));
+
+    // who has access to what: the owner's view of all they own (GET /api/access)
+    let mine = s.named(api, &owner, "members-alone")?;
+    s.create(api, &owner, &mine)?;
+    let waits_on = format!("waits-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
+    invite(&waits_on, "viewer")?;
+    let r = api.signed(&owner, "GET", "/api/access", None)?;
+    let row = |n: &str| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == n)).cloned().unwrap_or_default();
+    let (shared, alone) = (row(&name), row(&mine));
+    let carol_row = shared["members"].as_array().and_then(|m| m.iter().find(|m| m["principal"] == api.identity(&carol).unwrap_or_default().as_str())).cloned().unwrap_or_default();
+    s.ok(
+        "the owner's access view lists each fragment they own: who is in by email and role (not the owner), and the invites waiting",
+        r.status == 200
+            && carol_row["email"] == Api::email_of(&carol).as_str()
+            && carol_row["role"] == "editor"
+            && carol_row["kind"] == "person"
+            && !shared["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == api.identity(&owner).unwrap_or_default().as_str()))
+            && shared["invites"].as_array().is_some_and(|i| i.iter().any(|i| i["email"] == waits_on.as_str() && i["role"] == "viewer"))
+            && shared["sharing"]["visibility"] == "link",
+        &shared,
+    );
+    s.ok("one no one else is in wakes for nothing: its list row's counts alone, no members asked", alone["name"] == mine.as_str() && alone["members"].is_null() && alone["sharing"]["guests"] == 0, &alone);
+    let r = api.signed(&carol, "GET", "/api/access", None)?;
+    s.ok("a member's own view lists what they own, not what is shared with them", r.status == 200 && !r.text.contains(&name), &r);
+    let r = api.unsigned("GET", "/api/access", None)?;
+    s.ok("unsigned, the access view is 401", r.status == 401, &r);
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let made = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    let r = api.signed(&hand, "GET", "/api/access", None)?;
+    let r2 = api.signed(&hand, "GET", &format!("/api/access?for={}", api.identity(&owner)?), None)?;
+    s.ok("an agent's is 403 (it is a person's view), and one naming `for` 400", made.status == 200 && r.status == 403 && r2.status == 400, format!("{r} {r2}"));
+
+    // the mails a person can have sent are capped by the day: the cap's
+    // last is mailed, one more is refused (429) and waits on no one; an
+    // invite to someone who signs in already mails no one, and is made
+    let sharer = api.person()?;
+    let many = s.named(api, &sharer, "members-mails")?;
+    s.create(api, &sharer, &many)?;
+    let to = |n: u32| format!("mail-{n}-{}@e2e.test", &sharer.pubkey_hex()[..8]);
+    let mut mailed = 0;
+    for n in 0..limits::INVITE_MAILS_DAILY_MAX {
+        let r = api.signed(&sharer, "POST", &format!("/api/f/{many}/invites"), Some(&json!({ "email": to(n), "role": "viewer" })))?;
+        mailed += u32::from(r.status == 200 && !r.body["invited"].is_null());
+    }
+    let over = api.signed(&sharer, "POST", &format!("/api/f/{many}/invites"), Some(&json!({ "email": to(limits::INVITE_MAILS_DAILY_MAX), "role": "viewer" })))?;
+    let held = api.signed(&sharer, "GET", &format!("/api/f/{many}/invites"), None)?.body["invites"].as_array().map_or(0, Vec::len);
+    let known = api.signed(&sharer, "POST", &format!("/api/f/{many}/invites"), Some(&json!({ "email": Api::email_of(&carol), "role": "viewer" })))?;
+    s.ok(
+        &format!("a day's {} mailed invites are sent; one more is 429, saying so, and waits on no one; one to someone in already is made, mailing no one", limits::INVITE_MAILS_DAILY_MAX),
+        mailed == limits::INVITE_MAILS_DAILY_MAX
+            && over.code() == Some(ErrorCode::RateLimited)
+            && over.text.contains("invite more tomorrow")
+            && held == limits::INVITE_MAILS_DAILY_MAX as usize
+            && known.status == 200
+            && known.body["member"]["role"] == "viewer",
+        format!("{mailed} mailed; {over}; {held} held; {known}"),
+    );
     let r = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&dave))), Some(&json!({ "role": "viewer" })))?;
     s.ok("a PUT names a person by their email too", r.status == 200 && r.body["principal"] == api.identity(&dave)?.as_str(), &r);
     let r = api.signed(&owner, "PUT", &path("members/nobody-yet@e2e.test"), Some(&json!({ "role": "viewer" })))?;

@@ -20,8 +20,9 @@
 //! The fragment is the authority: a change is written here with an outbox
 //! row in the same turn, then delivered (and retried from the alarm). The
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
-//! open it, its members and guests), made when the row is sent: a change
-//! to members or visibility sends it again (`sharing_changed`), so the
+//! open it, its members and guests, and the invites waiting), made when
+//! the row is sent: a change to members, invites or visibility sends it
+//! again (`sharing_changed`), so the
 //! platform's page reads the owner's list alone. Every row carries the
 //! fragment's face (its kind and title) and its agents, the first added
 //! first: an install that changes the face, or an agent joining or
@@ -449,9 +450,13 @@ impl FragmentCell {
         self.check_room(current)?;
         let by = actor.by.as_str();
         let now = js::now_ms();
+        // a member asked no `peopleOnly` keeps theirs: a role changed (the
+        // share sheet's, an invite to someone in already) lends their agents
+        // no more than it did
+        let people_only = body.people_only.map_or(SqlStorageValue::Null, |p| SqlStorageValue::Integer(i64::from(p)));
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = excluded.people_only",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0))
+             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = COALESCE(?, members.people_only)",
             vec![
                 target.id.as_str().into(),
                 body.role.as_str().into(),
@@ -459,9 +464,12 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
-                SqlStorageValue::Integer(i64::from(body.people_only)),
+                people_only.clone(),
+                people_only,
             ],
         )?;
+        let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
+        let member = member_json(row.first().ok_or_else(|| CellError::host("a member just written is not there"))?)?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
         // a new agent member's computer hears it joined (runs_on.rs), and
@@ -475,7 +483,7 @@ impl FragmentCell {
             Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
             None => format!("{} is now {}", target.id, body.role.as_str()),
         };
-        let data = json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner, "peopleOnly": body.people_only });
+        let data = json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner, "peopleOnly": member.people_only });
         self.event("member.set", &format!("{summary}{}", actor.said()), actor.noted(data));
         // A socket's role is fixed when it opens, and it answers queries at
         // that role: a changed role reopens the member's sockets (and their
@@ -489,8 +497,7 @@ impl FragmentCell {
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
         self.flush_joined().await;
-        let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
-        member_json(&row[0])
+        Ok(member)
     }
 
     pub(crate) async fn remove_member(&self, caller: &Caller, who: &str) -> CellResult<Response> {
@@ -549,7 +556,7 @@ impl FragmentCell {
     }
 
     /// Its title as its members' lists show it, if it has one.
-    fn title(&self) -> CellResult<Option<String>> {
+    pub(crate) fn title(&self) -> CellResult<Option<String>> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
@@ -602,17 +609,20 @@ impl FragmentCell {
         let mine = || self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)]);
         match answer {
             Ok(Invited::Mailed) => {
+                // the owner's list counts the invites waiting
+                self.sharing_changed()?;
                 self.event(
                     "invite.created",
                     &format!("an invite waits on an email, as {}{}", body.role.as_str(), actor.said()),
                     actor.noted(json!({ "role": body.role, "expiresAt": expires_at })),
                 );
+                self.flush_index().await;
                 let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone() };
                 json_response(&Shared::Invited(invite))
             }
             Ok(Invited::Holder(person)) => {
                 mine()?;
-                let member = self.put_member(&actor, &person, SetRole { role: body.role, people_only: false }).await?;
+                let member = self.put_member(&actor, &person, SetRole { role: body.role, people_only: None }).await?;
                 json_response(&Shared::Member(member))
             }
             Err(e) => {
@@ -634,7 +644,7 @@ impl FragmentCell {
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
-    pub(crate) fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
+    pub(crate) async fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         let email = email.trim().to_ascii_lowercase();
         self.drop_spent_invites()?;
@@ -642,7 +652,10 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no invite waits on {email}")));
         }
         self.exec("DELETE FROM invites WHERE email = ?", vec![email.as_str().into()])?;
+        // the owner's list counts the invites waiting
+        self.sharing_changed()?;
         self.event("invite.revoked", &format!("an invite was revoked{}", actor.said()), actor.noted(json!({})));
+        self.flush_index().await;
         json_response(&json!({ "ok": true, "revoked": email }))
     }
 
@@ -687,7 +700,9 @@ impl FragmentCell {
     }
 
     /// The fragment's sharing, as its owner's list carries it: `guests`
-    /// counts the members who are neither the owner nor an agent of theirs.
+    /// counts the members who are neither the owner nor an agent of theirs,
+    /// and `invites` those waiting on an email (as of this change: one
+    /// that runs out later is counted until the next).
     pub(crate) fn sharing_counts(&self) -> CellResult<Sharing> {
         let visibility = self.visibility()?;
         let owner = self.must(MetaKey::Owner)?;
@@ -695,15 +710,18 @@ impl FragmentCell {
         struct Counts {
             members: u64,
             guests: u64,
+            invites: u64,
         }
         let counts: Vec<Counts> = self.typed(
             "SELECT (SELECT COUNT(*) FROM members) AS members,
-                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests",
-            vec![owner.as_str().into(), owner.as_str().into()],
+                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests,
+                    (SELECT COUNT(*) FROM invites WHERE expires_at > ?) AS invites",
+            vec![owner.as_str().into(), owner.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let counts = counts.into_iter().next().expect("a SELECT without FROM answers one row");
         assert!(counts.guests <= counts.members, "guests are members");
-        Ok(Sharing { visibility, members: counts.members, guests: counts.guests })
+        assert!(counts.invites <= limits::INVITES_MAX as u64, "a fragment holds at most INVITES_MAX invites");
+        Ok(Sharing { visibility, members: counts.members, guests: counts.guests, invites: Some(counts.invites) })
     }
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
