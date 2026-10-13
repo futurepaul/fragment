@@ -717,9 +717,15 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.viewport(&page, 1280, 800, false)?;
 
     // first run: the default agent, made while the shell waits with no
-    // question asked (Paul, 2026-10-03), and nothing to choose before it
+    // question asked (Paul, 2026-10-03), and nothing to choose before it: a
+    // seat (the e2e's people are the deployment's plan's) skips the welcome
     let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
-    s.ok("signed in, the shell makes their default agent at once, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
+    let first = b.eval(&page, "({ path: location.pathname, card: document.getElementById('first-run-card').innerText.slice(0, 200), seats: document.querySelectorAll('#first-run-card [data-plan]').length, steps: [...document.querySelectorAll('#first-run-card .creating-steps li')].map((li) => li.textContent) })")?;
+    s.ok(
+        "signed in, a seat's shell makes their default agent at once, asking nothing, and says so: no welcome, no seat to choose, no seat to wait for, at home's address",
+        creating && first["path"] == "/" && first["seats"] == 0 && first["steps"] == json!(["Making your agent", "Starting its computer"]),
+        &first,
+    );
     let _ = b.screenshot(&page, &shots.join("creating.png"));
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;

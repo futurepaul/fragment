@@ -98,10 +98,16 @@
   // with an operator key no person holds (`fragment operator key <file>`
   // makes one and prints the npub to list here).
   "operators": [],
-  // Computers (docs/computers.md): the images they run, by name, relative
-  // to the repo, and the one a new computer is pinned to. Without this
-  // the deployment makes no computers. The Hermes image builds from the
-  // repo's root (it carries the fragment CLI); the stub, from images/.
+  // Computers (docs/computers.md): the images they run, by name, and the
+  // one a new computer is pinned to. Without this the deployment makes no
+  // computers. Each is built from the tree at every deploy (its Dockerfile
+  // and build context, relative to the repo: the Hermes image builds from
+  // the repo's root, as it carries the fragment CLI), or kept at a digest
+  // this account's registry holds. Stable and canary (docs/computers.md):
+  // the default kept at the digest a canary proved, the canary built.
+  //   "hermes": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
+  //   "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+  // Never drop a name while computers are pinned to it.
   "computers": {
     "default_image": "hermes",
     "images": {

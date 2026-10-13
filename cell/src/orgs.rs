@@ -159,6 +159,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
+        (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
@@ -184,7 +185,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
                 SeatKind::Seat => "a seat",
             };
             let text = format!(
-                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/settings?trial={}\n\nYour code: {}\n",
+                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/welcome?trial={}\n\nYour code: {}\n",
                 code.days,
                 cfg.platform(),
                 code.code,
@@ -200,7 +201,8 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
 }
 
 /// A person's page for operators: as the list shows them, their ledger,
-/// and their computer (none: `null`).
+/// their computer, and the whole references of the image it runs and of
+/// the one its next start runs (both `null` without a computer).
 async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
     if !fragment_core::npub::is_identity(person) {
         return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
@@ -208,12 +210,30 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
     let row = ask_registry(env, &admin::Person { person: person.to_string() }).await?;
     let ledger = crate::ledger::ask(env, person, &crate::ledger::Status {}).await.map_err(|e| CellError::new(e.code, e.message))?;
     let id = fragment_core::computer::default_computer_of(person);
-    let computer = match crate::computer::ask(env, &id, "computer/view", &serde_json::json!({})).await {
-        Ok(v) => v,
-        Err(e) if e.code == ErrorCode::NotFound => serde_json::Value::Null,
+    let (computer, references) = match crate::computer::ask(env, &id, "computer/view", &serde_json::json!({})).await {
+        Ok(v) => (v, crate::computer::ask(env, &id, "computer/references", &serde_json::json!({})).await?),
+        Err(e) if e.code == ErrorCode::NotFound => (serde_json::Value::Null, serde_json::Value::Null),
         Err(e) => return Err(e),
     };
-    Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer }))
+    Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer, "references": references }))
+}
+
+/// An operator pins a person's computer to another of the deployment's
+/// images (docs/computers.md, "Stable and canary"): onto the canary, or
+/// back. As its owner's pin is, its next start runs it, and awake on
+/// another, its owner is told an update is ready. Logged as `pin`.
+async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serde_json::Value> {
+    if !fragment_core::npub::is_identity(person) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
+    }
+    let image = crate::computer::image_named(bytes)?;
+    let id = fragment_core::computer::default_computer_of(person);
+    let view = crate::computer::ask(env, &id, "computer/pin", &serde_json::json!({ "image": image })).await.map_err(|e| match e.code {
+        ErrorCode::NotFound => CellError::new(ErrorCode::NotFound, format!("{person} has no computer yet")),
+        _ => e,
+    })?;
+    ask_registry(env, &admin::Note { by: by.to_string(), action: "pin".into(), target: person.to_string(), detail: image }).await?;
+    Ok(view)
 }
 
 /// A new seat's mail to its email, from its org: where to sign in.

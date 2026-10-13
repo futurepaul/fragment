@@ -1,22 +1,27 @@
 // The shell's Billing (docs/billing.md, "The shell"; docs/api.md, Seats
 // and orgs, Billing): a person's seat, their credit, and their org's.
-// A guest buys a seat, or starts a trial with a code; a seat's holder sees
-// it, lets a $200 seat's computer sleep, and buys credit; an org's admin
-// adds, changes and removes seats and admins, and opens Stripe's portal for
-// card and invoices. An org is shown once someone besides its admin is in
-// it (a seat, held or invited, or another admin): its admin alone, who pays
-// for themselves, sees only Payment and invoices, and asks for the org's
-// seats to add one for someone else. Stripe's Checkout and portal are
-// Stripe's pages: the shell goes there, and Checkout's return
-// (`/settings?checkout=…`) comes back here (`returning`). Every value is
-// text, never markup.
+// A guest's seats and trial code are the welcome's (`seatOffer`, for
+// shell.js `welcome`), which Billing links to; a seat's holder sees it,
+// lets a $200 seat's computer sleep, and buys credit; an org's admin adds,
+// changes and removes seats and admins, and opens Stripe's portal for card
+// and invoices. An org is shown once someone besides its admin is in it (a
+// seat, held or invited, or another admin): its admin alone, who pays for
+// themselves, sees only Payment and invoices, and asks for the org's seats
+// to add one for someone else. Stripe's Checkout and portal are Stripe's
+// pages: the shell goes there; a seat's Checkout returns to the welcome
+// (`/welcome?checkout=…`), a credit pack's here (`/settings?pack=…`,
+// `returning`). Every value is text, never markup.
 
 const KIND = { seat: "$100 seat", seat_always_on: "$200 always-on seat" };
+// The two seats (decision 25), as a guest chooses between them.
+const PLANS = [
+  ["seat", "$100 a month", "Your agents, the computer they run on (it sleeps when idle), apps of your own, and $50 of credit a month."],
+  ["seat_always_on", "$200 a month, always on", "The same on a computer that stays awake, and $100 of credit a month."],
+];
 
 /**
- * The shell's helpers this module uses: `{api, el, section, line, usd,
- * reopen, firstAgent}` (`firstAgent`: home's first run, for a person with
- * no chat of their own yet; otherwise null).
+ * The shell's helpers this module uses: `{api, el}` for the welcome, and
+ * `{section, line, usd, reopen}` besides for settings.
  */
 let h = null;
 
@@ -60,25 +65,74 @@ async function goCheckout(body) {
 }
 
 /**
- * Checkout's return, or a trial mailed (`/settings?checkout=`, `?pack=`,
- * `?trial=`): the purchase applied at once, whatever Stripe's webhook's
- * timing. Answers what to say, and a trial code to offer, if any.
+ * A credit pack's Checkout returning (`/settings?pack=`): the credit
+ * applied at once, whatever Stripe's webhook's timing. Answers what to say.
  */
 export async function returning(helpers) {
   h = helpers;
-  const q = new URLSearchParams(location.search);
-  const session = q.get("checkout") || q.get("pack");
-  const trial = q.get("trial");
-  if (!session && !trial) return { said: null, trial: null };
+  const pack = new URLSearchParams(location.search).get("pack");
+  if (!pack) return { said: null };
   history.replaceState(null, "", location.pathname);
-  if (session === "canceled") return { said: "Checkout was canceled: nothing was bought.", trial: null };
-  if (!session) return { said: null, trial };
+  if (pack === "canceled") return { said: "Checkout was canceled: nothing was bought." };
   try {
-    await h.api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {});
-    return { said: q.get("pack") ? "Paid: the credit is yours." : "Paid: your seat is ready.", trial: null };
+    await h.api("POST", `/api/billing/sessions/${encodeURIComponent(pack)}`, {});
+    return { said: "Paid: the credit is yours." };
   } catch (e) {
-    return { said: `Your purchase is not here yet: ${e.message}`, trial: null };
+    return { said: `Your purchase is not here yet: ${e.message}` };
   }
+}
+
+/**
+ * The welcome's seats for a guest (`mine`: `GET /api/seat`'s), each to
+ * Stripe's Checkout, and a trial code (`trial`: one a mailed link named);
+ * what Checkout or a code refuses is said under them. Someone in an org
+ * whose admins give its seats is told so instead.
+ */
+export function seatOffer(helpers, mine, trial) {
+  h = helpers;
+  const { el } = h;
+  if (mine?.org && !mine.admin) return [el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
+  const said = el("p", "form-error");
+  said.hidden = true;
+  const plans = el("div", "plans");
+  const form = el("form", "trial-code");
+  const code = el("input");
+  code.placeholder = "Trial code";
+  code.setAttribute("aria-label", "Trial code");
+  code.value = trial || "";
+  code.autocomplete = "off";
+  code.required = true;
+  const begin = el("button", "quiet", "Start a trial");
+  begin.type = "submit";
+  form.append(code, begin);
+  // one Checkout at a time; a refusal is said; every choice is open again
+  // after, as Billing's buttons are (a page Back brings back is usable)
+  const go = async (body) => {
+    const choices = [...plans.children, begin];
+    for (const b of choices) b.disabled = true;
+    said.hidden = true;
+    try {
+      await goCheckout(body);
+    } catch (e) {
+      said.textContent = e.message;
+      said.hidden = false;
+    } finally {
+      for (const b of choices) b.disabled = false;
+    }
+  };
+  for (const [kind, title, what] of PLANS) {
+    const b = el("button", "plan");
+    b.type = "button";
+    b.dataset.plan = kind;
+    b.append(el("strong", null, title), el("span", null, what));
+    b.onclick = () => go({ kind });
+    plans.append(b);
+  }
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    go({ trialCode: code.value });
+  };
+  return [plans, form, said, el("p", "muted", "Prices are monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel.")];
 }
 
 /** The Billing section, and an admin's Org section. */
@@ -98,15 +152,6 @@ export async function billingSections(helpers, ledger, back) {
     billing.append(line("Seat", kind));
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
-    if (seat.good && h.firstAgent) {
-      const first = el("button", "primary", "Make your first agent");
-      first.type = "button";
-      first.onclick = () => {
-        first.disabled = true;
-        h.firstAgent();
-      };
-      billing.append(actionLine("Agent", first));
-    }
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
       if (seat.admin) billing.append(actionLine("Renewal", button("Pay again", () => goCheckout({ kind: seat.kind }))));
@@ -130,26 +175,10 @@ export async function billingSections(helpers, ledger, back) {
     }
   } else if (!mine.org || mine.admin) {
     billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat gives you agents of your own, the computer they run on, and apps of your own."));
-    const buy = el("div", "settings-actions");
-    buy.append(button("Get a $100 seat", () => goCheckout({ kind: "seat" })), button("Get a $200 always-on seat", () => goCheckout({ kind: "seat_always_on" })));
-    billing.append(actionLine("Choose a seat", buy));
-    const trial = el("form", "settings-actions");
-    const code = el("input");
-    code.placeholder = "Trial code";
-    code.value = back?.trial || "";
-    code.autocomplete = "off";
-    const start = el("button", "quiet", "Start a trial");
-    start.type = "submit";
-    trial.append(code, start);
-    trial.onsubmit = async (e) => {
-      e.preventDefault();
-      try {
-        await goCheckout({ trialCode: code.value });
-      } catch (err) {
-        note(billing, err.message);
-      }
-    };
-    billing.append(actionLine("Trial code", trial), el("p", "muted", "Prices are monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel."));
+    // the seats and a trial code are the welcome's, as a new person's are
+    const get = el("a", "quiet", "Get a seat");
+    get.href = "/welcome";
+    billing.append(actionLine("Seat", get));
   } else {
     billing.append(el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`));
   }

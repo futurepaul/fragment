@@ -9,9 +9,15 @@
 //!   --hosted --zone <zone> --branch <b> [--secret-file <file>]
 //!       [--operator-key-file <file> --operators <npub,...>]
 //!       [--offers computers,models] [--max-paid-calls <n>]
+//!       [--candidate <image>]
 //!       [--only <section>[,...] | --except <section>[,...]]
 //!       [--dry-run | --sweep [<run>] | --sweep-all]
 //!
+//! - **The candidate.** `--candidate <image>` (one of the deployment's
+//!   images, never its default: the canary, docs/computers.md, "Stable and
+//!   canary") is what a round tries: the real-agent sections' computers
+//!   are pinned to it before their first start, and agent-restart's
+//!   restart upgrades its computer from the default into it and back.
 //! - **People.** Each signs in through the preview's levers
 //!   (`POST /api/test/signin`, the deployment's test secret in its header):
 //!   `<name>@e2e.test`, a seat under the e2e issuer, which no real sign-in
@@ -63,7 +69,7 @@ pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
-                    [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
+                    [--max-paid-calls <n>] [--candidate <image>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
 /// The suite's command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +104,9 @@ pub struct Hosted {
     pub models: bool,
     /// The paid calls the run may lend its people, in all.
     pub max_paid_calls: u64,
+    /// The image a round tries (`--candidate`): one of the deployment's,
+    /// not its default (xtask checks it against the config).
+    pub candidate: Option<String>,
     pub action: Action,
 }
 
@@ -126,7 +135,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let list = |names: &str| names.split(',').filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>();
     let (mut only, mut except) = (None, vec![]);
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
-    let (mut operator_key_file, mut operators) = (None, vec![]);
+    let (mut operator_key_file, mut operators, mut candidate) = (None, vec![], None);
     let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
     let mut shard = None;
     let mut it = args.iter().peekable();
@@ -145,6 +154,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
             "--operators" => operators = list(&value()?),
             "--offers" => offers = Some(value()?),
             "--max-paid-calls" => max_paid_calls = Some(value()?.parse::<u64>().map_err(|_| anyhow::anyhow!("--max-paid-calls is a whole number"))?),
+            "--candidate" if candidate.is_none() => candidate = Some(image_name(&value()?)?),
             "--dry-run" => dry_run = true,
             // its run is the next argument, when that is not another flag
             "--sweep" if sweep.is_none() => {
@@ -167,9 +177,9 @@ pub fn parse(args: &[String]) -> Result<Args> {
         Ok(n)
     };
     if !hosted {
-        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep.is_some() || operator_key_file.is_some() || !operators.is_empty();
+        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep.is_some() || operator_key_file.is_some() || !operators.is_empty() || candidate.is_some();
         if hosted_only || (max_paid_calls.is_some() && !rehearse) {
-            bail!("--zone, --branch, --secret-file, --operator-key-file, --operators, --offers, --dry-run, --sweep and --sweep-all are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
+            bail!("--zone, --branch, --secret-file, --operator-key-file, --operators, --offers, --candidate, --dry-run, --sweep and --sweep-all are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
         }
         if rehearse && shard.is_some() {
             // a rehearsal ends with its sweep, which belongs to no shard
@@ -200,8 +210,8 @@ pub fn parse(args: &[String]) -> Result<Args> {
         (false, Some(of)) => Action::Sweep(of),
         (false, None) => Action::Run,
     };
-    if matches!(action, Action::Sweep(_)) && (only.is_some() || !except.is_empty()) {
-        bail!("a sweep runs no sections: no --only or --except");
+    if matches!(action, Action::Sweep(_)) && (only.is_some() || !except.is_empty() || candidate.is_some()) {
+        bail!("a sweep runs no sections: no --only, --except or --candidate");
     }
     if action != Action::DryRun && secret_file.is_none() {
         bail!("a hosted run signs its people in through the preview's levers: --secret-file names the deployment's test secret (its config's test_secret_file)");
@@ -217,10 +227,22 @@ pub fn parse(args: &[String]) -> Result<Args> {
     if operator_key_file.is_some() && operators.is_empty() {
         bail!("--operator-key-file needs --operators: the deployment's (its config's `operators`), among which its key is");
     }
+    if candidate.is_some() && !computers {
+        bail!("--candidate names one of the deployment's computer images: it offers computers (--offers computers)");
+    }
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
-    let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, models, max_paid_calls, action };
+    let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, models, max_paid_calls, candidate, action };
     Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None })
+}
+
+/// `--candidate <image>`'s name, as a pin takes it: 1 to 64 visible
+/// characters (the cell's `image_named`).
+fn image_name(text: &str) -> Result<String> {
+    match !text.is_empty() && text.len() <= 64 && text.bytes().all(|b| b.is_ascii_graphic()) && !text.starts_with("--") {
+        true => Ok(text.to_string()),
+        false => bail!("--candidate names one of the deployment's images (hermes-canary), not {text:?}"),
+    }
 }
 
 /// `--sweep <run>`'s run: the id a run prints as it starts, the 6 hex
@@ -279,6 +301,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         rung: Rung::Hosted(offers(hosted)),
         hosted_rules: true,
         preview: Some(hosted.preview.clone()),
+        candidate: hosted.candidate.clone(),
         plan: None,
         shared,
         owners: Default::default(),
@@ -357,6 +380,9 @@ pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> Strin
         out += &format!("  operator     the key in {} (read when the run starts), among the config's operators\n", file.display());
     }
     out += &format!("  offers       {}\n", if offered.is_empty() { "nothing".to_string() } else { offered.join(", ") });
+    if let Some(image) = &hosted.candidate {
+        out += &format!("  candidate    {image}: the real-agent sections' computers start on it; agent-restart upgrades into it from the default and back\n");
+    }
     out += &format!("  paid calls   at most {} in all, lent to a person as they sign in (--max-paid-calls); each refused past its lending\n", hosted.max_paid_calls);
     let (runs, skips): (Vec<&Planned>, Vec<&Planned>) = planned.iter().partition(|p| p.skip.is_none());
     out += &format!("\nwould run ({}):\n", runs.len());

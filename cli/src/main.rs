@@ -381,6 +381,15 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Pin a person's computer to one of the deployment's images (a canary,
+    /// or back to the default): its next start runs it, and awake, its owner
+    /// is told an update is ready
+    Pin {
+        npub: String,
+        image: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// List orgs, a page at a time: seats, admins, Stripe status
     Orgs {
         #[arg(long)]
@@ -998,6 +1007,18 @@ fn run(cli: Cli) -> Result<()> {
             let v = admin_answer(&c, c.get(&format!("/api/admin/people/{npub}"))?)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Pin { npub, image, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.put_json(&format!("/api/admin/people/{npub}/computer/image"), &json!({ "image": image }))?)?;
+            json_exit(j, &v);
+            let runs = match v["version"].as_str() {
+                Some(version) => format!("it runs {version}"),
+                None => "it runs nothing now".to_string(),
+            };
+            let told = if v["notices"].as_array().is_some_and(|n| n.iter().any(|n| n["kind"] == "update")) { "; its owner is told an update is ready" } else { "" };
+            println!("pinned {npub}'s computer to {}: {runs}, its next start runs {}{told}", v["image"].as_str().unwrap_or("?"), v["latest"].as_str().unwrap_or("?"));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Orgs { after, key_file } } => {

@@ -189,7 +189,10 @@ the move if it ever outgrows that, not before.
   - It carries `client_reference_id` (the org), the metadata, a card
     always, and `allow_promotion_codes` (discounts are Stripe's,
     below).
-  - The return URL is `/settings?checkout={CHECKOUT_SESSION_ID}`.
+  - The return URL is the shell's welcome,
+    `/welcome?checkout={CHECKOUT_SESSION_ID}`, and Checkout's Back goes
+    to `/welcome?checkout=canceled` ("The shell", below). A credit
+    pack's are `/settings?pack=…`.
   - After that, seats change through the API, not Checkout.
 - **Seat changes** call `POST /v1/subscriptions/<id>` with the items'
   new quantities. That covers adding a seat, removing one, and moving
@@ -346,8 +349,9 @@ Checked against finite-mono's code (2026-10-08):
     expires_at, active, created_by)`;
   - `trial_uses (code, person, session, expires_at, subscription)`.
 - **Redeeming** (a guest who never had a subscription):
-  - **Where:** they type the code in the shell, or open the mailed link
-    `/?trial=<code>`.
+  - **Where:** they type the code in the shell's welcome, or open the
+    mailed link `/welcome?trial=<code>`, which fills it in (signed out,
+    sign-in comes back to it).
   - **Checks:** in one transaction, the registry checks the code is
     active and unexpired, that it has a place, and that the person never
     trialed. The places taken are uses with a subscription plus uses
@@ -404,10 +408,45 @@ Checked against finite-mono's code (2026-10-08):
 
 ## The shell
 
-Settings gains **Billing**, which replaces the read-only Credit section:
+**The welcome** (`/welcome`; shell.js `welcome`, billing.js
+`seatOffer`) is a new person's first run. It never goes through
+settings (Paul, 2026-10-13: "fixed onboarding (shouldn't go through the
+settings page)").
 
-- **A guest** sees the two seats and a trial-code field, then
-  Checkout. A team sets its seat counts there.
+- **Who sees it:** a guest with nothing shared with them, who lands
+  there from `/`. It holds a line of what this is, the two seats and a
+  trial-code field, then Checkout, and who is signed in, with Sign out.
+- **What comes back to it:** Checkout's return
+  (`?checkout=<session>`), its Back (`?checkout=canceled`, said), and a
+  mailed trial's link (`?trial=<code>`, filled in). Signed out, sign-in
+  comes back to it with its query. A refusal (a code that is none, a
+  full one) is said under the seats.
+- **A paid return** goes on to the first run, at `/`, in three steps:
+  - *Setting up your seat:* the Checkout applied
+    (`POST /api/billing/sessions/<id>`), kept in the address until its
+    seat holds, so a reload applies it again; then the seat's plan
+    reaching the ledger, a moment after (at most 30 s). A seat that does
+    not come (a Checkout not theirs, or unpaid) is said, with Try again
+    and Choose a seat.
+  - *Making your agent:* their default agent, its computer and its
+    chat, each made once (a retry or a reload reuses what was made).
+  - *Starting its computer:* then their chat opens (past 4 minutes,
+    "Open the chat now").
+- **Who skips it:** someone holding a seat (bought, an org's claimed at
+  sign-in, or the deployment's plan) goes straight to the first run.
+  Someone with a chat of their own goes home, a lapsed seat's
+  Checkout applied first.
+- **An invitee** (a guest someone shared something with) lands on what
+  was shared: home, with a note of what a guest may do and what a seat
+  gives. Its "Get a seat" opens the welcome, whose "Not now" goes back.
+- **Later:** a place is kept, hidden, beside the seats for "Import your
+  finite.computer agent" (fbfc's import, not built).
+
+Settings gains **Billing**, which replaces the read-only Credit section,
+for a seat once someone holds one:
+
+- **A guest** sees what a seat gives, and "Get a seat", which opens the
+  welcome.
 - **A seat holder** sees their seat, its kind, who provides it, and
   this month's usage and credit. On `seat_always_on` it adds "let it
   sleep".
@@ -425,13 +464,7 @@ Settings gains **Billing**, which replaces the read-only Credit section:
   which shows the table.
 - **A lapsed person** sees why, and how to pay again.
 
-The first run starts once a seat is held, so a guest's first run is
-home: what is shared with them, and a note of what a guest may do and
-what a seat gives, whose "Get a seat" opens Billing. The shell offers a
-guest nothing to make. A seat holder with no chat of their own yet sees
-"Make your first agent" in Billing: once the seat's plan has reached
-their ledger, it goes home, where the first run makes their default
-agent.
+The shell offers a guest nothing to make.
 
 ## The API, in sketch
 
@@ -505,7 +538,8 @@ agent.
    `claude/operator-admin`; docs/api.md, Operators: the admin): the
    API, the CLI (`fragment operator …`), `/admin`, and the audit log.
 9. **The shell's Billing page** (built 2026-10-08, branch
-   `claude/shell-billing`; cell/shell/billing.js).
+   `claude/shell-billing`; cell/shell/billing.js). Its first run moved
+   to the welcome (built 2026-10-13, branch `claude/first-run`).
 10. **Go live** (Paul's; its tooling built 2026-10-08, branch
     `claude/stripe-xtask`: `xtask stripe check|setup`, and a branch's own
     endpoint at each deploy):

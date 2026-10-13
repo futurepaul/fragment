@@ -2,7 +2,7 @@
 //! `registry/signin.rs`). WorkOS AuthKit authenticates people on the
 //! platform origin; the platform holds no key for them, only sessions.
 //!
-//! Platform origin (`/` and `/settings` are the shell's page: shell.rs):
+//! Platform origin (`/`, `/settings` and `/welcome` are the shell's page: shell.rs):
 //!
 //!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
 //!                                 round trip; an invitation's token lets its invitee sign up, since
