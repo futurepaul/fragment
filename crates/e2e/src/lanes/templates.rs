@@ -260,7 +260,7 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let r = files(owner)?;
     let rows: Vec<Value> = r.body["files"].as_array().cloned().unwrap_or_default();
     let release: Vec<(String, String)> = rows.iter().filter(|f| f["release"] == true).map(|f| (f["path"].as_str().unwrap_or("").to_string(), f["lastCommitSha"].as_str().unwrap_or("").to_string())).collect();
-    let want: Vec<(String, String)> = blessed::data("skills").iter().map(|d| (d.path.to_string(), d.version.clone())).collect();
+    let want: Vec<(String, String)> = blessed::data("skills").into_iter().map(|d| (d.path.to_string(), blessed::data_version(d))).collect();
     s.ok(
         &format!("its files are the release's managed set ({} files), each at its version, beside its own manifest", want.len()),
         r.status == 200 && !want.is_empty() && release == want && rows.iter().any(|f| f["path"] == "fragment.json" && f["release"].is_null()),

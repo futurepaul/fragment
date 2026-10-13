@@ -273,7 +273,7 @@ fragment.club until cutover (decisions 34–35).
   `templates/notes/src/viewer.mjs`. The repo has no Node tooling, so a
   rebuild is by hand (the recipe is at the top of the source). Since
   phase 6 the blessed brain template serves the same bundle
-  (`templates/brain/site/assets` is a symlink to it, embedded once), and
+  (`templates/brain/site/assets` is a symlink to it, one asset), and
   its search box is a separate script beside it (`site/brain.js`), not a
   change to the viewer: nothing pins the bundle's transitive dependencies
   (Shiki's among them), so a rebuild could not be checked against the

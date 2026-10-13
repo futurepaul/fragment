@@ -1,6 +1,7 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/` and `/settings`, and its files at `/__shell/<file>`, compiled into the
-//! release (cell/shell/). It holds no key: its script calls the API with
+//! page, at `/` and `/settings`, and its files at `/__shell/<file>`, the
+//! release's (cell/shell/), read from its Static Assets (assets.rs). It
+//! holds no key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
 //!
@@ -9,44 +10,24 @@
 //! the frame mint's redirects) and of the fragments' and computers' hosts
 //! under the suffix; never framed itself.
 
+use fragment_templates::File;
 use worker::*;
 
 use crate::config::Config;
-
-/// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 16] = [
-    ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
-    ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
-    ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
-    ("viewer.js", "text/javascript; charset=utf-8", include_bytes!("../shell/viewer.js")),
-    ("agent-identity.js", "text/javascript; charset=utf-8", include_bytes!("../shell/agent-identity.js")),
-    ("app-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/app-icons.js")),
-    ("lucide-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/lucide-icons.js")),
-    ("tooltips.js", "text/javascript; charset=utf-8", include_bytes!("../shell/tooltips.js")),
-    // Settings' Billing: a seat, credit, an org (docs/billing.md)
-    ("billing.js", "text/javascript; charset=utf-8", include_bytes!("../shell/billing.js")),
-    ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_bytes!("../shell/vendor/split-grid.js")),
-    ("manifest.webmanifest", "application/manifest+json", include_bytes!("../shell/manifest.webmanifest")),
-    ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
-    // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
-    ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
-    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
-    ("agent.png", "image/png", include_bytes!("../shell/agent.png")),
-    // the operators' admin page (`/admin`)
-    ("admin.js", "text/javascript; charset=utf-8", include_bytes!("../shell/admin.js")),
-    ("admin.css", "text/css; charset=utf-8", include_bytes!("../shell/admin.css")),
-];
-const PAGE: &str = include_str!("../shell/index.html");
-const ADMIN_PAGE: &str = include_str!("../shell/admin.html");
+use crate::error::CellResult;
 
 /// A file's validator: its bytes' hash (a release changes them).
-fn etag(body: &[u8]) -> String {
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(body);
-    format!("\"s-{}\"", hex::encode(&digest[..10]))
+fn etag(f: &File) -> String {
+    format!("\"s-{}\"", &f.sha256[..20])
 }
 
 fn not_modified(req: &Request, tag: &str) -> Result<bool> {
     Ok(req.headers().get("if-none-match")?.is_some_and(|v| v.split(',').any(|t| t.trim() == tag)))
+}
+
+/// One of the shell's pages, its file in the release.
+fn page_file(name: &str) -> &'static File {
+    fragment_templates::shell(name).unwrap_or_else(|| panic!("the shell's {name} is in the release's index"))
 }
 
 /// Where the shell may frame: this origin, and every fragment's and
@@ -60,7 +41,7 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
 
 /// `GET /` and `GET /settings`: the shell's page, for anyone (signed out,
 /// it asks them to sign in; the shell opens the view its path names).
-pub fn page(req: &Request, cfg: &Config, url: &Url) -> Result<Response> {
+pub async fn page(env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -75,14 +56,13 @@ pub fn page(req: &Request, cfg: &Config, url: &Url) -> Result<Response> {
     // a page that opens it in a window keeps no hold on it, as on every platform page
     h.set("cross-origin-opener-policy", "same-origin")?;
     h.set("referrer-policy", "strict-origin-when-cross-origin")?;
-    let _ = req;
-    Ok(Response::ok(PAGE)?.with_headers(h))
+    crate::assets::body(env, page_file("index.html"), h).await
 }
 
 /// `GET /admin`: the operators' admin page (decision 59), for anyone: it
 /// holds nothing, and its API answers only the deployment's operators.
 /// It frames nothing and is never framed.
-pub fn admin_page() -> Result<Response> {
+pub async fn admin_page(env: &Env) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -93,13 +73,15 @@ pub fn admin_page() -> Result<Response> {
     h.set("x-frame-options", "DENY")?;
     h.set("cross-origin-opener-policy", "same-origin")?;
     h.set("referrer-policy", "same-origin")?;
-    Ok(Response::ok(ADMIN_PAGE)?.with_headers(h))
+    crate::assets::body(env, page_file("admin.html"), h).await
 }
 
-/// `GET /__shell/<file>`: one of its files, or `None`.
-pub fn asset(req: &Request, name: &str) -> Result<Option<Response>> {
-    let Some((_, mime, body)) = FILES.iter().find(|(n, _, _)| *n == name) else { return Ok(None) };
-    let tag = etag(body);
+/// `GET /__shell/<file>`: one of the files it publishes
+/// (`fragment_templates::shell_published`), or `None`. A 304 and a HEAD
+/// are answered from the index, before any read.
+pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Response>> {
+    let Some((f, mime)) = fragment_templates::shell_published(name) else { return Ok(None) };
+    let tag = etag(f);
     let h = Headers::new();
     h.set("content-type", mime)?;
     // revalidated each time: a release changes them under the same names
@@ -109,5 +91,9 @@ pub fn asset(req: &Request, name: &str) -> Result<Option<Response>> {
     if not_modified(req, &tag)? {
         return Ok(Some(Response::empty()?.with_status(304).with_headers(h)));
     }
-    Ok(Some(Response::from_bytes(body.to_vec())?.with_headers(h)))
+    if req.method() == Method::Head {
+        h.set("content-length", &f.size.to_string())?;
+        return Ok(Some(Response::empty()?.with_headers(h)));
+    }
+    Ok(Some(crate::assets::body(env, f, h).await?))
 }

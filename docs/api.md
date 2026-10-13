@@ -810,7 +810,8 @@ site, and code: the template's `app.mjs` and `applib/`, when it carries
 any (a chat's push: docs/chat-records.md), held to an app's limits and
 run in the same facet, under the release's identity (`blessed:<template>@
 <release>`, a hash of the template's files,
-`fragment_templates::blessed`; `status.code.id`). A platform deploy that
+`fragment_templates::blessed`; `status.code.id`), each file read from the
+cell's Static Assets (Serving, The release's files). A platform deploy that
 changes the template installs again at each such fragment's next request,
 a fresh worker as a new commit is: what runs is the release, which its
 commit does not name, and the `code.installed` event says when it changed. Its repo holds only its face and data: a live
@@ -1643,18 +1644,32 @@ platform is elsewhere (`Cache-Control: no-store`, so the platform can
 still move); any other name under the suffix, 404; anything else, the
 platform.
 
+### The release's files
+
+The files the platform serves as they are in its release, a blessed
+template's site, data and code (Apps, above), a catalog template's
+files, the shell's files (The shell, below) and the agent docs (Agent
+docs, below), are the Worker's Static Assets (`ASSETS`), each named by
+its SHA-256. The cell carries only their index, each file's path,
+hash and size and each template's release, made by its build
+(crates/templates), and reads a file by its hash when it answers with
+it (cell/src/assets.rs): a 304 or a `HEAD` reads none. Every request
+runs the cell first (`run_worker_first`), so none is served at a path
+of its own: only the routes above serve them, with the headers they
+always had.
+
 ## Agent docs
 
 For an agent with no CLI yet (llmstxt.org), the platform's own host
 answers `GET /llms.txt` with `cli/SKILL.md`, the text `fragment skill`
 prints (what fragment is, the install, pairing, the daily commands),
 and `GET /llms-full.txt` with `cli/GUIDE.md`, the text `fragment guide`
-prints (the whole manual). Both are compiled into the cell from the
-CLI's own files, so they never drift from it. They answer anyone, as
+prints (the whole manual). Both are the CLI's own files, which the
+release carries in the cell's Static Assets (Serving, The release's
+files), so they never drift from it. They answer anyone, as
 `text/plain; charset=utf-8` with `Cache-Control: no-cache` and an ETag
-of their build-time hash (304 when `If-None-Match` names it), as
-`__fragment.js` does. On a fragment's host the same paths are the
-fragment's own.
+of their hash (304 when `If-None-Match` names it), as `__fragment.js`
+does. On a fragment's host the same paths are the fragment's own.
 
 ## Connections (decisions 22 and 37)
 
@@ -1675,7 +1690,8 @@ the computer's swap, each with a placeholder of its own
 ## The shell (phase 5)
 
 The platform's one page is `/`, and `/settings` (cell/shell/, its files at
-`/__shell/<file>`): its script reads the path, opening its settings at
+`/__shell/<file>`, the release's: Serving, The release's files): its
+script reads the path, opening its settings at
 `/settings` and the person's chats at `/`, and puts the view it shows in
 the address, so a reload stays put. A guest (their ledger's plan) makes
 nothing (decision 49), so the shell offers them nothing to make: their

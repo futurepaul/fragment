@@ -9,7 +9,7 @@ name = "fragment"
 path = "src/main.rs"
 
 [dependencies]
-fragment-templates = { path = "../crates/templates" }
+fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-core = { path = "../crates/core" }
 fragment-proto = { path = "../crates/proto" }
 fragment-nip98 = { path = "../crates/nip98", features = ["sign"] }
