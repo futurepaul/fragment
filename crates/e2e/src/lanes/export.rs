@@ -418,7 +418,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
             let text = chrome.eval(&page, "document.getElementById('settings-data')?.innerText ?? ''")?;
             let text = text.as_str().unwrap_or("").to_string();
             s.ok("Settings shows Your data: the export ready, its size, until when it is kept, and its download", shown && text.contains("Ready to download") && text.contains("Kept until"), &text);
-            let _ = chrome.viewport(&page, 1100, 1000, false);
+            let _ = chrome.viewport(&page, 1100, 2600, false);
             let _ = chrome.eval(&page, "document.getElementById('settings-data')?.scrollIntoView({ block: 'center' })");
             let _ = chrome.screenshot(&page, &s.dir("export-shots").join("settings-your-data.png"));
             chrome.click(&page, "#settings-data [data-action=export-download]")?;
