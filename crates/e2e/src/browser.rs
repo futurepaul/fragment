@@ -391,6 +391,17 @@ impl Browser {
         Ok(())
     }
 
+    /// Lets the lease's context save what it downloads into `dir` (a click
+    /// on a link that answers an attachment).
+    pub fn allow_downloads(&mut self, dir: &Path) -> Result<()> {
+        let mut params = json!({ "behavior": "allow", "downloadPath": dir.to_string_lossy() });
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        self.send("Browser.setDownloadBehavior", params, None)?;
+        Ok(())
+    }
+
     /// `set_cookie` in another of the lease's contexts (a second person's browser).
     pub fn set_cookie_in(&mut self, context: &BrowserContext, url: &str, name: &str, value: &str) -> Result<()> {
         let params = json!({ "cookies": [cookie(url, name, value)], "browserContextId": context.0 });

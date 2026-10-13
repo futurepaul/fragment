@@ -11,7 +11,7 @@
 //! (below). So the platform's page reads this one cell and wakes no
 //! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
-//! Four things here are the person's own, not a fragment's:
+//! Five things here are the person's own, not a fragment's:
 //!
 //! - **Archived**, a flag on their row (`PUT /api/fragments/{name}/archived`):
 //!   their view of the fragment, which no fragment's change touches. It
@@ -55,6 +55,10 @@
 //!   Their computer tells the same sockets when what its owner is told of
 //!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
 //!   page reads it again with the list.
+//! - **Their export** (docs/api.md, Export; export.rs): everything that is
+//!   theirs as one archive in R2, built here on this cell's alarm, which is
+//!   its only use, its place kept in its tables (`exports`, `export_tail`,
+//!   `export_parts`, `export_blobs`) between slices.
 //!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person (or of the
 //! person who owns its agent) closes its sockets and empties it in one

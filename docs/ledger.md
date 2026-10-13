@@ -329,6 +329,14 @@ the batch, so a guest's fragments are billed nothing.
   spent. A guest's or a read-only owner's deploys are not shot.
 - **Images** (the deploy path): `images` rows to the fragment's owner,
   when a transformation is made.
+- **An export** (a person's list, export.rs; docs/api.md, Export): one
+  batch to its person, `export:<id>`, as its archive is deleted (seven days
+  after it was ready, at a newer export, or as a failed one's parts go):
+  `export:<id>:storage`, its archive's bytes from ready to deleted as R2
+  byte-hours, and `export:<id>:requests`, its R2 operations and its
+  downloads. Asked of the ledger directly, as a computer's awake time is,
+  until it answers (a guest's refuses it: billed nothing). Its reads of
+  fragments are theirs, each a request metered to its owner.
 
 ## Where Stripe plugs in
 

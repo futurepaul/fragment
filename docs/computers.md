@@ -576,6 +576,16 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   until they say they saw it (`went_back`: "What its owner is told").
   Nothing's correctness depends on the guest reading either.
 
+### Exported for its owner
+
+Its owner's export (docs/api.md, Export) holds its view and its newest
+save that restores, each record as stored (a tar compressed with zstd,
+its `sha256` the record's), read through the Computer DO, which checks its
+owner (`computer/export`, `computer/export-read`: a range of a record at a
+time, at most 8 MiB). Nothing is saved for it: what the computer did since
+that save is in no save yet. A record pushed out by three newer saves as
+it is copied fails the export (`source_changed`; the debt ledger).
+
 ### Deleted with its owner
 
 An operator's wipe of its owner (docs/api.md, Operators) asks the Computer

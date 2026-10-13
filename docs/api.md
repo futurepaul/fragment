@@ -90,6 +90,7 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, `repo {repo}` makes it name the repo `repo` (`[a-z0-9-]`), as a fragment made before repos were named for their owner does (a wipe deletes what it names), and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos, tries, held, error}], dueAt}`: each life a delete ended whose cleanup is not done (at most 8; `lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete; `tries`: the most failed tries of a part left; `held`: one failed ten times or was refused, so it is tried daily, and by each wipe call; `error`: the last error of a part left, `part: error`), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
 | `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
+| `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
@@ -427,9 +428,11 @@ once it is whole:
 - `ledger`: emptied in one step; it keeps one row saying it was wiped and
   refuses everything after (404, `Refused::Wiped`), so a meter batch still
   in the queue is acknowledged and kept nowhere.
-- `lists`: their and their agents' lists (`Principal`s) emptied the same
-  way: a change still on its way from a fragment is taken and kept
-  nowhere.
+- `lists`: their export first (Export, below): its upload aborted, and
+  everything under `exports/<npub>/` in R2 deleted (ten pages a call; each
+  call after deletes again what a build cut short wrote late); then their
+  and their agents' lists (`Principal`s) emptied the same way: a change
+  still on its way from a fragment is taken and kept nowhere.
 - `pictures`: their picture's bytes, unless another identity set the same.
 - `registry`, in one turn: every row naming them or their agents
   (identities, keys, sign-in subjects and emails, picture, agent fragments,
@@ -459,6 +462,139 @@ The CLI: `fragment operator key <file>`; `fragment operator wipe <person>
 goes on where the last stopped), `--key-file <file>` (or
 `FRAGMENT_OPERATOR_KEY_FILE`) naming the operator key; `--json` answers
 the report (`{report, calls}` for `--yes`).
+
+## Export
+
+A person downloads everything that is theirs as one file (Paul,
+2026-10-13): from Settings, Your data (The shell, below), or `fragment
+export [--out <file>]`. Its archive is the reference for what a person's
+data is, and the format a later import reads. It adds no power to anyone:
+only the person, signed in as themselves, starts, reads or downloads
+theirs; an agent cannot, whomever it acts for, and there is no operator's
+export, nor a lever that reads one past its person (cell/src/export.rs).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/export` | a person, as themselves: the shell's session, or a key of their own (an agent is 403; `for` is 400; unsigned 401) | no body, or `{}` (any other is 400) → `ExportView` (`fragment_proto::export`): a new export, building. While one builds, that one, and nothing starts (a press twice is one export). A fourth start in any 24 hours is 429 `rate_limited`, saying when the next may start (`limits::PER_DAY`: 3). A new one replaces the last: that one's archive is deleted, and it is `expired` |
+| `GET /api/export` | the same | → `{export: ExportView \| null}`: their newest |
+| `GET`, `HEAD /api/export/{id}/download` | its person: signed, the shell's own fetch, or their click on the platform's own page (a navigation, `Sec-Fetch-Mode: navigate`, that page started, `Sec-Fetch-Site: same-origin`, with their platform session) | → the archive, `application/x-tar`, `Content-Disposition: attachment; filename="fragment-export-<YYYY-MM-DD>.tar"`, `Cache-Control: private, no-store`; a `Range` answers 206. Anyone else's export, one not ready, and one gone are 404 (an export is looked up in its asker's own list); another page's request carrying the person's cookie (a fragment's page, one site with the platform; another site's) is 401 |
+
+`ExportView` is `{id, state, startedAt, progress: {done, total, bytes},
+size?, readyAt?, expiresAt?, error?: {code, message}, download?}`: `state`
+`building`, `ready`, `failed` or `expired`; `progress` its parts done (its
+README and manifest, each fragment, each computer) and the archive's bytes
+so far; `download` the path above while it is ready; `error`'s `code` one
+of `too_large` (the archive, or one fragment's part of it, would pass its
+size), `too_many` (fragments, files, blobs, tables or entries past their
+limit), `unavailable` (a part kept failing for a reason that may pass, or
+its person cannot be read, as while a wipe of them runs), `source_changed`
+(a save of its computer, or a blob, went away as it was copied: export
+again) and `timed_out`.
+
+**What it reads, and how.** As its person, through the routes their own
+requests take: each fragment's is handed to the fragment as the router
+hands a request they signed (`Routed`), so the fragment decides their role
+and meters the request to its owner, and nothing is read around it (a part
+sealed at rest later is read as its owner reads it):
+
+- who they are: the registry's view of their identity (their email, their
+  agents), which refuses a person a wipe of whom runs;
+- their list and their agents' lists: the fragments they own, and their
+  agents own (each kept whole); and every fragment someone else owns that
+  they or an agent of theirs is in (`sharedWithMe`: named, its role and
+  whose membership, and its owner from its `status`; never copied);
+- each fragment kept: `status`, `members` and `__people` (each member's
+  email, or an agent's name, as its members see them), `invites`,
+  `secrets` (names), `channels` and each channel's records (pages of 100
+  after its cursor, up to the newest its listing named), `files` and
+  `file` at main (its working copy, which the file API reads: an agent's
+  memories land there) and each blob by its hash (`blobs/{sha256}`, a
+  range at a time), and `database` (above) for an app with code;
+- their computer: its view, and its newest save that restores, read
+  through its Durable Object (its internal `computer/export` and
+  `computer/export-read`, each checking its owner), a range at a time.
+
+A part a fragment refuses its person (an agent's fragment's invites,
+which only its owner reads) or does not have (no app code, so no
+database) is named in that fragment's `meta.json` (`skipped`), and the
+rest goes on.
+
+**The archive** (`fragment_core::export`): one tar, not compressed (a
+ustar header per entry, a pax header naming a path ustar cannot hold),
+every entry under one folder, `fragment-export/`. Its `README.md` says
+what each file is, in what format:
+
+    fragment-export/
+      README.md                     the layout, and every format
+      manifest.json                 its format and version, the deployment, when, whose
+                                    (npub, email), their fragments, agents, computers,
+                                    and sharedWithMe
+      fragments/<name>/             each fragment they own, and each their agents own
+        meta.json                   kind, template, owner, visibility, members, invites,
+                                    whether share links exist (never the tokens), secret
+                                    names (never values), and what each part holds
+        files/<path>                its files at main, a blob's bytes whole
+        database/schema.sql         its app's schema
+        database/<table>.jsonl      one row a line, a JSON object of its columns
+        channels/<channel>.jsonl    one record a line: {seq, at, principal, kind, body}
+        transcript.md               a chat's chat and work records, to read
+        blobs/<sha256>              the files its records attach
+      computers/<24 hex>/
+        meta.json                   its view, and the save exported
+        data.tar.zst                that save's /data (but /data/work), as stored
+        data-work.tar.zst           that save's /data/work, as stored
+
+Why a tar: it is written front to back in fixed parts, and a header names
+its entry's size before its bytes, so nothing after an entry changes it
+(zip wants each entry's CRC before its bytes, or a data descriptor a
+stored entry's reader cannot find its end by, and a directory of them all
+at the end). Every system opens one, and a computer's saves are tars
+already. Not compressed: most of its bytes (saves, pictures, audio)
+already are.
+
+**Where it runs.** In the person's list (`Principal`), on its alarm, a
+slice of 20 s at a time, its place kept in the list between slices (the
+export's row and job, the archive's bytes not uploaded yet, the parts
+uploaded), so a crash, a deploy or a restart goes on from the last slice
+kept, and a slice cut short runs again. The archive is an R2 multipart
+upload at `exports/<npub>/<id>/archive.tar` in parts of 8 MiB; an entry of
+unknown size (a channel's records, a table's rows, a transcript) is held
+to 8 MiB, then put aside at `exports/<npub>/<id>/spool/<n>` and copied in
+once its size is known; a stored source (a save, a blob) is copied 8 MiB
+at a time. It holds at most a part, a piece and a read at once, whatever
+it exports. A part that fails for a reason that may pass is tried again
+(5 s, doubling to 5 minutes), 8 tries in all, then the export fails
+`unavailable`.
+
+**Limits** (`fragment_core::export::limits`), each a typed failure the
+view shows:
+
+| Limit | Value |
+| --- | --- |
+| the archive | 8 GiB (`too_large`) |
+| one fragment's part of it | 2 GiB (`too_large`) |
+| fragments kept (theirs and their agents') | 1000 (`too_many`) |
+| fragments named in `sharedWithMe` | 2000 (`too_many`) |
+| files in one fragment's main | 20 000 (`too_many`) |
+| blobs one fragment's records attach | 10 000 (`too_many`) |
+| tables in one app's database | 256 (`too_many`) |
+| entries in the archive | 200 000 (`too_many`) |
+| a build's time | 6 hours (`timed_out`) |
+| exports started in any 24 hours | 3 (429) |
+| a ready archive kept | 7 days |
+
+**Once it is ready** its person is mailed (Mail, above) a link to
+`/settings`, never one to the archive, and the archive is kept seven days,
+then deleted (`expired`), as it is when a newer export starts, or a wipe
+of its person runs (Operators, above: `lists`).
+
+**Metering** (decision 24): its archive's R2 storage (its bytes from ready
+to deleted, as byte-hours) and its requests (its R2 operations and its
+downloads) are one meter batch on its person's ledger, `export:<id>`, as
+it is deleted (a row late by up to its seven days counts in its own
+month). Each request it makes of a fragment is that fragment's, metered
+to its owner as any request (a fragment shared with them, its status:
+its owner's). A guest's ledger takes none.
 
 ## Sign-in
 
@@ -807,7 +943,7 @@ title opening its share sheet.
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it at once |
-| `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, release?}]}` at main; a pointer's `size` is its bytes'. A fragment on a blessed template lists that template's data from the release beneath its own files (`release: true`, `lastCommitSha` `release:<hash of its bytes>`: templates/skills/README.md) |
+| `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `size` is its bytes', and its `sha256` the blob that holds them (`GET blobs/{sha256}`). A fragment on a blessed template lists that template's data from the release beneath its own files (`release: true`, `lastCommitSha` `release:<hash of its bytes>`: templates/skills/README.md) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store; with none of its own at `path`, a blessed template's data file from the release |
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media (Blobs, below) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
@@ -819,6 +955,7 @@ title opening its share sheet.
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
+| `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent: an agent's owner reads as a viewer, and an agent acts at most as an editor) | its app's database, as the platform code in its facet reads it (`__dump`, cell/platform.mjs), for an export (Export, below). With no `table`, `{schema: [{type, name, table, sql}], tables}`: each table's, index's, view's and trigger's statement in the order SQLite made them, a virtual table's shadow tables and the platform's operation ledger (`_fragment_ops`) left out, and the tables whose rows it holds. With one, `{table, offset, rows, next}`: at most 1000 of its rows from `offset`, each a JSON object of its columns (a blob `{"$base64"}`), about 4 MiB of their JSON at most (the first whatever its size), `next` the offset after them or `null` at the end; a table not in the schema is 404. Without app code, 404 `no_code`. It loads the app's code, as a query does (its dynamic worker, metered) |
 | `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
@@ -1740,7 +1877,8 @@ plan) makes nothing (decision 49), so the shell offers them nothing to
 make: once something is shared with them, their home is what is shared
 (a chat in the middle, else the first app in its window), beside a note
 of what a guest may do and what a seat gives, whose Get a seat opens the
-welcome; their settings are their Billing, then their account. Its
+welcome; their settings are their Billing, their account, then Your
+data. Its
 settings hold the person's account (email, sign-ins, identity id,
 picture, `/auth/link` to add another sign-in, a POST to
 `/auth/logout`), their Billing (cell/shell/billing.js: for a guest, Get
@@ -1760,9 +1898,13 @@ its kind, their state there with its action, which of their agents may
 use it, pressed to narrow one, and this month's calls by agent with an
 operator key's cost: `GET /api/connections`, the computer's view and its
 `uses`), sharing (who may open each fragment they own, by fragment or
-by person: `GET /api/access`), and pairing the
+by person: `GET /api/access`), pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
-coding agent); its sidebar shows their agent and lists their chats, its
+coding agent), and Your data (Export, above: "Export everything", its
+state and progress while it builds, read again every 2 s while the page
+shows it, its size, until when it is kept and its Download once ready,
+which downloads on the click with the platform session, and a refusal's
+reason); its sidebar shows their agent and lists their chats, its
 desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
 dialog (their own's "Share…" or "Invite…"; someone else's "People…",
 where they see who is in and may leave), and the dock's Add opens the
@@ -1773,7 +1915,9 @@ rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
 `Sec-Fetch-Site: same-origin`, and, writing, the platform's exact
 `Origin`. Its list's socket (`GET /api/fragments/watch`), which can
-carry no header, is taken by the platform's exact `Origin` alone.
+carry no header, is taken by the platform's exact `Origin` alone, and an
+export's download, a navigation that can carry no header either, by its
+Fetch Metadata alone (the platform's own page started it: Export, above).
 Anything else needs a signature as before. Adding a key still needs a
 key.
 

@@ -764,7 +764,8 @@ table's, with any byte but `A-Z a-z 0-9 . _ -` written `%XX`.
 `kind` is `app`, `chat`, `agent`, `brain` or `skills`. People and agents are
 named by their npubs. `sharedWithMe` names each fragment someone else owns
 that you (or an agent of yours: `member`) are in, with your role there; it
-copies none of them. Ask their owners for theirs.
+copies none of them. Ask their owners for theirs. Every `path` and `file` a
+JSON file names is relative to its own folder.
 
 ## A fragment
 
@@ -795,8 +796,12 @@ Each `channels/<channel>.jsonl` holds one record a line, oldest first:
 `at` is milliseconds since 1970 (UTC); `principal` is who wrote it (an npub,
 `anon:...` for a visitor, `platform` for the platform). `events` is the
 fragment's audit trail, `ops` its applied operations, `inbox` its webhooks,
-and the rest are its app's. A chat's `chat` and `work` records are
-docs/chat-records.md's: what was said, and each agent's turns and steps.
+and the rest are its app's. A chat's are its template's: `chat` holds
+what was said (a message `{"text", "attachments"?, "reply_to"?}`, an
+agent's reply `{"text", "turn"}`, `{"kind": "stop"}`, a prompt's answer),
+and `work` each agent's turns (`turn.start`, `turn.step`, `turn.prompt`,
+`turn.prompt.closed`, `turn.notice`, `turn.end`); Fragment's repository
+documents them whole (docs/chat-records.md).
 
 `transcript.md` is a chat's `chat` and `work` records, read in order: who
 said what and when, each agent's steps, its questions and their answers.
@@ -824,8 +829,8 @@ save yet.
 
 Your sign-ins and keys, your connections' tokens, your own keys (sealed in
 your computer), secrets' values, share links' and inbox tokens, your usage
-ledger, git history, the runs of jobs, and anything of the fragments others
-share with you.
+ledger, git history, the runs of jobs, apps' preview cards, and anything
+of the fragments others share with you.
 "#;
 
 #[cfg(test)]

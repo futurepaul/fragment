@@ -464,6 +464,9 @@ struct Run {
     /// (`PIECE_BYTES`; smaller on a test fleet's lever, so a small export
     /// puts its entries aside in many pieces, as a large one does).
     piece_bytes: usize,
+    /// The most the archive holds (`ARCHIVE_MAX_BYTES`; smaller on a test
+    /// fleet's lever, so a small export meets its limit).
+    archive_max: u64,
 }
 
 /// How a slice ended.
@@ -599,7 +602,9 @@ impl PrincipalCell {
     /// part way, as a crash or a restart finds one. `piece {steps: bytes |
     /// null}` holds an open entry `bytes` at a time before putting it aside
     /// (1 KiB to `PIECE_BYTES`; `null`, `PIECE_BYTES`), so a small export
-    /// puts its entries aside in many pieces, as a large one does.
+    /// puts its entries aside in many pieces, as a large one does. `cap
+    /// {steps: bytes | null}` makes the archive's limit `bytes` (`null`,
+    /// `ARCHIVE_MAX_BYTES`), so a small export meets it.
     pub(crate) fn export_lever(&self, body: &[u8]) -> CellResult<Value> {
         assert!(self.test_hooks, "a list's levers answer on fleets with them only");
         #[derive(Deserialize)]
@@ -614,7 +619,8 @@ impl PrincipalCell {
             "pace" => "pace",
             "piece" if l.steps.is_none_or(|n| (1024..=limits::PIECE_BYTES as u32).contains(&n)) => "piece",
             "piece" => return Err(CellError::invalid(format!("a piece is 1024 to {} bytes", limits::PIECE_BYTES))),
-            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, or piece"))),
+            "cap" => "cap",
+            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, piece, or cap"))),
         };
         match l.steps {
             Some(n) => self.run_sql("INSERT INTO export_levers (name, value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value", vec![name.into(), SqlStorageValue::Integer(i64::from(n))])?,
@@ -823,7 +829,8 @@ impl PrincipalCell {
             }
         }
         let piece_bytes = self.lever("piece")?.map_or(limits::PIECE_BYTES, |n| n as usize);
-        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes };
+        let archive_max = self.lever("cap")?.map_or(limits::ARCHIVE_MAX_BYTES, u64::from);
+        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes, archive_max };
         let mut pace = self.pace()?;
         let outcome = self.steps(&mut run, now + limits::SLICE_MS, &mut pace).await;
         let outcome = match outcome {
@@ -1026,8 +1033,8 @@ impl PrincipalCell {
     /// archive's limit, or the fragment's (`fragment`), it fails.
     async fn put(&self, run: &mut Run, bytes: &[u8], fragment: bool) -> Step {
         let n = bytes.len() as u64;
-        if run.job.written + n > limits::ARCHIVE_MAX_BYTES {
-            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(limits::ARCHIVE_MAX_BYTES))));
+        if run.job.written + n > run.archive_max {
+            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(run.archive_max))));
         }
         if fragment {
             let f = run.job.frag();
@@ -1105,8 +1112,8 @@ impl PrincipalCell {
         run.piece.extend_from_slice(bytes);
         let open = run.job.open.as_ref().expect("bytes go to an open entry");
         let held: u64 = open.pieces.iter().map(|(_, s)| s).sum::<u64>() + run.piece.len() as u64;
-        if run.job.written + held > limits::ARCHIVE_MAX_BYTES {
-            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(limits::ARCHIVE_MAX_BYTES))));
+        if run.job.written + held > run.archive_max {
+            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(run.archive_max))));
         }
         if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > limits::FRAGMENT_MAX_BYTES) {
             let name = run.job.frag().meta.name.clone();

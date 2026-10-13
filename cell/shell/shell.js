@@ -2005,7 +2005,10 @@ function dataSection() {
     if (v) {
       parts.push(line("Export", EXPORT_STATE[v.state] ?? v.state));
       if (v.state === "building") parts.push(line("Progress", `${v.progress.done} of ${v.progress.total} parts, ${sized(v.progress.bytes)} so far`));
-      if (v.state === "ready") parts.push(line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()));
+      if (v.state === "ready") {
+        parts.push(line("Size", sized(v.size ?? 0)), line("Kept until", new Date(v.expiresAt).toLocaleString()));
+        parts.push(el("p", "muted", "Exporting again replaces this one: its download goes."));
+      }
       if (v.state === "failed" && v.error) parts.push(el("p", "settings-warning", v.error.message));
     }
     const actions = el("div", "settings-actions");

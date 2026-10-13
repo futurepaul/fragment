@@ -106,7 +106,7 @@ fn browser_download(api: &Api, session: &str, id: &str, site: &str, range: Optio
 }
 
 pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("export", &[Need::Fakes, Need::LocalDocker, Need::Node, Need::Levers]) {
+    if !s.section("export", &[Need::Fakes, Need::LocalDocker, Need::Node, Need::Levers, Need::Chrome]) {
         return Ok(());
     }
     // ---- a person, and someone else
@@ -403,6 +403,37 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{other_page} | {elsewhere} | {bobs_click}"),
     );
 
+    // ---- the shell: Settings' Your data shows it, downloads it on a click
+    // (Chrome's own navigation, its Fetch Metadata as a person's click sends
+    // it), and a press there makes a new one, which it follows to ready
+    match s.browser()? {
+        None => s.ok("Chrome is installed for the export section (set CHROME_BIN)", false, "no Chrome found"),
+        Some(mut chrome) => {
+            let downloads = s.dir("export-downloads");
+            chrome.allow_downloads(&downloads)?;
+            chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &paul_session)?;
+            let page = chrome.open(&format!("{}/settings", api.base))?;
+            let link = |id: &str| format!("document.querySelector('#settings-data [data-action=export-download]')?.getAttribute('href') === '/api/export/{id}/download'");
+            let shown = chrome.until(&page, &link(&id), Duration::from_secs(30));
+            let text = chrome.eval(&page, "document.getElementById('settings-data')?.innerText ?? ''")?;
+            let text = text.as_str().unwrap_or("").to_string();
+            s.ok("Settings shows Your data: the export ready, its size, until when it is kept, and its download", shown && text.contains("Ready to download") && text.contains("Kept until"), &text);
+            let _ = chrome.viewport(&page, 1100, 1000, false);
+            let _ = chrome.eval(&page, "document.getElementById('settings-data')?.scrollIntoView({ block: 'center' })");
+            let _ = chrome.screenshot(&page, &s.dir("export-shots").join("settings-your-data.png"));
+            chrome.click(&page, "#settings-data [data-action=export-download]")?;
+            let saved = || std::fs::read_dir(&downloads).ok().into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "tar"));
+            let got = s.eventually(Duration::from_secs(30), || saved().and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.len() == archive.len() as u64));
+            let same = saved().and_then(|p| std::fs::read(p).ok()).is_some_and(|b| b == archive);
+            s.ok("a click on its download saves the archive, byte for byte", got && same, format!("{:?}", saved()));
+            chrome.click(&page, "#settings-data [data-action=export]")?;
+            let again = s.eventually(BUILT, || view(api, &paul)["id"] != id.as_str() && view(api, &paul)["state"] == "ready");
+            let new_id = view(api, &paul)["id"].as_str().unwrap_or("").to_string();
+            let followed = again && chrome.until(&page, &link(&new_id), Duration::from_secs(30));
+            s.ok("its Export again starts a new one, which the page follows until it is ready", followed && fragment_proto::export::valid_export_id(&new_id), view(api, &paul));
+        }
+    }
+
     // ---- a day's presses, and what a replaced export leaves
     let carol = api.person()?;
     let carol_id = api.identity(&carol)?;
@@ -422,5 +453,40 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let old = api.signed(&carol, "GET", &format!("/api/export/{}/download", ids[0]), None)?;
     let metered = s.eventually(Duration::from_secs(30), || entries(api, &carol_id, &format!("export:{}:", ids[0])).iter().any(|e| e["ref"] == format!("export:{}:requests", ids[0]).as_str()));
     s.ok("one replaced is gone (404), and its usage is metered to its person", old.status == 404 && metered, format!("{old} {:?}", entries(api, &carol_id, "export:")));
+
+    // ---- a limit: an export that would pass the archive's fails as it
+    // builds, its view saying why, and downloads nothing; the next one,
+    // within it, is made (the lever lowers the limit for this person alone)
+    let erin = api.person()?;
+    let erin_id = api.identity(&erin)?;
+    let fat = s.named(api, &erin, "export-fat")?;
+    let fc = s.create(api, &erin, &fat)?;
+    s.commit(&fc, &[("notes.txt", Some(&bytes_of(200 * 1024, 7)))]);
+    api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "cap", "steps": 64 * 1024 })))?;
+    let r = press(api, &erin)?;
+    let failed = built(s, api, &erin);
+    let gone = api.signed(&erin, "GET", &format!("/api/export/{}/download", r.body["id"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "past the archive's limit it fails as it builds, its view saying why (too_large), and downloads nothing (404)",
+        failed["state"] == "failed" && failed["error"]["code"] == "too_large" && failed["error"]["message"].as_str().is_some_and(|m| m.contains("the archive would pass")) && failed["download"].is_null() && gone.status == 404,
+        format!("{failed} | {gone}"),
+    );
+    api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "cap", "steps": null })))?;
+    let again = press(api, &erin)?;
+    let made = built(s, api, &erin);
+    s.ok("within its limit, the next is made", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+
+    // ---- the CLI: `fragment export` starts one, waits, and downloads it
+    let home = s.dir("export-cli");
+    s.login(api, &home);
+    let out = home.join("mine.tar");
+    let path = out.to_string_lossy().to_string();
+    let r = s.cli_json(api, &home, &["export", "--out", &path, "--json"]);
+    let saved = std::fs::read(&out).ok().and_then(|b| entries_of(&b).ok()).unwrap_or_default();
+    s.ok(
+        "fragment export starts one, waits for it, and downloads it: one tar, its README first",
+        r.as_ref().is_ok_and(|v| v["export"]["state"] == "ready" && v["out"] == path.as_str()) && saved.get(&format!("{root}/README.md")).is_some_and(|b| b == fragment_core::export::README.as_bytes()),
+        format!("{r:?}"),
+    );
     Ok(())
 }
