@@ -2,6 +2,7 @@
   "operations": {
     "say": {
       "kind": "mutation",
+      "description": "Say something in the room. Answers its {id}.",
       "role": "public",
       "input": {
         "type": "object",
@@ -15,9 +16,9 @@
     "reach": { "kind": "mutation" },
     "patched": { "kind": "mutation" },
     "bulk": { "kind": "mutation" },
-    "count": { "kind": "query", "role": "public" },
+    "count": { "kind": "query", "role": "public", "description": "How many things were said: {n}." },
     "whoami": { "kind": "query", "role": "public" },
-    "measure": { "kind": "query", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } },
+    "measure": { "kind": "query", "description": "How long this text is: {chars}.", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } },
     "backstage": { "kind": "query", "role": "editor" }
   },
   "channels": {

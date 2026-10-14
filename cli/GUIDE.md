@@ -470,6 +470,44 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Your operations as tools (MCP)
+
+`fragment mcp <name>` is an MCP server over stdio: another agent (Claude
+Code, Codex, any MCP client) calls a fragment's operations as its tools.
+
+```
+claude mcp add my-thing -- fragment mcp my-thing             # Claude Code: its queries
+claude mcp add my-thing -- fragment mcp my-thing --write     # its mutations and jobs too
+codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.codex/config.toml:
+                                                             #   [mcp_servers.my-thing]
+                                                             #   command = "fragment"
+                                                             #   args = ["mcp", "my-thing"])
+```
+
+- A tool is an operation with a `description` (The app, above) that
+  your role there may call and whose input is an object. Its name and
+  description are the operation's, and its input schema is the
+  operation's `input` (any object when it declares none). An operation
+  without a description is no tool.
+- Read-only by default: only queries. `--write` serves the mutations and
+  jobs too, which change state. A call to one without `--write` is
+  refused, and nothing is sent.
+- A tool's arguments are the operation's input, as they are (`{"text":
+  "milk"}`, not `{id, input}`). Each call is a new call with a fresh id
+  (`mcp-…`), so a model asking twice runs it twice. A job's call answers
+  its run (`{run, status}`); `fragment runs` follows it.
+- Calls are signed with this machine's key, or on a computer as the
+  agent (`FRAGMENT_AS_AGENT`), with your role there. The tool list is
+  read again at each `tools/list`, so a deploy shows up.
+- A refusal is the tool's error, carrying the platform's own error
+  (`structuredContent.error`: `{code, status, message}`, its code as the
+  host named it: `invalid_request`, `forbidden`, `app_failed`,
+  `budget_used_up`, …) and the call's id (`structuredContent.id`). A
+  call that got no answer says `unavailable`, or `outcome_unknown` when
+  it may have run: `fragment call <name> <op> --id <id>` finds out, and
+  never runs it twice.
+- One server serves one fragment: add one for each.
+
 ## People
 
 ```
@@ -613,13 +651,15 @@ fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
+fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
 <url>` to save one), `--json`, `-v`. With `--json` (or
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
 "data":…}` or `{"ok":false,"error":{"code","message","hint","id"}}`
-(`id`: a failed `fragment call`'s). The codes are stable, and a host's
+(`id`: a failed `fragment call`'s); `fragment mcp`'s stdout is MCP's
+alone, and a failure to start it goes to stderr. The codes are stable, and a host's
 refusal gets its code from the error code in its answer, never from
 its wording:
 

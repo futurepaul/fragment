@@ -2,6 +2,7 @@
 //! that fill them, the live socket, custom routes, the CLI's call and
 //! channel, and the todo template driven in a real browser.
 
+use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -716,6 +717,46 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let (exit, v) = refused(s, &["call", &name, "measure", "--input", "@/nowhere/at-all.json", "--json"]);
     s.ok("a file that is not there is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
+    // `fragment mcp`: the described operations as an MCP server's tools, over stdio
+    let mcp = |write: bool, calls: &[(&str, Value)]| -> Result<Vec<Value>> {
+        let mut args = vec!["mcp", name.as_str()];
+        args.extend(write.then_some("--write"));
+        let mut child = s.bare_cli().args(&args).env("HOME", &home).env("FRAGMENT_HOST", &api.base).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+        let mut stdin = child.stdin.take().expect("its stdin is piped");
+        let init = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } });
+        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init }))?;
+        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))?;
+        for (i, (tool, arguments)) in calls.iter().enumerate() {
+            writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": i + 2, "method": "tools/call", "params": { "name": tool, "arguments": arguments } }))?;
+        }
+        drop(stdin);
+        let out = child.wait_with_output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap_or_else(|_| json!({ "not JSON-RPC": l }))).collect())
+    };
+    let tools = |list: &Value| list["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" }))])?;
+    let wrote = mcp(true, &[("say", json!({ "text": "from mcp" }))])?;
+    let said = api.signed(&keys, "GET", &format!("/api/f/{name}/channels/room"), None)?;
+    s.ok(
+        "fragment mcp serves the described queries over stdio, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
+        read.len() == 5
+            && read[0]["result"]["serverInfo"]["title"] == name.as_str()
+            && tools(&read[1]) == ["count", "measure"]
+            && read[2]["result"]["structuredContent"]["n"].is_u64()
+            && read[3]["result"]["isError"] == true
+            && read[3]["result"]["structuredContent"]["error"]["code"] == "invalid_request"
+            && read[3]["result"]["structuredContent"]["error"]["message"].as_str().is_some_and(|m| m.contains("/text: is required"))
+            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write")),
+        json!(read),
+    );
+    s.ok(
+        "with --write it serves the described mutation too, and a call of it runs once",
+        tools(&wrote[1]) == ["count", "measure", "say"]
+            && wrote[2]["result"]["structuredContent"]["id"].is_u64()
+            && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
+        json!({ "mcp": wrote, "room": said.body }),
+    );
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
     let r = s.cli_json(api, &home, &["channel", &name, "room", "--json"])?;
