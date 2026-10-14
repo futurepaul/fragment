@@ -84,7 +84,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`, Finite's tiers') the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -101,18 +101,34 @@ calls. The defaults are consts in `price.rs`, each with its source. The
 operator's book comes from the deploy's configuration and is versioned:
 a ledger takes only a newer version, and a hold keeps the price it was
 held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 4 since
-Hermes' tool keys were priced, after 3 for DeepSeek V4 Flash), so a change
-to the defaults reaches every ledger at its next call.
+`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 5 since
+Finite Private's GLM-5.3 Flash was priced on 2026-10-14, after 4 for
+Hermes' tool keys and 3 for DeepSeek V4 Flash), so a change to the
+defaults reaches every ledger at its next call.
+
+**Finite Private's price** (decision 61; a decision for Paul): its list
+price is Workers AI's GLM-5.3 Flash's, and its rows take the credits fee
+and the margin as every token row does, though no gateway is between: a
+call is charged the same whichever of the two answered it, and the cheap
+tier costs a person what it did. Two differences remain:
+- **Its cached tokens.** SGLang behind its limiter reports none (no
+  `prompt_tokens_details`), so its prompts are priced uncached, where
+  Workers AI prices a cached prefix at a fifth. An agent's long, mostly
+  repeated prompt costs its owner more on Finite Private until it reports
+  them (part of the ask to finite-mono).
+- **What it costs Finite** is Tinfoil's GPU time, not tokens: the margin
+  is a guess at that, not a measure.
 
 A model call that fell back (docs/api.md, Models) keeps its one hold,
 reserved at its tier's model's worst case, and is settled from the
 fallback's usage at the fallback's prices. The hold (the request's
 bytes as tokens, the capped `max_tokens` out, at the tier's model's
 prices) covers a fallback call of an agent's usual size; DeepSeek V4
-Flash is dearer than the cheap tier's GLM-5.3 Flash, so a fallback call
-near its worst case is charged in full past its hold, as any usage that
-happened is.
+Flash, the default fallback, is dearer than the cheap tier's GLM-5.3
+Flash, so a fallback call near its worst case is charged in full past
+its hold, as any usage that happened is. On Finite's own deployment the
+tiers' Finite Private and the fallback, Workers AI's GLM-5.3 Flash, are
+at one price: the hold always covers it.
 
 ## The state machine
 
@@ -257,10 +273,12 @@ mark sends the same batch again, which answers as before.
   the tier's capped `max_tokens`) under the intercept's own call id. It
   streams, takes only the last, cumulative usage (S4), and settles with
   it. A call that failed before any token is released. A call whose
-  stream broke settles without usage, at its worst case. The gateway's
-  log id rides along for reconciliation; the gateway's per-user spend
-  rule is only a backstop. The payer is the agent's owner; the fragment
-  is the agent's.
+  stream broke settles without usage, at its worst case. A Workers AI
+  call's gateway log id rides along for reconciliation; the gateway's
+  per-user spend rule is only a backstop. A Finite Private call has
+  neither: finite-mono meters the deployment's one key against its
+  window, and this ledger alone meters each person. The payer is the
+  agent's owner; the fragment is the agent's.
 - **AI steps** (a job's `ai.*`, voice input). The step's reference
   (`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`:
   a replay is a new attempt, so a step released before reserves again) is

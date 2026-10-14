@@ -283,6 +283,14 @@ pub struct Fleet {
     /// the AI binding, through `ai_gateway`).
     pub ai_url: Option<String>,
     pub ai_gateway: Option<String>,
+    /// Where the model route's names run (`FRAGMENT_MODELS`:
+    /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
+    /// every one on Workers AI), and, when some run on an OpenAI-compatible
+    /// API, the value of the key they name (`store::FINITE_PRIVATE_KEY`,
+    /// bound for each slot `model_key_slots` lists).
+    pub models: Option<String>,
+    pub model_key_slots: Vec<String>,
+    pub model_key_value: Option<String>,
     /// Where the platform's mail goes (`FRAGMENT_MAIL_URL`: the mail fake in
     /// dev and the e2e; `None`: the Email Sending binding), and the address
     /// it comes from (`FRAGMENT_MAIL_FROM`).
@@ -353,7 +361,8 @@ impl Fleet {
     /// The store secrets its Worker is bound to, by name.
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers)
+        let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
+        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots)
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -374,10 +383,14 @@ impl Fleet {
                 values.push((w.as_str(), s.webhook_secret.as_str()));
             }
         }
+        if !bound.model_keys.is_empty() {
+            let value = self.model_key_value.as_deref().context("a fleet whose models run on an OpenAI-compatible API names its key's value")?;
+            values.push((store::FINITE_PRIVATE_KEY, value));
+        }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
         }
-        assert_eq!(values.len(), bound.cell().len(), "every binding has its value");
+        assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
         write_local_config(project, &bound.cell())?;
         let poll = self.poll_interval_s.to_string();
@@ -407,6 +420,9 @@ impl Fleet {
         }
         if let Some(g) = &self.ai_gateway {
             vars.push(("AI_GATEWAY_ID", g.as_str()));
+        }
+        if let Some(m) = &self.models {
+            vars.push(("FRAGMENT_MODELS", m.as_str()));
         }
         if let Some(p) = &self.default_plan {
             vars.push(("FRAGMENT_DEFAULT_PLAN", p.as_str()));

@@ -170,9 +170,13 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        // text and images: the Workers AI fake (dev never calls a real model)
+        // text and images: the Workers AI fake (dev never calls a real model),
+        // every tier on it
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
+        models: None,
+        model_key_slots: vec![],
+        model_key_value: None,
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),

@@ -357,6 +357,18 @@ impl Api {
     /// browser's fetch waits for it.
     pub fn patient(&self, wait: Duration) -> Api {
         assert!(wait >= REQUEST_WAIT, "patience waits longer, never shorter");
+        self.waiting(wait)
+    }
+
+    /// The same API, its requests given up on after `wait`: a client that
+    /// stops waiting on a call that hangs, as an agent runtime's stale
+    /// detector does.
+    pub fn impatient(&self, wait: Duration) -> Api {
+        assert!(wait < REQUEST_WAIT, "impatience waits less, never more");
+        self.waiting(wait)
+    }
+
+    fn waiting(&self, wait: Duration) -> Api {
         Api {
             http: client_waiting(POOL_IDLE, wait),
             base: self.base.clone(),

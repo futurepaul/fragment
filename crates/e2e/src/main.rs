@@ -59,6 +59,23 @@ enum Shape {
     /// platform at `fragment.localhost`, cross-site from the fragments
     /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,
+    /// As `Plain`, its model route shaped as Finite's own deployment
+    /// (deploy/example.jsonc; decision 61): the tiers on Finite Private (the
+    /// model fake's OpenAI-compatible face, its key a test value), the
+    /// fallback and vision on Workers AI's GLM-5.3 Flash.
+    FinitePrivate,
+}
+
+/// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
+/// a test value, in `fpk_live_`'s shape, which the model fake asks for.
+pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
+
+/// `FRAGMENT_MODELS` on a node shaped as Finite's: deploy/example.jsonc's
+/// `models`, less its keys, Finite Private's base URL the model fake's.
+pub fn finite_private_models(fake: &str) -> Value {
+    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
+    let flash = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH });
+    json!({ "cheap": private, "medium": private, "fallback": flash, "vision": flash })
 }
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
@@ -469,6 +486,15 @@ impl Suite {
         self.start_shaped(Shape::TwoSites)
     }
 
+    /// Starts the node with its model route shaped as Finite's own
+    /// deployment (`Shape::FinitePrivate`): its tiers on Finite Private.
+    pub fn start_as_finite(&mut self) -> Result<Api> {
+        self.shape = Shape::FinitePrivate;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -500,9 +526,17 @@ impl Suite {
             egress_local: true,
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
-            // the lower rung: the model route's calls go to the Workers AI fake
+            // the lower rung: the model route's calls go to the Workers AI fake,
+            // and, shaped as Finite's own, its tiers to the fake's
+            // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
+            models: matches!(self.shape, Shape::FinitePrivate).then(|| finite_private_models(&self.ai.node().url).to_string()),
+            model_key_slots: match self.shape {
+                Shape::FinitePrivate => vec!["cheap".into(), "medium".into()],
+                _ => vec![],
+            },
+            model_key_value: matches!(self.shape, Shape::FinitePrivate).then(|| FINITE_PRIVATE_KEY.to_string()),
             mail_url: Some(self.mail.node().url.clone()),
             mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
@@ -521,7 +555,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -560,7 +594,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate => SUFFIX,
         }
     }
 

@@ -1,8 +1,10 @@
 //! The deployment's keys, held in its Cloudflare Secrets Store and bound to
 //! the platform Worker by name (docs/secrets.md; the bindings' names are
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
-//! rest, the code.storage org key, WorkOS's client id and API key, and the
-//! operator's keys a computer's swap sends; and what is derived from the
+//! rest, the code.storage org key, WorkOS's client id and API key, Stripe's,
+//! the keys of the models the route runs on OpenAI-compatible APIs (Finite
+//! Private's), and the operator's keys a computer's swap sends; and what is
+//! derived from the
 //! host secret: the key placeholders' tags are made with (`tag_keys`).
 //! This file is the one place the cell reads them (`secret`), through a
 //! per-isolate cache that holds a value at most a minute
@@ -305,6 +307,14 @@ pub fn holds_operator_key(env: &Env, name: &str) -> bool {
 /// deployment must bind.
 pub async fn operator_key(env: &Env, name: &str) -> CellResult<String> {
     required(env, &store::operator_key(name)).await
+}
+
+/// The key of the model the route's `slot` runs on an OpenAI-compatible
+/// API (`secrets_store::model_key`: Finite Private's, on Finite's own
+/// deployment), which the deployment binds when its config names one there.
+/// Sent only to that API, as its bearer token, and never logged.
+pub async fn model_key(env: &Env, slot: &str) -> CellResult<String> {
+    required(env, &store::model_key(slot)).await
 }
 
 /// The keys placeholders' tags are made with (`swap::TagKey`), derived

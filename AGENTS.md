@@ -99,9 +99,12 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, transcribe, orgs, billing, billing-page,
-  trials, admin, admin-page, shell, computers, chat, shell-ui, wipe,
-  hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
+  brain, push, ai, ledger, transcribe, finite-private, orgs, billing,
+  billing-page, trials, admin, admin-page, shell, computers, chat,
+  shell-ui, wipe, hermes, agent-smoke, sync, restart;
+  `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
+  shaped as Finite's deployment (its tiers on Finite Private, the model
+  fake's OpenAI-compatible face; decision 61), then the plain one again.
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
   file `--operator-key-file <file>` names (its npub in the config's

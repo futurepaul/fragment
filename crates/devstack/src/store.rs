@@ -413,12 +413,21 @@ pub struct Bound {
     pub stripe: Option<(String, Option<String>)>,
     /// Each operator key's provider and its secret's name.
     pub operator_keys: Vec<(String, String)>,
+    /// Each slot of the model route that runs on an OpenAI-compatible API
+    /// (`fragment_core::models::SLOTS`), and its key's secret's name (two
+    /// slots may name one: Finite's tiers name Finite Private's key).
+    pub model_keys: Vec<(String, String)>,
 }
+
+/// Finite Private's key's name in the store (deploy/example.jsonc), which
+/// dev and the e2e bind in wrangler's local store for each slot they run
+/// there.
+pub const FINITE_PRIVATE_KEY: &str = "fragment-finite-private-key";
 
 impl Bound {
     /// The names `deploy/example.jsonc` uses, which dev and the e2e bind in
-    /// wrangler's local store.
-    pub fn conventional(workos: bool, stripe: bool, operator_keys: &[&str]) -> Bound {
+    /// wrangler's local store: `model_slots` each on Finite Private's key.
+    pub fn conventional(workos: bool, stripe: bool, operator_keys: &[&str], model_slots: &[&str]) -> Bound {
         Bound {
             host_secret: "fragment-host-secret".into(),
             host_secret_previous: None,
@@ -426,6 +435,7 @@ impl Bound {
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
             stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
+            model_keys: model_slots.iter().map(|s| (s.to_string(), FINITE_PRIVATE_KEY.to_string())).collect(),
         }
     }
 
@@ -446,11 +456,25 @@ impl Bound {
                 bound.push((bindings::STRIPE_WEBHOOK.to_string(), w.as_str()));
             }
         }
+        for (slot, name) in &self.model_keys {
+            bound.push((bindings::model_key(slot), name.as_str()));
+        }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));
         }
         assert!(bound.len() <= bindings::CACHE_ENTRIES_MAX, "the cell's cache holds every binding");
         bound
+    }
+
+    /// The secrets `cell` binds, each once: two bindings may name one.
+    pub fn secrets(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        for (_, name) in self.cell() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
     }
 }
 
@@ -606,7 +630,7 @@ mod tests {
     /// name in one store; and what a store lacks is named with its binding.
     #[test]
     fn bindings_name_each_secret_once() {
-        let mut bound = Bound::conventional(true, false, &["perplexity", "google-places"]);
+        let mut bound = Bound::conventional(true, false, &["perplexity", "google-places"], &["cheap", "medium"]);
         bound.host_secret_previous = Some("fragment-host-secret-2025".into());
         let cell = bound.cell();
         let json = bindings_json("0f0e", &cell);
@@ -619,16 +643,24 @@ mod tests {
                 ("CODESTORAGE_KEY", "fragment-codestorage-private-key"),
                 ("WORKOS_CLIENT", "fragment-workos-client-id"),
                 ("WORKOS_KEY", "fragment-workos-api-key"),
+                ("MODEL_KEY_CHEAP", "fragment-finite-private-key"),
+                ("MODEL_KEY_MEDIUM", "fragment-finite-private-key"),
                 ("OPERATOR_KEY_PERPLEXITY", "fragment-perplexity-api-key"),
                 ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
             ]
         );
+        // two slots on one key: two bindings, one secret
+        assert_eq!(bound.secrets().iter().filter(|n| **n == FINITE_PRIVATE_KEY).count(), 1);
+        assert_eq!(bound.secrets().len(), cell.len() - 1);
         let doubled = vec![("HOST_SECRET".to_string(), "a"), ("HOST_SECRET".to_string(), "b")];
         assert!(std::panic::catch_unwind(|| bindings_json("0f0e", &doubled)).is_err());
 
         let listed = |names: &[&str]| names.iter().map(|n| Listed { name: n.to_string(), id: "i".into(), created: String::new(), modified: String::new() }).collect::<Vec<_>>();
         let gone = missing(&cell, &listed(&["fragment-host-secret", "fragment-codestorage-private-key"]));
         let gone: Vec<&str> = gone.iter().map(|(_, n)| *n).collect();
-        assert_eq!(gone, ["fragment-host-secret-2025", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-perplexity-api-key", "fragment-google-places-api-key"]);
+        assert_eq!(
+            gone,
+            ["fragment-host-secret-2025", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-finite-private-key", "fragment-finite-private-key", "fragment-perplexity-api-key", "fragment-google-places-api-key"]
+        );
     }
 }

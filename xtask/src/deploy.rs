@@ -83,16 +83,17 @@ struct Deployment {
     /// The AI Gateway the model route calls through (its id, named: never
     /// `default`, which makes one that logs). Without it, models are off.
     ai_gateway: Option<String>,
-    /// The model the route's `vision` runs (`FRAGMENT_VISION_MODEL`): a
-    /// runtime's calls about an image, Hermes' screenshots among them.
-    /// GLM-5.3 Flash unless named; one the price book does not price is
-    /// refused (`fragment_core::models::vision_model`).
-    vision_model: Option<String>,
-    /// The model a tier's call is made on once more when its own fails
-    /// before answering (`FRAGMENT_FALLBACK_MODEL`; cell/src/models.rs):
-    /// DeepSeek V4 Flash unless named; one the price book does not price is
-    /// refused (`fragment_core::models::fallback_model`).
-    fallback_model: Option<String>,
+    /// Where the model route's names run (`FRAGMENT_MODELS`, less the keys;
+    /// docs/computers.md, Models; decision 61): an object of the slots it
+    /// names (`cheap`, `medium`, `fallback`: a tier's call is made on it
+    /// once more when its own fails before answering, `vision`: a runtime's
+    /// calls about an image), each `{"provider": "workers_ai", "model":
+    /// <catalog id>}` or `{"provider": "openai", "base_url", "key": <its
+    /// secret's name in the store>, "model"}`. Each slot unnamed is on
+    /// Workers AI as before (`fragment_core::models::Models::defaults`). A
+    /// slot, provider, URL or model the cell would refuse is refused before
+    /// a deploy, as is an OpenAI-compatible API without a key.
+    models: Option<Value>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
     /// Where a person whose computer will not start gets help
@@ -221,6 +222,48 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(S
     Ok((catalog, keys))
 }
 
+/// Each slot of the model route on an OpenAI-compatible API, and its key's
+/// name in the store.
+type SlotKeys = Vec<(String, String)>;
+
+/// The deployment's models (`models`): the cell's (`FRAGMENT_MODELS`, each
+/// slot's upstream less its key) and the store secret each slot on an
+/// OpenAI-compatible API names for its key. Such a slot names one; a
+/// Workers AI slot names none. Checked as the cell checks them
+/// (`fragment_core::models::Models::parse`), on no local address.
+fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
+    let Some(models) = &d.models else { return Ok((None, vec![])) };
+    let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
+    let mut cell = serde_json::Map::new();
+    let mut keys = vec![];
+    for (slot, row) in slots {
+        let mut row = row.clone();
+        let key = row.as_object_mut().and_then(|o| o.remove("key"));
+        match (row["provider"].as_str(), key) {
+            (Some("openai"), Some(Value::String(k))) => keys.push((slot.clone(), k)),
+            (Some("openai"), Some(_)) => bail!("models.{slot}: its key is its secret's name in the store, a string"),
+            (Some("openai"), None) => bail!("models.{slot}: an OpenAI-compatible API names its key: its secret's name in the store (cargo xtask secret set <name> --config <file>)"),
+            (Some("workers_ai"), Some(_)) => bail!("models.{slot}: only an OpenAI-compatible API (provider openai) names a key"),
+            (Some("workers_ai"), None) => {}
+            (other, _) => bail!(
+                "models.{slot}: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not {}",
+                other.map_or("none".to_string(), |p| format!("{p:?}"))
+            ),
+        }
+        cell.insert(slot.clone(), row);
+    }
+    let cell = Value::Object(cell);
+    fragment_core::models::Models::parse(Some(&cell.to_string()), &fragment_core::price::PriceBook::defaults(), false).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok((Some(cell), keys))
+}
+
+/// Fields a hard cut took out of the config, and what replaced each: a
+/// config naming one is refused, saying so.
+const FIELDS_GONE: [(&str, &str); 2] = [
+    ("vision_model", "models.vision: {\"provider\": \"workers_ai\", \"model\": <its id>} (2026-10-14, decision 61)"),
+    ("fallback_model", "models.fallback: {\"provider\": \"workers_ai\", \"model\": <its id>} (2026-10-14, decision 61)"),
+];
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeStorage {
@@ -277,6 +320,7 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
 /// store secret for it).
 fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bound> {
     let (_, operator_keys) = catalog_of(d)?;
+    let (_, model_keys) = models_of(d)?;
     Ok(devstack::store::Bound {
         host_secret: d.host_secret.clone(),
         host_secret_previous: d.host_secret_previous.clone(),
@@ -284,6 +328,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
         stripe: d.stripe.as_ref().map(|s| (s.key.clone(), (!makes_endpoint(d, branch)).then(|| s.webhook_secret.clone()))),
         operator_keys,
+        model_keys,
     })
 }
 
@@ -302,6 +347,14 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
         named.push(("stripe.key".into(), key.as_str()));
         if let Some(w) = webhook {
             named.push(("stripe.webhook_secret".into(), w.as_str()));
+        }
+    }
+    // a secret two slots name is one line, naming both
+    let first_model_key = named.len();
+    for (slot, name) in &b.model_keys {
+        match named[first_model_key..].iter_mut().find(|(_, n)| *n == name.as_str()) {
+            Some((field, _)) => field.push_str(&format!(", models.{slot}.key")),
+            None => named.push((format!("models.{slot}.key"), name.as_str())),
         }
     }
     for (provider, name) in &b.operator_keys {
@@ -481,6 +534,11 @@ fn read_test_secret(file: &Path) -> Result<String> {
 
 fn load(config: &Path) -> Result<Deployment> {
     let v = read_json(config)?;
+    for (field, now) in FIELDS_GONE {
+        if v.get(field).is_some() {
+            bail!("{}: {field} is gone; name it as {now}", config.display());
+        }
+    }
     let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
 }
@@ -514,16 +572,9 @@ pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
 
 /// What the cell would refuse at its first request, refused before a
 /// deploy: the provider catalog, a default image it has, its store
-/// secrets' names, and vision and fallback models the price book prices.
+/// secrets' names, and its models (`models_of`, through `bound`).
 fn checked(d: Deployment) -> Result<Deployment> {
     check_names(&bound(&d)?)?;
-    let book = fragment_core::price::PriceBook::defaults();
-    if let Some(m) = &d.vision_model {
-        fragment_core::models::vision_model(Some(m), &book).map_err(|e| anyhow::anyhow!("vision_model: {e}"))?;
-    }
-    if let Some(m) = &d.fallback_model {
-        fragment_core::models::fallback_model(Some(m), &book).map_err(|e| anyhow::anyhow!("fallback_model: {e}"))?;
-    }
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -841,11 +892,8 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
             v.insert("FRAGMENT_STRIPE_TAX".into(), json!("off"));
         }
     }
-    if let Some(m) = &d.vision_model {
-        v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
-    }
-    if let Some(m) = &d.fallback_model {
-        v.insert("FRAGMENT_FALLBACK_MODEL".into(), json!(m.trim()));
+    if let (Some(models), _) = models_of(d)? {
+        v.insert("FRAGMENT_MODELS".into(), Value::String(models.to_string()));
     }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
@@ -980,8 +1028,7 @@ mod tests {
             stripe: None,
             operators: vec![],
             ai_gateway: None,
-            vision_model: None,
-            fallback_model: None,
+            models: None,
             default_plan: None,
             support_url: None,
             mail_from: None,
@@ -1176,7 +1223,9 @@ mod tests {
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
-            let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"]);
+            // the example's tiers on Finite Private (decision 61); a preview's on Workers AI
+            let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
+            let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
     }
@@ -1430,46 +1479,97 @@ mod tests {
         }
     }
 
-    /// The vision and fallback models are ones the price book prices,
-    /// refused before a deploy otherwise (the cell would refuse them at its
-    /// first request); named, each is the cell's variable
-    /// (`FRAGMENT_VISION_MODEL`, `FRAGMENT_FALLBACK_MODEL`), and unnamed the
-    /// cell's default (GLM-5.3 Flash; DeepSeek V4 Flash).
+    /// Finite's own deployment's `models` (deploy/example.jsonc; decision
+    /// 61): its tiers on Finite Private, each naming its key, which is bound
+    /// for each slot (one secret, two bindings) and is nowhere in the cell's
+    /// variable; its fallback and vision on Workers AI's GLM-5.3 Flash. A
+    /// preview's (deploy/e2e.jsonc) names none: its tiers are on Workers
+    /// AI, and it needs no Finite Private key to deploy.
     #[test]
-    fn a_vision_or_fallback_model_the_book_does_not_price_is_refused() {
-        let with = |vision: Option<&str>, fallback: Option<&str>| {
-            let mut d = deployment(None, None);
-            d.vision_model = vision.map(str::to_string);
-            d.fallback_model = fallback.map(str::to_string);
-            d
+    fn a_deployments_models_bind_their_keys_and_render_without_them() {
+        let rendered = |file: &str| {
+            let d = load(&devstack::repo_root().join(file)).unwrap();
+            let n = names(&d, Some("p5")).unwrap();
+            (worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap(), bound(&d).unwrap())
         };
-        let unpriced = "@cf/meta/llama-4-scout-17b-16e-instruct";
-        let refused = checked(with(Some(unpriced), None)).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains(&format!("vision_model: the vision model {unpriced:?} is not in the price book")), "{refused}");
-        let refused = checked(with(None, Some(unpriced))).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains(&format!("fallback_model: the fallback model {unpriced:?} is not in the price book")), "{refused}");
-        assert!(checked(with(Some("@cf/zai-org/glm-5.3-flash"), Some("@cf/deepseek-ai/deepseek-v4-flash-0731"))).is_ok());
-        assert!(checked(with(None, None)).is_ok());
+        let (cell, b) = rendered("deploy/example.jsonc");
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        let private = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": "glm-5-3-flash" });
+        let flash = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
+        assert_eq!(models, json!({ "cheap": private, "medium": private, "fallback": flash, "vision": flash }), "no key in the cell's variable");
+        let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
+        assert_eq!(parsed.cheap.model(), "glm-5-3-flash");
+        let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
+        assert!(bindings.contains(&("MODEL_KEY_CHEAP", "fragment-finite-private-key")) && bindings.contains(&("MODEL_KEY_MEDIUM", "fragment-finite-private-key")), "{bindings:?}");
+        assert!(!bindings.iter().any(|(binding, _)| *binding == "MODEL_KEY_FALLBACK" || *binding == "MODEL_KEY_VISION"), "Workers AI needs no key");
+        assert_eq!(b.model_keys, [("cheap".to_string(), "fragment-finite-private-key".to_string()), ("medium".into(), "fragment-finite-private-key".into())]);
+        // a deploy without the key is refused, naming it once, with both slots
+        let named = named_secrets(&b);
+        assert_eq!(named.iter().filter(|(_, n)| *n == "fragment-finite-private-key").map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["models.cheap.key, models.medium.key"]);
+        let all: Vec<&str> = named.iter().map(|(_, n)| *n).filter(|n| *n != "fragment-finite-private-key").collect();
+        let listed: Vec<devstack::store::Listed> = all.iter().map(|n| devstack::store::Listed { name: n.to_string(), id: "0".into(), created: String::new(), modified: String::new() }).collect();
+        let missing = devstack::store::missing(&named, &listed);
+        let said = refusal(Path::new("/home/p/prod.jsonc"), Some(&devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() }), &missing);
+        assert!(said.contains("lacks 1 of the secrets") && said.contains("models.cheap.key, models.medium.key  cargo xtask secret set fragment-finite-private-key --config /home/p/prod.jsonc"), "{said}");
+
+        // the preview's: every tier on Workers AI, no key named or bound
+        let (cell, b) = rendered("deploy/e2e.jsonc");
+        assert!(cell["vars"].get("FRAGMENT_MODELS").is_none(), "unnamed: the cell's defaults, every slot on Workers AI");
+        assert!(b.model_keys.is_empty() && !cell.to_string().contains("MODEL_KEY_"));
+    }
+
+    /// Goal: a deployment's `models` the cell would refuse, or whose key the
+    /// deploy could not bind, is refused before anything is read or made,
+    /// saying which slot and why; the fields it replaced are refused, naming
+    /// it. Invalid: an unknown provider, an OpenAI-compatible API without a
+    /// key's name (or with one that is no string, or no store name), a key
+    /// on a Workers AI slot, a bad base URL, an unknown slot, an unpriced
+    /// model, `models` no object, and `vision_model` or `fallback_model`.
+    /// Valid: a slot alone, rendered with the rest the cell's.
+    #[test]
+    fn a_deployments_models_out_of_shape_are_refused() {
+        let with = |models: Value| {
+            let mut d = deployment(None, None);
+            d.models = Some(models);
+            checked(d).err().map(|e| format!("{e:#}")).unwrap_or_default()
+        };
+        let row = |extra: Value| {
+            let mut r = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "key": "fragment-finite-private-key", "model": "glm-5-3-flash" });
+            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            json!({ "cheap": r })
+        };
+        assert_eq!(with(row(json!({}))), "", "Finite Private's, as example.jsonc names it");
+        let refused = |models: Value, says: &str| {
+            let e = with(models.clone());
+            assert!(e.contains(says), "{models}: {e}");
+        };
+        refused(row(json!({ "provider": "anthropic" })), "models.cheap: its provider is workers_ai (a Workers AI model, through the gateway) or openai (an OpenAI-compatible API), not \"anthropic\"");
+        refused(json!({ "cheap": { "model": "glm-5-3-flash" } }), "models.cheap: its provider is workers_ai");
+        refused(json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash" } }), "models.cheap: an OpenAI-compatible API names its key");
+        refused(row(json!({ "key": 7 })), "models.cheap: its key is its secret's name in the store, a string");
+        refused(row(json!({ "key": "~/.config/fragment/secrets/finite-private" })), "models.cheap.key is \"~/.config/fragment/secrets/finite-private\", which is no Secrets Store secret's name");
+        refused(json!({ "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash", "key": "fragment-finite-private-key" } }), "models.vision: only an OpenAI-compatible API (provider openai) names a key");
+        refused(row(json!({ "base_url": "http://finite-private.finite.containers.tinfoil.dev/v1" })), "models.cheap: base_url:");
+        refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.cheap: base_url:");
+        refused(row(json!({ "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/" })), "without a query or a trailing /");
+        refused(row(json!({ "model": "glm-6" })), "models.cheap: the model \"glm-6\" is not in the price book");
+        refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
+        refused(json!([]), "models is an object");
+        // a slot alone: rendered as named, the rest the cell's
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        let rendered = |v: &Value, test: &str| {
-            let d = load(&config_file(test, v)).unwrap();
-            let n = names(&d, Some("p5")).unwrap();
-            worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].clone()
-        };
-        assert!(rendered(&v, "vision-none").get("FRAGMENT_VISION_MODEL").is_none(), "unnamed: the cell's default");
-        v["vision_model"] = json!("@cf/zai-org/glm-5.3-flash");
-        assert_eq!(rendered(&v, "vision-named")["FRAGMENT_VISION_MODEL"], "@cf/zai-org/glm-5.3-flash");
-        v["vision_model"] = json!("@cf/meta/llama-4-scout-17b-16e-instruct");
-        let refused = load(&config_file("vision-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains("is not in the price book"), "{refused}");
-        v["vision_model"] = Value::Null;
-        assert!(rendered(&v, "fallback-none").get("FRAGMENT_FALLBACK_MODEL").is_none(), "unnamed: the cell's default");
-        v["fallback_model"] = json!("@cf/zai-org/glm-5.3");
-        assert_eq!(rendered(&v, "fallback-named")["FRAGMENT_FALLBACK_MODEL"], "@cf/zai-org/glm-5.3");
-        v["fallback_model"] = json!("anthropic/claude-haiku-4.5");
-        let refused = load(&config_file("fallback-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(refused.contains("fallback_model: the fallback model"), "{refused}");
+        v["models"] = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
+        let d = load(&config_file("models-fallback", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        let vars = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].clone();
+        assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
+        // the fields it replaced
+        for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
+            let mut v = v.clone();
+            v[field] = json!("@cf/zai-org/glm-5.3-flash");
+            let refused = load(&config_file(field, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(refused.contains(&format!("{field} is gone; name it as {now}")), "{refused}");
+        }
     }
 
     /// The support link a person whose computer will not start is shown:
