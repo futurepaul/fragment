@@ -589,7 +589,9 @@ struct Owned<'a> {
 /// running turn as `/steer`, no turn of their own; Reply quotes a message,
 /// above what is typed and above the message sent, its record naming it
 /// (`reply_to`), and the agent is handed the quoted words, at a desktop's
-/// width and a phone's. Screenshots in the run's scratch (`chat/`).
+/// width and a phone's; a phone's return adds a line and its send button
+/// sends, a desktop's Enter sends. Screenshots in the run's scratch
+/// (`chat/`).
 fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, o: Owned, shots: &Path) -> Result<()> {
     chrome.viewport(page, 1280, 860, false)?;
     chrome.color_scheme(page, "light")?;
@@ -710,6 +712,43 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     );
     chrome.viewport(page, 1280, 860, false)?;
     chrome.until(page, "innerWidth === 1280", TURN);
+
+    // a phone's return is a newline, and the send button sends (Paul,
+    // 2026-10-14): a touch screen with no finer pointer, at a phone's width
+    let composer = "(() => { const t = document.getElementById('text'); return { value: t.value, hint: t.enterKeyHint }; })()";
+    let said = |text: &str| chat_records().into_iter().filter(|r| r["body"]["text"] == text).count();
+    chrome.viewport(page, 375, 812, true)?;
+    chrome.touch(page, true)?;
+    let labelled = shows(chrome, "document.getElementById('text').enterKeyHint === 'enter'");
+    let before = chat_records().len();
+    typed(chrome, "a line on a phone")?;
+    chrome.press(page, "Enter", false)?;
+    chrome.type_text(page, "and another")?;
+    std::thread::sleep(Duration::from_secs(2));
+    let held = chrome.eval(page, composer)?;
+    let unsent = chat_records().len() == before;
+    chrome.click(page, "#send")?;
+    let lines = "a line on a phone\nand another";
+    let posted = shows(chrome, "document.getElementById('text').value === ''") && s.eventually(TURN, || said(lines) == 1);
+    let _ = chrome.screenshot(page, &shots.join("phone-return.png"));
+    s.ok(
+        "on a phone (a touch screen, no finer pointer) the keyboard's return adds a line, labelled so (enterkeyhint enter), and sends nothing; the send button sends the lines",
+        labelled && held["value"] == lines && unsent && posted,
+        json!({ "held": held, "unsent": unsent, "posted": posted }),
+    );
+    let _ = shows(chrome, &replied("a line on a phone"));
+    // a desktop's: Enter sends, Shift+Enter adds a line
+    chrome.touch(page, false)?;
+    chrome.viewport(page, 1280, 860, false)?;
+    let labelled = shows(chrome, "innerWidth === 1280 && document.getElementById('text').enterKeyHint === 'send'");
+    typed(chrome, "first of two")?;
+    chrome.press(page, "Enter", true)?;
+    chrome.type_text(page, "second of two")?;
+    let held = chrome.eval(page, composer)?;
+    chrome.press(page, "Enter", false)?;
+    let posted = shows(chrome, "document.getElementById('text').value === ''") && s.eventually(TURN, || said("first of two\nsecond of two") == 1);
+    s.ok("on a desktop Enter sends (enterkeyhint send), and Shift+Enter adds a line", labelled && held["value"] == "first of two\nsecond of two" && posted, json!({ "held": held, "posted": posted }));
+    let _ = shows(chrome, &replied("first of two"));
     Ok(())
 }
 

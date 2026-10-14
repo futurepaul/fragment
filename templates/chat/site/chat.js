@@ -1625,7 +1625,8 @@ export function mount(root) {
   root.addEventListener("pointerleave", clearEdgeLight);
   addEventListener("blur", clearEdgeLight);
 
-  // ---- the composer: one line that grows; Enter sends, Shift+Enter adds a line ----
+  // ---- the composer: one line that grows; Enter sends, Shift+Enter adds a
+  // line (a phone's return adds one: `touchTyping`) ----
   const canPost = () => !!state.me && atLeast(state.me.role, "viewer");
   // a file is one of the chat's blobs, which editors upload (the chat's people)
   const canAttach = () => canPost() && atLeast(state.me.role, "editor") && state.me.principal.startsWith("npub1");
@@ -2076,11 +2077,21 @@ export function mount(root) {
       }
       if (e.key === "Escape") return closeMentions();
     }
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (!touchTyping.matches || e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       composer.requestSubmit();
     }
   });
+  // A phone's keyboard writes lines (Paul, 2026-10-14: "can we get 'enter'
+  // on the mobile keyboard to be newline?"): on a touch screen with no
+  // finer pointer beside it (no mouse or trackpad, so most likely no
+  // keyboard either) return is a newline, so labelled, and the send button
+  // sends (or ⌘ or Ctrl+Enter, from a keyboard after all). Anywhere else
+  // Enter sends and Shift+Enter is a newline.
+  const touchTyping = matchMedia("(pointer: coarse) and (not (any-pointer: fine))");
+  const fitReturn = () => { input.enterKeyHint = touchTyping.matches ? "enter" : "send"; };
+  touchTyping.addEventListener("change", fitReturn);
+  fitReturn();
   composer.addEventListener("submit", (e) => {
     e.preventDefault();
     // a memo being recorded goes with the message: it stops, then sends

@@ -409,6 +409,19 @@ zoom as one takes focus), its buttons neither selected nor held; a table's
 cells keep their words whole, and a wide table or a long line of code
 scrolls in its own box, never the page.
 
+**A phone's return is a newline** (Paul, 2026-10-14). On a touch screen
+with no finer pointer beside it (`(pointer: coarse) and (not (any-pointer:
+fine))`: no mouse or trackpad, so most likely no keyboard), the
+composer's return key adds a line, labelled so (`enterkeyhint="enter"`),
+and only the send button sends (or ⌘ or Ctrl+Enter, from a keyboard after
+all). Anywhere else Enter sends (`enterkeyhint="send"`) and Shift+Enter
+adds a line. A field of one line (a card's words, the shell's launcher)
+sends on Enter everywhere. The bar Safari puts above an iPhone's keyboard
+(its up and down arrows and its ✓) is not the page's: WebKit shows it for
+every text field on a phone (`-[WKContentView requiresAccessoryView]`),
+and only an app embedding WebKit may hide it, so no attribute, form or
+field of a page removes it.
+
 **Sending, then sent.** A message or command sent from the page shows
 at once as **sending**: its bubble dimmed, "Sending…" where its time
 goes, no Reply, never queued. It is sent once the platform answers with
