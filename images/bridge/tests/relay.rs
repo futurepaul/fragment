@@ -43,7 +43,7 @@ async fn setup(name: &str, agents: &[&str]) -> (Fake, support::Running, Hermes, 
 
 /// A card's life in the expiry tests: the bridge's prompt life and the
 /// scripted Hermes' approval timeout, the same, as the Hermes image sets
-/// both (`HERMES_BOOT_APPROVAL_TIMEOUT_S`).
+/// both (`HERMES_BOOT_CARD_TIMEOUT_S`).
 const CARD_MS: u64 = 1_500;
 
 fn card_settings() -> fragment_bridge::engine::Settings {
@@ -298,6 +298,32 @@ async fn stop_during_an_approval() {
         assert!(replies(w, &chat).is_empty());
     });
     hermes.with(|s| assert_eq!(s.interrupted, 1, "Hermes heard the Stop mid-approval"));
+    bridge.stop().await;
+}
+
+/// Goal (the hermes e2e lane, 2026-10-14: a Stop on a turn waiting on a
+/// clarify's card closed the card, but the turn ran on until the clarify's
+/// hour was out): Stop while a turn waits on a clarify's card of choices
+/// closes it as stopped, interrupts Hermes, and answers the clarify `skip`
+/// (its wait never reads an interrupt), so the turn ends stopped with no
+/// reply, and the word starts no turn of its own.
+#[tokio::test]
+async fn stop_during_a_clarifys_card() {
+    let (fake, bridge, hermes, _dir) = setup("relay-stop-clarify", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &chat, &turn, "turn.prompt.closed")[0]["outcome"], "stopped");
+        assert_eq!(work_of(w, &chat, &turn, "turn.end")[0]["outcome"], "stopped");
+        assert!(replies(w, &chat).is_empty());
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 1, "`skip` is no turn");
+    });
+    hermes.with(|s| assert_eq!((s.interrupted, s.clarify_answers.clone()), (1, vec![wire::STOP_WORDS.to_string()]), "Hermes heard the Stop, and its clarify was let go"));
     bridge.stop().await;
 }
 

@@ -68,8 +68,10 @@ manage.
 An agent acting for its owner shares its owner's fragments as its owner
 would: `fragment members add|rm`, `fragment invite list|revoke`,
 `fragment visibility`, and `fragment rotate`, on a fragment its owner
-owns. Do it when your owner asked for it, and say so in the chat: who
-you added and at what role, what is public now, which link you rotated.
+owns. Do it when your owner asked for exactly that, or once they said
+yes when you asked them in plain words (never with a command), and say
+so in the chat: who you added and at what role, what is public now,
+which link you rotated.
 Your owner's events and members name you as who did it: each event's
 summary says "(an agent, for …)" (`by` and `for` in `fragment events
 --json`), and a member you added has you as `addedBy` (`fragment members

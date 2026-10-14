@@ -23,8 +23,9 @@
 //!   `✏️ Type your answer:` after "Other") is a `send`: a reply part, and
 //!   the turn asks (`Event::Asked`); the asker's next message comes back as
 //!   an inbound in the same chat at once (`Command::Tell`), which Hermes'
-//!   clarify intercept takes as the answer mid-turn. A Stop while it asks
-//!   interrupts, then answers "Stop." so the waiting clarify lets go;
+//!   clarify intercept takes as the answer mid-turn. A Stop while it asks,
+//!   or while a clarify's card of choices is open, interrupts, then answers
+//!   `skip` (`wire::STOP_WORDS`) so the waiting clarify lets go;
 //! - `👀` on, then off as the turn ends, then `✅` or `❌` (Hermes'
 //!   processing hooks; Relay has no other end): a turn ends at its `❌`, at
 //!   its `✅` once it said something, and, stopped, at its `👀` off (a
@@ -166,6 +167,8 @@ struct Inflight {
     stopped: bool,
     /// It asked its asker something to answer in words, not yet told.
     asking: bool,
+    /// A clarify's card of choices is open, not yet answered.
+    carded: bool,
     /// A clarify's "Other" was answered in words on its card, which went to
     /// Hermes with the answer: its `✏️ Type your answer:` that follows asks
     /// nothing.
@@ -460,9 +463,10 @@ impl Loop {
                     // its ack or the next dial, should this one be lost.
                     f.stopped = true;
                     let frame = wire::interrupt(&f.profile, &f.chat);
-                    // a clarify waiting on the person's words never sees
-                    // the interrupt: words let it go, and the turn stops
-                    let asking = f.asking.then(|| (f.start.asker.clone(), f.start.asker_name.clone()));
+                    // a clarify waiting on the person (their words, or its
+                    // card) never sees the interrupt: words let it go, and
+                    // the turn stops
+                    let asking = (f.asking || f.carded).then(|| (f.start.asker.clone(), f.start.asker_name.clone()));
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
                     if let Some((by, by_name)) = asking {
@@ -475,9 +479,14 @@ impl Loop {
                 }
             }
             Command::Answer { turn, prompt, option, seq, by, words } => {
-                // An expiry needs no word to Hermes: its own approval
-                // timeout (the image sets it to the bridge's prompt TTL)
-                // fails the command closed.
+                // Answered or expired, the card asks no more: a Stop after
+                // it says nothing to a clarify.
+                if let Some(f) = self.inflight.get_mut(&turn) {
+                    f.carded = false;
+                }
+                // An expiry needs no word to Hermes: its own wait (the
+                // image sets an approval's and a clarify's to the bridge's
+                // prompt TTL) times out with the card.
                 let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
                 let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None };
@@ -566,7 +575,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new(), pictures: 0, pictured: HashMap::new(), pending_end: None });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new(), pictures: 0, pictured: HashMap::new(), pending_end: None });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -829,11 +838,13 @@ impl Loop {
                 }
                 ok
             }
-            Action::Prompt { chat, prompt_id, content, options, timeout_s } => {
+            Action::Prompt { chat, prompt_id, content, options, timeout_s, clarify } => {
                 let Some(turn) = turn_of(&chat, &self.by_chat) else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
                 let id = self.message_id();
+                let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
                 // the engine posts an open reply before the card
-                self.inflight.get_mut(&turn).expect("by_chat names a held turn").open_reply = None;
+                f.open_reply = None;
+                f.carded |= clarify;
                 self.emit(Event::Prompt { turn, prompt: prompt_id, text: content, options, ttl_ms: timeout_s.map(|s| s.saturating_mul(1000)) }).await;
                 json!({ "success": true, "message_id": id })
             }

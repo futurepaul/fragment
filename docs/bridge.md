@@ -167,7 +167,7 @@ earlier save, or lost, costs reads and runs nothing twice
   there, is a turn of its own, claimed and run once. So is one a rollback
   sends a cursor back before, though an earlier life told it (a Tell
   writes nothing on `work`). A Stop answers the question too (Relay says
-  "Stop."), so the asker's next message queues behind the stopping turn.
+  `skip`), so the asker's next message queues behind the stopping turn.
 - What the runtime says unasked is a turn of the life's counter and the
   life, so a counter a rollback sent back collides with nothing.
 
@@ -298,9 +298,10 @@ turn, which waits for one), `queue`, `btw` (`aside: /btw …`).
 A turn waiting on its card holds the keepalive until the card is
 answered or expires, at most the card's life (`BRIDGE_PROMPT_TTL_MS`, an
 hour; docs/durable-computers.md, P6 for now). So a card expires with its
-runtime there: Hermes' approval times out with it (the image sets
-`approvals.timeout` to the card's life), the command does not run, Hermes
-says so and ends the turn, and the chat's next message is answered.
+runtime there: Hermes' wait on it times out with it (the image sets
+`agent.clarify_timeout` and `approvals.timeout` to the card's life), its
+model is told no one answered, the turn ends, and the chat's next message
+is answered.
 
 It used to be let go (decision 42 as first written), so an idle computer
 slept 20 minutes into an unanswered card, and the next life ended its turn
@@ -310,7 +311,7 @@ in a row are one): the model was given `[paul] do the risky thing\n\n[paul]
 good morning`, and asked the cut command's approval again. Every message
 after a missed card was met by the card again, and the computer slept
 under each one (Paul on p5, 2026-10-05: "I missed the 1hr window and now
-it's not responding to chats"; `an_expired_approval_ends_its_turn` in
+it's not responding to chats"; `an_expired_card_ends_its_turn` in
 tests/docker.rs, and its scripted twin in tests/relay.rs). A restart for
 any other reason while a card is open (an owner's sleep, a crash, a
 deploy) still cuts the turn, which ends as lost; the next message is now
@@ -438,14 +439,16 @@ get_chat_info`.
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
   What asks at all is the image's (docs/computers.md, "Approvals in our
-  Hermes image"): a terminal command Hermes flags, once its smart
-  guardian escalates it, but never an action on the agent's own desktop.
-  Expiry needs no word: Hermes' `approvals.timeout` is the card's life
-  (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
-  is a test's shorter one). At its timeout Hermes tries to edit the card
-  (the bridge refuses: it is no message of the turn), sends `⌛ Approval
-  timed out …` (a notice), hands the model `BLOCKED: Command timed out
-  without user response`, and the turn goes on to its reply.
+  Hermes image"): nothing technical (no command, file or code), so in our
+  image only a saved payment card's fill; the agent asks its owner about
+  outcomes with a clarify's card instead. Expiry needs no word: Hermes'
+  `approvals.timeout` and `agent.clarify_timeout` are the card's life
+  (`hermes-boot` gives the bridge the same; `HERMES_BOOT_CARD_TIMEOUT_S`
+  is a test's shorter one). At an approval's timeout Hermes tries to edit
+  the card (the bridge refuses: it is no message of the turn), sends `⌛
+  Approval timed out …` (a notice), hands the model `BLOCKED: Command
+  timed out without user response`, and the turn goes on to its reply; at
+  a clarify's, it hands the model `[user did not respond within …]`.
 - A notice is a `send` answering nothing that starts with one of the
   glyphs Hermes' gateway starts its notices with (`relay/wire.rs`,
   `NOTICES`, read from v0.21.6: `💾` its self-improvement review, `⚠️` its
@@ -500,8 +503,13 @@ get_chat_info`.
   `✏️ Type your answer:` that follows shows nothing and asks nothing. An
   "Other" answered with no words (an older page) asks for them as above.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
-  waiting on words never sees it, so a Stop while the turn asks is
-  followed by the words "Stop.", which let the wait go.
+  waiting on its person (their words, or its card of choices) never sees
+  it, so a Stop while the turn asks, or while a clarify's card is open, is
+  followed by the word `skip` (Hermes' own, which any clarify takes), which
+  lets the wait go; Hermes may then reply once, its model told the
+  question was skipped. Before this, a Stop on a turn waiting on a
+  clarify's card closed the card, and the turn ran on until the clarify's
+  hour was out (`a_stop_lets_its_clarify_go` in tests/docker.rs).
 - **Commands** (above, "Commands"): the menu is Hermes v0.21.6's own
   manifest (`gateway/relay/command_manifest.py`, the names and
   descriptions its connectors register), less what changes the install

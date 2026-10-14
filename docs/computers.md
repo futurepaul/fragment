@@ -822,7 +822,7 @@ expires within 30 days. The container application is the deployment's
   sent on, and nothing of them reaches the gateway, Workers AI or a log.
 - Our Hermes image sets `x-fragment-agent` on every call of an agent's
   profile (its `model.default_headers`), the main model's and the
-  auxiliary ones' (titles, the smart-approval guardian, vision). Its
+  auxiliary ones' (titles, memory reviews, vision). Its
   speech-to-text, whose client takes no header, names the agent by its
   key (each profile's `stt.openai.api_key`, `agent:<name>`).
 - The intercept names no fragment, so a call bills its agent's owner
@@ -1375,42 +1375,64 @@ settings and state):
 
 ### Approvals in our Hermes image
 
-Hermes asks before some actions, and the bridge makes each ask a card in
-the chat that only the agent's owner answers (docs/bridge.md; decision
-42). What asks is `hermes-boot`'s to set (images/hermes/boot/src/
-hermes.rs), against Hermes v0.21.6:
+Nothing technical asks a person (Paul, 2026-10-14: "Our users are
+non-technical: if hermes asks them a technical approval it makes no sense
+to them … hermes asking for approvals for stuff like 'can I make this
+site public?' would make sense, but for technical command line things it
+can't be asking"). No command, file, path or code is ever put to the
+agent's owner. The computer is the person's own sandboxed container, and
+the agent acts on the platform with at most its owner's role (R17), so a
+command reaches no further than those. finite-mono ran Hermes the same
+way (`approvals.mode: off`). What asks is `hermes-boot`'s to set, with
+Hermes' own settings (images/hermes/boot/src/hermes.rs, `managed_config`,
+the overlay over every profile), against Hermes v0.21.6. A card that
+still comes is its owner's alone to answer (docs/bridge.md; decision 42).
 
-- **Its terminal: Hermes' `smart` mode** (`approvals.mode`, the managed
-  overlay; decision 16). An ordinary command runs. One that matches
-  Hermes' dangerous-command patterns (`rm -rf`, `chmod 777`, `curl … |
-  sh`, a write to a system file, …), and each `execute_code` script, goes
-  first to its guardian: one call to the agent's own model
-  (`auxiliary.approval`, left `auto`, is the main model's), through the
-  route as the agent (`x-fragment-agent`), metered to its owner as its
-  other calls are. It approves (the command runs), denies (blocked; its
-  owner may still allow it once), or escalates: a card. Hermes' hard
-  floors (`rm -rf /`, `mkfs`, a fork bomb) are blocked whatever anyone
-  answers.
-- **Its desktop: never asked.** Hermes' `computer_use` asks about every
-  action but `capture`, `wait`, `list_apps` and `list_windows` (a click,
-  a scroll, a focus change, typing, a key, raising a window), and its
-  gate never consults the guardian: only `/yolo`, `approvals.mode: off`
-  or a standing grant pass it. So in `smart` mode every kind of action
-  was a card (Paul on p5, 2026-10-09: "asking me for permission for silly
-  things like changing focus in computer use and scrolling"). The desktop
-  is the agent's own, so each profile's own config holds them all
-  granted, in both delivery modes (`command_allowlist`:
-  `cua:<action>:<background|foreground>`, `hermes::DESKTOP_ACTIONS`).
-  What it does there is what its browser tools, which Hermes never asks
-  about, do in the same Chromium. Hermes' hard blocks on the desktop come
-  first and stand (a log-out or lock key, `curl … | sh` typed).
-- **What else asks:** a write to an SSH config, and a write through
-  Hermes' file tools to a project's `AGENTS.md`, `CLAUDE.md`, `SOUL.md` or
-  `.cursorrules` (Hermes asks for these even under `/yolo`).
-- Not used: `approvals.mode: off`, which also runs every flagged command
-  unreviewed, and `/yolo` (on no agent's menu, and a message's leading
-  `/` never reads as a command: docs/bridge.md, "Commands"; it would
-  also run the desktop's driver unrestricted).
+Every ask Hermes has, with what the owner saw before 2026-10-14 (each a
+card on `work`) and what happens now:
+
+| What asks | Its setting | Before | Now |
+| --- | --- | --- | --- |
+| Its terminal: a command matching Hermes' dangerous patterns (`rm -rf`, `chmod 777`, `curl … \| sh`, a `-c` script, a write to a system file, …) | `approvals.mode` | `smart`: its guardian first (a call to the agent's model, metered to its owner), then a card, "Hermes wants to run a command that needs your OK", the command, why it was flagged, and Allow Once, Allow Session, Always Allow, Deny | `off`: it runs; no guardian |
+| `execute_code`: each script | `approvals.mode` | the guardian, then a card with the script | `off`: it runs |
+| `computer_use`: every action but `capture`, `wait`, `list_apps` and `list_windows`, and raising a window | `approvals.mode`, `command_allowlist` | nothing: each profile held them all granted (`cua:<action>:<mode>`, #284) | `off`: it runs; no grant is held |
+| A write to an SSH client config (`~/.ssh/config`) | `approvals.mode` | a card, "Write to SSH client config file(s): …" | `off`: it runs |
+| A plugin's `pre_tool_call` rule that asks | `approvals.mode` | none of the image's asks | `off`: it runs |
+| A write through Hermes' file tools to a project's `AGENTS.md`, `CLAUDE.md`, `SOUL.md`, `.cursorrules` or `.hermes/` file (a brain's guide, an app's notes; its profile's own `SOUL.md`, in Hermes' home, never asked) | `security.protected_instruction_files` | a card, "Write to protected agent-instruction file(s): AGENTS.md …", Allow Once, Deny, whatever `approvals.mode` says | `false`: it runs |
+| `/new`, `/undo` from the menu | `approvals.destructive_slash_confirm` | `false` | `false` |
+| `/reload-mcp`; an MCP server's elicitation, or a write-capable tool of an untrusted one | `approvals.mcp_reload_confirm`; `mcp_servers.<name>` | on no menu; no MCP server is configured | the same |
+| A skill's or a memory's write staged for a yes | `skills.write_approval`, `memory.write_approval` | off (Hermes' default) | the same |
+| Filling a saved payment card into a page (`browser_vault_fill`) | none: Hermes asks whatever `approvals.mode` says | "Confirm payment card fill?", naming the site: a person's question, about their money | it still asks |
+| The agent's own question (`clarify`) | `agent.clarify_timeout` | with choices a card, else a question in words (`turn.asked`) | the same: how it asks about outcomes |
+
+Hermes' rails that ask no one stand, before any of these: its floors for
+the terminal (a recursive delete of `/`, a system directory or the home
+directory, `mkfs`, `dd` or a redirect to a block device, a fork bomb,
+`kill -1`, a shutdown, deleting Hermes' own runtime, a password piped to
+`sudo -S`), its desktop's (a log-out or lock key, `curl … | sh` typed),
+its file tools' denials (a credential store, a `.env` file, a system
+file: `agent/file_safety.py`), and another profile's files. Each is a
+refusal its model reads, never a card. `off` runs the desktop's driver
+(cua-driver) in its `unrestricted` mode, a private daemon of the
+session's, where `standard` was its machine-wide one: Hermes ties the
+driver's mode to its approval bypass. The desktop is the agent's own, and
+Hermes' desktop rails come before the driver.
+
+What a person is asked instead is an outcome, in plain words. Every agent
+is told so in its system prompt, on every turn in our chats (Hermes'
+`platform_hints.relay`: `hermes::ASKING`), and the `fragment` skill's
+first page says it at more length (`computer.md`, "Asking your owner"):
+before it makes something of theirs public or shares it with someone new,
+sends an email or a message in their name, deletes something of theirs,
+or spends their money, unless they asked for exactly that, it asks with
+`clarify` and its choices, a card only its owner answers. That is the
+agent's to keep: the platform itself holds no agent's share for a yes (an
+agent shares for its owner as they would, and each share names it:
+docs/api.md, Sharing), and refuses every agent a fragment's deletion and
+its cap. A card, a clarify's or the payment card's, waits as long as the
+bridge's prompt lives (`approvals.timeout` and `agent.clarify_timeout`
+are both `BRIDGE_PROMPT_TTL_MS`'s, an hour; `HERMES_BOOT_CARD_TIMEOUT_S`
+is a test's shorter one).
 
 ### Bot Mode in our Hermes image
 
@@ -1922,10 +1944,11 @@ for a host) and finds the same `HOME`, `~` and modes.
   unused desktop stops after the bound (30 s there:
   `HERMES_BOOT_SCREEN_IDLE_MS`), a watched one does not, and the next
   viewer starts it again with its browser's profile kept.
-  Approvals (`an_agents_own_desktop_never_asks`): a scroll, a focus
-  change that raises its window, and a foreground click each run with no
-  card; then `rm -rf` goes to the guardian, once, as the agent on its
-  tier, and (its scripted answer `ESCALATE`) is a card.
+  Approvals (`nothing_technical_asks_its_owner`): a scroll, a focus
+  change that raises its window, a foreground click, `rm -rf`, an
+  `execute_code` script, and writes to a project's `AGENTS.md` and to
+  `~/.ssh/config` each run with no card and no guardian call, and the
+  model's system prompt says how to ask (`hermes::ASKING`).
 - The platform's side, with the stub: the `computers` lane's ticket that
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on

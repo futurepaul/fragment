@@ -776,7 +776,7 @@ async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u3
 /// The bridge, which runs the agents the ready file names (its `ready.rs`)
 /// and shows the screen's socket, whichever agents come and go: nothing
 /// it is started with changes with them.
-fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
+fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
     let mut c = Command::new(format!("{OPT}/bin/fragment-bridge"));
     c.arg("run")
         .env("BRIDGE_RUNTIME", "relay")
@@ -787,8 +787,8 @@ fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
         // its answer to a hold is this image's to wait for: the platform's
         // `held` comes once Hermes' databases are copied too (held.rs)
         .env("BRIDGE_HELD", held::BRIDGE_HELD)
-        // a card lives as long as Hermes waits on its approval
-        .env("BRIDGE_PROMPT_TTL_MS", (approval_timeout_s * 1000).to_string())
+        // a card lives as long as Hermes waits on it
+        .env("BRIDGE_PROMPT_TTL_MS", (card_timeout_s * 1000).to_string())
         .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
@@ -1183,8 +1183,8 @@ async fn boot_main() {
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
-    // HERMES_BOOT_APPROVAL_TIMEOUT_S: a test's shorter approval (and card)
-    let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
+    // HERMES_BOOT_CARD_TIMEOUT_S: a test's shorter card (and Hermes' wait on it)
+    let card_timeout_s = hermes::card_timeout_s(env("HERMES_BOOT_CARD_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's Bot Chat, found before the gateway's config: the
@@ -1192,7 +1192,7 @@ async fn boot_main() {
     let mut chats = BotChats::new();
     find_bot_chats(&api, &agents, &mut chats).await;
     let routes = bots::profile_routes(&agents, &route_chats(&api, &agents, &chats).await);
-    let managed = hermes::managed_config(&lean, approval_timeout_s, screen_idle_ms) + &routes;
+    let managed = hermes::managed_config(&lean, card_timeout_s, screen_idle_ms) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
@@ -1224,7 +1224,7 @@ async fn boot_main() {
         Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
     }
     write_ready(&agents, &home, &chats);
-    let mut bridge = spawn_bridge(approval_timeout_s);
+    let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     let mut keeper = spawn_keeper(&home);
     let mut keeper_restarts = 0u32;
@@ -1287,7 +1287,7 @@ async fn boot_main() {
                     stop(gateway, None, keeper.as_mut()).await;
                     fail("the bridge keeps exiting");
                 }
-                bridge = spawn_bridge(approval_timeout_s);
+                bridge = spawn_bridge(card_timeout_s);
             }
         }
         // the managed skills again: the first as soon as there is an agent to

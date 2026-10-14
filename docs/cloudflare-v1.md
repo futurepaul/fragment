@@ -205,7 +205,11 @@ speaking Cloudflare's APIs) returns once this product works.
     may use, and its model tier. It draws its own avatar in the
     operator's style reference; the `avatar-lab` fragment on fragment.club
     is where that style is iterated. Approvals default to Hermes' `smart`
-    mode.
+    mode. *Amended 2026-10-14 (Paul: "Our users are non-technical: if
+    hermes asks them a technical approval it makes no sense to them"):*
+    nothing technical asks; Hermes' approvals are `off`, as finite-mono
+    ran them, and an agent asks its owner only about outcomes, in plain
+    words (docs/computers.md, "Approvals in our Hermes image").
 17. **Skills are git-tracked.** The managed set is a skills fragment
     (a blessed template's repo, versioned). Each agent's own skills are
     in its fragment's `skills/`. The managed set is all of finite-skills

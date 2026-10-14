@@ -488,19 +488,16 @@ async fn the_hermes_image() {
         assert!(answered(w, &t_twice).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t_twice));
     });
 
-    // An approval: Hermes flags `rm -rf`, its guardian escalates, the card
-    // is the owner's, the owner's answer runs it.
+    // A command Hermes flags (`rm -rf`) runs at once: no card asks the
+    // owner (Paul, 2026-10-14), and no guardian is asked either.
     let fourth = fake.say(&chat, &person("paul"), json!({ "text": "do the risky thing" }));
     let t4 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", fourth["seq"].as_u64().unwrap());
-    fake.until(120_000, "Hermes' approval card", |w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == t4)).await;
-    let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t4).unwrap());
-    eprintln!("hermes: approval card options {}", card["options"]);
-    assert_eq!(card["asks"], "npub1paul");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(fake.with(|w| w.keepalive_open), 1, "the card holds the computer awake");
-    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "once" }));
-    fake.until(120_000, "the approved turn's answer", |w| answered(w, &t4).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran"))).await;
-    fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").into_iter().find(|p| p["turn"] == t4).unwrap()["outcome"], "answered"));
+    fake.until(120_000, "the flagged command's turn to end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t4)).await;
+    fake.with(|w| {
+        assert!(answered(w, &t4).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "it ran: {:?}", answered(w, &t4));
+        assert!(!w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == t4), "no card");
+    });
+    assert!(!model.calls.lock().unwrap().iter().any(|c| c.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")), "no guardian");
 
     // An agent assigned while it runs (docs/computers.md: a computer's
     // agents may change while it runs): hermes-boot writes its profile,
@@ -763,20 +760,13 @@ async fn a_save_taken_while_it_writes_opens() {
         let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
         let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
         fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
-        // Hermes asks its owner before a script runs from `-c` ("script
-        // execution via -e/-c flag"): allowed for the session, once. So the
-        // tool waits on its card (the first round) or runs (the rest), and
-        // which is waited for, not a fixed time: a slow runner shows the card
-        // well after the step.
+        // A script run from `-c`, which Hermes flags ("script execution via
+        // -e/-c flag"), runs unasked: no card.
         let asked = Instant::now();
-        let mut answered = false;
         // bounded: a minute
         while !writing(&c) {
-            if let (false, Some(card)) = (answered, fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t))) {
-                fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
-                answered = true;
-            }
-            assert!(asked.elapsed() < Duration::from_secs(60), "round {round}: its tool never wrote (its card answered: {answered}); the container said:\n{}", c.logs());
+            assert!(fake.with(|w| !w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == t)), "round {round}: no card asks its owner");
+            assert!(asked.elapsed() < Duration::from_secs(60), "round {round}: its tool never wrote; the container said:\n{}", c.logs());
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         // the tool writing for about six seconds: the save is taken in its midst
@@ -1589,23 +1579,18 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
     unhold(&c);
 }
 
-/// Says `text` and waits until `done` holds of its turn, any card the turn
-/// asks allowed for the session: the turn.
+/// Says `text` and waits until `done` holds of its turn, which asks its
+/// owner nothing: the turn.
 async fn asked(fake: &Fake, chat: &str, c: &Container, text: &str, done: impl Fn(&support::fake::World, &str) -> bool) -> String {
     let said = fake.say(chat, &person("paul"), json!({ "text": text }));
     let turn = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
-    let (t, mut allowed) = (Instant::now(), false);
+    let t = Instant::now();
     // bounded: four minutes
     loop {
         if fake.with(|w| done(w, &turn)) {
             return turn;
         }
-        if !allowed {
-            if let Some(card) = fake.with(|w| w.bodies(chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == turn)) {
-                fake.say(chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
-                allowed = true;
-            }
-        }
+        assert!(fake.with(|w| !w.bodies(chat, "work", "turn.prompt").iter().any(|p| p["turn"] == turn)), "{text:?} asks its owner nothing; {}", told(fake, chat, c));
         assert!(t.elapsed() < Duration::from_secs(240), "{text:?} not done in 240 s; {}", told(fake, chat, c));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1932,12 +1917,17 @@ async fn a_memory_review_is_a_notice() {
     });
 }
 
-// ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
-// 1hr window and now it's not responding to chats") ----
+// ---- a card nobody answers (Paul on p5, 2026-10-05: "I missed the 1hr
+// window and now it's not responding to chats") ----
 
-/// Hermes' approval timeout in the expiry tests, and with it the card's life
-/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`: the image gives the bridge the same).
-const APPROVAL_S: u64 = 20;
+/// How long Hermes waits on a card in the expiry tests, and with it the
+/// card's life (`HERMES_BOOT_CARD_TIMEOUT_S`: the image gives the bridge the
+/// same).
+const CARD_S: u64 = 20;
+
+/// A question Hermes asks as a card, with choices (its `clarify`): what a
+/// card is now that nothing technical asks.
+const CARD_ASKED: &str = "clarify: Which pot should the basil go in? | clay | plastic";
 
 /// What the chat and its `work` hold, and the container's last lines: a
 /// failure's detail.
@@ -1956,7 +1946,7 @@ async fn within(fake: &Fake, chat: &str, c: &Container, ms: u64, what: &str, con
     }
 }
 
-/// A chat with Hermes on the line: the image with a short approval, its
+/// A chat with Hermes on the line: the image with a short card, its
 /// agent's first reply given.
 struct Expiry {
     fake: Fake,
@@ -1979,8 +1969,8 @@ impl Expiry {
     }
 
     fn container(&self, extra: &[(&str, &str)]) -> Container {
-        let approval = APPROVAL_S.to_string();
-        let mut env = vec![("HERMES_BOOT_APPROVAL_TIMEOUT_S", approval.as_str())];
+        let card = CARD_S.to_string();
+        let mut env = vec![("HERMES_BOOT_CARD_TIMEOUT_S", card.as_str())];
         env.extend_from_slice(extra);
         Container::run(&hermes_tag(), self.fake.addr.port(), self.model.addr.port(), &env)
     }
@@ -2025,37 +2015,37 @@ impl Expiry {
 
 /// Goal (Paul on p5, 2026-10-05: "the agent asked me for permission for
 /// something but I missed the 1hr window and now it's not responding to
-/// chats"), with real Hermes: an approval card nobody answers is closed
-/// `expired` once its `expiresAt` passes, its turn ends once, as Hermes ends
-/// it (its approval times out with the card: the command is not run), and
-/// the chat's next message is claimed and answered, not met by the card's
-/// command asked again; and a message said while a card is open waits
-/// behind its turn, then is answered the same way.
+/// chats"), with real Hermes: a card nobody answers is closed `expired` once
+/// its `expiresAt` passes, its turn ends once, as Hermes ends it (its wait
+/// on the card times out with it), and the chat's next message is claimed
+/// and answered, not met by the card asked again; and a message said while
+/// a card is open waits behind its turn, then is answered the same way.
 ///
-/// Method: the image with a 20 s approval (`HERMES_BOOT_APPROVAL_TIMEOUT_S`;
-/// the bridge's card lives as long), the scripted model asking for a
-/// command Hermes flags, and the Computer DO's idle rule in a test's time
-/// (crates/core/src/computer.rs, `IDLE_MS`: a computer with no keepalive
-/// open sleeps 20 minutes after its last record; here, at once): if the
-/// bridge lets its keepalive go under the card, the computer is put to sleep
-/// as the DO does it (the hold, a save of `/data`, SIGTERM) and woken from
-/// that save by the next message, after the card's `expiresAt`; otherwise it
-/// stays awake through the expiry. On master it is let go (decision 42),
-/// and the woken Hermes folds the next message into the cut request (its
-/// model is given `[paul] do the risky thing\n\n[paul] good morning`), so
-/// the next message asks the cut command's approval again.
+/// Method: the image with a 20 s card (`HERMES_BOOT_CARD_TIMEOUT_S`: Hermes'
+/// clarify waits as long as the bridge's card lives), the scripted model
+/// asking a question with choices (`CARD_ASKED`, a card), and the Computer
+/// DO's idle rule in a test's time (crates/core/src/computer.rs, `IDLE_MS`:
+/// a computer with no keepalive open sleeps 20 minutes after its last
+/// record; here, at once): if the bridge lets its keepalive go under the
+/// card, the computer is put to sleep as the DO does it (the hold, a save of
+/// `/data`, SIGTERM) and woken from that save by the next message, after
+/// the card's `expiresAt`; otherwise it stays awake through the expiry.
+/// Before the keepalive was held under a card it was let go (decision 42),
+/// and the woken Hermes folded the next message into the cut request (its
+/// model was given `[paul] do the risky thing\n\n[paul] good morning`), so
+/// the next message asked the cut card again.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
-async fn an_expired_approval_ends_its_turn() {
+async fn an_expired_card_ends_its_turn() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
 
     // 1. a card nobody answers; then the next message
-    let risky = x.say("do the risky thing");
-    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    let risky = x.say(CARD_ASKED);
+    within(fake, chat, &c, 120_000, "the card", |w| !x.cards(w, &risky).is_empty()).await;
     let asked = fake.with(|w| x.cards(w, &risky)[0].clone());
     let expires_at = asked["expiresAt"].as_u64().unwrap();
-    assert!(expires_at.saturating_sub(fragment_bridge::log::now_ms()) <= APPROVAL_S * 1000 + 2_000, "the card lives as long as Hermes waits: {asked}");
+    assert!(expires_at.saturating_sub(fragment_bridge::log::now_ms()) <= CARD_S * 1000 + 2_000, "the card lives as long as Hermes waits: {asked}");
     // the DO's idle rule: what the keepalive does while the card waits
     tokio::time::sleep(Duration::from_secs(1)).await;
     let let_go = fake.with(|w| w.keepalive_open == 0);
@@ -2087,7 +2077,7 @@ async fn an_expired_approval_ends_its_turn() {
         assert!(c.exec(&["touch", "/run/computer/restored"]));
         (c, next)
     } else {
-        within(fake, chat, &c, APPROVAL_S * 1000 + 60_000, "the card expired, awake, and its turn's end", |w| x.closed(w, &risky).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky).is_empty()).await;
+        within(fake, chat, &c, CARD_S * 1000 + 60_000, "the card expired, awake, and its turn's end", |w| x.closed(w, &risky).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky).is_empty()).await;
         fake.with(|w| eprintln!("expired, awake: its end {:?}, its reply {:?}", x.ends(w, &risky), x.reply(w, &risky)));
         (c, x.say("good morning"))
     };
@@ -2099,15 +2089,15 @@ async fn an_expired_approval_ends_its_turn() {
         assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "the next message is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
         assert_eq!((x.ends(w, &risky).len(), x.closed(w, &risky).len()), (1, 1), "the card's turn ends once, its card closed once");
         assert_eq!(x.closed(w, &risky)[0]["outcome"], "expired");
-        assert_eq!(x.ends(w, &risky)[0]["outcome"], "idle", "Hermes ended it, its approval timed out with the card");
+        assert_eq!(x.ends(w, &risky)[0]["outcome"], "idle", "Hermes ended it, its wait timed out with the card");
     });
     assert!(!let_go, "the card holds the computer awake");
 
     // 2. a message while a card is open waits behind it, then is answered
-    let risky2 = x.say("do the risky thing once more");
+    let risky2 = x.say(&format!("{CARD_ASKED} | none"));
     within(fake, chat, &c, 120_000, "the second card", |w| !x.cards(w, &risky2).is_empty()).await;
     let meanwhile = x.say("hello while you wait");
-    within(fake, chat, &c, APPROVAL_S * 1000 + 90_000, "the second card expired, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky2).is_empty()).await;
+    within(fake, chat, &c, CARD_S * 1000 + 90_000, "the second card expired, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky2).is_empty()).await;
     within(fake, chat, &c, 120_000, "the message said while it waited answered", |w| x.reply(w, &meanwhile).is_some() && !x.ends(w, &meanwhile).is_empty()).await;
     fake.with(|w| {
         assert_eq!((x.ends(w, &risky2).len(), x.closed(w, &risky2).len()), (1, 1), "each once");
@@ -2116,53 +2106,89 @@ async fn an_expired_approval_ends_its_turn() {
     });
 }
 
-/// Goal (Paul on p5, 2026-10-09: "xbt-2000 is asking me for permission for
-/// silly things like changing focus in computer use and scrolling"): an
-/// agent's own desktop never asks its owner, and a command Hermes flags in
-/// its terminal still does, after its smart guardian, which runs as the
-/// agent on its own model through the route (so it is metered as the
-/// agent's other calls are).
+/// Goal (Paul, 2026-10-14: "hermes asking for approvals for stuff like
+/// 'can I make this site public?' would make sense, but for technical
+/// command line things it can't be asking"; on p5, 2026-10-09: "asking me
+/// for permission for silly things like changing focus in computer use and
+/// scrolling"): nothing technical asks the agent's owner, with real Hermes,
+/// and no guardian model is called in a person's place; the agent is told,
+/// in its system prompt, to ask only about outcomes, in plain words.
 ///
-/// Method: the image with a 20 s approval, so a desktop action that asked
-/// would end its turn `BLOCKED` within it; the scripted model changes
-/// focus raising the window (its `bring_to_front` scope too), then scrolls
-/// and clicks in the foreground (on X11 Hermes' driver delivers a scroll
-/// only so, and tells the model to retry so: a grant of its own), each a
-/// turn of its own, after a capture that starts the desktop. None is a card, and none is refused. Then `rm -rf`,
-/// which the guardian (scripted: `ESCALATE`) leaves to a person: a card.
+/// Method: the image with a 20 s card, so a step that asked would end its
+/// turn `BLOCKED` within it. Each a turn of its own, none a card nor
+/// refused: on its own desktop (after a capture that starts it), a focus
+/// change raising the window (its `bring_to_front` scope too), then a
+/// scroll and a click in the foreground (on X11 Hermes' driver delivers a
+/// scroll only so); in its terminal a recursive delete Hermes flags
+/// (`risky`: `rm -rf`); an execute_code script; and Hermes' file tools'
+/// writes to a project's `AGENTS.md` (a protected instruction file, which
+/// Hermes asks about even under `/yolo` unless told otherwise) and to its
+/// SSH config.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
-async fn an_agents_own_desktop_never_asks() {
+async fn nothing_technical_asks_its_owner() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
     let look = x.say("look at your screen");
     within(fake, chat, &c, 240_000, "its look", |w| x.reply(w, &look).is_some()).await;
-    for args in [
-        json!({ "action": "focus_app", "app": "xfce4-panel", "raise_window": true }),
-        json!({ "action": "scroll", "direction": "down", "amount": 3, "coordinate": [400, 300], "delivery_mode": "foreground" }),
-        json!({ "action": "click", "coordinate": [400, 300], "delivery_mode": "foreground" }),
+    let agents_md = "/data/work/juniper--k3x9/garden/AGENTS.md";
+    let desk = |args: serde_json::Value| format!("desk: {args}");
+    for said in [
+        desk(json!({ "action": "focus_app", "app": "xfce4-panel", "raise_window": true })),
+        desk(json!({ "action": "scroll", "direction": "down", "amount": 3, "coordinate": [400, 300], "delivery_mode": "foreground" })),
+        desk(json!({ "action": "click", "coordinate": [400, 300], "delivery_mode": "foreground" })),
+        "do the risky thing".to_string(),
+        "code: import shutil; shutil.rmtree('/tmp/fragment-gone', ignore_errors=True); print('code-ran')".to_string(),
+        format!("write: {agents_md}"),
+        "write: ~/.ssh/config".to_string(),
     ] {
-        let turn = x.say(&format!("desk: {args}"));
-        within(fake, chat, &c, APPROVAL_S * 1000 + 60_000, &format!("{} to end", args["action"]), |w| x.reply(w, &turn).is_some() && !x.ends(w, &turn).is_empty()).await;
+        let turn = x.say(&said);
+        within(fake, chat, &c, CARD_S * 1000 + 60_000, &format!("{said} to end"), |w| x.reply(w, &turn).is_some() && !x.ends(w, &turn).is_empty()).await;
         fake.with(|w| {
-            let said = x.reply(w, &turn).unwrap()["text"].as_str().unwrap_or("").to_string();
-            eprintln!("desktop: {} said {}", args["action"], said.chars().take(300).collect::<String>());
-            assert!(x.cards(w, &turn).is_empty(), "{} asks no one: {:?}", args["action"], x.cards(w, &turn));
-            assert!(said.starts_with("scripted: the tool said:"), "the tool ran: {said}");
-            assert!(!said.contains("BLOCKED") && !said.contains("requires approval") && !said.contains("denied"), "{} is not refused: {said}", args["action"]);
+            let reply = x.reply(w, &turn).unwrap()["text"].as_str().unwrap_or("").to_string();
+            eprintln!("nothing technical asks: {said} said {}", reply.chars().take(300).collect::<String>());
+            assert!(x.cards(w, &turn).is_empty(), "{said} asks no one: {:?}", x.cards(w, &turn));
+            assert!(reply.starts_with("scripted: the tool said:") || reply.contains("the tool ran"), "{said}: the tool ran: {reply}");
+            assert!(!reply.contains("BLOCKED") && !reply.contains("requires approval") && !reply.contains("denied"), "{said} is not refused: {reply}");
         });
     }
-    // a flagged command: the guardian first, as the agent, on its tier; then a card
-    let calls_before = x.model.calls.lock().unwrap().len();
-    let risky = x.say("do the risky thing");
-    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
-    let card = fake.with(|w| x.cards(w, &risky)[0].clone());
-    fake.say(chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "deny" }));
-    within(fake, chat, &c, 120_000, "the denied turn's end", |w| !x.ends(w, &risky).is_empty()).await;
+    assert_eq!(c.exec_out(&["cat", agents_md]), support::model::WRITTEN, "the protected file was written");
     let calls = x.model.calls.lock().unwrap();
-    let guardian: Vec<_> = calls[calls_before..].iter().filter(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")).collect();
-    assert_eq!(guardian.len(), 1, "the guardian reviewed it once: {guardian:?}");
-    assert_eq!((guardian[0].agent.as_deref(), guardian[0].model.as_str()), (Some("juniper--k3x9"), "cheap"), "as the agent, on its own model, through the route");
+    assert!(!calls.iter().any(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")), "no guardian");
+    let told = calls.iter().filter(|m| m.path.ends_with("/chat/completions")).filter(|m| m.body["messages"][0]["role"] == "system").map(|m| m.body["messages"][0]["content"].to_string()).find(|s| s.contains("Never ask them to approve a command, a file, a path or code"));
+    assert!(told.is_some_and(|s| s.contains("with the clarify tool and its choices")), "every turn's system prompt says how to ask (the image's platform_hints.relay)");
+}
+
+/// Goal (the hermes e2e lane, 2026-10-14: a Stop on a turn waiting on a
+/// clarify's card closed the card, but the turn ran on until the clarify's
+/// hour was out): with real Hermes, its asker's Stop while a clarify's card
+/// of choices waits ends the turn stopped, its card closed `stopped`, no
+/// choice made for its owner; the bridge's answer to the clarify (`skip`:
+/// Hermes' clarify never reads an interrupt) starts no turn of its own; and
+/// the chat's next message is answered.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_stop_lets_its_clarify_go() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    let of = |w: &support::fake::World, turn: &str, kind: &str| w.bodies(&chat, "work", kind).into_iter().filter(|b| b["turn"] == turn).collect::<Vec<_>>();
+    let turn = turn_of(fake.say(&chat, &person("paul"), json!({ "text": CARD_ASKED })));
+    within(&fake, &chat, &c, 120_000, "the clarify's card", |w| !of(w, &turn, "turn.prompt").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    // well inside the card's hour
+    within(&fake, &chat, &c, 60_000, "the stopped turn's end", |w| !of(w, &turn, "turn.end").is_empty()).await;
+    let next = turn_of(fake.say(&chat, &person("paul"), json!({ "text": "good morning" })));
+    within(&fake, &chat, &c, 120_000, "the next message's end", |w| !of(w, &next, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(of(w, &turn, "turn.end")[0]["outcome"], "stopped");
+        assert_eq!(of(w, &turn, "turn.prompt.closed")[0]["outcome"], "stopped");
+        let replies = |t: &str| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+        // Hermes may answer once more, its model told the question was
+        // skipped: never a choice made for the person
+        assert!(replies(&turn).iter().all(|r| r.contains("\"status\": \"skipped\"") && !r.contains("\"user_response\": \"")), "no choice made: {:?}", replies(&turn));
+        assert!(replies(&next).iter().any(|r| r.contains("good morning")), "{:?}", replies(&next));
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3, "hello, the stopped one and good morning: `skip` is no turn");
+    });
 }
 
 // ---- a turn a restart cuts, then the next message (P5; F10) ----
@@ -2199,25 +2225,26 @@ fn asked_with(calls: &[support::model::Call], said: &str) -> Option<(String, (St
 /// from the journal. So the model's request for "good morning" ends with a
 /// user message of its own (the note as its channel context, then the
 /// message) after an assistant message (the boundary), never joined to the
-/// cut request; no request after the wake has the model call the cut
-/// command again, no card is shown again, "good morning" is answered, and
+/// cut request; no request after the wake has the model ask the cut
+/// question again, no card is shown again, "good morning" is answered, and
 /// the message after it is told nothing.
 ///
-/// Method: the image with a 20 s approval, the scripted model asking for a
-/// command Hermes flags (`risky`), and the DO's owner's sleep under the
+/// Method: the image with a 20 s card, the scripted model asking a question
+/// with choices (`CARD_ASKED`, a card), and the DO's owner's sleep under the
 /// card, taken as the expiry test above takes an idle one; then a wake from
-/// that save. On master (no closing at boot, no note) Hermes joins the next
-/// message to the cut request (its model is given `[paul] do the risky
-/// thing\n\n[paul] good morning`), the scripted model calls the cut command
-/// again, and its card is shown again (`FRAGMENT_DOCKER_SKIP_BUILD=1
-/// FRAGMENT_DOCKER_HERMES_TAG=<an image of master's>` runs this against it).
+/// that save. Before P5 (no closing at boot, no note) Hermes joined the
+/// next message to the cut request (its model was given `[paul] do the
+/// risky thing\n\n[paul] good morning`), the scripted model did the cut
+/// request again, and its card was shown again
+/// (`FRAGMENT_DOCKER_SKIP_BUILD=1 FRAGMENT_DOCKER_HERMES_TAG=<an image>`
+/// runs this against another image).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
-    let risky = x.say("do the risky thing");
-    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    let risky = x.say(CARD_ASKED);
+    within(fake, chat, &c, 120_000, "the card", |w| !x.cards(w, &risky).is_empty()).await;
     // the owner's sleep under the card: held, saved, stopped
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cut-told");
@@ -2241,31 +2268,32 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {said}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
-    // its end, or the cut command's card shown again (master: the fold)
+    // its end, or the cut card shown again (before P5: the fold)
     within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty() || !x.cards(w, &next).is_empty()).await;
     let again = fake.with(|w| x.cards(w, &next));
-    assert!(again.is_empty(), "the cut command's card is not shown again: {again:?}; the model saw {:#?}", x.model_saw(calls_before));
+    assert!(again.is_empty(), "the cut card is not shown again: {again:?}; the model saw {:#?}", x.model_saw(calls_before));
     let after = x.say("and after that");
     within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
 
     let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
-    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("rm -rf")).collect();
+    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("clarify")).collect();
     let logs = c.logs();
     let closed = logs.lines().find(|l| l.contains("boot.cut_turns_closed") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
     let saw = x.model_saw(calls_before);
     fake.with(|w| {
         assert_eq!(x.ends(w, &risky).len(), 1, "the cut turn ends once");
         assert_eq!(x.ends(w, &risky)[0]["error"], "lost when the computer restarted");
-        assert!(redone.is_empty(), "no request after the wake has the model call the cut command again: {redone:?}; the model saw {saw:#?}");
+        assert!(redone.is_empty(), "no request after the wake has the model ask the cut question again: {redone:?}; the model saw {saw:#?}");
         assert!(x.cards(w, &next).is_empty() && x.cards(w, &after).is_empty(), "no card shown again: {:?}; the model saw {saw:#?}", x.cards(w, &next));
         assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
     });
     let (asked, (before_role, before)) = asked_with(&calls, "good morning").unwrap_or_else(|| panic!("a model request for good morning; it saw {saw:#?}"));
     assert!(asked.starts_with("[Recent channel messages]\n"), "the note first, nothing joined before it: {asked:?}");
-    for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “do the risky thing”", "[New message]\n[paul] good morning"] {
+    let answering = format!("It was answering: “{CARD_ASKED}”");
+    for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", &answering, "[New message]\n[paul] good morning"] {
         assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
     }
-    assert!(!asked.contains("[paul] do the risky thing"), "the cut request is never joined to it: {asked:?}");
+    assert!(!asked.contains(&format!("[paul] {CARD_ASKED}")), "the cut request is never joined to it: {asked:?}");
     assert_eq!(before_role, "assistant", "the cut turn is closed before it (Hermes' failed-turn boundary; {closed}): {before:?}");
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");

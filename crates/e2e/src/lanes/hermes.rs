@@ -330,22 +330,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // ends at once can end before it)
     screen(s, api, &owner, &id, &agent_name, &stop_desktop)?;
 
-    // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
+    // nothing technical asks (Paul, 2026-10-14): a command Hermes flags runs at once
     let r = say(3, "run: rm -rf /tmp/fragment-risky && echo tool-ran")?;
     let risky = turn_for(&r);
-    let carded = s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &risky).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
-    let card = work_of(&records(api, &owner, &chat_name, "work"), &risky).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
-    s.ok("Hermes asks before a risky command: a card asking the agent's owner", carded && card["body"]["asks"] == owner_id.as_str(), &card);
-    let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-    let once = card["body"]["options"].as_array().and_then(|o| o.iter().find(|o| o["id"] == "once").or(o.first())).and_then(|o| o["id"].as_str()).unwrap_or("once").to_string();
-    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": once } });
-    api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
     let ran = s.eventually(TURN, || reply_of(&risky).is_some_and(|t| t.contains("the tool ran")));
-    let closed = work_of(&records(api, &owner, &chat_name, "work"), &risky).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();
-    s.ok("its owner's answer runs it, the card closed as answered", ran && closed["body"]["outcome"] == "answered", json!({ "reply": reply_of(&risky), "closed": closed }));
+    let work = work_of(&records(api, &owner, &chat_name, "work"), &risky);
+    s.ok("a command Hermes flags (a recursive delete) runs at once: no card asks the agent's owner", ran && !work.iter().any(|r| r["body"]["kind"] == "turn.prompt"), json!({ "reply": reply_of(&risky), "work": work }));
+
+    // a question with choices (Hermes' clarify) is a card asking the agent's owner, whose answer it hears
+    let r = say(8, "clarify: Which pot should the basil go in? | clay | plastic")?;
+    let asking = turn_for(&r);
+    let carded = s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &asking).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
+    let card = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
+    s.ok("a question with choices is a card asking the agent's owner", carded && card["body"]["asks"] == owner_id.as_str() && card["body"]["text"].as_str().is_some_and(|t| t.starts_with("Which pot")), &card);
+    let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
+    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0" } });
+    api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
+    let heard = s.eventually(TURN, || reply_of(&asking).is_some_and(|t| t.contains("clay")));
+    let closed = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();
+    s.ok("its owner's answer reaches the agent, the card closed as answered", heard && closed["body"]["outcome"] == "answered", json!({ "reply": reply_of(&asking), "closed": closed }));
 
     // Stop: its asker stops a turn waiting on its card
-    let r = say(4, "run: rm -rf /tmp/fragment-stop && echo tool-ran")?;
+    let r = say(4, "clarify: Shall I water the basil now? | yes | no")?;
     let stopping = turn_for(&r);
     s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &stopping).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
     let stop = json!({ "id": "stop-1", "body": { "kind": "stop", "turn": stopping } });
@@ -353,8 +359,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let stopped = s.eventually(TURN, || ended(&stopping) == Some(json!("stopped")));
     let closed = work_of(&records(api, &owner, &chat_name, "work"), &stopping).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();
     s.ok(
-        "its asker's Stop ends the turn stopped, its card closed, the command never run",
-        stopped && closed["body"]["outcome"] == "stopped" && reply_of(&stopping).is_none_or(|t| !t.contains("the tool ran")),
+        "its asker's Stop ends the turn stopped, its card closed",
+        stopped && closed["body"]["outcome"] == "stopped",
         json!(work_of(&records(api, &owner, &chat_name, "work"), &stopping)),
     );
 
@@ -603,7 +609,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // a restart mid-turn: a turn waiting on its card when the computer sleeps
-    let r = say(10, "run: rm -rf /tmp/fragment-restart && echo tool-ran")?;
+    let r = say(10, "clarify: Shall I move the basil indoors? | yes | no")?;
     let lost = turn_for(&r);
     s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &lost).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
     std::thread::sleep(QUEUE_DRAIN);
@@ -621,7 +627,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         w.iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "expired") && w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "error")
     });
     s.ok(
-        "a turn the restart cut short ends in an error, its card expired, its command never run",
+        "a turn the restart cut short ends in an error, its card expired, its question never answered",
         closed && reply_of(&lost).is_none_or(|t| !t.contains("the tool ran")),
         json!(work_of(&records(api, &owner, &chat_name, "work"), &lost)),
     );

@@ -29,8 +29,6 @@
 //!   `message_agent` to that teammate (`pong from <its first line>`) before
 //!   the reply; and a message telling it to `end this turn with exactly
 //!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
-//! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
-//!   asked;
 //! - `image: <url>` is answered with that image (`![a cat](<url>)`), as a
 //!   model whose tool made one at its provider (FAL) gives it; and the
 //!   model's own server serves one at `/generated/<name>.png` (`IMAGE`), as
@@ -280,10 +278,6 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
         return (format!("scripted: {ran}"), None);
-    }
-    // Hermes' smart-approval guardian asks for one word: a person decides.
-    if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
-        return ("ESCALATE".into(), None);
     }
     // `image: <url>`: an answer with that image, as a model whose tool made
     // one at its provider gives it (a markdown image, which Hermes sends)

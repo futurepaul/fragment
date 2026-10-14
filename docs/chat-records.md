@@ -261,13 +261,17 @@ steps said) as `other`, by its `tool`. The bridge's runtime says which
 (our Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
-{ "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>", "text": "Run `rm -rf x`?",
-  "options": [ { "id": "once", "label": "Allow once", "style": "primary" },
-               { "id": "deny", "label": "Deny", "style": "danger" } ],
+{ "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
+  "text": "Make your recipe app public, so anyone with its link can open it?",
+  "options": [ { "id": "c0", "label": "Yes, make it public", "style": "primary" },
+               { "id": "c1", "label": "No, keep it private" },
+               { "id": "other", "label": "Something else", "words": true } ],
   "asks": "id:<owner>", "expiresAt": 1791000000000 }
 ```
 
-Part `p:<prompt>`: a card with buttons. `prompt` and option ids are
+Part `p:<prompt>`: a card with buttons, a question its runtime asks in
+plain words (our Hermes image asks none about a command, a file or code:
+docs/computers.md, "Approvals in our Hermes image"). `prompt` and option ids are
 `^[A-Za-z0-9._-]{1,64}$` (options `{1,32}`), 1 to 8 options, `style`
 optional (`primary`, `danger`). An option with `"words": true` is
 answered in words (a clarify's "Other": docs/bridge.md, Relay): a field
@@ -280,7 +284,7 @@ ends it.
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
-  "outcome": "answered", "option": "once", "by": "npub1…" }
+  "outcome": "answered", "option": "c0", "by": "npub1…" }
 ```
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
