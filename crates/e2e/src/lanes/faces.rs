@@ -216,7 +216,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     if s.hosted() {
         s.skip("a picture pushed through git that is no picture is refused at its install", "a preview's git is written through the platform's files route, which refuses it first (above)");
     } else {
-        s.commit(&created, &[("fragment.json", Some(format!("{{\"template\":\"agent\",\"meta\":{{\"title\":\"Frank\"}}}}\n").as_bytes())), ("avatar.png", Some(b"<svg/>"))]);
+        s.commit(&created, &[("fragment.json", Some(br#"{"template":"agent","meta":{"title":"Frank"}}"#)), ("avatar.png", Some(b"<svg/>"))]);
         s.deploy(&created);
         let said = api.status(&paul, &agent)?.body["code"]["error"].clone();
         let served = fetched(api, &shown)?;

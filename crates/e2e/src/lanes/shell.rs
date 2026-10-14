@@ -1154,6 +1154,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         pictured && offers["label"] == "Change picture" && offers["remove"] == true,
         json!({ "offers": offers, "row": own_row_of(api, me.session, &agent) }),
     );
+    b.eval(page, &format!("(document.querySelector({face})?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("settings-agent-face.png"));
     // the chat: its header in the shell, and its page
     open_row(b, page, chat, wait)?;

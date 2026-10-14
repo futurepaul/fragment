@@ -527,6 +527,24 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let failed = chrome.eval(&page, "import('./response-actions.js').then(async (a) => { Object.defineProperty(navigator, 'share', { configurable: true, value: async () => { throw new Error('Unavailable'); } }); const result = await a.share({text: 'fallback', title: 'Chat'}); delete navigator.share; return result === 'Copied' && window.__copied === 'fallback'; })")?;
     s.ok("a failed native share falls back to copy too", failed == true, "");
 
+    // renamed while its chat's page is open (its fragment's title, put
+    // live), the agent is named so on that page, which no shell frames, as
+    // its next turn ends (docs/chat-records.md, "Who is who")
+    s.commit(&agent, &[("fragment.json", Some(br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } }, "meta": { "title": "Juniper Renamed" } }"#))]);
+    s.deploy(&agent);
+    chrome.front(&page)?;
+    say(&mut chrome, "after your rename")?;
+    let renamed = shows(
+        &mut chrome,
+        &page,
+        &format!("{} && [...document.querySelectorAll('.msg.agent .who')].pop()?.textContent === 'Juniper Renamed' && document.getElementById('head-label').textContent === 'Juniper Renamed'", replied("after your rename")),
+    );
+    s.ok(
+        "renamed while its chat's page is open, that page (no shell around it) names it so once its next turn ends",
+        renamed,
+        chrome.eval(&page, "({ by: [...document.querySelectorAll('.msg.agent .who')].pop()?.textContent, head: document.getElementById('head-label').textContent })")?,
+    );
+
     // away from the chat (its page closed), a reply reaches each of its people once
     chrome.close(page)?;
     let member_push = s.name("chat-member-push");
@@ -543,7 +561,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let ended = runs_ended(s);
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     let text = reply["body"]["text"].as_str().unwrap_or("").to_string();
-    let want = json!({ "title": capital(&label), "body": text, "tag": chat_name, "url": "./" });
+    // titled with its name as renamed above (job.people: its fragment's title)
+    let want = json!({ "title": "Juniper Renamed", "body": text, "tag": chat_name, "url": "./" });
     s.ok(
         "away, the agent's reply is pushed once to each of the chat's people: its name, its words, the chat",
         answered && pushed && ended && text.chars().count() <= 120 && s.push.received(&owner_push) == [want.clone()] && s.push.received(&member_push) == [want.clone()],
@@ -565,6 +584,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
+
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())

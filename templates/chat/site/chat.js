@@ -482,11 +482,12 @@ export function mount(root) {
     if (!askTimer) askTimer = setTimeout(ask, 20);
   }
   // An agent's name and picture change while the page is open (it renamed
-  // itself in a turn): it is asked again as each of its turns ends.
+  // itself in a turn): it is asked again as each of its turns ends, its
+  // profile shown as it was until the answer comes.
   function again(principal) {
-    if (!profiles.get(principal)) return;
-    profiles.delete(principal);
-    want(principal);
+    if (!profiles.get(principal) || asking.has(principal)) return;
+    asking.add(principal);
+    if (!askTimer) askTimer = setTimeout(ask, 20);
   }
   async function ask() {
     askTimer = 0;
@@ -495,7 +496,7 @@ export function mount(root) {
     // bounded: one call per PROFILES_PER_ASK ids asked
     for (let i = 0; i < ids.length; i += PROFILES_PER_ASK) {
       const batch = ids.slice(i, i + PROFILES_PER_ASK);
-      let found = {};
+      let found = null;
       try {
         const query = batch.map((id) => `id=${encodeURIComponent(id)}`).join("&");
         const r = await fetch(`./__people?${query}`, { credentials: "same-origin" });
@@ -503,7 +504,8 @@ export function mount(root) {
       } catch {
         // unnamed for now: shown by what the records say
       }
-      for (const id of batch) profiles.set(id, found[id] ?? {});
+      // unanswered, one known already stays as it was
+      for (const id of batch) profiles.set(id, found ? (found[id] ?? {}) : (profiles.get(id) ?? {}));
     }
     schedule();
   }
