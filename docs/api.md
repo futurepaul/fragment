@@ -37,7 +37,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
-| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; fragment.club's is https://fragment.club, on no fragment's domain). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
+| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
 
@@ -240,6 +240,22 @@ Only the owner, or their agent sharing for them, manages members,
 invites, visibility, and tokens; a member may leave. Each identity's
 list of fragments is kept in its `Principal` cell, fed from each
 fragment's outbox.
+
+### Who can do what, where
+
+Each way in acts as a principal, held to that principal's role on the
+fragment (above); what costs money is paid from an owner's ledger (a
+fragment's owner for its jobs' paid steps, an agent's owner for its
+turns: Ledger, below). The same table is in cli/GUIDE.md, so
+`/llms-full.txt` carries it (Agent docs, below).
+
+| | call operations | read or write records | use models | share and invite | deploy |
+|---|---|---|---|---|---|
+| **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: a template from the shell's catalog is live as it is made; the rest is an agent's |
+| **their agent, on its computer** (signed by its computer's egress, `for` its owner) | `POST /api/f/{name}/ops/{op}` (`fragment call`), at its own grants, or `for` its owner at the lower of theirs and its cap (at most `editor`) | channels and posts at that role; its chats are records (docs/chat-records.md) | the model route (Models), on its tier or its owner's own model, paid by its owner | `for` its owner, on what its owner owns (above): members, invites, visibility, rotation; never a delete or a cap | `files` and `deploy` at that role: an editor's; what it creates is its owner's |
+| **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels; a channel trigger hands it the record | `job.ai.text`, `job.ai.image` (AI, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
+| **a coding agent, with the CLI** (a key a person approved: `fragment login`) | `fragment call`, as that person | `fragment channel [--follow]`, `fragment post` | its own; the platform's only through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate`: the owner's | `fragment sync`, `write`, `deploy`, `rollback`: an editor's |
+| **an MCP client, through `fragment mcp`** (that CLI, over stdio) | the fragment's operations that have a `description`, as tools, at the key's role: its queries, and with `--write` its mutations and jobs | none but through operations | its own; the platform's through a described job | none | none |
 
 ## Identities
 
@@ -1848,14 +1864,31 @@ always had.
 
 For an agent with no CLI yet (llmstxt.org), the platform's own host
 answers `GET /llms.txt` with `cli/SKILL.md`, the text `fragment skill`
-prints (what fragment is, the install, pairing, the daily commands),
-and `GET /llms-full.txt` with `cli/GUIDE.md`, the text `fragment guide`
-prints (the whole manual). Both are the CLI's own files, which the
-release carries in the cell's Static Assets (Serving, The release's
-files), so they never drift from it. They answer anyone, as
-`text/plain; charset=utf-8` with `Cache-Control: no-cache` and an ETag
-of their hash (304 when `If-None-Match` names it), as `__fragment.js`
-does. On a fragment's host the same paths are the fragment's own.
+prints (the handoff to a coding agent building for a person: what a
+fragment is, the install, `fragment login --host`, building, deploying
+and sharing, design, the primitives, its person's apps as tools through
+`fragment mcp`), and `GET /llms-full.txt` with `cli/GUIDE.md`, the text
+`fragment guide` prints (the whole manual, with Who can do what, where,
+below). Both are the CLI's own files, which the release carries in the
+cell's Static Assets (Serving, The release's files), so they never drift
+from it. Neither names a host: each has two blanks, `{{platform}}` and
+`{{fragment}}`, that whoever shows it fills (`fragment_templates::
+agent_doc`). The cell fills them with its own deployment's platform
+(`FRAGMENT_PLATFORM_URL`) and a fragment's origin there, `<name>` for its
+name (`https://<name>.<suffix>`, a branch's mark before the dot), so
+production's say `https://finite.chat` and a preview's its own; the CLI
+fills them with the host it calls, and a fragment's as
+`https://<name>.<the platform's domain for fragments>`. They answer
+anyone, as `text/plain; charset=utf-8` with `Cache-Control: no-cache`
+and an ETag of the file's hash and what filled it (304 when
+`If-None-Match` names it, before the file is read). On a fragment's host
+the same paths are the fragment's own.
+
+The shell's settings hand them on: "Build with Claude Code or Codex" is
+a prompt to copy, `Read <the platform>/llms.txt and help me build: `,
+which the person finishes and pastes into their coding agent, which
+installs the CLI and asks them to approve it. The install line itself is
+folded below it ("Install it yourself").
 
 ### Operations as MCP tools (`fragment mcp`)
 

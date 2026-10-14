@@ -112,7 +112,8 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 /// The agent docs on the platform's origin, for an agent with no CLI yet
 /// (llmstxt.org): `fragment skill`'s text and `fragment guide`'s, the same
 /// files (cli/SKILL.md, cli/GUIDE.md), so they cannot drift: the release's,
-/// read from its Static Assets (assets.rs).
+/// read from its Static Assets, their blanks filled with this deployment's
+/// platform and fragments (assets.rs).
 const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
 const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
@@ -1013,8 +1014,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
-        (Method::Get | Method::Head, ["llms.txt"]) => assets::serve(&req, env, LLMS_TXT, "text/plain; charset=utf-8").await,
-        (Method::Get | Method::Head, ["llms-full.txt"]) => assets::serve(&req, env, LLMS_FULL_TXT, "text/plain; charset=utf-8").await,
+        (Method::Get | Method::Head, ["llms.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_TXT).await,
+        (Method::Get | Method::Head, ["llms-full.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_FULL_TXT).await,
         (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;

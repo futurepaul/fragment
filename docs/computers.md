@@ -1594,7 +1594,10 @@ and how a runtime finds them, is the image's.
 - **The platform skill**, `fragment`, is every profile's, whatever the
   skills fragment holds: what an agent knows of the platform it is on. It
   is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
-  what a fragment is, the commands for the agent's fragments) after a page
+  what a fragment is, the commands for the agent's fragments; its
+  platform's URL the CLI's default, production's, since nothing names
+  another at the image's build, and the agent skips the install and
+  pairing it names) after a page
   of what the computer adds (`images/hermes/boot/src/computer.md`: that it
   is an agent on a Fragment computer acting for its owner with no login,
   the apps and brain skills to load, its connections as placeholders in

@@ -1,8 +1,9 @@
 # fragment-next
 
-Fragment publishes stateful, multiplayer web apps from the CLI. Sign up
-(invite-only for now), pair the `fragment` CLI, and publish. fragment.club
-lists your fragments, and fragment.boats serves them.
+Fragment publishes stateful, multiplayer web apps from the CLI. Sign in,
+pair the `fragment` CLI (or hand your coding agent the platform's
+`/llms.txt`), and publish. The platform lists your fragments, and serves
+each at its own address.
 Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
@@ -34,19 +35,26 @@ it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
 ## Use it
 
-fragment.club is invite-only for now. To start, tell your agent:
+Production will be https://finite.chat (its fragments at
+`*.finite.place`); a preview is its own `<branch>` copy. To start, tell
+your coding agent (Claude Code, Codex), naming the platform you use:
 
 ```
-Read https://fragment.club/llms.txt and help me make my first fragment.
+Read https://finite.chat/llms.txt and help me build: …
 ```
 
-Or install the CLI yourself (macOS or Linux, no sudo; put
-`~/.local/bin` on your PATH if it is not), then pair it with you:
+Its `/llms.txt` is filled in with that platform's own URLs (docs/api.md,
+Agent docs); its settings give the same prompt to copy. Or install the
+CLI yourself (macOS or Linux, no sudo; put `~/.local/bin` on your PATH if
+it is not), then pair it with you:
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
-fragment login
+fragment login --host https://finite.chat
 ```
+
+`fragment login --host` saves its host for every later command; with
+none ever named, the CLI calls https://finite.chat.
 
 `fragment guide` is the manual; `fragment skill` prints a SKILL.md for
 your coding agent.

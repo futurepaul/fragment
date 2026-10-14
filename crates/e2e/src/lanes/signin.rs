@@ -305,13 +305,15 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let theirs = from_shell(api, &chooser, "GET", "/api/fragments", None, &api.base, "same-origin")?;
     let script = api.unsigned("GET", "/__shell/shell.js", None)?;
     s.ok(
-        "their settings are the shell's: it knows who they are, that they have no fragments yet, and says how to pair a CLI and a coding agent",
+        "their settings are the shell's: it knows who they are, that they have no fragments yet, and hands a coding agent this platform's llms.txt (the install folded beside it)",
         is_shell(&settings)
             && who(api, &chooser)?["email"] == "chooser@e2e.test"
             && theirs.status == 200
             && theirs.body["fragments"].as_array().is_some_and(|f| f.is_empty())
+            && script.text.contains("Build with Claude Code or Codex")
+            && script.text.contains("/llms.txt and help me build: ")
             && script.text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
-            && script.text.contains("`fragment login`")
+            && script.text.contains("fragment login --host ${location.origin}")
             && script.text.contains("fragment skill > ~/.claude/skills/fragment/SKILL.md"),
         format!("{settings} / {theirs}"),
     );

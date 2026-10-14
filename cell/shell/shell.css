@@ -451,6 +451,12 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-section p code { padding: 2px 5px; border-radius: 5px; background: var(--chat-code); }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
 .settings-section pre.command { width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+/* settings' Build with Claude Code or Codex: the prompt to copy (16px: no zoom as it takes focus), the install folded */
+.settings-section textarea.build-prompt { width: 100%; min-height: 80px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 16px; line-height: 1.5; resize: vertical; }
+.settings-section textarea.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+.settings-install { width: 100%; padding: 4px 2px 8px; }
+.settings-install summary { width: max-content; padding: 6px 0; color: var(--text-secondary); font-size: 13.5px; cursor: pointer; }
+.settings-install p { margin: 8px 0; font-size: 14px; }
 .settings-section .picture { margin-top: 12px; margin-bottom: 2px; }
 .settings-section .picture img { width: 24px; height: 24px; }
 @container settings (max-width: 880px) {

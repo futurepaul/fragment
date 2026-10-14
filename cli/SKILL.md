@@ -1,21 +1,27 @@
 ---
 name: fragment
-description: Publish small stateful web apps with built-in multiplayer on fragment.club, using the `fragment` CLI. Use when the person wants to make, publish, share, or change a fragment, or wants a web page or app of theirs online at a link.
+description: Build, publish and share small stateful, multiplayer web apps (fragments) for the person you work with, on {{platform}}, with the `fragment` CLI. Use when they want an app, a page, a tracker, a shared list or a webhook inbox online at a link, want to change or share one, or want to use their apps as tools.
 ---
 
 # fragment
 
-A fragment is a small web app at its own link: pages, an app of
-operations over its own SQLite, channels that every open page follows
-live (multiplayer is built in), and members with roles. Use one when the
-person wants something on the web that keeps its state or that others
-open with them: a shared list, a tracker, notes, a webhook inbox, a chat,
-a small site. fragment.club is invite-only: the person must have been
-invited.
+You are helping a person build on Fragment, at {{platform}}. A fragment
+is a small web app at its own link, {{fragment}}: pages, an app of
+named operations over its own SQLite, channels that every open page
+follows live (multiplayer is built in), and members with roles. Make one
+when your person wants something on the web that keeps its state or
+that others use with them: a shared list, a tracker, a poll, notes, a
+webhook inbox, a small site. Your person signs in at {{platform}}, where
+their apps are, and shares them from there or through you.
+
+This page is the handoff. {{platform}}/llms-full.txt (the same text as
+`fragment guide`) is the whole manual: read it before you build past a
+template.
 
 ## Install
 
-On macOS or Linux, with no sudo:
+macOS or Linux, with no sudo (on Windows, run it in WSL). The same line
+updates it:
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
@@ -25,81 +31,112 @@ If `fragment` is then not found, `~/.local/bin` is not on the PATH: run
 it as `~/.local/bin/fragment` (an agent's shell may not keep an
 `export` from one command to the next), or run `export
 PATH="$HOME/.local/bin:$PATH"` and add that line to `~/.zshrc` or
-`~/.bashrc`. The same command updates it.
+`~/.bashrc`.
 
 In a sandbox that reaches only the hosts it allows (Claude Code on the
 web, Codex cloud), the install needs `github.com` and
-`release-assets.githubusercontent.com`, and the CLI needs
-`fragment.club` (and `*.code.storage` for `fragment sync` and `deploy
---dir`). When one is blocked, ask the person to allow it in the
-environment's network settings. Each new sandbox is a new machine: pair
-it again.
+`release-assets.githubusercontent.com`, and the CLI needs {{platform}}
+(and `*.code.storage` for `fragment sync` and `deploy --dir`). When one
+is blocked, ask your person to allow it in the environment's network
+settings. Each new sandbox is a new machine: pair it again.
 
 An agent on a Fragment computer (`FRAGMENT_AS_AGENT` is set) needs neither
 this nor pairing: `fragment` is installed there, and acts as the agent.
 
 ## Pair
 
-`fragment login`, once per machine. It opens fragment.club, where the
-person signs in and approves this machine's key (the page and the
-terminal show the same ending). With no browser at hand, `fragment login
---no-wait` prints the link: give it to the person, and run `fragment
-login` again once they have approved it.
+```
+fragment login --host {{platform}}
+```
 
-## Your fragments
+Once per machine. It opens {{platform}} in a browser, where your person
+signs in and approves this machine's key (the page and the terminal show
+the same ending); the CLI keeps the host, so later commands need no
+`--host`. With no browser at hand, `--no-wait` prints the link: give it
+to your person, and run `fragment login` again once they have approved
+it. From then on the CLI acts as them. Their account must be one that
+makes apps: a guest only edits what is shared with them.
+
+## Build, deploy, share
 
 ```
-fragment whoami                                  # who you are (an agent: for whom it acts)
-fragment list                                    # the fragments you have a role on, and the role
-fragment status <name>                           # its links, its live commit, why its code was refused, its page's errors
-fragment events <name> --tail 30                 # what happened there: believe it over your memory
-fragment sync <name> --dir <folder> --mode pull  # its files, into a folder
-fragment create <label> --template todo          # a new one (`fragment new --list`: the templates)
-fragment write <name> site/index.html --from index.html   # one text file to main
+fragment init my-app --template todo             # a folder my-app/, created and live: prints its links
+fragment deploy my-app --dir my-app              # after an edit: sync the folder, then put it live
+fragment status my-app                           # its links, its live commit, why its code was refused, its page's errors
+fragment events my-app --tail 30                 # what happened there: believe it over your memory
+fragment call my-app add --input '{"text":"hi"}' # one of its operations
+fragment visibility my-app link                  # public | link (anyone with the share link) | members
+fragment members add my-app bea@example.com --role editor   # by email; viewer | editor
+fragment list                                    # your person's fragments
+fragment create <label> --template todo          # one with no folder (`fragment new --list`: the templates)
+fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
-fragment call <name> <operation> --input '{}'    # one of its operations
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
 ```
 
 A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
-the suffix to the label you create it with); a bare label names the one
-of yours with it (an agent's: its owner's).
+the suffix); a bare label names the one of your person's with it.
+
+Go in this order: say the app in one sentence (who it is for, the job it
+does); build the smallest version that does that job, and deploy it;
+reload it and check its state is still there, then open it twice and
+check a change in one shows in the other without a reload; hand back its
+link with one suggested next step. Add nothing they didn't ask for.
 
 Who can open a fragment is the person's to decide: before you make one
 public or share it with someone new, ask them in plain words, unless
 they asked for exactly that, and then say what you did.
 
+## Design
+
 Apps default to no header: no title bar, banner, hero, or page-title
 heading unless the person asks for one. The shell already frames the app
 with its title; start with useful content. Design for a narrow pane
-(about 380 px) and phones. A heading may name content or a section.
-Link `./__fragment.css` for the platform's look, then build on its theme
-variables and base styles; the stylesheet is optional.
+(about 380 px) and phones: one column, thumb-sized targets, nothing that
+needs a hover. Link `./__fragment.css` for the platform's look, then
+build on its theme variables and base styles: warm greys and one accent
+color, used sparingly. None of: gradients, glow, decorative emoji, heavy
+shadows.
 
-Give every operation you write a `description` in `fragment.json`: what
-it does and what it answers, in plain text (`"description": "Add a todo
-with this text. Answers its {id}."`). People and agents read it in
-`fragment status` to know what to call.
+## What an app has
 
-## Ask another agent
+- **Operations**, named in `fragment.json` and written in `app.mjs`: a
+  query reads, a mutation changes the app's SQLite (all or nothing, once
+  per id), a job runs durable steps. Each has a `role` (who may call it)
+  and an `input` JSON Schema. Give every operation you write a
+  `description`: what it does and what it answers, in plain text
+  (`"description": "Add a todo with this text. Answers its {id}."`).
+  People and agents read it in `fragment status` to know what to call,
+  and a described operation is a tool (below).
+- **Pages** import `./__fragment.js`: `fragment.call`, `fragment.live` (a
+  query that re-runs after every change), `fragment.subscribe` (a
+  channel's records, live), presence, web push.
+- **Channels**: records a mutation publishes and pages follow live;
+  `inbox` takes webhooks, `events` is the log.
+- **Triggers**: a cron, a record on a channel, a change to files.
+- **Job steps**: `job.fetch` (a secret `{{NAME}}` in a header is filled
+  outside your code), `job.sleep`, `job.files`, `job.push`, and AI,
+  which the fragment's owner pays for: `job.ai.text` (text on the
+  platform's model tiers, `cheap` or `medium`) and `job.ai.image` (a
+  JPEG into the fragment's files).
 
-An agent hands work to another of its owner's agents by @naming it in a
-chat they share, or with:
+## Use their apps as tools
+
+`fragment mcp <name>` serves a fragment's described operations as MCP
+tools over stdio, as your person: its queries, and with `--write` its
+mutations and jobs too.
 
 ```
-fragment ask <agent> "<question>" --wait    # in a chat of you two and your owner; prints its answer
-fragment ask <agent> "<question>" --chat <chat>   # in that chat (the agent is added to it)
+claude mcp add groceries -- fragment mcp groceries            # Claude Code: read only
+claude mcp add groceries -- fragment mcp groceries --write    # and change things
+codex mcp add groceries -- fragment mcp groceries             # Codex
 ```
 
-`--wait` waits up to 150 seconds (`--wait <seconds>`, at most 1800: give
-your terminal call a timeout above it); without it
-the answer comes in the chat. A person can ask one of their agents the
-same way (in their chat with it). Three hand-offs in a row without a
-person stop, and a chat allows its agents 20 turns of each other in 5
-minutes.
+`fragment list` shows what your person has. An operation without a
+`description` is no tool: describe the ones a model should use.
 
 ## Then
 
-Run `fragment guide` (or read https://fragment.club/llms-full.txt, the
-same text) and read it all before you build: it is the whole manual
-(the folder, operations, deploys, sharing, the ledger, errors).
+Run `fragment guide` (or read {{platform}}/llms-full.txt, the same
+text) and read it all before you build: the folder, operations, jobs and
+their steps, deploys, sharing, who can do what where, the ledger, errors.
