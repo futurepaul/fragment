@@ -120,7 +120,17 @@ pub enum LiveOut {
     /// A channel's draft: a record its poster is writing (a reply as it
     /// streams), its whole text so far, or `null` once they stopped.
     /// Never stored; the record that carries the same `turn` replaces it.
-    Draft { channel: String, principal: String, turn: String, text: Option<String>, at: i64 },
+    /// `thinking`: a job's text step whose model reasons with no words yet
+    /// (its text empty), for this many ms so far.
+    Draft {
+        channel: String,
+        principal: String,
+        turn: String,
+        text: Option<String>,
+        at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<u64>,
+    },
     /// A mutation applied: re-run live queries.
     Changed { op: String },
     /// A query's answer.

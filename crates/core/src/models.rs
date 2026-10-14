@@ -40,13 +40,23 @@
 //! own with the whole call's (spike S4): only that last, cumulative one is
 //! metered, and the client reads OpenAI's shape, usage once on a last chunk
 //! with no choices (`Stream`). An OpenAI-compatible API streams that shape
-//! already, and is metered from its last chunk.
+//! already, and is metered from its last chunk. A stream's answer is whole
+//! at its `[DONE]`: a reader stops there (the gateway has held a stream
+//! open for minutes after it, 2026-10-07).
+//!
+//! A job's text step (`text_body`) is such a call, streamed, its tools
+//! bounded (`TOOLS_MAX`, `TOOLS_MAX_BYTES`) and its request too
+//! (`AI_TEXT_MAX_BYTES`), its answer read into one message as it streams
+//! (`Stream::answering`, `Answer`): the text, the tool calls, why it
+//! stopped, and never the model's reasoning, of which only its length is
+//! counted (a draft's "thinking").
 
-use fragment_proto::Tier;
+use fragment_proto::{valid_channel_name, valid_op_id, Tier, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::price::{PriceBook, Usage};
+use crate::steps::AiText;
 
 /// GLM-5.3 Flash and DeepSeek V4 Flash, as Workers AI's catalog names
 /// them: each id once, each role below naming its model.
@@ -119,6 +129,22 @@ pub const EFFORTS: [&str; 2] = ["low", "high"];
 /// bytes. A longer line is passed through unread, and the call is metered
 /// at its reservation (its usage cannot be trusted).
 pub const SSE_LINE_MAX: usize = 1024 * 1024;
+/// A text step's tools: at most this many, in at most this many bytes of
+/// JSON (what the model reads on every call).
+pub const TOOLS_MAX: usize = 64;
+pub const TOOLS_MAX_BYTES: usize = 64 * 1024;
+/// A function's name, as OpenAI takes one: 1 to 64 of letters, digits,
+/// `_` and `-`.
+pub const TOOL_NAME_MAX_BYTES: usize = 64;
+/// The tool calls one answer is read for: a delta for a later index is
+/// out of the stream's contract, and dropped.
+pub const TOOL_CALLS_MAX: usize = 128;
+/// A text step's arguments (its messages and tools, as JSON): half a
+/// Workflow step's result, which carries them to the supervisor
+/// (`limits::RESULT_MAX_BYTES`), so a long tool loop is refused in the
+/// app's realm (platform.mjs) and here, saying why, never by the Workflow.
+pub const AI_TEXT_MAX_BYTES: usize = 512 * 1024;
+const _: () = assert!(AI_TEXT_MAX_BYTES * 2 <= fragment_proto::limits::RESULT_MAX_BYTES && AI_TEXT_MAX_BYTES < MODEL_BODY_MAX_BYTES);
 
 /// Where one of the route's models runs (a deployment's `models`, each
 /// slot one of these, `provider` its kind). Its `model` is also its row in
@@ -307,6 +333,19 @@ pub enum Refusal {
     MaxTokens,
     /// A `stream` that is not true or false.
     Stream,
+    /// A step's tools past `TOOLS_MAX` or `TOOLS_MAX_BYTES`, one not shaped
+    /// as OpenAI's function (a key it does not take), a name that is not a
+    /// function's, or one named twice.
+    Tools,
+    /// A tool whose `parameters` is no object schema (`{"type": "object", …}`).
+    ToolSchema,
+    /// A `tool_choice` with no tools, or naming a function not among them.
+    ToolChoice,
+    /// A draft to a channel that is no app's, or under a turn that is not
+    /// `^[A-Za-z0-9._:-]{1,128}$`.
+    Draft,
+    /// A step's arguments past `AI_TEXT_MAX_BYTES`.
+    TextTooLarge,
 }
 
 impl Refusal {
@@ -319,7 +358,181 @@ impl Refusal {
             Refusal::NoMessages => "a chat completion has messages: at least one".into(),
             Refusal::MaxTokens => format!("max_tokens is a positive integer (at most {MAX_TOKENS} is used)"),
             Refusal::Stream => "stream is true or false".into(),
+            Refusal::Tools => format!(
+                "ai.text takes at most {TOOLS_MAX} tools in {TOOLS_MAX_BYTES} bytes, each {{\"type\": \"function\", \"function\": {{name, description?, parameters?, strict?}}}} and no other key, named 1 to {TOOL_NAME_MAX_BYTES} letters, digits, '_' or '-', once"
+            ),
+            Refusal::ToolSchema => "a tool's parameters is a JSON Schema of an object: {\"type\": \"object\", \"properties\": {…}}".into(),
+            Refusal::ToolChoice => "tool_choice is none, auto, required, or a function among the tools".into(),
+            Refusal::Draft => "a draft names an app's channel and a turn matching ^[A-Za-z0-9._:-]{1,128}$".into(),
+            Refusal::TextTooLarge => format!("job.ai.text's arguments are at most {AI_TEXT_MAX_BYTES} bytes of JSON"),
         }
+    }
+}
+
+fn valid_tool_name(name: &str) -> bool {
+    (1..=TOOL_NAME_MAX_BYTES).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The keys a tool's `function` takes (OpenAI's); any other is refused, as
+/// a tool the model would read otherwise than the app meant.
+const FUNCTION_KEYS: [&str; 4] = ["name", "description", "parameters", "strict"];
+
+/// A step's tools, OpenAI's functions (`{type: "function", function:
+/// {name, description?, parameters?, strict?}}`), within their bounds: their
+/// names, or why not.
+fn tool_names(tools: &[Value]) -> Result<Vec<&str>, Refusal> {
+    let bytes = serde_json::to_vec(tools).expect("a JSON value serializes").len();
+    if tools.len() > TOOLS_MAX || bytes > TOOLS_MAX_BYTES {
+        return Err(Refusal::Tools);
+    }
+    let mut names = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let o = tool.as_object().ok_or(Refusal::Tools)?;
+        let f = o.get("function").and_then(Value::as_object).ok_or(Refusal::Tools)?;
+        let name = f.get("name").and_then(Value::as_str).filter(|n| valid_tool_name(n)).ok_or(Refusal::Tools)?;
+        let shaped = o.len() == 2
+            && o.get("type") == Some(&json!("function"))
+            && f.keys().all(|k| FUNCTION_KEYS.contains(&k.as_str()))
+            && f.get("description").is_none_or(Value::is_string)
+            && f.get("strict").is_none_or(Value::is_boolean);
+        if !shaped || names.contains(&name) {
+            return Err(Refusal::Tools);
+        }
+        let schema = f.get("parameters").is_none_or(|p| p.as_object().is_some_and(|p| p.get("type") == Some(&json!("object"))));
+        if !schema {
+            return Err(Refusal::ToolSchema);
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// A job's text step as the chat completion it asks for (`bound` bounds it
+/// for its tier): its messages (or its prompt, as one user message), and
+/// what it named of `max_tokens`, `reasoning_effort`, `tools` and
+/// `tool_choice`. Refused, typed, before anything is reserved: tools past
+/// their bounds or not a function's, a choice of none of them, a draft out
+/// of shape (the cell checks the app declares its channel), a request past
+/// `AI_TEXT_MAX_BYTES`.
+pub fn text_body(t: &AiText) -> Result<Value, Refusal> {
+    let messages = match (&t.messages, &t.prompt) {
+        (Some(m), _) => Value::Array(m.clone()),
+        (None, Some(prompt)) => json!([{ "role": "user", "content": prompt }]),
+        (None, None) => return Err(Refusal::NoMessages),
+    };
+    let mut body = json!({ "messages": messages });
+    if let Some(n) = t.max_tokens {
+        body["max_tokens"] = json!(n);
+    }
+    if let Some(effort) = &t.reasoning_effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    let tools = t.tools.as_deref().unwrap_or_default();
+    let names = tool_names(tools)?;
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools.to_vec());
+    }
+    if let Some(choice) = &t.tool_choice {
+        let named = match choice {
+            Value::String(mode) => ["none", "auto", "required"].contains(&mode.as_str()),
+            Value::Object(o) => {
+                let function = o.get("function").and_then(Value::as_object);
+                let name = function.and_then(|f| f.get("name")).and_then(Value::as_str);
+                o.len() == 2 && o.get("type") == Some(&json!("function")) && function.is_some_and(|f| f.len() == 1) && name.is_some_and(|n| names.contains(&n))
+            }
+            _ => false,
+        };
+        if tools.is_empty() || !named {
+            return Err(Refusal::ToolChoice);
+        }
+        body["tool_choice"] = choice.clone();
+    }
+    if t.draft.is_some() && draft_of(t).is_none() {
+        return Err(Refusal::Draft);
+    }
+    // within what platform.mjs counts (the step's arguments) before the
+    // Workflow carries them
+    if body.to_string().len() > AI_TEXT_MAX_BYTES {
+        return Err(Refusal::TextTooLarge);
+    }
+    Ok(body)
+}
+
+/// A text step's draft, `{channel, turn}` and no other key: an app's
+/// channel (never a built-in one) and a turn `^[A-Za-z0-9._:-]{1,128}$`;
+/// `None` when it names none, or one out of shape (`text_body` refuses it).
+pub fn draft_of(t: &AiText) -> Option<(&str, &str)> {
+    let d = t.draft.as_ref()?.as_object()?;
+    let (channel, turn) = (d.get("channel")?.as_str()?, d.get("turn")?.as_str()?);
+    (d.len() == 2 && valid_channel_name(channel) && !BUILTIN_CHANNELS.contains(&channel) && valid_op_id(turn)).then_some((channel, turn))
+}
+
+/// One tool call of an answer: OpenAI's `{id, type: "function", function:
+/// {name, arguments}}` (`Answer::message`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// JSON text, as the model wrote it (it may not parse).
+    pub arguments: String,
+}
+
+/// What a text call answered, folded from its stream's deltas
+/// (`Stream::answering`): its text, its tool calls, and why it stopped.
+/// The model's reasoning is never kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Answer {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub finish_reason: Option<String>,
+}
+
+impl Answer {
+    /// One streamed choice's delta, and its finish reason when it has one.
+    fn take(&mut self, choice: &Value) {
+        let delta = &choice["delta"];
+        if let Some(text) = delta["content"].as_str() {
+            self.content.push_str(text);
+        }
+        for (n, call) in delta["tool_calls"].as_array().into_iter().flatten().enumerate() {
+            let index = call["index"].as_u64().map_or(n, |i| usize::try_from(i).unwrap_or(usize::MAX));
+            if index < TOOL_CALLS_MAX {
+                self.fold_call(index, call);
+            }
+        }
+        if let Some(reason) = choice["finish_reason"].as_str() {
+            self.finish_reason = Some(reason.to_string());
+        }
+    }
+
+    /// A delta of a tool call: its id and name as given, its arguments
+    /// appended.
+    fn fold_call(&mut self, index: usize, call: &Value) {
+        assert!(index < TOOL_CALLS_MAX, "a tool call's index is bounded before it is folded");
+        if self.tool_calls.len() <= index {
+            self.tool_calls.resize(index + 1, ToolCall::default());
+        }
+        let to = &mut self.tool_calls[index];
+        if let Some(id) = call["id"].as_str().filter(|s| !s.is_empty()) {
+            to.id = id.to_string();
+        }
+        if let Some(name) = call["function"]["name"].as_str().filter(|s| !s.is_empty()) {
+            to.name = name.to_string();
+        }
+        if let Some(args) = call["function"]["arguments"].as_str() {
+            to.arguments.push_str(args);
+        }
+    }
+
+    /// The assistant's message, as the next call's messages take it back:
+    /// `{role, content, tool_calls?}`.
+    pub fn message(&self) -> Value {
+        let mut m = json!({ "role": "assistant", "content": self.content });
+        if !self.tool_calls.is_empty() {
+            let calls = self.tool_calls.iter().map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": c.arguments } }));
+            m["tool_calls"] = Value::Array(calls.collect());
+        }
+        m
     }
 }
 
@@ -577,14 +790,54 @@ pub struct Stream {
     /// A line past `SSE_LINE_MAX`: the stream is out of its contract.
     overlong: bool,
     lines: u64,
+    /// A `data:` line was read: the answer began.
+    began: bool,
+    /// `[DONE]` was read: the answer and its usage are whole, whether or
+    /// not the connection stays open after it (the gateway's may, for
+    /// minutes). Nothing after it is read.
+    done: bool,
+    /// The answer so far, when one is read (`answering`).
+    answer: Option<Answer>,
+    /// Characters of reasoning read (`reasoning_content`, or `reasoning`),
+    /// none of them kept.
+    thought: u64,
 }
 
 impl Stream {
+    /// A stream whose answer is read as it comes (a job's text step), as
+    /// well as its usage.
+    pub fn answering() -> Stream {
+        Stream { answer: Some(Answer::default()), ..Stream::default() }
+    }
+
+    /// The answer so far (`answering`'s; `None` for a stream only metered).
+    pub fn answer(&self) -> Option<&Answer> {
+        self.answer.as_ref()
+    }
+
+    /// Whether `[DONE]` was read: a reader stops there.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
+    /// Whether a `data:` line was read: when the model began to answer.
+    pub fn began(&self) -> bool {
+        self.began
+    }
+
+    /// Characters of reasoning read so far (`answering`'s).
+    pub fn thought(&self) -> u64 {
+        self.thought
+    }
+
     /// Takes the next bytes; the client's lines go to `out` (none when
-    /// only metering).
+    /// only metering). Bytes after `[DONE]` are none of the answer's.
     pub fn push(&mut self, chunk: &[u8], mut out: Option<&mut Vec<u8>>) {
         // bounded by the chunk: each pass takes one line out of it
         for piece in chunk.split_inclusive(|b| *b == b'\n') {
+            if self.done {
+                return;
+            }
             self.line.extend_from_slice(piece);
             if piece.last() == Some(&b'\n') {
                 let line = std::mem::take(&mut self.line);
@@ -601,7 +854,7 @@ impl Stream {
 
     /// The end of the stream: a last line without its newline.
     pub fn finish(&mut self, out: Option<&mut Vec<u8>>) {
-        if !self.line.is_empty() {
+        if !self.line.is_empty() && !self.done {
             let line = std::mem::take(&mut self.line);
             self.take_line(&line, out);
         }
@@ -633,14 +886,24 @@ impl Stream {
     fn read_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
         let text = std::str::from_utf8(line).ok()?;
         let data = text.strip_prefix("data:")?.trim();
+        self.began = true;
+        let ending = if text.ends_with("\r\n") { "\r\n" } else { "\n" };
         if data == "[DONE]" {
-            return None;
+            // the last event, ended by its blank line: nothing after it is read
+            self.done = true;
+            return Some(format!("data: [DONE]{ending}{ending}").into_bytes());
         }
         let Ok(Value::Object(mut chunk)) = serde_json::from_str::<Value>(data) else { return None };
         if let Some(id) = chunk.get("id").filter(|id| !id.is_null()) {
             self.id = Some(id.clone());
         }
-        let ending = if text.ends_with("\r\n") { "\r\n" } else if text.ends_with('\n') { "\n" } else { "" };
+        if let (Some(answer), Some(choice)) = (self.answer.as_mut(), chunk.get("choices").and_then(|c| c.get(0))) {
+            answer.take(choice);
+            let delta = &choice["delta"];
+            let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).unwrap_or("");
+            self.thought += reasoning.chars().count() as u64;
+        }
+        let ending = if text.ends_with('\n') { ending } else { "" };
         match (chunk.get("choices"), chunk.get("usage").cloned()) {
             (_, None) => None,
             (Some(Value::Array(choices)), Some(usage)) if choices.is_empty() => {
@@ -1014,6 +1277,184 @@ mod tests {
         s.push(S4_STREAM.as_bytes(), None);
         s.finish(None);
         assert_eq!(s.usage().and_then(|u| u["completion_tokens"].as_u64()), Some(15));
+    }
+
+    /// Goal: a reader stops at `[DONE]` with the answer and its usage whole
+    /// (the gateway held a stream open ~150 s after it, 2026-10-07), and
+    /// what follows it is none of the answer's: not metered, not sent.
+    /// Method: S4's stream, then bytes after its `[DONE]` that would change
+    /// its usage and its text, fed in pieces.
+    #[test]
+    fn a_stream_is_done_at_its_done_line() {
+        let after = "data: {\"response\":\"\",\"usage\":{\"prompt_tokens\":9999,\"completion_tokens\":9999}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n";
+        let whole = format!("{S4_STREAM}{after}");
+        for piece in [1, 9, whole.len()] {
+            let mut s = Stream::answering();
+            let mut out = Vec::new();
+            // a reader stops at done; one that feeds on reads nothing more
+            for chunk in whole.as_bytes().chunks(piece) {
+                s.push(chunk, Some(&mut out));
+            }
+            s.finish(Some(&mut out));
+            assert!(s.done() && s.began(), "pieces of {piece}");
+            assert_eq!(s.usage().and_then(|u| u["completion_tokens"].as_u64()), Some(15), "the usage before [DONE]");
+            assert_eq!(s.answer().map(|a| (a.content.as_str(), a.finish_reason.as_deref())), Some(("1, 2, 3,", Some("stop"))));
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.ends_with("data: [DONE]\n\n") && !text.contains("late") && !text.contains("9999"), "the client's stream ends at [DONE]: {text}");
+        }
+        let (body, _) = S4_STREAM.split_at(S4_STREAM.len() - "data: [DONE]\n\n".len());
+        let mut s = Stream::default();
+        assert!(!s.began());
+        s.push(body.as_bytes(), None);
+        assert!(s.began() && !s.done(), "not done before [DONE]");
+        // a [DONE] with no blank line after it still ends its event for the client
+        let mut out = Vec::new();
+        s.push(b"data: [DONE]", Some(&mut out));
+        s.finish(Some(&mut out));
+        assert_eq!((s.done(), out.as_slice()), (true, b"data: [DONE]\n\n".as_slice()));
+    }
+
+    fn text(args: Value) -> AiText {
+        match crate::steps::Step::from_parts("ai.text", args) {
+            Ok(crate::steps::Step::AiText(t)) => t,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn lookup(name: &str) -> Value {
+        json!({ "type": "function", "function": { "name": name, "description": "Looks a word up.", "parameters": { "type": "object", "properties": { "word": { "type": "string" } } } } })
+    }
+
+    /// Goal: a text step asks for what it named, its tools and tool choice
+    /// as OpenAI's, and a conversation carrying an assistant's tool calls
+    /// and their results reaches the model as it came. Method: a prompt, a
+    /// tool turn's messages, through `bound`.
+    #[test]
+    fn a_text_step_asks_for_what_it_named() {
+        let body = text_body(&text(json!({ "prompt": "hi", "max_tokens": 10 }))).unwrap();
+        assert_eq!(body, json!({ "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 10 }));
+        let messages = json!([
+            { "role": "system", "content": "be brief" },
+            { "role": "user", "content": "what is a shard?" },
+            { "role": "assistant", "content": "", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{\"word\":\"shard\"}" } }] },
+            { "role": "tool", "tool_call_id": "call_1", "content": "a small fragment" },
+        ]);
+        let t = text(json!({ "messages": messages, "tools": [lookup("lookup")], "tool_choice": "auto", "reasoning_effort": "high", "draft": { "channel": "log", "turn": "turn:t_0123456789abcdef" } }));
+        let b = bound(tier(Tier::Medium), text_body(&t).unwrap(), true).unwrap();
+        assert_eq!(b.input["messages"], messages, "tool calls and their results pass through");
+        assert_eq!((b.input["tools"].clone(), b.input["tool_choice"].clone()), (json!([lookup("lookup")]), json!("auto")));
+        assert_eq!((b.input["stream"].clone(), b.input["reasoning_effort"].clone()), (json!(true), json!("high")));
+        assert!(b.input.get("draft").is_none(), "a draft is the platform's, never the model's");
+        let named = text(json!({ "prompt": "p", "tools": [lookup("lookup")], "tool_choice": { "type": "function", "function": { "name": "lookup" } } }));
+        assert_eq!(text_body(&named).unwrap()["tool_choice"], json!({ "type": "function", "function": { "name": "lookup" } }));
+        assert!(text_body(&text(json!({ "prompt": "p", "tools": [] }))).unwrap().get("tools").is_none(), "no tools is none sent");
+        let bare = json!({ "type": "function", "function": { "name": "now" } });
+        assert_eq!(text_body(&text(json!({ "prompt": "p", "tools": [bare] }))).unwrap()["tools"][0], bare, "a function of no arguments names no schema");
+    }
+
+    /// Goal: a text step's tools, tool choice, draft and size are bounded,
+    /// and refused typed past them, before anything is reserved. Method:
+    /// each bound at and past its edge.
+    #[test]
+    fn a_text_steps_tools_and_draft_are_bounded() {
+        let check = |args: Value| text_body(&text(args));
+        assert_eq!(check(json!({})), Err(Refusal::NoMessages));
+        let tools = |n: usize| Value::Array((0..n).map(|i| lookup(&format!("t{i}"))).collect());
+        assert!(check(json!({ "prompt": "p", "tools": tools(TOOLS_MAX) })).is_ok());
+        assert_eq!(check(json!({ "prompt": "p", "tools": tools(TOOLS_MAX + 1) })), Err(Refusal::Tools));
+        let long = json!({ "type": "function", "function": { "name": "big", "description": "d".repeat(TOOLS_MAX_BYTES) } });
+        assert_eq!(check(json!({ "prompt": "p", "tools": [long] })), Err(Refusal::Tools), "past the bytes");
+        assert_eq!(check(json!({ "prompt": "p", "tools": [lookup("a"), lookup("a")] })), Err(Refusal::Tools), "a name twice");
+        assert_eq!(check(json!({ "prompt": "p", "tools": [lookup("look up")] })), Err(Refusal::Tools));
+        assert_eq!(check(json!({ "prompt": "p", "tools": [lookup(&"x".repeat(TOOL_NAME_MAX_BYTES + 1))] })), Err(Refusal::Tools));
+        assert!(check(json!({ "prompt": "p", "tools": [lookup(&"x".repeat(TOOL_NAME_MAX_BYTES))] })).is_ok());
+        for schema in [json!("a word"), json!({ "type": "string" }), json!({ "properties": {} }), json!([])] {
+            let bad = json!({ "type": "function", "function": { "name": "f", "parameters": schema } });
+            assert_eq!(check(json!({ "prompt": "p", "tools": [bad] })), Err(Refusal::ToolSchema), "{schema}");
+        }
+        // not OpenAI's function: another type, no function, a key it does not take, a field of another type
+        for bad in [
+            json!({ "type": "retrieval", "function": { "name": "f" } }),
+            json!({ "type": "function" }),
+            json!({ "type": "function", "function": { "name": "f", "code": "rm -rf /" } }),
+            json!({ "type": "function", "function": { "name": "f" }, "cache": true }),
+            json!({ "type": "function", "function": { "name": 7 } }),
+            json!({ "type": "function", "function": { "name": "f", "description": 7 } }),
+            json!({ "type": "function", "function": { "name": "f", "strict": "yes" } }),
+            json!("lookup"),
+        ] {
+            assert_eq!(check(json!({ "prompt": "p", "tools": [bad] })), Err(Refusal::Tools), "{bad}");
+        }
+        assert_eq!(check(json!({ "prompt": "p", "tool_choice": "auto" })), Err(Refusal::ToolChoice), "a choice with no tools");
+        let with = |choice: Value| check(json!({ "prompt": "p", "tools": [lookup("lookup")], "tool_choice": choice }));
+        for good in [json!("none"), json!("auto"), json!("required"), json!({ "type": "function", "function": { "name": "lookup" } })] {
+            assert_eq!(with(good.clone()).map(|b| b["tool_choice"].clone()), Ok(good));
+        }
+        for bad in [json!("sometimes"), json!({ "type": "function", "function": { "name": "other" } }), json!({ "type": "function", "function": { "name": "lookup", "x": 1 } }), json!({ "function": { "name": "lookup" } }), json!(true)] {
+            assert_eq!(with(bad.clone()), Err(Refusal::ToolChoice), "{bad}");
+        }
+        assert_eq!(check(json!({ "prompt": "p", "draft": { "channel": "events", "turn": "t" } })), Err(Refusal::Draft), "a built-in channel is no app's");
+        assert_eq!(check(json!({ "prompt": "p", "draft": { "channel": "Log", "turn": "t" } })), Err(Refusal::Draft));
+        assert_eq!(check(json!({ "prompt": "p", "draft": { "channel": "log", "turn": "a turn" } })), Err(Refusal::Draft));
+        assert_eq!(check(json!({ "prompt": "p", "draft": { "channel": "log", "turn": "t".repeat(129) } })), Err(Refusal::Draft));
+        assert!(check(json!({ "prompt": "p", "draft": { "channel": "log", "turn": "t".repeat(128) } })).is_ok());
+        for bad in [json!({ "channel": "log" }), json!({ "channel": "log", "turn": "t", "text": "x" }), json!("log"), json!({ "channel": 7, "turn": "t" })] {
+            assert_eq!(check(json!({ "prompt": "p", "draft": bad })), Err(Refusal::Draft), "{bad}");
+        }
+        assert_eq!(draft_of(&text(json!({ "prompt": "p", "draft": { "channel": "log", "turn": "t:1" } }))), Some(("log", "t:1")));
+        // the request it makes (within what platform.mjs counts: the step's arguments)
+        let room = AI_TEXT_MAX_BYTES - json!({ "messages": [{ "role": "user", "content": "" }] }).to_string().len();
+        assert!(check(json!({ "prompt": "x".repeat(room) })).is_ok(), "at the bound");
+        assert_eq!(check(json!({ "prompt": "x".repeat(room + 1) })), Err(Refusal::TextTooLarge));
+        assert!(Refusal::Tools.message().contains("at most 64 tools") && Refusal::TextTooLarge.message().contains("524288 bytes"));
+    }
+
+    /// A streamed tool turn as Workers AI streams one: reasoning, text,
+    /// then two calls whose arguments come in pieces, one past the bound,
+    /// and its usage.
+    const TOOL_STREAM: &str = concat!(
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":0}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hidden\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":3}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me \"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":2}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"look.\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":2}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"wo\"}}]},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":4}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"rd\\\":\\\"a\\\"}\"}}]},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":4}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"zoom\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":2}}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":9999999999,\"id\":\"call_x\",\"function\":{\"name\":\"x\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"9\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n",
+        "data: {\"response\":\"\",\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":17,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    /// Goal: a streamed answer is read into one message: its reasoning
+    /// counted and dropped, a call's arguments joined from their pieces, a
+    /// delta past `TOOL_CALLS_MAX` dropped, its last usage metered, and the
+    /// message as the next call's messages take it back. Method: the tool
+    /// stream, fed in pieces that split lines; a stream only metered.
+    #[test]
+    fn a_stream_is_read_into_its_answer() {
+        for piece in [1, 5, 64, TOOL_STREAM.len()] {
+            let mut s = Stream::answering();
+            for chunk in TOOL_STREAM.as_bytes().chunks(piece) {
+                s.push(chunk, None);
+            }
+            s.finish(None);
+            let a = s.answer().cloned().unwrap();
+            assert_eq!((a.content.as_str(), a.finish_reason.as_deref(), s.thought(), s.done()), ("Let me look.", Some("tool_calls"), 6, true), "pieces of {piece}");
+            assert_eq!(a.tool_calls.len(), 2, "the call past the bound is dropped");
+            assert_eq!(a.tool_calls[0], ToolCall { id: "call_1".into(), name: "lookup".into(), arguments: "{\"word\":\"a\"}".into() });
+            let m = a.message();
+            assert_eq!(m["tool_calls"][1], json!({ "id": "call_2", "type": "function", "function": { "name": "zoom", "arguments": "{}" } }));
+            assert!(!m.to_string().contains("hidden"), "no reasoning: {m}");
+            assert_eq!(s.usage().and_then(|u| usage_of(CHEAP_MODEL, u)), Some(Usage::Tokens { model: CHEAP_MODEL.into(), input: 40, cached_input: 0, cache_write: 0, output: 17 }));
+        }
+        let mut metered = Stream::default();
+        metered.push(TOOL_STREAM.as_bytes(), None);
+        assert_eq!((metered.answer(), metered.thought()), (None, 0), "a stream only metered keeps no answer");
+        let mut plain = Stream::answering();
+        plain.push(S4_STREAM.as_bytes(), None);
+        let a = plain.answer().unwrap();
+        assert_eq!(a.message(), json!({ "role": "assistant", "content": "1, 2, 3," }), "no calls: no tool_calls key");
     }
 
     /// Goal: an OpenAI-style stream (usage once, on a last chunk with no
