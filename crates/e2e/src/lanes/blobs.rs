@@ -52,7 +52,7 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the blob store holds the bytes", r.status == 200 && r.bytes == video, format!("{} ({} bytes)", r.status, r.bytes.len()));
     let r = api.signed(&keys, "GET", &format!("/api/f/{name}/files"), None)?;
     let listed = r.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "site/clip.bin").cloned()).unwrap_or(Value::Null);
-    s.ok("the file list shows its real size", listed["size"] == video.len() && listed["blob"] == true, &listed);
+    s.ok("the file list shows its real size, and the blob that holds it", listed["size"] == video.len() && listed["blob"] == true && listed["sha256"] == sha.as_str(), &listed);
 
     // another folder pulls the real bytes; a folder that has them adopts them
     let other = s.dir("blobs-pull");

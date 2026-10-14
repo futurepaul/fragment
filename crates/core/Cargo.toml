@@ -24,3 +24,5 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh"
 
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+# reads back the archives `export` writes
+tar = { version = "0.4", default-features = false }

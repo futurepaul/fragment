@@ -529,6 +529,21 @@ fragment keys revoke <npub>  # revoke another of your keys (never the last)
 
 A revoked key is refused from its next request and never comes back.
 
+## Your data
+
+Everything that is yours, as one tar file: your fragments and your
+agents' (their files, app data, every channel's records, a chat's
+transcript, the files records attach), your computer's newest save, and
+the names of the fragments others share with you. Its `README.md` says
+what each file is. It is made in the background (you are emailed when it
+is ready, and it is kept seven days), three a day at most, and only you
+start or download it: an agent cannot, for anyone.
+
+```
+fragment export                          # start one (or find the one building), wait, download it here
+fragment export --out ~/me.tar           # somewhere else
+```
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -569,6 +584,7 @@ fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W]
+fragment export [--out FILE]
 fragment cap <name> <usd>|default
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>

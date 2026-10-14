@@ -570,6 +570,40 @@ export class App extends AuthorApp {
     return JSON.stringify({ result: { run: row.run, effects } });
   }
 
+  // The app's database, for its owner's export (docs/api.md, Export;
+  // cell export.rs `database`): with no table, its schema (each table's,
+  // index's, view's and trigger's statement, a virtual table's shadow
+  // tables left out, as its own statement makes them), the platform's
+  // ledger left out; with one, a page of its rows from `offset`, each a
+  // JSON object of its columns (a blob as { $base64 }), at most `limit`
+  // rows and about `maxBytes` of their JSON (the first row whatever its
+  // size). Read in the author's realm: what the app's database holds, as
+  // its own code would answer it.
+  __dump(table, offset, limit, maxBytes) {
+    const sql = this.ctx.storage.sql;
+    const all = sql
+      .exec("SELECT type, name, tbl_name AS \"table\", sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND tbl_name <> ? ORDER BY rowid", LEDGER)
+      .toArray();
+    const virtual = all.filter((e) => e.type === "table" && /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(e.sql)).map((e) => e.name);
+    const schema = all.filter((e) => !(e.type === "table" && virtual.some((v) => e.name !== v && e.name.startsWith(`${v}_`))));
+    if (table === null) return JSON.stringify({ result: { schema } });
+    if (!schema.some((e) => e.type === "table" && e.name === table)) return JSON.stringify({ result: { rows: [], more: false } });
+    const quoted = `"${String(table).replaceAll('"', '""')}"`;
+    const rows = [];
+    let bytes = 0;
+    let more = false;
+    for (const row of sql.exec(`SELECT * FROM ${quoted} LIMIT ? OFFSET ?`, limit + 1, offset)) {
+      if (rows.length >= limit || (rows.length > 0 && bytes >= maxBytes)) {
+        more = true;
+        break;
+      }
+      const text = JSON.stringify(row, (_, v) => (v instanceof ArrayBuffer ? { $base64: base64(new Uint8Array(v)) } : v));
+      rows.push(text);
+      bytes += text.length;
+    }
+    return `{"result":{"rows":[${rows.join(",")}],"more":${more}}}`;
+  }
+
   // Custom routes: the author's fetch, when there is one.
   fetch(request) {
     const own = AuthorApp.prototype.fetch;

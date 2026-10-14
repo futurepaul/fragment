@@ -2,7 +2,11 @@
 
 Status: **the contract phase 4's bridge writes and phase 5's chat
 template reads** (docs/cloudflare-v1.md, decisions 8, 9, 38, 42). The
-bridge's code for it is `images/bridge/src/records.rs`.
+bridge's code for it is `images/bridge/src/records.rs`. A person's export
+(docs/api.md, Export) keeps them whole, and reads them as a transcript,
+`transcript.md` (`fragment_core::export::transcript_part`: a message's
+text and files, a turn's steps, prompts, notices and an error's end; the
+debt ledger names it).
 
 A chat is a fragment with two channels, and one job of the template's
 own code, which runs from the platform's release as its page does

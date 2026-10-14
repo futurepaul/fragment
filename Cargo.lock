@@ -560,6 +560,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "url",
 ]
 
@@ -594,6 +595,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2",
+ "tar",
  "tungstenite",
 ]
 

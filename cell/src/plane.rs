@@ -692,16 +692,18 @@ impl FragmentCell {
         let mut facts = self.facts()?;
         self.admit(&facts, caller, false, Role::Viewer)?;
         self.ensure_pins(&mut facts).await?;
-        let blobs = self.pointer_sizes("main")?;
+        let blobs = self.pointers_at("main")?;
         let rows = self.tree_rows("main")?;
         let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).collect())?;
         let mut files: Vec<Value> = rows
             .into_iter()
             .map(|r| {
                 let mut f = json!({ "path": r.path, "size": r.size, "mode": r.mode, "lastCommitSha": r.last_commit, "machinery": site::is_machinery(&r.path) });
-                if let Some(size) = blobs.get(&r.path) {
+                // a pointer's bytes: their size, and the blob that holds them
+                if let Some((sha, size)) = blobs.get(&r.path) {
                     f["size"] = json!(size);
                     f["blob"] = json!(true);
+                    f["sha256"] = json!(sha);
                 }
                 f
             })

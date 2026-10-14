@@ -267,6 +267,7 @@ Every change is checked against this table.
 | The release's files: the templates, the shell's files, the agent docs | the repo (`templates/`, `cell/shell/`, `cli/`) | the cell's index of them (path, SHA-256, size, each template's release), made by its build; their bytes in the Worker's Static Assets, named by hash, written by the same build and uploaded with it, served only through the router (docs/api.md, The release's files); the CLI embeds the templates |
 | A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
 | A person's own view of their fragments: what they archived, and how far they have seen each chat | their list, the `Principal` cell (principal.rs; docs/api.md, Control API) | none: no fragment holds it, and it goes when they leave the fragment |
+| A person's export: whether it builds, how far it got, and its archive | their list, the `Principal` cell (its row, its job and its kept place: export.rs; docs/api.md, Export), and its archive in R2 (`exports/<npub>/<id>/archive.tar`) | the archive is a copy of what each fragment, the registry and their computer answered its person as it was read, never updated; it is deleted seven days after it is ready, when a newer export starts, or by a wipe of its person |
 
 No file bytes persist in the cell's SQLite: a file lives in git or, at
 1 MiB and above, in R2 under its hash, named by a pointer in git.

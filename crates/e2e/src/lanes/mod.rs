@@ -17,6 +17,7 @@ mod computers;
 mod control;
 mod credentials;
 mod delegation;
+mod export;
 mod deliver;
 mod frames;
 pub mod hermes;
@@ -112,6 +113,7 @@ const LANES: &[Lane] = &[
     admin::admin_page,
     shell::shell_platform,
     computers::computers,
+    export::export,
     chat::chat,
     shell::shell_ui,
     wipe::wipe,
@@ -142,7 +144,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
+    &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
     &["chat", "shell-ui", "wipe", "sync", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[

@@ -565,7 +565,8 @@ fragment.club until cutover (decisions 34–35).
   chat; code.storage's git: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
-  lockdown, isolation, share), and the whole deployment's
+  lockdown, isolation, share, export: it crashes the node mid-build and
+  scripts the stub's runtime), and the whole deployment's
   (identities, signin, ledger's operator). Nothing runs it from CI.
 - **Risk:** a limit, a Workflow resume, or a skipped section's behaviour
   on real vendors breaks unseen.
@@ -599,6 +600,59 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the runtime lets the supervisor read a facet's
   database size or bound it (a facet storage limit), and the meter
   samples it, with a test of a query that writes past the cap.
+
+## An export reads an app's database through the app's own realm
+
+- **Observed:** 2026-10-13 (docs/api.md, Export). The supervisor cannot
+  read a facet's SQLite (the entry above), so `GET /api/f/{name}/database`
+  asks platform code in the facet (`__dump`, cell/platform.mjs), which
+  runs in the author's realm: an app's code can patch what it answers.
+  The supervisor holds its answer to its shape and its page's bounds, not
+  to the truth. An integer past 2^53 crosses as a JavaScript number,
+  rounded; a table's `rowid`, unless a column of its own, is not dumped.
+- **Risk:** an app that patches the platform's code exports what it
+  likes of its own database, to its own owner (the only one who reads
+  it); an import of a dumped table renumbers its implicit rowids.
+- **First proof:** a dump's rows that disagree with what the app's own
+  queries answer.
+- **Delete when:** the runtime lets the supervisor read a facet's
+  database itself (a facet SQL handle for its parent, or a backup of its
+  file), and the export reads that.
+
+## A chat's transcript is the platform's reading of the chat template's records
+
+- **Observed:** 2026-10-13 (docs/api.md, Export). An export renders a
+  chat fragment's `transcript.md` from its `chat` and `work` records
+  (`fragment_core::export::transcript_part`), which are the chat
+  template's and its bridges' (docs/chat-records.md): platform code that
+  knows one template's records, which the rule (docs/cloudflare-v1.md)
+  calls a design bug. It reads the shape generically where it can (a
+  message is the search's convention: `text`, `attachments`) and passes
+  over any kind it does not know; the records themselves are exported
+  whole beside it (`channels/*.jsonl`).
+- **Risk:** a change to the records' shape (a new kind, a renamed field)
+  leaves transcripts missing it until the platform's renderer follows.
+- **First proof:** a chat whose transcript lacks something its page shows.
+- **Delete when:** the chat template renders its own transcript (a query
+  of its own the export asks for its fragment, paged), or Paul decides the
+  platform may read the chat records' shape (then this moves to the
+  special-case inventory).
+
+## An export can fail when its computer saves three times as it is copied
+
+- **Observed:** 2026-10-13 (docs/api.md, Export). An export copies its
+  computer's newest good save a piece at a time through the Computer DO,
+  which keeps three saves and deletes each pushed out at once. Three new
+  saves while one save is copied (a busy computer saves at each work's
+  end, 30 s settled, and every 15 minutes) delete the one being copied:
+  the export fails `source_changed`, saying to export again. Nothing holds
+  the save for it.
+- **Risk:** a busy person's export of a large `/data` fails, and they
+  press again.
+- **First proof:** an export failed `source_changed` on a deployment.
+- **Delete when:** the Computer DO keeps a save an export copies until it
+  is copied (a hold its forget passes over), with a test that saves three
+  times mid-copy.
 
 ## A blob larger than the zone's request limit cannot be uploaded
 

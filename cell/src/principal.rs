@@ -11,7 +11,7 @@
 //! (below). So the platform's page reads this one cell and wakes no
 //! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
-//! Four things here are the person's own, not a fragment's:
+//! Five things here are the person's own, not a fragment's:
 //!
 //! - **Archived**, a flag on their row (`PUT /api/fragments/{name}/archived`):
 //!   their view of the fragment, which no fragment's change touches. It
@@ -55,6 +55,10 @@
 //!   Their computer tells the same sockets when what its owner is told of
 //!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
 //!   page reads it again with the list.
+//! - **Their export** (docs/api.md, Export; export.rs): everything that is
+//!   theirs as one archive in R2, built here on this cell's alarm, which is
+//!   its only use, its place kept in its tables (`exports`, `export_tail`,
+//!   `export_parts`, `export_blobs`) between slices.
 //!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person (or of the
 //! person who owns its agent) closes its sockets and empties it in one
@@ -70,11 +74,12 @@ use fragment_core::search::{self, Query};
 use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Seen, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
 
-const SCHEMA: &str = "
+pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS memberships (
   fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL,
   sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT);
@@ -91,6 +96,14 @@ CREATE TRIGGER IF NOT EXISTS search_entries_dropped AFTER DELETE ON search_entri
   INSERT INTO search_text (search_text, rowid, text) VALUES ('delete', old.id, old.text);
 END;
 CREATE TABLE IF NOT EXISTS seen (fragment TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS exports (
+  id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL,
+  ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT,
+  requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n));
+CREATE TABLE IF NOT EXISTS export_parts (export TEXT NOT NULL, part INTEGER NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (export, part));
+CREATE TABLE IF NOT EXISTS export_blobs (export TEXT NOT NULL, fragment TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (export, fragment, sha));
+CREATE TABLE IF NOT EXISTS export_levers (name TEXT PRIMARY KEY, value INTEGER);
 ";
 
 /// The one row a wiped list keeps: when it was wiped. Apart from `SCHEMA`,
@@ -125,12 +138,15 @@ const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
 
 #[durable_object]
 pub struct PrincipalCell {
-    state: State,
+    pub(crate) state: State,
+    /// The state as the runtime handed it (a synchronous transaction's).
+    pub(crate) raw: JsValue,
+    pub(crate) env: Env,
     /// Its person was wiped (`wiped`'s row, read as it starts): it takes
     /// nothing more.
-    wiped: Cell<bool>,
+    pub(crate) wiped: Cell<bool>,
     /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `test/…` answers.
-    test_hooks: bool,
+    pub(crate) test_hooks: bool,
 }
 
 /// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
@@ -249,13 +265,15 @@ struct Hit {
 
 impl DurableObject for PrincipalCell {
     fn new(state: State, env: Env) -> Self {
+        let raw: JsValue = state._inner().into();
+        let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
         sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
         let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
         let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
         let test_hooks = crate::config::Config::from_env(&env).test_hooks;
-        PrincipalCell { state, wiped: Cell::new(wiped), test_hooks }
+        PrincipalCell { state, raw, env, wiped: Cell::new(wiped), test_hooks }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -263,6 +281,12 @@ impl DurableObject for PrincipalCell {
             Ok(r) => Ok(r),
             Err(e) => e.response(),
         }
+    }
+
+    // its person's export, built a slice at a time (export.rs)
+    async fn alarm(&self) -> Result<Response> {
+        self.export_alarm().await;
+        Response::ok("ok")
     }
 
     // A watching socket says nothing the list reads.
@@ -282,7 +306,7 @@ impl DurableObject for PrincipalCell {
 }
 
 impl PrincipalCell {
-    fn sql(&self) -> SqlStorage {
+    pub(crate) fn sql(&self) -> SqlStorage {
         self.state.storage().sql()
     }
 
@@ -310,9 +334,17 @@ impl PrincipalCell {
             }
             let route = route.to_string();
             let body = req.bytes().await?;
+            // its export's objects first: the step that ends it awaits nothing
+            if route == "exports" {
+                return Ok(Response::from_json(&self.wipe_exports(&body).await?)?);
+            }
             return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
         }
-        // the router's levers (`/api/test/list`), on fleets with them only
+        // the router's levers (`/api/test/list`, `/api/test/export`), on fleets with them only
+        if req.path() == "/test/export" && self.test_hooks {
+            let body = req.bytes().await?;
+            return Ok(Response::from_json(&self.export_lever(&body)?)?);
+        }
         if let Some(op) = req.path().strip_prefix("/test/").filter(|_| self.test_hooks) {
             return Ok(Response::from_json(&self.test_lever(op)?)?);
         }
@@ -358,6 +390,8 @@ impl PrincipalCell {
                 Ok(Response::from_json(&self.search(&q)?)?)
             }
             (Method::Get, "/watch") => self.watch(&req),
+            // their export (export.rs): the router's, for the signer
+            (_, p) if p.starts_with("/export/") => self.export_route(req).await,
             // something of theirs the list does not hold changed (their
             // computer: what its owner is told of it), so their pages read
             // again; only the Worker's own code reaches here

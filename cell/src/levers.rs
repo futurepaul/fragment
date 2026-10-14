@@ -116,6 +116,27 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             json_answer(&routed::ask_object(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
         }
+        (Method::Post, ["export"]) => {
+            /// `{identity, op, steps?}`: a lever on that person's export (export.rs `export_lever`).
+            #[derive(Deserialize, serde::Serialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestExport {
+                identity: String,
+                op: String,
+                #[serde(default)]
+                steps: Option<u32>,
+            }
+            let t: TestExport = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !npub::is_identity(&t.identity) {
+                return Err(CellError::invalid("name a person's identity"));
+            }
+            if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
+                return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the export levers reach e2e people's exports alone"));
+            }
+            let lever = serde_json::json!({ "op": t.op, "steps": t.steps });
+            let req = routed::internal_request("test/export", &lever.to_string())?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&t.identity)?.fetch_with_request(req).await?)
+        }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).
             #[derive(Deserialize)]

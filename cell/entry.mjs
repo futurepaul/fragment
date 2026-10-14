@@ -31,6 +31,7 @@ export class Principal extends DurableObject {
     this.rs = new rs.PrincipalCell(ctx, env);
   }
   fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
 }
 
 export class Ledger extends DurableObject {
