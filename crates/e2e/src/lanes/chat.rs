@@ -678,8 +678,10 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     let _ = chrome.screenshot(page, &shots.join("quote-composer.png"));
     s.ok("Reply on the agent's message quotes it above what is typed", shown, chrome.eval(page, "document.getElementById('quoting').innerText")?);
     chrome.press(page, "Enter", false)?;
-    let quoted = "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'what did that mean' && m.querySelector('.quote .quote-text')?.textContent === 'ran /usage')";
-    s.ok("the message sent shows what it quotes, and the composer quotes nothing now", shows(chrome, quoted) && chrome.eval(page, "document.getElementById('quoting').hidden")? == true, "");
+    // one wait for both: the message can come back on the live feed before
+    // its post answers, and the composer lets the quote go only after that
+    let quoted = "document.getElementById('quoting').hidden && [...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'what did that mean' && m.querySelector('.quote .quote-text')?.textContent === 'ran /usage')";
+    s.ok("the message sent shows what it quotes, and the composer quotes nothing now", shows(chrome, quoted), "");
     let sent = chat_records().into_iter().find(|r| r["body"]["text"] == "what did that mean").unwrap_or_default();
     s.ok("its record names the message it quotes (`reply_to`, its seq)", sent["body"]["reply_to"] == reply_seq, &sent);
     s.ok("and the agent is handed the quoted words", shows(chrome, &replied("(quoting itself: ran /usage)")), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
