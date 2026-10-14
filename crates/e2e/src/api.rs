@@ -50,6 +50,24 @@ const SERVER_KEEP_ALIVE: Duration = Duration::from_secs(5);
 const POOL_IDLE: Duration = Duration::from_secs(4);
 const _: () = assert!(POOL_IDLE.as_millis() < SERVER_KEEP_ALIVE.as_millis(), "the client drops an idle connection before the server does");
 
+/// A request's body, as `wrangler dev` can send it again: a GET or HEAD
+/// with none goes with none, not `Content-Length: 0`. Its ProxyWorker
+/// retries a GET whose connection to the Worker dropped (the same 5 s
+/// keep-alive race, on its own hop) by making the request again, which
+/// throws "Cannot reconstruct a Request with a used body" for one whose
+/// body stream the first try read, and that request is never answered:
+/// lockdown's `GET /healthz` hung 60 s so (CI, 2026-10-13). A bodyless one
+/// is retried and answered. Upstream: cloudflare/workers-sdk, ProxyWorker.ts
+/// `attemptUserWorkerFetch` (wrangler 4.145.0; an issue drafted for Paul to
+/// post, 2026-10-14).
+fn with_body(req: reqwest::blocking::RequestBuilder, method: &str, body: &[u8]) -> reqwest::blocking::RequestBuilder {
+    let bodyless = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+    match (bodyless, body.is_empty()) {
+        (true, true) => req,
+        _ => req.body(body.to_vec()),
+    }
+}
+
 fn client() -> reqwest::blocking::Client {
     client_with(POOL_IDLE)
 }
@@ -415,8 +433,8 @@ impl Api {
             }
             // A deployment's hosts are its own, over https.
             Target::Hosted(_) => self.http.request(c.method.parse()?, url.clone()),
-        }
-        .body(body.clone());
+        };
+        req = with_body(req, c.method, &body);
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }
@@ -920,5 +938,51 @@ mod tests {
         std::thread::sleep(limit + Duration::from_millis(150));
         get();
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new connection past the limit");
+    }
+
+    /// A server that answers one request and hands its head back, lowercased.
+    fn head_of(send: impl FnOnce(&str)) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/", listener.local_addr().expect("its address"));
+        let served = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("the request's connection");
+            let mut out = stream.try_clone().expect("clone the stream");
+            let mut lines = BufReader::new(stream);
+            let (mut head, mut line) = (String::new(), String::new());
+            // bounded: a request head ends at its first empty line
+            while lines.read_line(&mut line).expect("the request's head") > 0 && line != "\r\n" {
+                head.push_str(&line.to_ascii_lowercase());
+                line.clear();
+            }
+            out.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").expect("answer");
+            head
+        });
+        send(&url);
+        served.join().expect("the server's thread")
+    }
+
+    /// The property: a GET or HEAD with no body says no `Content-Length`,
+    /// so `wrangler dev`'s proxy can retry it (`with_body`). A POST with
+    /// none still says `Content-Length: 0`, and a body is still sent.
+    #[test]
+    fn a_get_with_no_body_says_no_content_length() {
+        let http = super::client_with(Duration::from_secs(4));
+        let sent = |method: &str, body: &[u8]| {
+            let body = body.to_vec();
+            let method = method.to_string();
+            head_of(|url| {
+                let req = super::with_body(http.request(method.parse().expect("a method"), url), &method, &body);
+                req.send().and_then(|r| r.bytes()).expect("the server answers");
+            })
+        };
+        let get = sent("GET", b"");
+        assert!(get.starts_with("get / "), "{get}");
+        assert!(!get.contains("content-length"), "a bodyless GET says no length: {get}");
+        let head = sent("HEAD", b"");
+        assert!(!head.contains("content-length"), "nor a bodyless HEAD: {head}");
+        let post = sent("POST", b"");
+        assert!(post.contains("content-length: 0"), "a bodyless POST says 0: {post}");
+        let put = sent("PUT", b"{}");
+        assert!(put.contains("content-length: 2"), "a body goes as it is: {put}");
     }
 }
