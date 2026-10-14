@@ -1090,6 +1090,24 @@ const PAGE_FITS: &str = "(() => { const d = document.documentElement; const wide
     const moved = scrollY + d.scrollTop + document.body.scrollTop; scrollTo(0, 0); document.body.scrollTop = 0; \
     return { ok: wide <= innerWidth && moved === 0 && getComputedStyle(d).overscrollBehaviorY === 'none', wide, width: innerWidth, moved }; })()";
 
+/// Opens `chat` from its row in the sidebar, as a person picks it (a
+/// reload, or /, opens the newest chat: maybe another).
+fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
+    if b.eval(page, &format!("!!({open})"))? != true {
+        b.eval(page, &format!("({row}?.click(), true)"))?;
+    }
+    anyhow::ensure!(b.until(page, &open, wait), "{chat} opened from its row");
+    Ok(())
+}
+
+/// Whether settings' Your data stays in a phone's width: none of its rows
+/// past the screen's edge, nor the page or the section wider than it shows.
+const YOUR_DATA_FITS: &str = "(() => { const d = document.getElementById('settings-data'); const p = document.getElementById('settings-page'); if (!d || !p) return { ok: false, missing: true }; \
+    d.scrollIntoView({ block: 'center' }); const out = [...d.querySelectorAll('*')].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.dataset.action || e.className || e.tagName); \
+    return { ok: out.length === 0 && p.scrollWidth <= p.clientWidth && d.scrollWidth <= d.clientWidth, out, page: [p.scrollWidth, p.clientWidth], section: [d.scrollWidth, d.clientWidth] }; })()";
+
 /// The fields a phone would zoom into on focus (text under 16px): none.
 const SMALL_FIELDS: &str = "[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=file]):not([type=range]), textarea, select')] \
     .map((e) => [e.id || e.name || e.getAttribute('aria-label') || e.placeholder || e.tagName, parseFloat(getComputedStyle(e).fontSize)]).filter(([, px]) => px < 16)";
@@ -1104,7 +1122,8 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// Chrome's phone emulation: the page never wider than the screen nor
 /// scrolling, with its sidebar open and closed, a chat holding a long
 /// word, code and a wide table (the table scrolls in its own box), the
-/// launcher, settings, the share sheet and an app's window; and no field a
+/// launcher, settings (its Your data with an export ready, its widest
+/// rows), the share sheet and an app's window; and no field a
 /// phone zooms into on focus (16px or more), in the shell, the chat, the
 /// launcher, settings and the sheet. Safari's keyboard, bounce and zoom are
 /// not Chrome's: a phone tests those.
@@ -1116,17 +1135,32 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     b.viewport(page, 375, 812, true)?;
     b.reload(page)?;
     b.until(page, home, wait);
-    let chat = open_chat(b, page);
-    anyhow::ensure!(!chat.is_empty(), "a chat open on the phone");
-    // the wide message, and its echo, in the open chat
+    // a chat of theirs (theirs to invite to), their newest
+    let listed = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let chat = listed.body["fragments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["kind"] == "chat" && f["role"] == "owner" && f["archived"] != true)
+        .max_by_key(|f| f["previewAt"].as_i64().unwrap_or(0))
+        .and_then(|f| f["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    anyhow::ensure!(!chat.is_empty(), "a chat of theirs: {listed}");
+    open_row(b, page, &chat, wait)?;
+    // the wide message, and its echo, in that chat
     let r = shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "phone-wide-1", "body": { "text": WIDE_MESSAGE } })), &[])?;
     anyhow::ensure!(r.status == 200, "the wide message: {r}");
     let echoed = s.eventually(agent_wait, || b.eval_in_frame(page, &chat, "!!document.querySelector('.msg.agent .md-table table')").ok() == Some(Value::Bool(true)));
+    // an export of theirs, built while the first width's chat is looked at
+    let r = shell(api, session, "POST", "/api/export", None, &[])?;
+    anyhow::ensure!(r.status == 200, "the export: {r}");
     let mut small: Vec<Value> = Vec::new();
     for w in [320u32, 375, 390, 430] {
         b.viewport(page, w, 812, true)?;
         b.reload(page)?;
         b.until(page, home, wait);
+        open_row(b, page, &chat, wait)?;
         let mut places: Vec<(&str, Value)> = Vec::new();
         // the chat open, the sidebar closed; its page in its frame, the table in its own box
         places.push(("chat", b.eval(page, PAGE_FITS)?));
@@ -1164,10 +1198,16 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         if w == 320 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-settings.png")));
         }
+        // its Your data, the export ready: its download, size, until when, and again
+        let ready = b.until(page, "document.querySelector('#settings-data .settings-export')?.dataset.state === 'ready' && !!document.querySelector('#settings-data [data-action=export-download]')", agent_wait);
+        let data = b.eval(page, YOUR_DATA_FITS)?;
+        places.push(("settings' Your data, an export ready", json!({ "ok": ready && data["ok"] == true, "seen": data })));
+        if w == 320 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-your-data.png")));
+        }
         // the share sheet, over the chat
-        // (the page left for, not settings' page before it goes; its ⋯ then holds Invite…)
-        b.eval(page, "(location.assign('/'), true)")?;
-        b.until(page, &format!("location.pathname === '/' && !document.querySelector('#settings-access') && {home}"), wait);
+        // (the chat of theirs, from its row: at / the newest chat opens, maybe one shared with them)
+        open_row(b, page, &chat, wait)?;
         let invite = "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Invite…'); if (i) { i.click(); return true; } \
             if (!document.querySelector('#menu button')) document.getElementById('chat-options')?.click(); return false; })()";
         let sheet = b.until(page, invite, wait) && b.until(page, "document.getElementById('sheet').open", wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[type=email]')").ok() == Some(Value::Bool(true)));
@@ -1184,7 +1224,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         places.push(("an app's window", b.eval(page, PAGE_FITS)?));
         let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
         s.ok(
-            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings, the share sheet and an app's window"),
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet and an app's window"),
             echoed && bad.is_empty(),
             json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
         );
