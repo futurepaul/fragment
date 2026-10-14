@@ -547,6 +547,15 @@ composer and larger input text. Mobile inputs use 16px text to avoid focus
 zoom; messages remain 14px. The shell reserves the home-indicator safe area,
 and the mobile composer adds bottom clearance.
 
+**A way to ask for an app, in the composer.** The shell's Add (and its
+empty desktop) offers ways to ask the person's agent for an app; one
+pressed comes to their chat's page as `{fragment: "compose", text}`
+(docs/api.md, The shell). The page takes it only from its parent at the
+platform's origin (its hello's `platform`), from someone who may post
+here, and at most `TEXT_MAX_BYTES`: it puts the words in the composer in
+place of what was typed and of any quote, selects their first `…` (the
+part to make theirs) and focuses it. It sends nothing; the person does.
+
 **Desktop launcher.** Command K (or Control K) opens the shell's shared
 search/new-chat input, including while typing in the framed chat. The chat
 sends `{fragment: "open-launcher"}` to its parent. The shell accepts it

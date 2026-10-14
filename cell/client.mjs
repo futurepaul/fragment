@@ -207,7 +207,7 @@ function connect() {
   ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
     if (m.type === "hello") {
-      hello = { id: m.id, principal: m.principal, role: m.role };
+      hello = { id: m.id, principal: m.principal, role: m.role, platform: m.platform };
       present.clear();
       for (const p of m.presence) present.set(p.id, p);
       helloWaiters.splice(0).forEach((resolve) => resolve(hello));
@@ -390,7 +390,9 @@ export function closed(handler) {
   return () => closedHandlers.delete(handler);
 }
 
-/// Who this page is to the fragment: { id, principal, role }.
+/// Who this page is to the fragment: { id, principal, role, platform }
+/// (`platform` the platform's origin, the one page that frames it with its
+/// person's session).
 export function me() {
   connect();
   return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));

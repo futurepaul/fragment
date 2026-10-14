@@ -1320,7 +1320,9 @@ exit says.
        - Finite Brain's layout and wiki conventions.
        - FTS5 sections ranked by BM25, kept current by a file trigger,
          behind a `search` operation.
-       - Assets are blobs. It is offered in the shell's catalog.
+       - Assets are blobs. It was offered in the shell's catalog until
+         the dock's Add taught asking an agent instead (Paul,
+         2026-10-14); `fragment create --template brain` makes one.
      - **The skills** (decision 17): a blessed `skills` template of the
        managed set, finite-skills ported.
        - The Finite-specific skills are rewritten: apps, git, brain,
