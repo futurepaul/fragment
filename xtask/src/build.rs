@@ -16,8 +16,10 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// The most the cell's Wasm may be, raw: every isolate copies its data
 /// into its memory, and every deploy uploads it. The files it serves are
 /// the release's Static Assets, not its data (cell/src/assets.rs); what
-/// grows it past this is a choice, made by moving this number.
-pub const CELL_WASM_MAX_BYTES: u64 = 6_000_000;
+/// grows it past this is a choice, made by moving this number: 6.5 MB
+/// since launch week (2026-10-14, the debt ledger's "The cell's Wasm
+/// budget was raised for launch").
+pub const CELL_WASM_MAX_BYTES: u64 = 6_500_000;
 
 /// cell/ for wasm32, into its `build/`, and the release's files beside it
 /// in `build/assets`, the Worker's Static Assets (cell/wrangler.jsonc): what

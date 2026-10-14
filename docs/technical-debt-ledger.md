@@ -35,6 +35,24 @@ fragment.club until cutover (decisions 34–35).
   with the same ownership and fresh-read guarantees; remove the plugin
   after that behavior passes the promotion test. Budget tuning is Paul's call.
 
+## The cell's Wasm budget was raised for launch
+
+- **Observed:** 2026-10-14. The cell diet (#305) set the budget at
+  6.00 MB raw; by launch week Export everything (#315, about 400 KB) and
+  operation descriptions (#327) had it at 5.98 MB, and Finite Private's
+  model routing (#330) took it 6 KB over, with decide and `ai.text`
+  tools still to land.
+- **Shortcut:** `CELL_WASM_MAX_BYTES` is 6.5 MB (xtask/src/build.rs), so
+  the launch week's features land without squeezing.
+- **Risk:** every isolate copies the Wasm's data into its memory and
+  every deploy uploads it: a bigger cell starts slower and leaves less
+  memory to requests, and a budget moved once is easier to move again.
+- **First proof:** a cold-start or memory regression in the cell's
+  Workers Logs after a deploy that grew it.
+- **Delete when:** the cell is back under 6.0 MB, the first candidate
+  being Export everything's archive builder moved into a Worker of its
+  own, and the budget is set back to 6.0 MB.
+
 ## A Hermes release has no rollback
 
 - **Observed:** 2026-10-13, designing the canary (docs/computers.md,
