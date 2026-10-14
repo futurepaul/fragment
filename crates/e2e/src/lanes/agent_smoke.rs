@@ -664,12 +664,27 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     // drawn: its Mesa cache is named `*.db`)
     let numbered = lever(api, &id, "saves").map(|r| r.body["numbered"].as_u64().unwrap_or(0)).unwrap_or(0);
     let t_saved = Instant::now();
-    let saved = within(SAVED, || lever(api, &id, "saves").ok().filter(|r| r.body["numbered"].as_u64().is_some_and(|n| n > numbered)).map(|r| r.body["saves"][0].clone()));
+    // what the DO said last, for a miss: a keepalive still open, a save
+    // under way, or saves failing
+    let mut said = Value::Null;
+    let saved = within(SAVED, || {
+        let r = lever(api, &id, "saves").ok()?;
+        said = json!({ "keepalives": r.body["keepalives"], "saving": r.body["saving"], "unsavedSince": r.body["unsavedSince"], "generation": r.body["generation"], "numbered": r.body["numbered"] });
+        r.body["numbered"].as_u64().is_some_and(|n| n > numbered).then(|| r.body["saves"][0].clone())
+    });
     println!("      (its work's end to its awake save: {:.1?})", t_saved.elapsed());
+    // and its owner's view, for a miss: saves failing awake are a notice
+    let told = match saved.is_some() {
+        true => Value::Null,
+        false => {
+            let v = view(api, &keys, &id);
+            json!({ "phase": v["phase"], "why": v["why"], "notices": v["notices"] })
+        }
+    };
     s.ok(
         "after its desktop ran, its work's end is saved awake, and its guest answered the hold (held)",
         saved.as_ref().is_some_and(|x| x["held"] == true),
-        json!({ "save": saved, "before": numbered }),
+        json!({ "save": saved, "before": numbered, "last": said, "view": told }),
     );
 
     // ---- 6. asleep, a message wakes it, and its work is still there
