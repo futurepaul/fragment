@@ -201,8 +201,8 @@
   // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
-  // (fragment_core::price::DEFAULT_BOOK_VERSION, 5 since Finite Private's
-  // GLM-5.3 Flash was priced): raise it past both with every change to a
+  // (fragment_core::price::DEFAULT_BOOK_VERSION, 6 since the Clef family
+  // was priced): raise it past both with every change to a
   // key's price, or ledgers keep their book.
-  "price_book_version": 5
+  "price_book_version": 6
 }

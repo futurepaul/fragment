@@ -3,7 +3,10 @@
 //! `[DONE]`: OpenAI's tools pass through, and its answer is one message
 //! (its text, its tool calls, why it stopped; never its reasoning) and its
 //! timing. With a draft, its text so far is that app channel's draft as it
-//! streams, from the run's principal, as `PUT …/draft` puts one. An image is FLUX.1
+//! streams, from the run's principal, as `PUT …/draft` puts one. Typed
+//! decisions are the Clef family on Workers AI (fragment_core::decide),
+//! their media the fragment's own blobs or small and inline, priced in
+//! input tokens only. An image is FLUX.1
 //! [schnell] on Workers AI, on the model route's transport (the AI binding
 //! through the deployment's gateway), priced in neurons by its tiles and
 //! steps (fragment_core::media). A generated image is a file written to
@@ -29,6 +32,7 @@
 //! whose retries ran out, or of a run that ended.
 
 use fragment_core::ledger::{Release, Released, Reserve, Reserved, Settle, Spend};
+use fragment_core::decide;
 use fragment_core::media;
 use fragment_core::models::{self as bounds, Answer, Bounded, Stream};
 use fragment_core::price::Usage;
@@ -266,11 +270,8 @@ impl FragmentCell {
     /// A kept image's bytes, from the blob store where it was put before
     /// it was kept.
     async fn kept_bytes(&self, sha: &str) -> Result<Vec<u8>, StepFail> {
-        let key = self.blob_key(sha).map_err(retry)?;
-        let found = crate::js::blob_get(&self.env, &key, None).await.map_err(retry)?;
-        let body = found.ok_or_else(|| permanent(format!("the image this step bought ({sha}) is gone from the blob store: replay the run to make it again")))?;
-        let mut resp = Response::from_body(ResponseBody::Stream(body.body)).map_err(|e| retry(e.into()))?;
-        resp.bytes().await.map_err(|e| retry(e.into()))
+        let found = self.blob(sha).await?.ok_or_else(|| permanent(format!("the image this step bought ({sha}) is gone from the blob store: replay the run to make it again")))?;
+        read_blob(found).await
     }
 
     /// `job.ai.*` steps (the module's doc); `tried`: the Workflow's try of
@@ -278,6 +279,7 @@ impl FragmentCell {
     pub(crate) async fn step_ai(&self, run: &RunRow, index: u32, step: &Step, tried: Option<u32>) -> Result<Value, StepFail> {
         match step {
             Step::AiText(t) => self.step_text(run, index, t, tried).await,
+            Step::AiDecide(d) => self.step_decide(run, index, d).await,
             Step::AiImage(image) => {
                 let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
@@ -329,6 +331,69 @@ impl FragmentCell {
             self.release(&p.owner, &p.reference).await;
         }
         failed
+    }
+
+    /// `job.ai.decide`: checked, its blobs sized then read, reserved at
+    /// its model's context, called, and its paid answer (a malformed one
+    /// too, as a rejection) kept before it settles: a retry or a replay
+    /// never buys it again, nor reads its media again.
+    async fn step_decide(&self, run: &RunRow, index: u32, d: &Value) -> Result<Value, StepFail> {
+        let p = self.paying(run, index)?;
+        if let Some(kept) = self.kept(&p.key)? {
+            self.settle_kept(&p, &kept).await?;
+            return decision_result(kept.result);
+        }
+        let call = decide::bound(d, decide::Asker::Job).map_err(|e| permanent(e.message()))?;
+        let blobs = self.decision_blobs(&call).await?;
+        self.reserve(&p, call.worst()).await?;
+        let input = call.input(blobs);
+        let answered = crate::models::run(&self.env, call.model.id(), &input, &p.owner, p.agent.as_deref()).await;
+        drop(input);
+        let (status, bytes, log_id) = answered.map_err(retry)?;
+        if status != 200 {
+            return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
+        }
+        let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let usage = call.usage(&response);
+        if usage.is_none() {
+            self.event("ai.cost-missing", &format!("{}: the decision model reported no valid input usage; charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+        }
+        let result = match call.answer(&response) {
+            Ok(answer) => answer,
+            Err(e) => {
+                let message = e.message();
+                self.event("ai.decide-refused", &format!("{}: {message}; its paid answer is kept", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+                json!({ "error": message })
+            }
+        };
+        self.keep(&p, &result, usage.as_ref())?;
+        self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
+        self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
+        decision_result(result)
+    }
+
+    /// The bytes of the blobs a decision names, in its order: each one this
+    /// fragment holds (its blobs are under its own key: another's hash is
+    /// not found), each sized, with those before it, before its bytes are
+    /// read, so media past its limits is refused unread.
+    async fn decision_blobs(&self, call: &decide::DecisionCall) -> Result<Vec<Vec<u8>>, StepFail> {
+        let shas = call.blobs();
+        let (mut sizes, mut blobs) = (Vec::with_capacity(shas.len()), Vec::with_capacity(shas.len()));
+        // bounded: at most decide::MEDIA_MAX items
+        for sha in shas {
+            let found = self.blob(sha).await?.ok_or_else(|| permanent(decide::Refusal::BlobMissing.message()))?;
+            sizes.push(found.size);
+            call.sized(&sizes).map_err(|e| permanent(e.message()))?;
+            blobs.push(read_blob(found).await?);
+        }
+        Ok(blobs)
+    }
+
+    /// One of this fragment's blobs, its size known and its bytes unread,
+    /// or `None` when it is gone.
+    async fn blob(&self, sha: &str) -> Result<Option<crate::js::BlobBody>, StepFail> {
+        let key = self.blob_key(sha).map_err(retry)?;
+        crate::js::blob_get(&self.env, &key, None).await.map_err(retry)
     }
 
     /// `job.ai.text`: the model route's call, streamed (`read_text`), kept,
@@ -481,4 +546,17 @@ struct Drafting {
     channel: String,
     turn: String,
     principal: String,
+}
+
+/// A blob's bytes, read whole (its caller bounds it).
+async fn read_blob(found: crate::js::BlobBody) -> Result<Vec<u8>, StepFail> {
+    let mut resp = Response::from_body(ResponseBody::Stream(found.body)).map_err(|e| retry(e.into()))?;
+    resp.bytes().await.map_err(|e| retry(e.into()))
+}
+
+fn decision_result(result: Value) -> Result<Value, StepFail> {
+    match result["error"].as_str() {
+        Some(message) => Err(permanent(message)),
+        None => Ok(result),
+    }
 }

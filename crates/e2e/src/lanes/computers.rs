@@ -593,7 +593,8 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
 /// The intercept's one rule for whose a model call is (decision 9's
 /// transcriptions; docs/computers.md, Models): an OpenAI SDK, which sends
 /// no header of its own, names its agent by its key, `agent:<name>`, for a
-/// voice memo's transcription and a chat call alike. The key goes no
+/// voice memo's transcription, a chat call and a decision alike (a tool an
+/// agent built calls `/v1/decide` with the same key). The key goes no
 /// further than the computer: Workers AI (the fake) never sees it. A key
 /// naming a fragment that does not run on this computer is refused (403),
 /// a malformed one and one that disagrees with `x-fragment-agent` too
@@ -627,7 +628,24 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
             && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
         json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
     );
-    Ok(6)
+    // a tool the agent built on its computer decides as it calls a model:
+    // `POST /v1/decide` on the intercept, its agent named by its key
+    use fragment_core::decide::Model;
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let decided = fetched(s, 76, "decide kale chips")?;
+    let heard = fetched(s, 77, "decide heard is this a snack")?;
+    let sent = s.ai.calls()[calls..].to_vec();
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "a decision through the intercept (POST /v1/decide), its agent named by its key, runs clef-flash, and with a voice memo inline clef-omni, each metered to the agent's owner; the vendor sees no key",
+        decided == format!("decided: {} snack 0.5", Model::ClefFlash.id()) && heard == format!("decided: {} snack 0.5", Model::ClefOmni.id())
+            && sent.len() == 2 && sent[0].model == Model::ClefFlash.id() && sent[0].body["state"] == "kale chips"
+            && sent[1].model == Model::ClefOmni.id() && sent[1].body["audio"].as_array().is_some_and(|a| a.len() == 1)
+            && sent.iter().all(|c| c.authorization.is_none() && !c.body.to_string().contains("agent:"))
+            && aig.len() == before + 2 && aig.iter().all(|e| end_of(e) == "settled"),
+        json!({ "decided": decided, "heard": heard, "models": sent.iter().map(|c| c.model.clone()).collect::<Vec<_>>(), "aig": aig.len() - before }),
+    );
+    Ok(8)
 }
 
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {

@@ -48,6 +48,8 @@ const FALLBACK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
+/// Its decisions (fragment_core::decide).
+const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
 const USD: i64 = 1_000_000;
 
@@ -414,6 +416,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("agents are stopped: the credit is used up")) && s.ai.calls().len() == calls,
         &run,
     );
+    let decision = json!({ "input": "chips", "questions": { "snack": { "type": "predicate", "instructions": "Is it a snack?" } } });
+    let r = api.op(&owner, &name, "decide", "decision-zero", decision.clone())?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("at zero a decision is refused before its vendor call", run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("credit is used up")) && s.ai.calls().len() == calls, &run);
     let hand = Keys::generate();
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
@@ -532,6 +538,12 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         theirs["status"] == "held" && theirs["error"].as_str().is_some_and(|e| e.contains("cap this month")) && s.ai.calls().len() == calls,
         &theirs,
     );
+    let r = api.op(&visitor, &name, "decide", "decision-visitor-cap", decision.clone())?;
+    let theirs = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("past its cap, a visitor's decision is refused before its vendor call", theirs["status"] == "held" && theirs["error"].as_str().is_some_and(|e| e.contains("cap this month")) && s.ai.calls().len() == calls, &theirs);
+    let r = api.op(&owner, &name, "decide", "decision-owner-cap", decision)?;
+    let ours = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.ok("the owner's decision can still run past their fragment's cap", ours["status"] == "succeeded", &ours);
     let r = api.op(&owner, &name, "ask", "o-1", json!({ "text": "from its owner" }))?;
     let ours = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok("while its owner's goes on", ours["status"] == "succeeded" && ours["output"]["text"] == "echo: from its owner", &ours);
@@ -578,6 +590,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a model id is never a tier", r.status == 400, &r);
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
+    decisions_route(s, api, wait)?;
     let r = api.signed(&owner, "POST", route, Some(&chat(false)))?;
     s.ok("a person does not call the model route (an agent does, for whom its owner pays)", r.status == 403, &r);
     let elsewhere = s.named(api, &visitor, "ledger-elsewhere")?;
@@ -777,6 +790,84 @@ fn transcription_call(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[
         keys: Some(keys),
         ..Call::default()
     })
+}
+
+/// The model route's decisions (docs/api.md, Models): an agent's `POST
+/// /api/models/v1/decide`, a job's `ai.decide` input with its media
+/// inline, on the Clef family, its owner paying: reserved at its model's
+/// context window and settled at the input tokens it counted, answered as
+/// the step is; refused before anything is reserved or sent when it is no
+/// decision the route takes; the model's refusal passed through and
+/// released; a malformed answer charged, and 502; never a person's. Its
+/// payer is a person of its own.
+fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    use base64::Engine;
+    use fragment_core::decide::Model;
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let owner_id = owner_id.as_str();
+    let aig = || entries(api, owner_id, "aig:");
+    let settled_at = |charge: i64, basis: &str| aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == charge && e["entry"]["end"]["basis"] == basis);
+    let snack = json!({ "snack": { "type": "predicate", "instructions": "Is it a snack?" } });
+    let asked = json!({ "input": "kale chips", "questions": snack });
+    s.ai.clear_script();
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 400, cached: 0, completion: 0 }]);
+    let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let priced = charge(&tokens(Model::ClefFlash.id(), 400, 0, 0));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, "usage"));
+    s.ok(
+        "an agent's decision runs clef-flash unless named, answers as the step does ({model, answers, usage}), and is settled on its owner's ledger at its input tokens",
+        r.status == 200 && r.body["model"] == Model::ClefFlash.id() && r.body["answers"]["snack"] == json!({ "type": "predicate", "probability": 0.5 })
+            && call.as_ref().is_some_and(|c| c.model == Model::ClefFlash.id() && c.body["state"] == "kale chips" && c.authorization.is_none()) && settled,
+        json!({ "status": r.status, "answer": r.body, "entries": aig() }),
+    );
+    let memo = format!("data:audio/wav;base64,{}", base64::engine::general_purpose::STANDARD.encode(spoken_wav("is this a snack", 1)));
+    let heard = json!({ "model": "clef-omni", "input": "a voice memo", "questions": snack, "media": [{ "data": memo }] });
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 0 }]);
+    let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&heard))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let priced = charge(&tokens(Model::ClefOmni.id(), 900, 0, 0));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, "usage"));
+    s.ok(
+        "a voice memo inline is heard on clef-omni, at its price",
+        r.status == 200 && r.body["model"] == Model::ClefOmni.id() && call.as_ref().is_some_and(|c| c.model == Model::ClefOmni.id() && c.body["audio"] == json!([memo])) && settled,
+        json!({ "status": r.status, "answer": r.body }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let mut refused = Vec::new();
+    for (body, why) in [
+        (json!({ "input": "a voice memo", "questions": snack, "media": [{ "data": memo }] }), "clef-omni alone"),
+        (json!({ "input": "chips", "questions": snack, "media": [{ "sha256": "a".repeat(64), "type": "image/png" }] }), "carries its media inline"),
+        (json!({ "model": "cheap", "input": "chips", "questions": snack }), "model is one of"),
+        (json!({ "state": "chips", "questions": snack }), "and nothing else"),
+    ] {
+        let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&body))?;
+        refused.push((r.status == 400 && r.message().contains(why), r.status, r.message().to_string()));
+    }
+    s.ok(
+        "audio for clef-flash, a blob (an agent's media is inline), a model no Clef's, and the provider's own names are refused, 400, saying why, nothing reserved or sent",
+        refused.iter().all(|(ok, _, _)| *ok) && s.ai.calls().len() == calls && aig().len() == before,
+        format!("{refused:?}"),
+    );
+    s.ai.fail_next(&[400]);
+    let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
+    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
+    s.ok("the model's refusal is passed through, and its reservation released", r.status == 400 && released, json!({ "status": r.status, "entries": aig() }));
+    s.ai.decide_next(&[json!({ "answers": {}, "usage": { "input_tokens": 300 } })]);
+    let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
+    let priced = charge(&tokens(Model::ClefFlash.id(), 300, 0, 0));
+    let settled = s.eventually(wait, || aig().len() == before + 2 && settled_at(priced, "usage"));
+    s.ok("an answer that does not answer what was asked is 502, and charged: it was paid for", r.status == 502 && r.message().contains("question set") && settled, json!({ "status": r.status, "message": r.message() }));
+    let r = api.signed(&owner, "POST", DECIDE_ROUTE, Some(&asked))?;
+    s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
+    Ok(())
 }
 
 /// The model route's transcriptions (decision 9: a voice memo is one the

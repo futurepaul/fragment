@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::decide::Model;
+
 /// One US dollar in micro-dollars.
 pub const USD: i64 = 1_000_000;
 /// Basis points in a whole: 10,000 bp is 100%.
@@ -262,7 +264,13 @@ pub struct PriceBook {
 /// fee and the margin with it, so a person pays the same for a call
 /// whichever of the two answers it (decision for Paul). Its SGLang reports
 /// no cached tokens, so its prompts are all priced uncached.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
+///
+/// The Clef family's (decisions: crate::decide) from Workers AI's pricing
+/// page and each model's own (developers.cloudflare.com/workers-ai/models/
+/// clef-flash, clef and clef-omni, read 2026-10-14): input tokens only,
+/// media counted as input, no output charge and no cache, so a cached or
+/// written token is an input token's price.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 8] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // Finite Private's (Finite's tiers'), at Workers AI's GLM-5.3 Flash's
@@ -273,15 +281,26 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
     // $0.44 in, $0.014 cached, $1.32 out (the fallback)
     ("@cf/deepseek-ai/deepseek-v4-flash-0731", TokenPrices { input: 440_000, cached_input: 14_000, cache_write: 440_000, output: 1_320_000 }),
+    // Clef-flash, $0.038 in; Clef, $0.24; Clef-omni, $0.15; nothing out
+    clef(Model::ClefFlash),
+    clef(Model::Clef),
+    clef(Model::ClefOmni),
 ];
+
+/// A Clef model's row: its input price for every input token, none out.
+const fn clef(m: Model) -> (&'static str, TokenPrices) {
+    let input = m.input_price();
+    (m.id(), TokenPrices { input, cached_input: input, cache_write: input, output: 0 })
+}
 /// The default book's version. A ledger takes a book only when its version
 /// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 5 for Finite Private's GLM-5.3 Flash
-/// (2026-10-14), after 4 for Hermes' tool keys (2026-10-09) and 3 for
+/// to the defaults raises it: 6 for the Clef family (2026-10-14), after 5
+/// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
+/// keys (2026-10-09) and 3 for
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 5;
+pub const DEFAULT_BOOK_VERSION: u32 = 6;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -622,8 +641,8 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 5);
-        assert_eq!(book.models.len(), 5);
+        assert_eq!(book.version, 6);
+        assert_eq!(book.models.len(), 8);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 
