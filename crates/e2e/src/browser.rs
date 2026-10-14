@@ -459,6 +459,14 @@ impl Browser {
         Ok(self.send("Storage.getCookies", params, None)?["cookies"].as_array().cloned().unwrap_or_default())
     }
 
+    /// A touch screen's pointer (`on`): coarse, five touch points, as a
+    /// phone's; off, the page's own again (headless: none at all).
+    pub fn touch(&mut self, page: &Page, on: bool) -> Result<()> {
+        let params = if on { json!({ "enabled": true, "maxTouchPoints": 5 }) } else { json!({ "enabled": false }) };
+        self.send("Emulation.setTouchEmulationEnabled", params, Some(&page.session))?;
+        Ok(())
+    }
+
     /// The page's viewport, as a phone's (`mobile`) or a desktop's.
     pub fn viewport(&mut self, page: &Page, width: u32, height: u32, mobile: bool) -> Result<()> {
         let params = json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": mobile });
