@@ -25,6 +25,14 @@ async draw({ prompt }, job) {
   from the fragment like any file. There is no image editing, no masks and
   no reference images: text to image only.
 - Video steps are off until they run on Cloudflare.
+- `job.ai.text` takes OpenAI's `messages`, `tools` and `tool_choice`, and
+  answers `{text, message, finish_reason, timing, …}`: a job runs its own
+  tool loop (on `finish_reason: "tool_calls"`, push `message`, run each of
+  `message.tool_calls`, push `{role: "tool", tool_call_id, content}`, call
+  again; bound the loop, each call is a step). With `draft: {channel,
+  turn}` the reply streams into that channel's draft, and the record you
+  publish with the same `turn` replaces it. `fragment guide`, AI, has a
+  worked example.
 - Every step bills the fragment's owner, reserved before it runs; one the
   ledger cannot cover is held, saying why. Each fragment has a monthly cap
   ($5 unless set: `fragment cap garden 10`).

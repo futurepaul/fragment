@@ -321,7 +321,8 @@ export function live(op, input, onResult, onError) {
 /// Follows a channel from after `after` (0: from the start), or from its
 /// last `last` records (at most 1000); returns a stop function. `onDraft`
 /// hears the channel's drafts while it is live: `{principal, turn, text,
-/// at}`, each the whole text so far (`text: null` once its writer stopped);
+/// at, thinking?}`, each the whole text so far (`text: null` once its writer
+/// stopped; `thinking`, ms a job's text step's model has had no words yet);
 /// the record its writer then posts with the same `turn` replaces it.
 export function subscribe(channel, onRecord, { after = 0, last = null, onDraft = null, onReady = null } = {}) {
   let s = subs.get(channel);

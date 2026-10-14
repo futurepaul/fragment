@@ -15,16 +15,17 @@
 //! are the call's; the route's `fallback` (Hermes' own switch) and `vision`
 //! run on Workers AI; a call that hangs is the caller's to give up on (the
 //! route never tries again on its own); and a job's `ai.text` runs there
-//! too, falling back the same.
+//! too, falling back the same, a tool loop among its steps.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{Face, Used};
+use fragment_fakes::workers_ai::{Face, Reply, Used};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::ai_tools;
 use super::app::ship;
 use super::jobs::{settle, started};
 use super::ledger::{end_of, entries};
@@ -261,6 +262,44 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "one whose Finite Private answers 503 is answered by Workers AI's GLM-5.3 Flash, once, and costs that call",
         run["status"] == "succeeded" && run["output"]["text"] == "echo: again" && run["output"]["model"] == FLASH && tried(s, calls) == fell() && run["costMicros"].as_i64().is_some_and(|c| c > 0),
+        json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+
+    // ---- a job's tool loop on Finite Private (ai_tools.rs's fixture), and
+    // its fallback sent the same tools
+    let tooled = ai_tools::tools_fragment(s, api, &owner, "private-tools")?;
+    let calls = s.ai.calls().len();
+    s.ai.reply_next(&[ai_tools::asks("shard"), Reply::Text("A small piece.".into())]);
+    let run = ai_tools::look_up(api, &owner, &tooled, "fp-tools", json!({ "question": "What is a shard?" }), wait)?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let first = &run["output"]["answers"][0];
+    s.ok(
+        "a job's tool loop runs on Finite Private, streamed: its tools sent, the tool call answered, the tool's result read by the next call",
+        run["status"] == "succeeded"
+            && tried(s, calls) == private(2)
+            && made.iter().all(|c| c.body["tools"] == json!([ai_tools::lookup()]) && c.body["stream"] == true && c.authorization.as_deref() == Some(platform_key.as_str()))
+            && first["finish_reason"] == "tool_calls"
+            && first["model"] == PRIVATE
+            && made[1].body["messages"][2]["content"] == "a small piece of something larger"
+            && run["output"]["text"] == "A small piece.",
+        json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+    let calls = s.ai.calls().len();
+    s.ai.fail_next(&[429]);
+    s.ai.reply_next(&[ai_tools::asks("fragment"), Reply::Text("A part broken off.".into())]);
+    let run = ai_tools::look_up(api, &owner, &tooled, "fp-tools-429", json!({ "question": "What is a fragment?" }), wait)?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let first = &run["output"]["answers"][0];
+    s.ok(
+        "Finite Private's 429 on a tool step falls back to Workers AI, sent the same messages and tools, whose tool call is the answer",
+        run["status"] == "succeeded"
+            && tried(s, calls) == [(Face::OpenAi, PRIVATE.to_string()), (Face::WorkersAi, FLASH.to_string()), (Face::OpenAi, PRIVATE.to_string())]
+            && made[0].body["tools"] == made[1].body["tools"]
+            && made[0].body["messages"] == made[1].body["messages"]
+            && first["model"] == FLASH
+            && first["finish_reason"] == "tool_calls"
+            && first["timing"]["calls"] == 2
+            && run["output"]["text"] == "A part broken off.",
         json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
     );
     Ok(())

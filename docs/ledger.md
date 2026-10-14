@@ -272,7 +272,9 @@ mark sends the same batch again, which answers as before.
   call it reserves a worst case (tokens in from the body's size, out at
   the tier's capped `max_tokens`) under the intercept's own call id. It
   streams, takes only the last, cumulative usage (S4), and settles with
-  it. A call that failed before any token is released. A call whose
+  it at the stream's `[DONE]` (not when the connection ends: the gateway
+  has held one open ~150 s past it). A call that failed before any token
+  is released. A call whose
   stream broke settles without usage, at its worst case. A Workers AI
   call's gateway log id rides along for reconciliation; the gateway's
   per-user spend rule is only a backstop. A Finite Private call has
@@ -289,7 +291,9 @@ mark sends the same batch again, which answers as before.
   reservation answers `settled` with nothing kept (the node died between
   the two) fails rather than buy again. A final failure releases (bug 3),
   as does a step whose retries ran out and any hold of a run that ended.
-  A text step settles its tokens; an image settles `neurons` from the
+  A text step settles its tokens (streamed, from its last usage; its
+  tools, tool calls and their results are tokens like any other, so the
+  price book is unchanged); an image settles `neurons` from the
   JPEG it got (its tiles, read from its header) and its steps, having
   reserved a 1024×1024 image's. The payer is the fragment's owner,
   `capped` when the run's principal is neither the owner nor an agent of

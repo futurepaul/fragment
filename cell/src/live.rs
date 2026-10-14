@@ -241,7 +241,8 @@ impl FragmentCell {
     /// A draft to the sockets following its channel, at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
-    pub(crate) fn broadcast_draft(&self, channel: &str, principal: &str, turn: &str, text: Option<&str>) -> bool {
+    /// `thinking`: ms a text step's model has reasoned with no words yet.
+    pub(crate) fn broadcast_draft(&self, channel: &str, principal: &str, turn: &str, text: Option<&str>, thinking: Option<u64>) -> bool {
         let now = js::now_ms();
         let due = self.live.borrow().draft_at;
         let Some(next) = presence_admit(due, now) else { return false };
@@ -249,7 +250,7 @@ impl FragmentCell {
         if !self.followed(channel) {
             return true;
         }
-        let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now };
+        let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             if state_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
                 send(&ws, &frame);

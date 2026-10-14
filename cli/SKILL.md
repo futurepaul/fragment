@@ -110,15 +110,19 @@ shadows.
   and a described operation is a tool (below).
 - **Pages** import `./__fragment.js`: `fragment.call`, `fragment.live` (a
   query that re-runs after every change), `fragment.subscribe` (a
-  channel's records, live), presence, web push.
+  channel's records, live, and with `onDraft` its drafts as they
+  stream), presence, web push.
 - **Channels**: records a mutation publishes and pages follow live;
   `inbox` takes webhooks, `events` is the log.
 - **Triggers**: a cron, a record on a channel, a change to files.
 - **Job steps**: `job.fetch` (a secret `{{NAME}}` in a header is filled
   outside your code), `job.sleep`, `job.files`, `job.push`, and AI,
   which the fragment's owner pays for: `job.ai.text` (text on the
-  platform's model tiers, `cheap` or `medium`) and `job.ai.image` (a
-  JPEG into the fragment's files).
+  platform's model tiers, `cheap` or `medium`; with OpenAI's `tools` the
+  model asks for calls your job runs, a tool loop with no computer, and
+  with `draft: {channel, turn}` its words stream to the pages following
+  that channel until the record you publish under the turn replaces
+  them) and `job.ai.image` (a JPEG into the fragment's files).
 
 ## Use their apps as tools
 

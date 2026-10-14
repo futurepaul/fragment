@@ -203,6 +203,8 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     };
     // a run with no charge (none reserved, or one released) names no cost
     let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
+    // tools, drafts, and streams held open (ai_tools.rs)
+    super::ai_tools::text_tools(s, api, wait)?;
 
     let r = run("t1", "summarize", json!({ "text": "the meeting notes" }))?;
     s.ok(

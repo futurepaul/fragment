@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_fakes::http::{Handler, Response, Server};
+use fragment_fakes::workers_ai::Reply;
 use fragment_nip98::Keys;
 use fragment_proto::limits;
 use serde_json::{json, Value};
 
+use super::ai_tools;
 use super::app::ship;
 use super::jobs;
 use super::signin::{site_cookie, who};
@@ -112,6 +114,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         access_before["members"].as_array().is_some_and(|m| m.iter().any(|m| m["email"] == MEMBER_EMAIL && m["role"] == "editor")) && access_before["invites"][0]["email"] == invitee.as_str(),
         "access setup: {access_before}"
     );
+    // a tool loop held after the call it bought (a tool call), its next
+    // call refused for good (ai_tools.rs)
+    let tooled = ai_tools::tools_fragment(s, &api, &owner, "restart-tools")?;
+    s.ai.reply_next(&[Reply::Tools(vec![("lookup".into(), json!({ "word": "shard" }))])]);
+    s.ai.pass_next(1);
+    s.ai.fail_next(&[400]);
+    let tools_held = ai_tools::look_up(&api, &owner, &tooled, "before", json!({ "question": "What is a shard?" }), Duration::from_secs(40))?;
+    anyhow::ensure!(tools_held["status"] == "held", "tool loop setup: {tools_held}");
+    let tool_calls_before = s.ai.calls().len();
 
     s.stop()?;
     let api = s.start(false)?;
@@ -120,6 +131,22 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
         access_after == access_before,
         format!("{access_before} → {access_after}"),
+    );
+    s.ai.say_next(&["A small piece of something larger."]);
+    api.signed(&owner, "POST", &format!("/api/f/{tooled}/replay"), Some(&json!({ "run": tools_held["id"] })))?;
+    let tools_done = jobs::settle(&api, &owner, &tooled, tools_held["id"].as_i64().unwrap_or(0), &["succeeded", "held"], Duration::from_secs(40));
+    let made = s.ai.calls()[tool_calls_before..].to_vec();
+    let kept = &tools_done["output"]["answers"][0];
+    s.ok(
+        "after a restart a replayed tool loop reuses the tool call it bought (its message and timing as kept), and buys only the call refused before",
+        tools_done["status"] == "succeeded"
+            && made.len() == 1
+            && kept["finish_reason"] == "tool_calls"
+            && kept["timing"]["calls"] == 1
+            && made[0].body["messages"][1] == kept["message"]
+            && made[0].body["messages"][2]["content"] == "a small piece of something larger"
+            && tools_done["output"]["text"] == "A small piece of something larger.",
+        json!({ "run": tools_done, "calls": made.len() }),
     );
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);

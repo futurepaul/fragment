@@ -137,18 +137,39 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 }
 
 /// `job.ai.text`: chat completions through the platform's model route
-/// (cell/src/models.rs). Keys the platform does not read are ignored.
+/// (cell/src/models.rs; crate::models bounds them, `text_body`). Keys the
+/// platform does not read are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiText {
     /// A tier (`fragment_proto::Tier`: `cheap` unless named), never a model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The conversation; without it, `prompt` is one user message.
+    /// The conversation, OpenAI's messages as given (an assistant's
+    /// `tool_calls` and `role: "tool"` results among them); without it,
+    /// `prompt` is one user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// GLM's reasoning control (`low` or `high`; anything else is `low`:
     /// crate::models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// Functions the model may call, OpenAI's shape: checked, and refused
+    /// saying why, by crate::models (`text_body`), not by their decoding
+    /// here (the cell's Wasm stays within its budget).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    /// OpenAI's: a mode, or one of the tools by name (crate::models checks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    /// Where its text so far is shown as it streams: `{channel, turn}`, one
+    /// of the app's channels' drafts under a turn, as `PUT
+    /// …/channels/<channel>/draft` puts one (crate::models `draft_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Value>,
 }
 
 /// `job.ai.image`: a JPEG drawn by the one image model (crate::media),
@@ -246,6 +267,15 @@ mod tests {
             ("files.write", json!({ "path": "log.txt", "text": "a\n", "expect": null })),
             ("files.remove", json!({ "path": "log.txt" })),
             ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
+            (
+                "ai.text",
+                json!({
+                    "messages": [{ "role": "user", "content": "hi" }, { "role": "assistant", "content": "", "tool_calls": [{ "id": "c1", "type": "function", "function": { "name": "zoom", "arguments": "{}" } }] }, { "role": "tool", "tool_call_id": "c1", "content": "x" }],
+                    "tools": [{ "type": "function", "function": { "name": "zoom", "description": "d", "parameters": { "type": "object" } } }],
+                    "tool_choice": { "type": "function", "function": { "name": "zoom" } },
+                    "draft": { "channel": "log", "turn": "turn:t_1" },
+                }),
+            ),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
             ("ai.video", json!({})),
             ("members", json!({})),
@@ -257,7 +287,7 @@ mod tests {
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 16, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 17, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -301,6 +331,8 @@ mod tests {
         refused("ai.text", json!({ "model": "cheap", "max_tokens": "100" }), "invalid type");
         refused("ai.text", json!({ "model": 7 }), "invalid type");
         refused("ai.text", json!({ "model": "cheap", "reasoning_effort": true }), "invalid type");
+        // a tool's and a draft's shapes are crate::models' to refuse (`text_body`); a list is a list
+        refused("ai.text", json!({ "prompt": "p", "tools": { "type": "function" } }), "invalid type");
         refused("ai.image", json!({ "prompt": "p" }), "missing field `path`");
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "model": "google/gemini-3.1-flash-lite-image" }), "unknown field `model`");
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "steps": -1 }), "invalid value");

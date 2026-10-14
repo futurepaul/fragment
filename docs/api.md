@@ -253,7 +253,7 @@ turns: Ledger, below). The same table is in cli/GUIDE.md, so
 |---|---|---|---|---|---|
 | **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: a template from the shell's catalog is live as it is made; the rest is an agent's |
 | **their agent, on its computer** (signed by its computer's egress, `for` its owner) | `POST /api/f/{name}/ops/{op}` (`fragment call`), at its own grants, or `for` its owner at the lower of theirs and its cap (at most `editor`) | channels and posts at that role; its chats are records (docs/chat-records.md) | the model route (Models), on its tier or its owner's own model, paid by its owner | `for` its owner, on what its owner owns (above): members, invites, visibility, rotation; never a delete or a cap | `files` and `deploy` at that role: an editor's; what it creates is its owner's |
-| **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels; a channel trigger hands it the record | `job.ai.text`, `job.ai.image` (AI, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
+| **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels, and a text step's draft to them as it streams (no `post` role needed); a channel trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image` (AI, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
 | **a coding agent, with the CLI** (a key a person approved: `fragment login`) | `fragment call`, as that person | `fragment channel [--follow]`, `fragment post` | its own; the platform's only through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate`: the owner's | `fragment sync`, `write`, `deploy`, `rollback`: an editor's |
 | **an MCP client, through `fragment mcp`** (that CLI, over stdio) | the fragment's operations that have a `description`, as tools, at the key's role: its queries, and with `--write` its mutations and jobs | none but through operations | its own; the platform's through a described job | none | none |
 
@@ -1327,11 +1327,13 @@ usage is charged its reservation, `ai.cost-missing`, never nothing). So:
 
 The steps:
 
-- `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?})`
-  → `{text, model, tier, usage}`: `model` is a tier, `cheap` (the default)
-  or `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
+- `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
+  tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
+  tier, usage, timing}`: `model` is a tier, `cheap` (the default) or
+  `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
-  else is `low`, since GLM takes an unknown one as `max`).
+  else is `low`, since GLM takes an unknown one as `max`). Tools, drafts
+  and timing are below (Text steps).
 - `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
   mediaType}`: a JPEG (`image/jpeg`) written to `main` at `path`, which
   ends in `.jpg` or `.jpeg` (a file is served by its extension: bug 5),
@@ -1343,10 +1345,130 @@ The steps:
 - `job.ai.video(…)` is refused, saying "video steps are off until they
   run on Cloudflare" (the debt ledger); nothing is reserved or called.
 
-A model's 429 or 5xx is answered by the fallback model (Models, below);
-when the fallback fails too, the step is retried. Other refusals fail
-the step with the model's message. A run answers `costMicros`: what its paid steps were
-charged (none when nothing was).
+A model's 429 or 5xx is answered by the fallback model (Models, below),
+sent the same request (its tools too); when the fallback fails too, the
+step is retried. Other refusals fail the step with the model's message.
+A run answers `costMicros`: what its paid steps were charged (none when
+nothing was).
+
+#### Text steps: tools, drafts, timing
+
+A text step is one OpenAI-shaped chat completion, streamed, read to its
+`[DONE]` and no further (the gateway has held a stream open ~150 s past
+it), so a job can run a small tool loop with no computer: call the
+model, run its own code for the tool, call again.
+
+- **Messages.** OpenAI's, as given: `system`, `user`, `assistant` (with
+  its `tool_calls`, as a step's `message` answers them) and `tool`
+  results (`{role: "tool", tool_call_id, content}`).
+- **Tools.** `tools` are OpenAI's functions, `{type: "function",
+  function: {name, description?, parameters?, strict?}}`: at most 64, in
+  64 KiB of JSON (`TOOLS_MAX`, `TOOLS_MAX_BYTES`), each named 1 to 64
+  letters, digits, `_` or `-`, once; `parameters` is a JSON Schema of an
+  object (`{"type": "object", …}`); any other key is refused.
+  `tool_choice` is `none`, `auto`, `required`, or `{type: "function",
+  function: {name}}` naming one of the tools; with no tools it is
+  refused. The same tools go to the fallback model.
+- **Size.** A step's arguments are at most 512 KiB of JSON
+  (`AI_TEXT_MAX_BYTES`, half a Workflow step's result, which carries
+  them): a tool loop's messages grow, and past that the job's
+  `job.ai.text` throws in its own realm, saying so.
+- **Steps.** Each call is a step, and a run takes at most 256 steps
+  (`limits::JOB_STEPS_MAX`) and 4 MiB of step results, its tools' own
+  steps (`job.fetch`, `job.call`) among them: bound the loop in the job
+  (`for (let i = 0; i < 6; i++)`); the platform bounds a run, not a loop.
+- **The answer.** `text` is the model's words (`""` when it only called
+  tools); `message` is `{role: "assistant", content, tool_calls?}`, each
+  call `{id, type: "function", function: {name, arguments}}` (its
+  arguments the model's JSON text, which may not parse), for the next
+  call's messages; never its reasoning. `finish_reason` is the model's
+  (`stop`, `length`, `tool_calls`), `model` the model that answered (its
+  tier's, or the fallback), `usage` as the model reported it.
+- **Timing.** `timing` is `{first_ms, ms, model, calls, tries}`: ms from
+  the call to the answer's first data line, ms to its `[DONE]`, the model
+  that answered, the calls this try made (2 when it fell back), and the
+  Workflow's try of the step (1 unless it was retried; `null` when the
+  Workflow did not say). It is kept with what the call bought: a step
+  tried again after its call answered answers the same. The model
+  route's `model.settled` line says the same of an agent's call
+  (Models), so a latency lane reads both.
+- **Drafts.** With `draft: {channel, turn}`, the call's text so far
+  streams into that channel's drafts (`{type: "draft", channel,
+  principal, turn, text, at, thinking?}` on `__live`, as `PUT
+  …/channels/{channel}/draft` puts one), from the run's principal: a
+  channel the app declares (no `post` role needed; never `events`, `ops`
+  or `inbox`), a turn `^[A-Za-z0-9._:-]{1,128}$`. As the call begins,
+  `{text: "", thinking: 0}`; while the model has no words yet, at most
+  once a second, `thinking` the ms so far, so a page can show
+  "Thinking… 4s"; then its text so far, at most 4 frames a second (none
+  past 64 KiB), and its whole text once more at its end. The job writes
+  the record with the same `turn` (`job.publish`, as the run's principal
+  too), which replaces the draft on a page; a step that fails stops it
+  (`text: null`). Drafts are never stored: a page that joins late sees
+  the next one.
+- **Prices.** Tool definitions, calls and results are tokens like any
+  other, at the model's prices (docs/ledger.md); nothing else is added.
+
+A job answering a chat with a tool, its reply streaming into the chat
+(`fragment.json`: the channel, and a trigger on people's messages, so
+its own replies start no run):
+
+```json
+{
+  "operations": { "answer": { "kind": "job" } },
+  "channels": { "chat": { "read": "viewer", "post": "viewer", "signedIn": true } },
+  "triggers": [{ "channel": "chat", "run": "answer", "from": "person" }]
+}
+```
+
+```js
+import { DurableObject } from "cloudflare:workers";
+
+const WEATHER = {
+  type: "function",
+  function: {
+    name: "weather",
+    description: "Today's weather in a city, in one line.",
+    parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  },
+};
+const CALLS_MAX = 6; // each call is a step: a run takes at most 256
+
+export class App extends DurableObject {
+  async answer({ record }, job) {
+    const turn = `reply:${record.seq}`; // the draft's, then the reply's
+    const messages = [
+      { role: "system", content: "Answer briefly. Use the weather tool for the weather." },
+      { role: "user", content: String(record.body.text ?? "") },
+    ];
+    for (let i = 0; i < CALLS_MAX; i++) {
+      const r = await job.ai.text({ messages, tools: [WEATHER], draft: { channel: "chat", turn } });
+      messages.push(r.message);
+      if (r.finish_reason !== "tool_calls") return job.publish("chat", { turn, text: r.text });
+      for (const call of r.message.tool_calls) {
+        let city = "";
+        try { city = JSON.parse(call.function.arguments).city; } catch {}
+        const res = await job.fetch(`https://wttr.in/${encodeURIComponent(city)}?format=3`);
+        messages.push({ role: "tool", tool_call_id: call.id, content: res.text() });
+      }
+    }
+    return job.publish("chat", { turn, text: "I stopped: too many tool calls." });
+  }
+}
+```
+
+and its page, which shows a reply as it streams and lets the record
+replace it:
+
+```js
+fragment.subscribe("chat", (rec) => { drafts.delete(rec.body.turn); show(rec); }, {
+  onDraft: (d) => {
+    if (d.text === null) drafts.delete(d.turn);
+    else drafts.set(d.turn, d.thinking !== undefined ? `Thinking… ${Math.round(d.thinking / 1000)}s` : d.text);
+    render();
+  },
+});
+```
 
 ### Models (docs/cloudflare-v1.md, decisions 23 and 61)
 
@@ -1439,10 +1561,22 @@ then settles from its last, cumulative usage, input less what was cached
 on a line of its own at the end: only that is metered). A call the model
 refuses is released and its answer passed through as it came; one whose
 stream broke before its usage is charged its worst case; a streamed
-call settles after its answer whether or not the client read to its end.
-Nothing of the request or its answer is kept: only the usage, on the
-ledger. A refusal of the payer's ledger is its own (402
-`budget_used_up`, 403 for a guest), with its message.
+call settles at its `[DONE]`, whether or not the client read to its end,
+and not at the stream's end: the gateway has held a stream open ~150 s
+past its `[DONE]`, which left the settle late, or cut with the Worker's
+`waitUntil` (the ledger's sweep then charged its worst case). The client
+reads the stream as it came (OpenAI's clients stop at `[DONE]`). Nothing
+of the request or its answer is kept: only the usage, on the ledger. A
+refusal of the payer's ledger is its own (402 `budget_used_up`, 403 for
+a guest), with its message.
+
+Each call's settle logs one line, `{"event": "model.settled", ref,
+logId, tier, model, charge, basis, first_ms, ms, calls}` (`wrangler
+tail`): `first_ms` is ms from its first try to the answer's first data
+line (streamed) or its status (read whole), `ms` to its settle, `calls`
+its tries (2 when it fell back), `model` the one that answered. A later
+latency lane reads these, as it reads a job's text step's `timing`
+(AI, above).
 
 The same call, as a Rust function the cell's other parts make
 (`models::complete`: the payer, the agent, the fragment, the tier, the
@@ -1743,10 +1877,11 @@ the upgrade, as a call does.
   sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
-  `{type: "draft", channel, principal, turn, text, at}` (a record its
-  poster is writing, to the sockets following its channel; `text: null`
-  once they stopped; never stored, so a page that joins late sees the
-  next),
+  `{type: "draft", channel, principal, turn, text, at, thinking?}` (a
+  record its poster is writing, to the sockets following its channel;
+  `text: null` once they stopped; never stored, so a page that joins
+  late sees the next; `thinking`, with `text: ""`, the ms a job's text
+  step's model has had no words yet: AI, Text steps),
   `{type: "presence", id, principal, data}` (one socket's change, to
   every socket, its own too; `data: null` once it cleared or left),
   `{type: "changed", op}` (after every applied mutation),
