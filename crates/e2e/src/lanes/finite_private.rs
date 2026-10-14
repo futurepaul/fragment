@@ -41,8 +41,8 @@ const PRIVATE: &str = fragment_core::models::FINITE_PRIVATE_FLASH;
 const FLASH: &str = fragment_core::models::GLM_FLASH;
 /// How long a call the fake holds back hangs: past the impatient caller's
 /// wait, as a stalled stream is past Hermes' 20 s.
-const HANG: Duration = Duration::from_secs(8);
-const PATIENCE: Duration = Duration::from_secs(3);
+const HANG: Duration = Duration::from_secs(15);
+const PATIENCE: Duration = Duration::from_secs(5);
 
 fn tokens(model: &str, input: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input: 0, cache_write: 0, output }
