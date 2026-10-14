@@ -928,7 +928,7 @@ title opening its share sheet.
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind` and `title` are what it is and its title as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
+| `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind` and `title` are what it is and its title as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `code.operations` are the installed manifest's, each as it declared them (Apps, below; `input`, `ephemeral` and `description` absent when it gave none); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
@@ -995,9 +995,10 @@ the code the fragment's own.
 ```json
 {
   "operations": {
-    "add":  { "kind": "mutation", "role": "editor", "input": { "type": "object", "required": ["text"],
+    "add":  { "kind": "mutation", "role": "editor", "description": "Add a todo with this text. Answers its {id}.",
+              "input": { "type": "object", "required": ["text"],
               "properties": { "text": { "type": "string", "maxLength": 200 } }, "additionalProperties": false } },
-    "list": { "kind": "query" }
+    "list": { "kind": "query", "description": "Every todo, oldest first: {todos: [{id, text, done}]}." }
   },
   "channels": { "activity": { "read": "viewer" } },
   "meta": { "title": "Todo", "description": "…", "image": "https://…" }
@@ -1029,6 +1030,15 @@ the code the fragment's own.
   keep theirs; the number is not declarable yet.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
+- `description` says what the operation does and what it answers, for
+  a person or an agent choosing it: plain text of 1 to 1024 characters
+  (`limits::OP_DESCRIPTION_MAX_CHARS`, counted in characters; line breaks
+  and tabs, and no other control character). One that is empty (or only
+  whitespace), longer, holds a control character, or is not a string is
+  refused at deploy, naming the operation (`status.code.error`; `fragment
+  deploy` exits 1 with `invalid_request`). `status.code.operations` shows
+  it as given; an operation without one shows none. Describe every
+  operation.
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
   *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
   <app channel>, "run": op}` (each new record; with `"from": "person" |

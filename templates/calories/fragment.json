@@ -3,6 +3,7 @@
   "operations": {
     "log_food": {
       "kind": "mutation",
+      "description": "Log a food and its calories for a person (who). Answers {id, food, calories}.",
       "role": "editor",
       "input": {
         "type": "object",
@@ -17,16 +18,18 @@
     },
     "today": {
       "kind": "query",
+      "description": "The caller's own entries since a time (ms; by default the last day), and their total: {entries, total}.",
       "role": "viewer",
       "input": { "type": "object", "additionalProperties": false, "properties": { "since": { "type": "integer", "minimum": 0 } } }
     },
     "forget": {
       "kind": "mutation",
+      "description": "Delete one of the caller's own entries, by its id. Answers its {id}.",
       "role": "viewer",
       "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
     },
-    "heard": { "kind": "job" },
-    "summarize": { "kind": "job", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
+    "heard": { "kind": "job", "description": "The ask channel's trigger: a model reads what someone said they ate, each item is logged as theirs, and they are answered on replies." },
+    "summarize": { "kind": "job", "description": "The caller's day of eating in one sentence, also posted on replies: {text}.", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
   },
   "channels": {
     "ask": { "read": "viewer", "post": "viewer", "signedIn": true },

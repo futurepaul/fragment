@@ -277,6 +277,7 @@ No file bytes persist in the cell's SQLite: a file lives in git or, at
 | Limit | Value | Why |
 |---|---|---|
 | operation input | 256 KiB | a request, not an upload (uploads go to the file plane) |
+| operation description | 1024 characters | what an agent reads to choose an operation: a sentence or a paragraph, not a manual |
 | inline file in git | under 1 MiB | a file of 1 MiB or more is a pointer to a blob |
 | operation or step result | 1 MiB | the Workflows step-result limit |
 | channel record body | 64 KiB | records are messages, not files |

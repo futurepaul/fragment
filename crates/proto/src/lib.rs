@@ -46,6 +46,11 @@ pub mod limits {
     pub const MANIFEST_MAX_BYTES: usize = 256 * 1024;
     /// Declared operations per fragment.
     pub const OPERATIONS_MAX: usize = 256;
+    /// An operation's `description`, in characters: what an agent reads to
+    /// choose the operation (an MCP tool's description), a sentence or a
+    /// paragraph, never a manual (`MANIFEST_MAX_BYTES` bounds them all
+    /// together).
+    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -1203,6 +1208,11 @@ pub struct OpDecl {
     /// no replay (the same id runs again) and no effects (docs/MODEL.md).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// What it does, in plain text, for a person or an agent choosing it
+    /// (1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the
+    /// manifest gives none, and then absent from the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A channel as `fragment.json` declares it (app channels), or a built-in.

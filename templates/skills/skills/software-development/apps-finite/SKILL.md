@@ -143,7 +143,11 @@ fragment rollback garden                  # live back to the deploy before
   Markdown that should stay the source belongs in the `notes` template.
 - **Stateful app**: operations in `fragment.json` and `app.mjs` over the
   fragment's own SQLite; pages call them and follow channels live. Read
-  `fragment guide` for the operations and channels contract.
+  `fragment guide` for the operations and channels contract. Give every
+  operation a `description`: what it does and what it answers, in plain
+  text (`"description": "Add a todo with this text. Answers its {id}."`),
+  so your owner and other agents know what to call (`fragment status`
+  shows it).
 - **Webhooks, schedules, background work**: a job, and a trigger on the
   inbox, a cron, or changed files.
 - **AI in the app**: `job.ai.text` and `job.ai.image` steps, billed to your

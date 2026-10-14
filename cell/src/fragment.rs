@@ -79,6 +79,12 @@ const ALARM_RETRY_MS: i64 = 30_000;
 
 /// A life's tables: a delete drops them all and makes them again empty
 /// (ended.rs), keeping only the ended lives' own (`ended::SCHEMA`).
+///
+/// A table here never gains a column: `CREATE TABLE IF NOT EXISTS` adds
+/// none to an object made before it, which then refuses every statement
+/// naming it (docs/technical-debt-ledger.md, "Objects made before a
+/// column…"). A new fact gets a table of its own, as operations'
+/// descriptions did (`code_op_descriptions`, beside `code_ops`).
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
@@ -110,6 +116,7 @@ CREATE TABLE IF NOT EXISTS code (
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
   modules TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);

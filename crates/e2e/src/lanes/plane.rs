@@ -209,6 +209,56 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("the CLI's key is readable for the op check", false, home.display());
     }
 
+    // operations' descriptions: deployed, kept by the next deploy, and a bad one refused
+    let described = |list: &str| {
+        let mut m: Value = serde_json::from_str(include_str!("../../fixtures/todo.json")).expect("the fixture is JSON");
+        m["operations"]["list"]["description"] = json!(list);
+        m["operations"]["add_todo"]["description"] = json!("Add a todo: {text}. Answers its {id}.");
+        m.to_string()
+    };
+    let descriptions = |st: &Value| ["list", "add_todo", "count"].map(|op| st["code"]["operations"][op].get("description").cloned());
+    std::fs::write(site.join("fragment.json"), described("Every todo, oldest first.\nAnswers {todos}."))?;
+    s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
+    let st = s.cli_json(api, &home, &["status", &name, "--json"])?;
+    s.ok(
+        "fragment status shows each operation's description as the manifest gave it, and none for one without",
+        descriptions(&st) == [Some(json!("Every todo, oldest first.\nAnswers {todos}.")), Some(json!("Add a todo: {text}. Answers its {id}.")), None],
+        &st["code"]["operations"],
+    );
+    std::fs::write(site.join("site/index.html"), "<h1>v5 marker</h1>")?;
+    let ok = deployed(s, "v5 marker");
+    let again = s.cli_json(api, &home, &["status", &name, "--json"])?;
+    s.ok(
+        "a deploy that leaves fragment.json as it was keeps them",
+        ok && again["code"]["sha"] != st["code"]["sha"] && again["code"]["operations"] == st["code"]["operations"],
+        &again["code"],
+    );
+    std::fs::write(site.join("fragment.json"), described(""))?;
+    let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--json"]);
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let kept = s.cli_json(api, &home, &["status", &name, "--json"])?;
+    s.ok(
+        "an empty description is refused (invalid_request, naming it), and the last good code keeps serving its own",
+        out.status.code() == Some(1)
+            && refused["error"]["code"] == "invalid_request"
+            && refused["error"]["message"].as_str().is_some_and(|m| m.contains("operations.list.description is empty"))
+            && kept["code"]["sha"] == again["code"]["sha"]
+            && kept["code"]["operations"] == again["code"]["operations"],
+        json!({ "refused": refused, "code": kept["code"] }),
+    );
+    std::fs::write(site.join("fragment.json"), described(&"x".repeat(limits::OP_DESCRIPTION_MAX_CHARS + 1)))?;
+    let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--json"]);
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    s.ok(
+        "and so is one over 1024 characters",
+        out.status.code() == Some(1) && refused["error"]["message"].as_str().is_some_and(|m| m.contains("operations.list.description is 1025 characters, over 1024")),
+        &refused,
+    );
+    std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json"))?;
+    s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
+    let plain = s.cli_json(api, &home, &["status", &name, "--json"])?;
+    s.ok("a deploy without them drops them", descriptions(&plain) == [None, None, None], &plain["code"]["operations"]);
+
     // a deploy whose code the platform refuses says so and fails
     let good = s.cli_json(api, &home, &["status", &name, "--json"])?;
     std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json").replacen("\"add_todo\"", "\"Add-Todo\"", 1))?;
