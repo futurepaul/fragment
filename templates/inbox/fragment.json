@@ -1,9 +1,10 @@
 {
   "name": "inbox",
   "operations": {
-    "ingest": { "kind": "job" },
+    "ingest": { "kind": "job", "description": "The inbox's trigger: turns one webhook delivery into an item (a payload's url becomes its page's title) and adds it." },
     "add": {
       "kind": "mutation",
+      "description": "Add an item: its text and where it came from (source). Answers its {id}.",
       "input": {
         "type": "object",
         "required": ["text", "source"],
@@ -11,7 +12,7 @@
         "properties": { "text": { "type": "string", "maxLength": 2000 }, "source": { "type": "string", "maxLength": 200 } }
       }
     },
-    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+    "list": { "kind": "query", "description": "The newest 100 items, newest first: {items: [{id, text, source, at}]}.", "role": "public", "input": { "type": "object", "additionalProperties": false } }
   },
   "channels": { "feed": { "read": "public" } },
   "triggers": [{ "channel": "inbox", "run": "ingest" }],

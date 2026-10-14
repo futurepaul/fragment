@@ -264,10 +264,11 @@ fragment verify my-thing --dir .            # full-content audit
 {
   "operations": {
     "add":    { "kind": "mutation", "role": "editor",
+                "description": "Add an item with this text. Answers its {id}.",
                 "input": { "type": "object", "required": ["text"], "additionalProperties": false,
                            "properties": { "text": { "type": "string", "maxLength": 200 } } } },
-    "list":   { "kind": "query", "role": "public" },
-    "ingest": { "kind": "job" }
+    "list":   { "kind": "query", "role": "public", "description": "Every item, oldest first: {items: [{id, text}]}." },
+    "ingest": { "kind": "job", "description": "The inbox's trigger: adds each webhook delivery as an item." }
   },
   "channels": { "activity": { "read": "viewer" } },
   "triggers": [{ "channel": "inbox", "run": "ingest" }],
@@ -281,6 +282,11 @@ fragment verify my-thing --dir .            # full-content audit
   and `fragment deploy` says why and exits 1.
 - `role` is who may call it: `public`, `viewer` (default for queries),
   `editor` (default for mutations and jobs), `owner`.
+- `description`: say what every operation does and what it answers, in
+  plain text (1 to 1024 characters). It is how a person reading
+  `fragment status` (under `code.operations`), or an agent choosing among
+  your operations, knows what to call. An empty or longer one is refused
+  at deploy.
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.

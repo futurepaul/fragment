@@ -71,6 +71,11 @@ with its title; start with useful content. Design for a narrow pane
 Link `./__fragment.css` for the platform's look, then build on its theme
 variables and base styles; the stylesheet is optional.
 
+Give every operation you write a `description` in `fragment.json`: what
+it does and what it answers, in plain text (`"description": "Add a todo
+with this text. Answers its {id}."`). People and agents read it in
+`fragment status` to know what to call.
+
 ## Ask another agent
 
 An agent hands work to another of its owner's agents by @naming it in a

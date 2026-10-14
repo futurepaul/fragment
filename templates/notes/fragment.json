@@ -1,8 +1,8 @@
 {
   "name": "notes",
   "operations": {
-    "changed": { "kind": "mutation" },
-    "last_change": { "kind": "query" }
+    "changed": { "kind": "mutation", "description": "The file trigger: records which notes changed as main moved, so open pages refresh." },
+    "last_change": { "kind": "query", "description": "When the notes last changed, and which: {at, paths}, or null before any change." }
   },
   "triggers": [{ "files": "**", "run": "changed" }],
   "meta": { "title": "Notes", "description": "A folder of markdown, live: edit it, sync it, and open pages follow." }

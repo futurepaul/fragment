@@ -77,7 +77,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
     // a fragment with code, triggers, and a channel
-    let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |_| {})?;
+    let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |m| m["operations"]["save"]["description"] = json!("Save texts to the feed."))?;
     // a sealed secret its job fetches with, and a channel with records in it
     let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{stored}/secrets/API_KEY", api.base), body: Some(SECRET.as_bytes().to_vec()), keys: Some(&owner), ..Call::default() })?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
@@ -85,7 +85,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let seq_before = jobs::records(&api, &owner, &stored, "feed").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
-    anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation", "code setup: {code_before}");
+    anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation" && code_before["operations"]["save"]["description"] == "Save texts to the feed.", "code setup: {code_before}");
     // a person's search and archiving (principal.rs), and a chat's search outbox (search.rs)
     let talk = s.named(&api, &owner, "restart-talk")?;
     let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
@@ -151,7 +151,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", &format!("/api/f/{paid}/runs?limit=1"), None)?;
     s.ok("after a restart a paused operation is still paused", r.status == 200 && r.body["paused"] == json!(["summarize"]), &r);
     let r = api.status(&owner, &stored)?;
-    s.ok("after a restart the installed code is the same: its operations and schemas", r.body["code"] == code_before, &r.body["code"]);
+    s.ok("after a restart the installed code is the same: its operations, schemas and descriptions", r.body["code"] == code_before, &r.body["code"]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{stored}/triggers"), None)?;
     let on: Vec<Value> = r.body["triggers"].as_array().into_iter().flatten().map(|t| t["run"].clone()).collect();
     s.ok("and its triggers, in their order", on == vec![json!("ingest"), json!("ping"), json!("boom"), json!("tick")], &r);

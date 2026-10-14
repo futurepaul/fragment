@@ -99,10 +99,36 @@ fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     }
 }
 
+/// An operation's `description`: plain text of 1 to
+/// `limits::OP_DESCRIPTION_MAX_CHARS` characters (an agent reads it to
+/// choose the operation), with no control characters but line breaks and
+/// tabs. One that says nothing (only whitespace) is refused, not dropped:
+/// the author meant to say something.
+fn description(name: &str, v: Option<&Value>) -> Result<Option<String>, String> {
+    let max = limits::OP_DESCRIPTION_MAX_CHARS;
+    let text = match v {
+        None => return Ok(None),
+        Some(Value::String(text)) => text,
+        Some(_) => return Err(format!("operations.{name}.description must be a string")),
+    };
+    let chars = text.chars().count();
+    if text.trim().is_empty() {
+        return Err(format!("operations.{name}.description is empty: say what the operation does, or leave it out"));
+    }
+    if chars > max {
+        return Err(format!("operations.{name}.description is {chars} characters, over {max}"));
+    }
+    if let Some(c) = text.chars().find(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        return Err(format!("operations.{name}.description is plain text: it holds the control character {c:?}"));
+    }
+    assert!((1..=max).contains(&chars), "a kept description is within its bounds");
+    Ok(Some(text.clone()))
+}
+
 fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("operations.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral")) {
-        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral" | "description")) {
+        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral, description)"));
     }
     let kind = match obj.get("kind").and_then(Value::as_str) {
         Some("query") => OpKind::Query,
@@ -134,7 +160,8 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some(Value::Bool(true)) => return Err(format!("operations.{name}.ephemeral is for a mutation: it keeps no ledger row")),
         Some(_) => return Err(format!("operations.{name}.ephemeral must be true or false")),
     };
-    Ok(OpDecl { kind, role, input, ephemeral })
+    let description = description(name, obj.get("description"))?;
+    Ok(OpDecl { kind, role, input, ephemeral, description })
 }
 
 /// One entry of `channels`: who reads it (default `viewer`), who may post
@@ -323,7 +350,7 @@ mod tests {
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
             "sign":{"kind":"mutation","role":"public"}},"meta":{"title":"T"}}"#)
         .unwrap();
-        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false });
+        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false, description: None });
         assert_eq!(m.operations["add"].role, Role::Editor);
         assert_eq!(m.operations["add"].input, Some(serde_json::json!({"type":"object"})));
         assert_eq!(m.operations["sign"].role, Role::Public);
@@ -343,13 +370,68 @@ mod tests {
             "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
             {"files":"notes/**","run":"digest"}]}"#)
         .unwrap();
-        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false });
+        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
         assert_eq!(m.triggers.len(), 4);
         assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
         assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
         let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
         assert_eq!(back, m.triggers[0], "stored triggers read back");
+    }
+
+    /// Goal: an operation may say what it does, in plain text within its
+    /// bounds, and status carries it as the manifest gave it. Method: valid
+    /// descriptions (the longest, counted in characters, not bytes; line
+    /// breaks and tabs) read back from the wire as status serves them, and
+    /// again (a replay changes nothing); one without says nothing of it; a
+    /// blessed template's are its fragments'; each bad one is refused,
+    /// naming the operation and why.
+    #[test]
+    fn an_operation_may_describe_itself() {
+        use serde_json::json;
+        let max = limits::OP_DESCRIPTION_MAX_CHARS;
+        let longest = "é".repeat(max);
+        let manifest = json!({ "operations": {
+            "count": { "kind": "query", "description": "The cards punched so far: {n, holes}." },
+            "press": { "kind": "mutation", "description": longest },
+            "reset": { "kind": "mutation", "description": "Set every count to zero.\n\tThe tape keeps its records." },
+            "pump": { "kind": "job" },
+        } })
+        .to_string();
+        let m = parse(manifest.as_bytes()).unwrap();
+        assert_eq!(m.operations["count"].description.as_deref(), Some("The cards punched so far: {n, holes}."));
+        assert_eq!(m.operations["press"].description.as_ref().map(|d| d.chars().count()), Some(max), "the limit counts characters: {max} two-byte ones pass");
+        assert!(m.operations["reset"].description.as_deref().is_some_and(|d| d.contains("\n\t")), "line breaks and tabs are plain text");
+        assert_eq!(m.operations["pump"].description, None);
+        assert_eq!(parse(manifest.as_bytes()).unwrap(), m, "the same manifest reads the same again");
+        let wire = serde_json::to_value(&m.operations).unwrap();
+        assert_eq!(wire["count"], json!({ "kind": "query", "role": "viewer", "description": "The cards punched so far: {n, holes}." }));
+        assert!(wire["pump"].get("description").is_none(), "an operation without one says nothing of it: {}", wire["pump"]);
+        let back: BTreeMap<String, OpDecl> = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, m.operations, "status's operations read back");
+        let older: OpDecl = serde_json::from_value(json!({ "kind": "query", "role": "viewer" })).unwrap();
+        assert_eq!(older.description, None, "a host from before descriptions reads as none");
+        let blessed = parse(br#"{"kind":"brain","operations":{"zoom":{"kind":"query","description":"Expand part of the view."}}}"#).unwrap();
+        let on = on_template(&parse(br#"{"template":"brain"}"#).unwrap(), &blessed).unwrap();
+        assert_eq!(on.operations["zoom"].description.as_deref(), Some("Expand part of the view."), "a blessed template's descriptions are its fragments'");
+        for (bad, says) in [
+            (json!(""), "operations.q.description is empty"),
+            (json!(" \n\t"), "operations.q.description is empty"),
+            (json!("x".repeat(max + 1)), "operations.q.description is 1025 characters, over 1024"),
+            (json!("é".repeat(max + 1)), "operations.q.description is 1025 characters, over 1024"),
+            (json!("ring\u{7}"), "operations.q.description is plain text"),
+            (json!("nul\u{0}"), "operations.q.description is plain text"),
+            (json!(7), "operations.q.description must be a string"),
+            (json!(null), "operations.q.description must be a string"),
+            (json!(["a"]), "operations.q.description must be a string"),
+            (json!({ "en": "a" }), "operations.q.description must be a string"),
+        ] {
+            let manifest = json!({ "operations": { "q": { "kind": "query", "description": bad } } }).to_string();
+            let why = parse(manifest.as_bytes()).expect_err(&manifest);
+            assert!(why.contains(says), "{why}");
+        }
+        let why = parse(br#"{"operations":{"q":{"kind":"query","desc":"x"}}}"#).unwrap_err();
+        assert!(why.contains("description)"), "the unknown-key refusal names it: {why}");
     }
 
     /// Goal: a channel trigger may start runs only for one kind of poster

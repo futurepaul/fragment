@@ -302,4 +302,21 @@ pub(crate) mod tests {
             assert!(t.file("fragment.json").is_some(), "{} has no fragment.json", t.name);
         }
     }
+
+    /// A template an author starts from (`fragment new`) has a manifest the
+    /// platform takes, and says what each of its operations does, as the
+    /// guide asks of every author's.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn a_scaffolds_operations_say_what_they_do() {
+        mod names {
+            include!("blessed_names.rs");
+        }
+        for t in ALL.iter().filter(|t| !names::BLESSED.contains(&t.name)) {
+            let bytes = t.file("fragment.json").expect("every template has one").bytes;
+            let m = fragment_core::manifest::parse(bytes).unwrap_or_else(|e| panic!("{}'s fragment.json: {e}", t.name));
+            let undescribed: Vec<&String> = m.operations.iter().filter(|(_, d)| d.description.is_none()).map(|(op, _)| op).collect();
+            assert!(undescribed.is_empty(), "{} leaves {undescribed:?} undescribed", t.name);
+        }
+    }
 }
