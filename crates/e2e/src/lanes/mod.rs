@@ -4,6 +4,7 @@ mod admin;
 mod agent_ask;
 mod agent_restart;
 mod agent_smoke;
+mod ai_tools;
 mod app;
 mod appfiles;
 mod blobs;

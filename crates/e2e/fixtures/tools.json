@@ -1,0 +1,7 @@
+{
+  "operations": {
+    "look_up": { "kind": "job" },
+    "tooled": { "kind": "job" }
+  },
+  "channels": { "answers": { "read": "viewer" } }
+}
