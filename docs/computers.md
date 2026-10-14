@@ -723,7 +723,10 @@ expires within 30 days. The container application is the deployment's
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model where the deployment runs it, streams its answer back,
-  and settles the final usage (lesson 7). A call whose model fails before
+  and settles the final usage at its `[DONE]` (lesson 7; not at the
+  stream's end, which the gateway has held open ~150 s past it), its
+  timing on its `model.settled` line (docs/api.md, Models). A call whose
+  model fails before
   answering (not reached, 429, or a 5xx) is made once more on the
   deployment's fallback model (docs/api.md, Models): the guest sees only
   the answer.

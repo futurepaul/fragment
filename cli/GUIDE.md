@@ -150,7 +150,7 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 |---|---|---|---|---|---|
 | **the person, in a browser** | on an app's pages (`fragment.call`), at their role | the channels their role reads, live; posts where a channel's `post` role lets them | through their agents and their apps' jobs | the owner, from the share sheet: members by email, the link, visibility | no: they make one from a template (the shell's Add) and ask an agent for the rest |
 | **their agent, on its computer** | `fragment call`, at its own grants, or for its owner at their role (at most an editor's) | `fragment channel`, `fragment post`; its chats are records | its turns, on its tier, paid by its owner | for its owner, on what its owner owns, when asked (never a delete or a cap) | `fragment write`, `fragment deploy` (an editor's); what it makes is its owner's |
-| **an app's own jobs** | its own operations (`job.call`); a triggered run acts as the fragment, an editor | `job.publish` to its own channels; a trigger hands it the record | `job.ai.text`, `job.ai.image`, paid by the fragment's owner | no | no: `job.files.write` writes to `main`, live at the next deploy |
+| **an app's own jobs** | its own operations (`job.call`); a triggered run acts as the fragment, an editor | `job.publish` to its own channels, and a text step's draft to them as it streams; a trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image`, paid by the fragment's owner | no | no: `job.files.write` writes to `main`, live at the next deploy |
 | **a coding agent, with the CLI** | `fragment call`, as the person whose key it holds | `fragment channel --follow`, `fragment post` | its own; the platform's through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate` (the owner's) | `fragment deploy`, `rollback` (an editor's) |
 | **an MCP client, through `fragment mcp`** | the described operations, as tools: queries, and with `--write` mutations and jobs | only through operations | its own; the platform's through a described job | no | no |
 
@@ -392,14 +392,59 @@ export class App extends DurableObject {
 - **`fetch(request)`**, if the App has one, answers every site path that
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.
-- **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning_effort})`,
-  `job.ai.image({prompt, path, steps})`. Text runs on a tier,
-  `model: "cheap"` (the default) or `"medium"`; an image is a JPEG
-  (FLUX.1 [schnell], 1 to 8 `steps`, 4 by default) written to `path` on
-  `main`, which ends in `.jpg` or `.jpeg`. You pay for them, from your
-  ledger (below). `job.ai.video` is off until videos run on Cloudflare.
-  GLM can spend a small `max_tokens` thinking: `reasoning_effort` is
-  `low` unless you ask for `high`.
+- **AI** (jobs): `job.ai.text({model, prompt | messages, max_tokens,
+  reasoning_effort, tools, tool_choice, draft})`, `job.ai.image({prompt,
+  path, steps})`. Text runs on a tier, `model: "cheap"` (the default) or
+  `"medium"`; an image is a JPEG (FLUX.1 [schnell], 1 to 8 `steps`, 4 by
+  default) written to `path` on `main`, which ends in `.jpg` or `.jpeg`.
+  You pay for them, from your ledger (below). `job.ai.video` is off until
+  videos run on Cloudflare. GLM can spend a small `max_tokens` thinking:
+  `reasoning_effort` is `low` unless you ask for `high`. A text step
+  answers `{text, message, finish_reason, model, tier, usage, timing}`
+  (`timing`: `{first_ms, ms, model, calls, tries}`). It takes OpenAI's
+  `tools` (at most 64, each `{type: "function", function: {name,
+  description, parameters}}`, `parameters` an object's JSON Schema) and
+  `tool_choice`, so a job runs its own tool loop with no computer: when
+  `finish_reason` is `tool_calls`, push `message` onto `messages`, run
+  each of `message.tool_calls` yourself, push `{role: "tool",
+  tool_call_id, content}` for each, and call again. Each call is a step
+  (a run takes at most 256): bound the loop. With `draft: {channel,
+  turn}` its text streams into that channel's drafts as it comes (at
+  most 4 frames a second; `{text: "", thinking: ms}` while the model has
+  no words yet), and the record you then publish with the same `turn`
+  replaces it on a page. A step's arguments are at most 512 KiB.
+
+A job that answers a chat with a tool, its reply streaming into the
+chat (`fragment.json`: `"channels": {"chat": {"read": "viewer", "post":
+"viewer", "signedIn": true}}`, `"triggers": [{"channel": "chat", "run":
+"answer", "from": "person"}]`, so its own replies start no run):
+
+```js
+const WEATHER = { type: "function", function: { name: "weather", description: "Today's weather in a city.",
+  parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } };
+
+async answer({ record }, job) {
+  const turn = `reply:${record.seq}`;
+  const messages = [{ role: "user", content: String(record.body.text ?? "") }];
+  for (let i = 0; i < 6; i++) {
+    const r = await job.ai.text({ messages, tools: [WEATHER], draft: { channel: "chat", turn } });
+    messages.push(r.message);
+    if (r.finish_reason !== "tool_calls") return job.publish("chat", { turn, text: r.text });
+    for (const call of r.message.tool_calls) {
+      let city = "";
+      try { city = JSON.parse(call.function.arguments).city; } catch {}
+      const res = await job.fetch(`https://wttr.in/${encodeURIComponent(city)}?format=3`);
+      messages.push({ role: "tool", tool_call_id: call.id, content: res.text() });
+    }
+  }
+  return job.publish("chat", { turn, text: "I stopped: too many tool calls." });
+}
+```
+
+Its page shows the reply as it streams: `fragment.subscribe("chat",
+show, { onDraft: (d) => d.text === null ? clear(d.turn) : d.thinking !==
+undefined ? showThinking(d.turn, d.thinking) : showDraft(d.turn, d.text)
+})`, and the record with the same `turn` replaces the draft.
 
 ## Pages
 
