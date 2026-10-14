@@ -968,22 +968,36 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // settings, at /settings: what a person needs of their account
     let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
     b.click(&page, "#settings")?;
-    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'The command line'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
     s.ok(
-        "settings, at /settings: the account (who they are, their identity, another sign-in, signing out), credit, computer, connections, and the CLI",
+        "settings, at /settings: the account (who they are, their identity, another sign-in, signing out), credit, computer, connections, and building with a coding agent",
         settings
             && text.contains(&email)
             && text.contains(&id)
             && has("#settings-page a[href='/auth/link?return=%2Fsettings']")
-            && has("#settings-page form[method=post][action='/auth/logout'] button")
-            && text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
-            && text.contains("fragment login")
-            && text.contains("fragment skill > ~/.claude/skills/fragment/SKILL.md"),
+            && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
+    // a prompt for Claude Code or Codex naming this platform's own llms.txt,
+    // copied whole; the CLI's install folded below it
+    let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
+    let shown = b.eval(&page, "(() => { const p = document.getElementById('build-prompt'); const d = document.querySelector('#settings-page details.settings-install'); return { prompt: p?.value, size: p && getComputedStyle(p).fontSize, folded: d && !d.open, install: d?.querySelector('pre.command')?.textContent }; })()")?;
+    s.ok(
+        "settings' Build with Claude Code or Codex: a prompt naming this platform's llms.txt, its text 16px, and the install folded behind Install it yourself",
+        shown["prompt"] == prompt.as_str()
+            && shown["size"] == "16px"
+            && shown["folded"] == true
+            && shown["install"].as_str().is_some_and(|i| {
+                i.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz") && i.contains(&format!("fragment login --host {}", api.base))
+            }),
+        &shown,
+    );
+    b.eval(&page, "(() => { window.__copied = null; navigator.clipboard.writeText = async (text) => { window.__copied = text; }; const p = document.getElementById('build-prompt'); p.value += 'a chore wheel'; document.querySelector('#settings-page [data-action=copy-prompt]').click(); return true; })()")?;
+    let copied = b.until(&page, &format!("window.__copied === {:?} && document.querySelector('#settings-page [data-action=copy-prompt]').textContent === 'Copied'", format!("{prompt}a chore wheel")), wait);
+    s.ok("its Copy copies the prompt as the person finished it, and says so", copied, b.eval(&page, "window.__copied")?);
     // Sharing: what they own, each with who can open it (GET /api/access)
     let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
     let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);

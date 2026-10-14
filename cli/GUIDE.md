@@ -2,14 +2,20 @@
 
 A **fragment** is one small place on the web: a folder of files in git,
 an app of named operations over its own SQLite, channels that pages
-follow live, members with roles, and URLs. Fragments live on
-fragment.club (invite-only for now), on Cloudflare, and sleep when idle;
-a request, a trigger, or an inbox delivery wakes them.
+follow live, members with roles, and URLs. Fragments live on the
+platform at {{platform}}, where people sign in and find their apps, each
+served at its own origin, {{fragment}}; they run on Cloudflare, and
+sleep when idle: a request, a trigger, or an inbox delivery wakes them.
+
+This manual is for an agent building for a person: a coding agent
+(Claude Code, Codex, Claude desktop's Code tab) with the CLI, or an
+agent on a Fragment computer. {{platform}}/llms.txt (`fragment skill`)
+is its one-page handoff.
 
 ## Install and pair
 
 You drive fragments with the `fragment` CLI. On macOS or Linux, with no
-sudo (the same command updates it):
+sudo (on Windows, in WSL; the same command updates it):
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
@@ -21,18 +27,24 @@ in `~/.zshrc` or `~/.bashrc`.
 `fragment skill` prints a SKILL.md for a coding agent (Claude Code,
 Codex) that points it here.
 
-Every request is signed with this machine's nostr key. `fragment login`
-makes it and opens a page on the host: sign in and approve the key,
-whose ending the page and the terminal both show. On a machine without a
-browser, it prints the link to open anywhere you are signed in
-(`--no-wait` returns at once; run it again after approving). The host is
-https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
-host <url>` names another. The host knows which identity (an npub) each
-key belongs to: memberships name you, not the key. `fragment keys
-rotate` replaces the key and keeps everything you have.
+Every request is signed with this machine's nostr key. Pair it once:
+
+```
+fragment login --host {{platform}}
+```
+
+It makes the key and opens a page on the host: your person signs in and
+approves the key, whose ending the page and the terminal both show. On a
+machine without a browser, it prints the link to open anywhere they are
+signed in (`--no-wait` returns at once; run it again after approving).
+The CLI keeps the host `--host` named once it answered, so later
+commands need none; `FRAGMENT_HOST` (an environment's, never saved) or
+`fragment host <url>` names another. The host knows which identity (an npub) each key belongs to:
+memberships name you, not the key. `fragment keys rotate` replaces the
+key and keeps everything you have.
 
 A fragment's name is its label and a random suffix the platform adds
-(`fragment create todo` makes `todo--k3x9`), served at `<name>.<suffix>`;
+(`fragment create todo` makes `todo--k3x9`), served at {{fragment}};
 in a command, a bare label names the one of yours with it (`fragment
 status todo`), and a name in full names any fragment.
 
@@ -132,10 +144,25 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 - **The event log is ground truth.** `fragment events <name>` says what
   happened; believe it over your memory.
 
+## Who can do what, where
+
+| | call operations | read or write records | use models | share and invite | deploy |
+|---|---|---|---|---|---|
+| **the person, in a browser** | on an app's pages (`fragment.call`), at their role | the channels their role reads, live; posts where a channel's `post` role lets them | through their agents and their apps' jobs | the owner, from the share sheet: members by email, the link, visibility | no: they make one from a template (the shell's Add) and ask an agent for the rest |
+| **their agent, on its computer** | `fragment call`, at its own grants, or for its owner at their role (at most an editor's) | `fragment channel`, `fragment post`; its chats are records | its turns, on its tier, paid by its owner | for its owner, on what its owner owns, when asked (never a delete or a cap) | `fragment write`, `fragment deploy` (an editor's); what it makes is its owner's |
+| **an app's own jobs** | its own operations (`job.call`); a triggered run acts as the fragment, an editor | `job.publish` to its own channels; a trigger hands it the record | `job.ai.text`, `job.ai.image`, paid by the fragment's owner | no | no: `job.files.write` writes to `main`, live at the next deploy |
+| **a coding agent, with the CLI** | `fragment call`, as the person whose key it holds | `fragment channel --follow`, `fragment post` | its own; the platform's through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate` (the owner's) | `fragment deploy`, `rollback` (an editor's) |
+| **an MCP client, through `fragment mcp`** | the described operations, as tools: queries, and with `--write` mutations and jobs | only through operations | its own; the platform's through a described job | no | no |
+
+Every row acts as someone: a person, their agent, or the fragment
+itself, each held to that one's role on the fragment (People, below).
+What costs money is paid from an owner's ledger: a fragment's owner for
+its jobs, an agent's owner for its turns (Your ledger, below).
+
 ## First moves
 
 ```
-fragment login                            # once per machine: sign in in a browser, approve this machine's key
+fragment login --host {{platform}}        # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
 fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
@@ -288,7 +315,8 @@ fragment verify my-thing --dir .            # full-content audit
   plain text (1 to 1024 characters). It is how a person reading
   `fragment status` (under `code.operations`), or an agent choosing among
   your operations, knows what to call. An empty or longer one is refused
-  at deploy.
+  at deploy. A described operation is a tool (Your operations as tools,
+  below); one without a description is no tool.
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
@@ -432,7 +460,7 @@ A page should look made for its job, by someone who cared.
 
 ## The inbox (webhooks in)
 
-Every fragment has an inbox URL: `POST <host>/api/f/<name>/inbox?t=<inbox
+Every fragment has an inbox URL: `POST {{platform}}/api/f/<name>/inbox?t=<inbox
 token>` (or the token in `x-fragment-inbox-token`), a JSON body of at
 most 64 KiB. Each delivery is a record on the `inbox` channel; a trigger
 `{"channel": "inbox", "run": "<op>"}` handles it.
@@ -506,7 +534,11 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   call that got no answer says `unavailable`, or `outcome_unknown` when
   it may have run: `fragment call <name> <op> --id <id>` finds out, and
   never runs it twice.
-- One server serves one fragment: add one for each.
+- One server serves one fragment: add one for each. Claude desktop
+  takes one in its config's `mcpServers`: `{"my-thing": {"command":
+  "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
+  full path: an app does not read your shell's PATH). So your person's
+  apps are tools in whatever they chat with: `fragment list` shows them.
 
 ## People
 
@@ -654,8 +686,8 @@ fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 ```
 
-Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
-<url>` to save one), `--json`, `-v`. With `--json` (or
+Global flags: `--host <url>` (or `FRAGMENT_HOST`; else the host
+`fragment login` or `fragment host <url>` saved), `--json`, `-v`. With `--json` (or
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
 "data":…}` or `{"ok":false,"error":{"code","message","hint","id"}}`
 (`id`: a failed `fragment call`'s); `fragment mcp`'s stdout is MCP's

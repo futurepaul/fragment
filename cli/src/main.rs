@@ -31,11 +31,16 @@ use std::path::{Path, PathBuf};
 
 const GUIDE: &str = include_str!("../GUIDE.md");
 const SKILL: &str = include_str!("../SKILL.md");
+/// The platform the CLI calls when nothing names another: production's.
+/// `fragment login --host` (or `fragment host`) saves another in the
+/// config, so a preview's or a dev stack's is typed once.
+const DEFAULT_HOST: &str = "https://finite.chat";
 
 #[derive(Parser)]
 #[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
 struct Cli {
-    /// Host base URL (else FRAGMENT_HOST, else config, else https://fragment.club)
+    /// Host base URL (else FRAGMENT_HOST, else the config's, which `fragment
+    /// login` saves, else https://finite.chat)
     #[arg(long, global = true)]
     host: Option<String>,
     /// Machine-readable output: one-line {"ok":true/false} envelope on stdout
@@ -659,11 +664,21 @@ fn load_config() -> Config {
 }
 
 fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
-    cli_host
-        .clone()
-        .or_else(|| std::env::var("FRAGMENT_HOST").ok())
-        .or_else(|| cfg.host.clone())
-        .unwrap_or_else(|| "https://fragment.club".to_string())
+    host_of(cli_host, std::env::var("FRAGMENT_HOST").ok(), cfg)
+}
+
+/// The host: `--host`, else `FRAGMENT_HOST`, else the config's (the one
+/// `fragment login` last reached, or `fragment host` set), else
+/// production's.
+fn host_of(cli_host: &Option<String>, env_host: Option<String>, cfg: &Config) -> String {
+    cli_host.clone().or(env_host).or_else(|| cfg.host.clone()).unwrap_or_else(|| DEFAULT_HOST.to_string())
+}
+
+/// An agent doc as this CLI prints it, its blanks filled with its host
+/// (an agent's too: the platform's, never its computer's internal API,
+/// which no person opens).
+fn agent_doc(text: &str, cli_host: &Option<String>) -> String {
+    fragment_templates::agent_doc(text, resolve_host(cli_host, &load_config()).trim_end_matches('/'), fragment_templates::ANY_FRAGMENT)
 }
 
 /// The agent mode, inside a computer (docs/computers.md, cli/GUIDE.md "As an
@@ -909,6 +924,14 @@ fn run(cli: Cli) -> Result<()> {
             };
             let key = c.key()?;
             let mut done = me()?;
+            // a host named with --host answered as a platform: it is this
+            // machine's from now on, so neither `fragment login` again nor
+            // any other command needs `--host` (`fragment host` changes it;
+            // FRAGMENT_HOST is the environment's to keep naming, and saves
+            // nothing)
+            if cli.host.is_some() && load_config().host.as_deref() != Some(c.host.as_str()) {
+                save_config("host", &c.host)?;
+            }
             if done.is_none() {
                 // the link carries this key's own proof (ten minutes good):
                 // approving it in a signed-in browser adds the key at once
@@ -968,11 +991,11 @@ fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Cmd::Guide => {
-            print!("{GUIDE}");
+            print!("{}", agent_doc(GUIDE, &cli.host));
             return Ok(());
         }
         Cmd::Skill => {
-            print!("{SKILL}");
+            print!("{}", agent_doc(SKILL, &cli.host));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Key { path } } => {
@@ -2171,5 +2194,98 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
         assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
         assert_eq!(after, config("http://127.0.0.1:2"));
+    }
+
+    /// Goal: with nothing named, the CLI calls production's platform, and
+    /// a host named once wins after: `--host`, then `FRAGMENT_HOST`, then
+    /// the config's. Method: each order of them.
+    #[test]
+    fn the_default_host_is_finite_chat_and_a_named_one_wins() {
+        let s = |v: &str| Some(v.to_string());
+        let saved = Config { host: s("https://preview.finite.build"), secret_key: None };
+        let none = Config { host: None, secret_key: None };
+        assert_eq!(host_of(&None, None, &none), "https://finite.chat");
+        assert_eq!(host_of(&None, None, &saved), "https://preview.finite.build");
+        assert_eq!(host_of(&None, s("http://127.0.0.1:8790"), &saved), "http://127.0.0.1:8790");
+        assert_eq!(host_of(&s("http://a"), s("http://127.0.0.1:8790"), &saved), "http://a");
+    }
+
+    /// Goal: `fragment skill` and `fragment guide` name the host they would
+    /// call, and leave no blank. Method: each printed for a dev stack's host.
+    #[test]
+    fn the_agent_docs_name_the_cli_host() {
+        let host = Some("http://127.0.0.1:8790/".to_string());
+        for text in [agent_doc(SKILL, &host), agent_doc(GUIDE, &host)] {
+            assert!(text.contains("fragment login --host http://127.0.0.1:8790") && text.contains(fragment_templates::ANY_FRAGMENT), "{text}");
+            assert!(!text.contains(fragment_templates::PLATFORM_BLANK) && !text.contains(fragment_templates::FRAGMENT_BLANK));
+        }
+    }
+
+    /// A platform that knows no key: it answers every request 401, as a
+    /// host answers a key no one approved yet. Its origin.
+    fn a_platform_that_knows_no_key() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
+                while !head.ends_with(b"\r\n\r\n") && std::io::Read::read(&mut stream, &mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let body = r#"{"error":"unauthenticated","message":"this key belongs to no one"}"#;
+                let answer = format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                let _ = std::io::Write::write_all(&mut stream, answer.as_bytes());
+            }
+        });
+        origin
+    }
+
+    /// Goal: `fragment login --host` is typed once: the host it named,
+    /// once it answered, is the config's, so every later command (and the
+    /// next `fragment login`, after a `--no-wait`) calls it. Valid: a named
+    /// host that answers as a platform does (401: this key is no one's yet)
+    /// is kept, beside the key. Invalid: a named host that does not answer
+    /// is not kept, nor is a FRAGMENT_HOST (the environment's to keep
+    /// naming). Method: a copy of this test runs each login with a HOME of
+    /// its own, against such a platform, a closed port, and another platform
+    /// named by the environment.
+    #[test]
+    fn login_keeps_the_host_it_named() {
+        if let Ok(host) = std::env::var("FRAGMENT_TEST_LOGIN_HOST") {
+            let mut args = vec!["fragment", "login", "--no-wait", "--no-browser"];
+            if !host.is_empty() {
+                args.extend(["--host", host.as_str()]);
+            }
+            return run(Cli::parse_from(args)).unwrap();
+        }
+        let (platform, other) = (a_platform_that_knows_no_key(), a_platform_that_knows_no_key());
+        let home = std::env::temp_dir().join(format!("fragment-login-host-{}", std::process::id()));
+        let file = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment/config.json");
+        let login = |named: &str, env: Option<&str>| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "tests::login_keeps_the_host_it_named", "--nocapture"]).env("FRAGMENT_TEST_LOGIN_HOST", named).env("HOME", &home);
+            for unset in ["XDG_CONFIG_HOME", "FRAGMENT_HOST", "FRAGMENT_AS_AGENT", "FRAGMENT_FOR", "FRAGMENT_OUTPUT"] {
+                child.env_remove(unset);
+            }
+            if let Some(host) = env {
+                child.env("FRAGMENT_HOST", host);
+            }
+            child.output().unwrap()
+        };
+        let config = || -> Value { serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap() };
+        let out = login(&platform, None);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        let kept = config();
+        assert_eq!(kept["host"], json!(platform), "the host it named is kept: {kept}");
+        assert!(kept["secret_key"].as_str().is_some_and(|k| k.len() == 64), "beside its key: {kept}");
+        let refused = login("http://127.0.0.1:1", None);
+        let after_refused = config();
+        let by_env = login("", Some(&other));
+        let after_env = config();
+        std::fs::remove_dir_all(&home).ok();
+        assert!(!refused.status.success(), "a host that does not answer is no login");
+        assert_eq!(after_refused, kept, "and is not kept");
+        assert!(by_env.status.success() && String::from_utf8_lossy(&by_env.stdout).contains(&other), "{}", String::from_utf8_lossy(&by_env.stdout));
+        assert_eq!(after_env, kept, "a FRAGMENT_HOST is not kept");
     }
 }

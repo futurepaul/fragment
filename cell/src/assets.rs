@@ -60,21 +60,27 @@ pub(crate) async fn body(env: &Env, f: &File, headers: Headers) -> CellResult<Re
     Ok(Response::from_body(body)?.with_headers(headers))
 }
 
-/// A file the platform answers as its own (the agent docs): revalidated
-/// by its hash (`no-cache`), a 304 and a HEAD answered from the index
-/// before any read.
-pub(crate) async fn serve(req: &Request, env: &Env, f: &File, content_type: &str) -> CellResult<Response> {
-    let etag = format!("\"{}\"", &f.sha256[..16]);
+/// An agent doc (`/llms.txt`, `/llms-full.txt`), as plain text with its
+/// blanks filled for this deployment: its platform, and a fragment's
+/// origin on it (`fragment_templates::agent_doc`). Revalidated by the
+/// hash of the file and what filled it (`no-cache`), a 304 answered before
+/// any read; a few dozen KiB read and filled otherwise.
+pub(crate) async fn agent_doc(req: &Request, env: &Env, cfg: &crate::config::Config, f: &File) -> CellResult<Response> {
+    let (platform, fragment) = (cfg.platform(), cfg.outside_origin("<name>"));
+    let filled = Sha256::digest(format!("{}\n{platform}\n{fragment}", f.sha256));
+    let etag = format!("\"{}\"", &hex::encode(filled)[..16]);
     if let Some(resp) = crate::serve::not_modified(req, &etag, "no-cache")? {
         return Ok(resp);
     }
+    let text = String::from_utf8(read(env, f).await?).map_err(|_| CellError::host(format!("the release's {} is not UTF-8", f.path)))?;
+    let text = fragment_templates::agent_doc(&text, &platform, &fragment);
     let h = Headers::new();
-    h.set("content-type", content_type)?;
+    h.set("content-type", "text/plain; charset=utf-8")?;
     h.set("cache-control", "no-cache")?;
     h.set("etag", &etag)?;
     if req.method() == Method::Head {
-        h.set("content-length", &f.size.to_string())?;
+        h.set("content-length", &text.len().to_string())?;
         return Ok(Response::empty()?.with_headers(h));
     }
-    body(env, f, h).await
+    Ok(Response::ok(text)?.with_headers(h))
 }

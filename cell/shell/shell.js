@@ -1650,7 +1650,9 @@ const WHY = {
 };
 // The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
 // xtask check` holds the two to each other and to the release's assets),
-// and a coding agent's skill, in Claude Code's folder.
+// and a coding agent's skill, in Claude Code's folder: behind settings'
+// "Install it yourself", for whoever wants them (a coding agent given the
+// prompt reads /llms.txt and installs it itself).
 const INSTALL = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
 const SKILL = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
 function section(title, ...children) {
@@ -1859,15 +1861,48 @@ async function openSettings(push = true) {
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
-  // pairing the CLI: `fragment login` opens this platform to approve its key
-  const cli = section(
-    "The command line",
-    say("Your agents and you can publish apps from a terminal. Install `fragment` (macOS or Linux):"),
-    el("pre", "command", INSTALL),
-    say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
+}
+
+// Building with a coding agent: one prompt that names this platform's
+// /llms.txt (its handoff: the install, `fragment login --host` here, the
+// manual), copied into Claude Code or Codex with what to build. The
+// install line stays, folded, for whoever runs it themselves.
+function buildSection() {
+  const prompt = el("textarea", "build-prompt");
+  prompt.id = "build-prompt";
+  prompt.rows = 3;
+  prompt.spellcheck = false;
+  prompt.setAttribute("aria-label", "A prompt for your coding agent");
+  prompt.value = `Read ${location.origin}/llms.txt and help me build: `;
+  const copy = el("button", "quiet", "Copy");
+  copy.type = "button";
+  copy.dataset.action = "copy-prompt";
+  copy.onclick = () =>
+    navigator.clipboard.writeText(prompt.value).then(
+      () => {
+        copy.textContent = "Copied";
+        setTimeout(() => (copy.textContent = "Copy"), 1500);
+      },
+      (err) => notice("The prompt was not copied", err.message),
+    );
+  const actions = el("div", "settings-actions");
+  actions.append(copy);
+  const yourself = el("details", "settings-install");
+  yourself.append(
+    el("summary", null, "Install it yourself"),
+    say("On macOS or Linux (on Windows, in WSL), then pair it with you:"),
+    el("pre", "command", `${INSTALL}\nfragment login --host ${location.origin}`),
+    say("To give Claude Code its skill:"),
     el("pre", "command", SKILL),
   );
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, cli, data]);
+  return section(
+    "Build with Claude Code or Codex",
+    say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
+    prompt,
+    actions,
+    yourself,
+  );
 }
 
 // ---- settings' Sharing: who has access to what the person owns (GET

@@ -109,7 +109,7 @@ pub struct Config {
     workos: Option<WorkOsConfig>,
     stripe: Option<StripeConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
-    /// sign-in and the platform session live (e.g. https://fragment.club).
+    /// sign-in and the platform session live (e.g. https://finite.chat).
     /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
     /// a push service may refuse one it cannot reach (Apple's answers 403
     /// `BadJwtToken`).

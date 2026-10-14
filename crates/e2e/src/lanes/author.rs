@@ -664,18 +664,48 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let home = s.dir("cli-home");
-    // the agent docs on the platform's origin are the CLI's own, for an agent without it
-    for (path, command) in [("/llms.txt", "skill"), ("/llms-full.txt", "guide")] {
+    // the agent docs on the platform's origin are the CLI's own, for an agent
+    // without it, filled in with this node's own platform and fragments; the
+    // CLI prints the same, filled in with the host it calls
+    let fragments = api.site_url("<name>", "").trim_end_matches('/').to_string();
+    for (path, command, doc) in [("/llms.txt", "skill", &fragment_templates::SKILL_MD), ("/llms-full.txt", "guide", &fragment_templates::GUIDE_MD)] {
+        let release = String::from_utf8_lossy(doc.bytes);
         let printed = String::from_utf8_lossy(&s.cli(api, &home, &[command]).stdout).into_owned();
         let r = api.unsigned("GET", path, None)?;
         let again = api.call(Call { method: "GET", url: format!("{}{path}", api.base), extra: vec![("if-none-match", r.header("etag"))], ..Call::default() })?;
         s.ok(
-            &format!("{path} is `fragment {command}`'s text, as plain text, revalidated by its hash"),
-            r.status == 200 && r.header("content-type") == "text/plain; charset=utf-8" && !printed.is_empty() && r.text == printed && again.status == 304,
+            &format!("{path} is `fragment {command}`'s text with this node's own platform and fragments, as plain text, revalidated"),
+            r.status == 200
+                && r.header("content-type") == "text/plain; charset=utf-8"
+                && r.text == fragment_templates::agent_doc(&release, &api.base, &fragments)
+                && printed == fragment_templates::agent_doc(&release, &api.base, fragment_templates::ANY_FRAGMENT)
+                && again.status == 304,
             format!("{} {}: {} bytes, the CLI's {}; again {}", r.status, r.header("content-type"), r.text.len(), printed.len(), again.status),
+        );
+        s.ok(
+            &format!("{path} says to sign in here ({}), names this node's fragments, and no other host", api.base),
+            r.text.contains(&format!("fragment login --host {}\n", api.base))
+                && r.text.contains(&fragments)
+                && !r.text.contains("fragment.club")
+                && !r.text.contains(fragment_templates::PLATFORM_BLANK)
+                && !r.text.contains(fragment_templates::FRAGMENT_BLANK),
+            &r.text[..r.text.len().min(400)],
         );
     }
     s.login(api, &home);
+    // `fragment login --host` names it once: with no FRAGMENT_HOST, the host
+    // it logged in to is the CLI's from then on
+    let bare = |s: &Suite, args: &[&str]| -> Value {
+        let out = s.bare_cli().args(args).env("HOME", &home).env_remove("FRAGMENT_HOST").env_remove("FRAGMENT_OUTPUT").output();
+        out.ok().and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or_default()
+    };
+    let logged = bare(&*s, &["login", "--host", &api.base, "--no-browser", "--json"]);
+    let (host, me) = (bare(&*s, &["host", "--json"]), bare(&*s, &["whoami", "--json"]));
+    s.ok(
+        "fragment login --host keeps the host it logged in to: later commands call it unnamed",
+        logged["data"]["host"] == api.base.as_str() && host["data"]["host"] == api.base.as_str() && me["ok"] == true,
+        json!({ "login": logged, "host": host, "whoami": me }),
+    );
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;

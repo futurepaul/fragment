@@ -2,7 +2,8 @@
 //! templates under `templates/` (`fragment new` scaffolds them, and the
 //! cell makes a fragment from one: docs/api.md, Control API), the shell's
 //! files (`cell/shell/`), and the agent docs (`cli/SKILL.md`,
-//! `cli/GUIDE.md`, the platform's `/llms.txt` and `/llms-full.txt`).
+//! `cli/GUIDE.md`, the platform's `/llms.txt` and `/llms-full.txt`, their
+//! blanks filled as they are shown: `agent_doc`).
 //!
 //! The cell holds only their index: each file's path, SHA-256 and size,
 //! and each template's release (build.rs), and reads a file's bytes from
@@ -47,6 +48,24 @@ impl Template {
 }
 
 include!(concat!(env!("OUT_DIR"), "/templates.rs"));
+
+/// The agent docs' blanks. cli/SKILL.md and cli/GUIDE.md name no host:
+/// whoever shows them fills these with the platform it speaks for, the
+/// cell with its own deployment's (`/llms.txt`, `/llms-full.txt`) and the
+/// CLI with its host's (`fragment skill`, `fragment guide`). The
+/// platform's origin (`https://finite.chat`), and a fragment's on it,
+/// `<name>` standing for the fragment's name.
+pub const PLATFORM_BLANK: &str = "{{platform}}";
+pub const FRAGMENT_BLANK: &str = "{{fragment}}";
+/// A fragment's origin as the CLI's docs name it: the host knows its
+/// fragments' domain and the CLI does not (the host's own `/llms.txt`
+/// names it).
+pub const ANY_FRAGMENT: &str = "https://<name>.<the platform's domain for fragments>";
+
+/// An agent doc's text with its blanks filled.
+pub fn agent_doc(text: &str, platform: &str, fragment: &str) -> String {
+    text.replace(PLATFORM_BLANK, platform).replace(FRAGMENT_BLANK, fragment)
+}
 
 /// The templates a fragment can start from, the simplest first (a create
 /// that names none of them lists them in this order), each copied into
@@ -212,6 +231,30 @@ pub(crate) mod tests {
         assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
         assert_eq!(SHELL.len(), count("cell/shell"), "every file of the shell is indexed");
+    }
+
+    /// Goal: the agent docs name no host of their own: a deployment's
+    /// fills its own in, and none says fragment.club or invite-only. Valid:
+    /// each, filled, names that platform and its fragments, with no blank
+    /// left; the secrets' `{{NAME}}` a job's fetch fills is no blank.
+    /// Invalid: a doc that writes a host in.
+    #[test]
+    fn the_agent_docs_name_the_platform_that_shows_them() {
+        let read = |path: &str| std::fs::read_to_string(repo().join(path)).unwrap();
+        let (skill, guide) = (read("cli/SKILL.md"), read("cli/GUIDE.md"));
+        for (path, text) in [("cli/SKILL.md", &skill), ("cli/GUIDE.md", &guide)] {
+            for gone in ["fragment.club", "fragment.boats", "invite-only", "finite.chat", "finite.place"] {
+                assert!(!text.contains(gone), "{path} names {gone}: it fills in its host");
+            }
+            assert!(text.contains(PLATFORM_BLANK) && text.contains(FRAGMENT_BLANK), "{path} has both blanks");
+            let filled = agent_doc(text, "https://finite.chat", "https://<name>.finite.place");
+            assert!(!filled.contains(PLATFORM_BLANK) && !filled.contains(FRAGMENT_BLANK), "{path}: a blank left");
+            assert!(filled.contains("fragment login --host https://finite.chat") && filled.contains("https://<name>.finite.place"), "{path}");
+        }
+        let filled = agent_doc(&skill, "http://127.0.0.1:8790", "http://<name>.fragment.localhost:8790");
+        assert!(filled.contains("http://127.0.0.1:8790/llms-full.txt"), "the short doc points to the long one, on its own platform");
+        assert!(agent_doc(&guide, "https://p", "https://f").contains("{{NAME}}"), "a secret's placeholder stays");
+        assert_eq!(agent_doc("sign in at {{platform}}; see {{fragment}}/", "https://a", "https://<name>.b"), "sign in at https://a; see https://<name>.b/");
     }
 
     /// Goal: the shell publishes its own files and nothing else of
