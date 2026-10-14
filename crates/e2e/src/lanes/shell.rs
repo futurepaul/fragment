@@ -906,13 +906,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
     anyhow::ensure!(hello, "the Reader's hello: {seen:?}");
-    let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
 
-    // what came to a chat not open, and another chat with the Reader
+    // what came to a chat not open, and another chat with the Reader (its
+    // hello shown once it is open: no frame of it before)
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
     b.click(&page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
     b.until(&page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
 
