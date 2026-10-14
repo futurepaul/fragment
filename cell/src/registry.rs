@@ -242,10 +242,9 @@ fn body<C: Call>(bytes: &[u8]) -> CellResult<C> {
     serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
 }
 
-/// Where a person's picture is served, on the platform's origin: by their
-/// identity, its digest's start the cache's key.
+/// Where a person's picture is served, on the platform's origin.
 fn picture_path(identity: &str, p: &Picture) -> String {
-    format!("/api/identities/{identity}/picture?v={}", &p.sha[..12])
+    fragment_core::face::picture_path(identity, &p.sha)
 }
 
 /// A call's answer: the type its `Call` names, so a route cannot answer
@@ -409,8 +408,9 @@ impl RegistryCell {
         assert!(rows.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person owns a bounded number of agents");
         rows.into_iter()
             .map(|r| {
-                let name = self.agent_fragment(&r.id)?.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-                Ok(ProfileAgent { id: r.id, name })
+                let fragment = self.agent_fragment(&r.id)?;
+                let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
+                Ok(ProfileAgent { id: r.id, name, fragment, title: None })
             })
             .collect()
     }

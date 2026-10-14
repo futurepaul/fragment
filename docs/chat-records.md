@@ -553,10 +553,16 @@ cross-origin frame, which a browser does not let ask for notifications:
 there the bell says to open the chat in a tab of its own, and does.
 
 Who is who comes from the fragment: `__members` lists the chat's agents
-(the lead first), and `__people` names them (an agent's `name` is its
-agent fragment's label, which `@mentions` it). An agent's color is one
-of six, chosen by its identity until agents carry one; the chat takes
-its lead's. The shell that frames it may send `postMessage({fragment:
+(the lead first), and `__people` names them. An agent shows by its agent
+fragment's title and picture (docs/api.md, "An agent's name and
+picture"): its replies' byline, its face, the header, the `@` list and
+the waiting line. Its `name` is its agent fragment's label, which
+`@mentions` it, whatever it is called. Framed by its owner's shell, the
+roster's `title` and `picture` come first, so a rename shows as the
+shell's list says it; anywhere else, an agent's profile is asked again
+as each of its turns ends (it renames itself in a turn). An agent with
+no picture shows its image in its color, one of six, chosen by its
+identity; the chat takes its lead's color. The shell that frames it may send `postMessage({fragment:
 "theme", mode: "light"|"dark", mobile: boolean})`; otherwise it follows
 `prefers-color-scheme`. The optional `mobile` flag follows the shell's 760px
 breakpoint, so a narrow desktop chat does not pick up the phone's rounded
@@ -617,10 +623,13 @@ a job acting as the chat itself:
    agent still, and the chat's people are its members of kind `person`;
 2. leaves out each person a page of the chat shares `{looking: true}`
    for (`job.presence()`);
-3. names the agent (`job.people`: its fragment's label, capitalized);
+3. names the agent (`job.people`: its agent fragment's title and
+   picture, as every page shows it; with no title, its label,
+   capitalized);
 4. pushes `{title: <the agent's name>, body: <the reply's first 120
    characters, on one line; one without words says what it carries>, tag:
-   <the chat's name>, url: "./"}` to each of the rest, at most 32, by
+   <the chat's name>, url: "./", icon?: <its picture>}` to each of the
+   rest, at most 32, by
    their identity (`job.push(<identity>, …)`). A subscription's `who` that
    is an identity is that identity's own (docs/api.md, Deliveries), so a
    reply reaches its people's browsers, never an agent's.

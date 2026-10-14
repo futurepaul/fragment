@@ -1098,8 +1098,126 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         b.eval(&page, "(() => { const v = document.getElementById('viewer').getBoundingClientRect(); return { top: v.top, bottom: v.bottom, width: v.width, innerWidth, innerHeight }; })()")?,
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
+    // last: it renames the person's first agent, which the checks above name
+    faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     println!("      (screenshots: {})", shots.display());
     Ok(())
+}
+
+/// An agent's name and picture in the shell (docs/api.md, "An agent's name
+/// and picture"): Settings' Agents renames the person's agent and gives it
+/// a picture from the row's own controls, and both reach the sidebar, its
+/// own chat's row and header, its settings row, the chat's page (its
+/// header, and its replies' byline and face) and the share sheet, with no
+/// reload. Renamed elsewhere (as `fragment agent` does), the shell follows,
+/// and titles its own chat after it. Remove takes the picture away
+/// everywhere. On a phone the name's field is 16px (no zoom on focus) and
+/// the row's controls stay on screen.
+fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.viewport(page, 1280, 900, false)?;
+    let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let first = r.body["computers"][0]["agents"].as_array().into_iter().flatten().find(|a| a["fragment"].as_str().map(label_of) == Some(me.first)).cloned().unwrap_or_default();
+    let (agent, id) = (first["fragment"].as_str().unwrap_or("").to_string(), first["identity"].as_str().unwrap_or("").to_string());
+    anyhow::ensure!(!agent.is_empty() && !id.is_empty(), "the first agent: {r}");
+    let face = js(&format!("[data-agent-face={}]", js(&agent)));
+    let own_row = js(&format!("#chats [data-key={}] .label", js(&format!("chat:{chat}"))));
+    // Rename, in Settings' Agents
+    b.click(page, "#settings")?;
+    let rename = js(&format!("[data-rename-agent={}]", js(&agent)));
+    b.until(page, &format!("!!document.querySelector({rename})"), wait);
+    b.eval(page, &format!("(document.querySelector({rename}).click(), true)"))?;
+    let asked = b.until(page, "document.getElementById('rename-agent').open && document.getElementById('rename-title').textContent === 'Name your agent'", wait);
+    b.eval(page, &fill("#agent-name", "Frank"))?;
+    b.eval(page, "(document.getElementById('rename-form').requestSubmit(), true)")?;
+    let screen = js(&format!("[data-screen-for={}]", js(&agent)));
+    let renamed = b.until(
+        page,
+        &format!(
+            "document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === 'Frank' && document.querySelector({screen})?.textContent === \"Open Frank's screen\""
+        ),
+        wait,
+    );
+    s.ok(
+        "Settings' Agents renames the person's agent: its name shows in the sidebar, its own chat's row, its settings row and its screen's button, with no reload",
+        asked && renamed,
+        b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
+    );
+    // a picture, from a file
+    let orange = super::faces::orange();
+    let file = shots.join("agent-picture.png");
+    std::fs::write(&file, &orange)?;
+    b.choose_files(page, &format!("[data-picture-for={}]", js(&agent)), &[&file])?;
+    let path = super::faces::picture_path(&id, &orange);
+    let loaded = |sel: &str| format!("(() => {{ const i = document.querySelector({}); return !!i && i.getAttribute('src') === {} && i.complete && i.naturalWidth === 16; }})()", js(sel), js(&path));
+    let pictured = b.until(page, &format!("{} && {}", loaded("#sidebar-agent img"), loaded(&format!("[data-agent-face={}] img", js(&agent)))), wait);
+    let offers = b.eval(page, &format!("({{ label: document.querySelector('[data-picture-label={a}]')?.textContent, remove: !document.querySelector('[data-picture-remove={a}]')?.hidden }})", a = js(&agent)))?;
+    s.ok(
+        "and gives it a picture from a file: the sidebar and its row show it in its image's place, loaded, and the row offers Change and Remove",
+        pictured && offers["label"] == "Change picture" && offers["remove"] == true,
+        json!({ "offers": offers, "row": own_row_of(api, me.session, &agent) }),
+    );
+    b.eval(page, &format!("(document.querySelector({face})?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("settings-agent-face.png"));
+    // the chat: its header in the shell, and its page
+    open_row(b, page, chat, wait)?;
+    let headed = b.until(page, "document.getElementById('chat-title').textContent === 'Frank'", wait);
+    let in_page = format!(
+        "(() => {{ const p = {}; const m = document.querySelector('#head-marks img'); const by = [...document.querySelectorAll('.msg.agent .who')].pop(); \
+         return document.getElementById('head-label')?.textContent === 'Frank' && !!m && m.src.endsWith(p) && m.naturalWidth === 16 && !!by && by.textContent.includes('Frank') && !!by.querySelector('img') && by.querySelector('img').src.endsWith(p); }})()",
+        js(&path)
+    );
+    let framed = s.eventually(wait, || b.eval_in_frame(page, chat, &in_page).ok() == Some(Value::Bool(true)));
+    s.ok(
+        "its chat's header is its new name, and the chat's page names it and shows its picture in its header and its replies' byline",
+        headed && framed,
+        b.eval_in_frame(page, chat, "({ head: document.getElementById('head-label')?.textContent, marks: document.getElementById('head-marks')?.innerHTML, by: [...document.querySelectorAll('.msg.agent .who')].pop()?.innerHTML })")?,
+    );
+    let _ = b.screenshot(page, &shots.join("chat-agent-face.png"));
+    let sheet = super::signin::with_session(api, "GET", &format!("/share/{chat}"), me.session)?;
+    s.ok("its chat's share sheet names it so, with its picture", sheet.status == 200 && sheet.text.contains("Frank") && sheet.text.contains(&format!("src=\"{path}\"")), &sheet);
+    // renamed elsewhere, as `fragment agent --name` does (its files, then a
+    // deploy): the shell follows, and titles its own chat after it
+    let mut manifest = shell(api, me.session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
+    manifest["meta"]["title"] = json!("Frankie");
+    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
+    let wrote = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
+    let deployed = shell(api, me.session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
+    let followed = b.until(page, &format!("document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie' && document.querySelector({own_row})?.textContent === 'Frankie' && document.getElementById('chat-title').textContent === 'Frankie'"), wait);
+    let titled = s.eventually(wait, || own_row_of(api, me.session, chat)["title"] == "Frankie");
+    let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
+    s.ok(
+        "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar, its chat's row, header and page follow with no reload, and the shell titles its own chat after it",
+        wrote.status == 200 && deployed.status == 200 && followed && titled && in_frame,
+        json!({ "chat": own_row_of(api, me.session, chat) }),
+    );
+    // Remove: gone everywhere
+    b.click(page, "#settings")?;
+    let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
+    b.until(page, &format!("!!document.querySelector({remove}) && !document.querySelector({remove}).hidden"), wait);
+    b.eval(page, &format!("(document.querySelector({remove}).click(), true)"))?;
+    let gone = b.until(page, &format!("!document.querySelector('#sidebar-agent img') && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", a = js(&agent)), wait);
+    let none = super::faces::fetched(api, &format!("/api/identities/{id}/picture"))?;
+    s.ok("Remove takes its picture away: no picture in the sidebar or its row, which offers Add again, and none at its address", gone && none.status == 404, none.status);
+    // on a phone: its name's field is 16px, and its row's controls stay on screen
+    b.viewport(page, 390, 844, true)?;
+    b.reload(page)?;
+    b.until(page, &format!("!!document.querySelector({rename})"), wait);
+    let fits = b.eval(page, &format!("(() => {{ const r = document.querySelector({rename}); r.scrollIntoView({{ block: 'center' }}); return [...r.parentElement.querySelectorAll('button, label')].every((e) => e.getBoundingClientRect().right <= innerWidth + 1); }})()"))?;
+    b.eval(page, &format!("(document.querySelector({rename}).click(), true)"))?;
+    b.until(page, "document.getElementById('rename-agent').open", wait);
+    let size = b.eval(page, "parseFloat(getComputedStyle(document.getElementById('agent-name')).fontSize)")?;
+    let _ = b.screenshot(page, &shots.join("phone-rename-agent.png"));
+    b.eval(page, "(document.getElementById('rename-cancel').click(), true)")?;
+    s.ok("on a phone the agent's controls stay on screen, and its name's field is 16px (no zoom as it takes focus)", fits == true && size.as_f64().is_some_and(|px| px >= 16.0), json!({ "fits": fits, "px": size }));
+    b.viewport(page, 1280, 900, false)?;
+    Ok(())
+}
+
+/// `name`'s row in the person's list, as the shell reads it.
+fn own_row_of(api: &Api, session: &str, name: &str) -> Value {
+    let r = shell(api, session, "GET", "/api/fragments", None, &[]).ok();
+    r.and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).cloned())).unwrap_or(Value::Null)
 }
 
 /// Whether a page stays in its viewport: nothing wider than it, and the

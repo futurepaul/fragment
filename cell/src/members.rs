@@ -163,11 +163,11 @@ impl FragmentCell {
     }
 
     /// What its members' lists show of it, at each install of live: its
-    /// kind and title (and its agents, read as each row is sent). A change
-    /// is sent to every member's list (at most `MEMBERS_MAX`) and its
-    /// owner's, as an agent's joining or leaving is.
-    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title);
+    /// kind and title, an agent's picture (and its agents, read as each row
+    /// is sent). A change is sent to every member's list (at most
+    /// `MEMBERS_MAX`) and its owner's, as an agent's joining or leaving is.
+    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> CellResult<()> {
+        let face = face(kind, title, picture);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -383,6 +383,23 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("{who:?} is not an email, an npub, or a 64-hex key")));
         }
         crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: who.to_string() }).await
+    }
+
+    /// Names for identities, as this fragment's page and code show them
+    /// (`__people`, `job.people`): the registry's profiles (a person's
+    /// email only for those `emails_of` names), each agent by its agent
+    /// fragment's face (share.rs `name_agents`), and each picture an
+    /// address on the platform's origin, which a fragment's page loads from
+    /// its own.
+    pub(crate) async fn people(&self, ids: Vec<String>, emails_of: Vec<String>) -> CellResult<crate::registry::calls::ProfilesAnswer> {
+        let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of, agents_of: vec![] }).await?;
+        crate::share::name_agents(&self.env, &mut answer.profiles).await;
+        let platform = self.cfg.platform();
+        // bounded: the registry answers at most 64 profiles
+        for p in answer.profiles.values_mut() {
+            p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
+        }
+        Ok(answer)
     }
 
     /// Which of `ids` are members here: those whose emails a member may
@@ -851,7 +868,12 @@ impl FragmentCell {
     }
 }
 
-/// A fragment's face as its members' lists keep it (`MetaKey::Face`).
-pub(crate) fn face(kind: FragmentKind, title: Option<&str>) -> String {
-    json!({ "kind": kind, "title": title }).to_string()
+/// A fragment's face as its members' lists keep it (`MetaKey::Face`): an
+/// agent fragment's with its picture's address, when it has one.
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> String {
+    let mut face = json!({ "kind": kind, "title": title });
+    if let Some(p) = picture {
+        face["picture"] = json!(p);
+    }
+    face.to_string()
 }

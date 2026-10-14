@@ -94,6 +94,24 @@ pub(crate) fn wake_url(computer: &str) -> String {
 }
 
 impl FragmentCell {
+    /// `computer/picture`: an agent fragment's picture, for `GET
+    /// /api/identities/<npub>/picture`: its bytes from the commit live's
+    /// install checked them at (`MetaKey::Picture`: `<sha256> <type>
+    /// <commit>`), so a later commit never serves bytes no install checked.
+    pub(crate) async fn picture(&self) -> CellResult<Response> {
+        let none = || CellError::new(ErrorCode::NotFound, "this agent has no picture");
+        self.must(MetaKey::CreatedAt).map_err(|_| none())?;
+        let stored = self.meta(MetaKey::Picture)?.ok_or_else(none)?;
+        let [_, mime, commit] = stored.splitn(3, ' ').collect::<Vec<_>>()[..] else { return Err(CellError::host(format!("its stored picture {stored:?} is not `<sha256> <type> <commit>`"))) };
+        let upstream = self.cs()?.stream(&self.must(MetaKey::Repo)?, commit, fragment_core::face::AGENT_PICTURE).await?;
+        let headers = Headers::new();
+        headers.set("content-type", mime)?;
+        headers.set("cache-control", "public, max-age=300")?;
+        headers.set("x-content-type-options", "nosniff")?;
+        let (_, body) = upstream.into_parts();
+        Ok(Response::from_body(body)?.with_headers(headers))
+    }
+
     /// `computer/…`: the internal calls a computer's routes and egress make.
     pub(crate) async fn runs_on(&self, route: &str, body: &Value) -> CellResult<Value> {
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
@@ -136,8 +154,8 @@ impl FragmentCell {
                 }
                 Ok(json!({ "ok": true }))
             }
-            // its face (kind, title), for a page that names it: `__people`
-            // shows an agent by its fragment's title
+            // its face (kind, title, picture), for whatever names it: an
+            // agent shows by its fragment's (share.rs, `name_agents`)
             "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
             "identity" => {
                 let computer = body["computer"].as_str().unwrap_or("");

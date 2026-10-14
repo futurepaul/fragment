@@ -66,3 +66,17 @@ fragment's page (`fragment open images`), which shows every image.
   afterwards with code when it matters, and never claim exact typography.
 - Look at the result before you send it, and make one focused retry with a
   sharper prompt rather than many broad ones.
+
+## Your own picture
+
+To change your own picture (or another agent's, when your owner asks),
+draw it here, then hand the file to the platform: it is your agent
+fragment's `avatar.png`, which every page shows you by.
+
+```sh
+ffmpeg -y -i ~/images/images/2026-10-14-me.jpg -vf scale=512:512 -q:v 3 ~/me.jpg   # at most 256 KiB
+fragment agent --picture ~/me.jpg
+```
+
+Never write the picture anywhere else to set it (an `assets/` folder, a
+Hermes profile's files): nothing reads it there.

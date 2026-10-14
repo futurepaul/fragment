@@ -274,10 +274,17 @@ pub(crate) struct ProfileAgent {
     /// Its agent fragment's label, made from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
+    /// Its agent fragment's title, filled as `Profile::title` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// A person's picture, and their email when the caller may show it; an
-/// agent made from an agent fragment, its name (its label) and fragment.
+/// agent made from an agent fragment, its name (its label) and fragment,
+/// and its face (title and picture), filled by the platform from that
+/// fragment (share.rs `name_agents`), never by the registry.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,
@@ -289,8 +296,7 @@ pub(crate) struct Profile {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
-    /// An agent's fragment's title (`XBT-2000`), filled by the fragment a
-    /// page asks (serve.rs `__people`), never by the registry.
+    /// An agent's fragment's title (`XBT-2000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A person's agents, when the caller named them in `agents_of`.

@@ -10,6 +10,8 @@ self.addEventListener("push", (event) => {
     body: typeof p.body === "string" ? p.body : "",
     tag: typeof p.tag === "string" ? p.tag : undefined,
     data: typeof p.url === "string" ? p.url : undefined,
+    // who it is from: an agent's picture, an address on the web
+    icon: typeof p.icon === "string" && /^https?:\/\//.test(p.icon) ? p.icon : undefined,
   };
   event.waitUntil(self.registration.showNotification(title, opts).catch(() => {}));
 });

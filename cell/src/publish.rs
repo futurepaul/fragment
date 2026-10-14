@@ -155,6 +155,13 @@ impl FragmentCell {
         if total > API_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, API_WRITE_MAX_BYTES));
         }
+        // an agent's picture is refused here, before it is committed, as its
+        // install refuses one (docs/api.md, "An agent's name and picture")
+        if let Some(bytes) = writes.iter().find(|w| w.path == fragment_core::face::AGENT_PICTURE).and_then(|w| w.bytes.as_deref()) {
+            if self.kind()? == fragment_proto::FragmentKind::Agent {
+                fragment_core::face::check_picture(bytes).map_err(|r| crate::picture_refused(r, fragment_core::face::AGENT_PICTURE))?;
+            }
+        }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {

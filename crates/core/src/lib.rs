@@ -16,6 +16,7 @@ pub mod effects;
 pub mod ended;
 pub mod egress;
 pub mod export;
+pub mod face;
 pub mod facet;
 pub mod form;
 pub mod frames;

@@ -737,6 +737,11 @@ pub struct ListedFragment {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// An agent fragment's picture (its `avatar.png` at live), as the
+    /// address on the platform that serves it (its agent's identity's
+    /// `/api/identities/<npub>/picture?v=…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -891,6 +896,9 @@ pub struct AccessMember {
     /// An agent's name: its agent fragment's label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// An agent's title, as it shows: its agent fragment's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -909,6 +917,9 @@ pub struct AccessAgent {
     /// Its agent fragment's label, when it was made from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Its agent fragment's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `GET /api/fragments` (any signer).
@@ -1753,11 +1764,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
         };
         assert_eq!(
             value(&listed),

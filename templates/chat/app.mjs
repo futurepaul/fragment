@@ -41,12 +41,16 @@ export class App extends DurableObject {
     const looking = new Set((await job.presence()).filter((p) => p.data?.looking === true).map((p) => p.principal));
     const people = members.filter((m) => m.kind === "person" && !looking.has(m.principal)).slice(0, PEOPLE_MAX);
     if (!people.length) return { pushed: 0, why: "no one away to tell" };
-    const name = (await job.people([record.principal]))?.[record.principal]?.name;
+    // the agent as every page shows it: its agent fragment's title and
+    // picture (docs/api.md, "An agent's name and picture"), else its label
+    const who = (await job.people([record.principal]))?.[record.principal] ?? {};
+    const name = typeof who.title === "string" && who.title ? who.title : typeof who.name === "string" && who.name ? who.name.charAt(0).toUpperCase() + who.name.slice(1) : "Your agent";
     const payload = {
-      title: typeof name === "string" && name ? name.charAt(0).toUpperCase() + name.slice(1) : "Your agent",
+      title: name,
       body: summary(record.body),
       tag: job.fragment,
       url: "./",
+      ...(typeof who.picture === "string" && who.picture ? { icon: who.picture } : {}),
     };
     let pushed = 0;
     // bounded: at most PEOPLE_MAX, one step each

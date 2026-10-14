@@ -1491,14 +1491,24 @@ neither on its own (Hermes' `website/docs/user-guide/bot-mode.md`, "What
 actually makes a chat a Bot Chat"), so the image does both
 (`images/hermes/boot/src/bots.rs`):
 
-- Each agent's `profile.yaml`, written by the boot with its profile (and
-  again when a sync pulls its `SOUL.md`): its agent fragment's title as
-  its display name and its bot's title (the shell titles an agent fragment
-  by the agent's name; with none, its name on the computer, its label),
-  its job's first line (its `SOUL.md`'s, at most 120 characters) as its
-  description. Hermes' roster reads both, and signs a bot's messages to
-  its teammates with its title (`Message from 🤖 Juniper
-  (@juniper--k3x9): …`). Its roster
+- Each agent's `profile.yaml`, written by the boot with its profile, and
+  again whenever it would say something else: its agent fragment's title
+  (its status's, read again with its model every 10 s while awake,
+  `HERMES_BOOT_MODEL_MS`) as its display name and its bot's title, which
+  is the agent's name everywhere (docs/api.md, "An agent's name and
+  picture": the shell titles an agent fragment by the agent's name,
+  Settings and `fragment agent --name` rename it; with none, its name on
+  the computer, its label), and its job's first line (its `SOUL.md`'s,
+  at most 120 characters, as a sync pulls it) as its description.
+  Hermes' roster reads both, and signs a bot's messages to its teammates
+  with its title (`Message from 🤖 Juniper (@juniper--k3x9): …`). A
+  rename reaches Bot Mode within seconds, nothing restarted (event
+  `profile.identity`); a title unread leaves the file as it was. The
+  file is the boot's alone: an agent that writes it is overwritten, and
+  the platform skill tells every agent to rename itself with `fragment
+  agent` instead. Bot Mode carries no picture (Hermes v0.21.6 reads a
+  profile's title, display name and description alone), so an agent's
+  picture is shown by the platform's pages alone. Its roster
   always lists the gateway's own profile too, as `@hermes`; that profile
   runs no agent's turns, and its `profile.yaml` says so ("this computer's
   gateway, not an agent: never message it").
