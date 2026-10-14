@@ -100,7 +100,10 @@ button.text.away{color:var(--muted)}button[data-sure]{color:var(--danger)!import
 footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:1.4em}footer .leave{margin-right:auto}
 .flash{padding:4px 14px;border-radius:10px;background:var(--soft);margin-bottom:1em}.flash.error{background:color-mix(in srgb,var(--danger) 18%,transparent)}
 .framed body{max-width:none;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
-@media (max-width:420px){body{padding:8px}main{padding:16px}}";
+@media (max-width:420px){body{padding:8px}main{padding:16px}}
+html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overscroll-behavior:none}
+button,.seg,.option{-webkit-user-select:none;user-select:none;touch-action:manipulation}
+@media (max-width:760px){input:not([type=radio]):not([type=checkbox]):not([type=hidden]){font-size:16px}}";
 
 /// Arms the page's buttons `DELAY_MS` after it shows (again each time it
 /// is shown), copies a link, asks a second click of a button that takes

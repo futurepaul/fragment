@@ -906,13 +906,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let (hello, seen) = said_hello(s, api, &session, &reader_chat, &reader_id, agent_wait);
     anyhow::ensure!(hello, "the Reader's hello: {seen:?}");
-    let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
 
-    // what came to a chat not open, and another chat with the Reader
+    // what came to a chat not open, and another chat with the Reader (its
+    // hello shown once it is open: no frame of it before)
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
     b.click(&page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
     b.until(&page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
 
@@ -1077,7 +1078,158 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         sheet,
         b.eval(&page, "(() => { const v = document.getElementById('viewer').getBoundingClientRect(); return { top: v.top, bottom: v.bottom, width: v.width, innerWidth, innerHeight }; })()")?,
     );
+    phone_ui(s, api, &mut b, &page, &session, &shots)?;
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// Whether a page stays in its viewport: nothing wider than it, and the
+/// page itself does not scroll (asked to, it stays put), with its own
+/// overscroll held (no bounce).
+const PAGE_FITS: &str = "(() => { const d = document.documentElement; const wide = d.scrollWidth; scrollTo(0, 400); document.body.scrollTop = 400; \
+    const moved = scrollY + d.scrollTop + document.body.scrollTop; scrollTo(0, 0); document.body.scrollTop = 0; \
+    return { ok: wide <= innerWidth && moved === 0 && getComputedStyle(d).overscrollBehaviorY === 'none', wide, width: innerWidth, moved }; })()";
+
+/// Opens `chat` from its row in the sidebar, as a person picks it (a
+/// reload, or /, opens the newest chat: maybe another).
+fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
+    let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
+    let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
+    if b.eval(page, &format!("!!({open})"))? != true {
+        b.eval(page, &format!("({row}?.click(), true)"))?;
+    }
+    anyhow::ensure!(b.until(page, &open, wait), "{chat} opened from its row");
+    Ok(())
+}
+
+/// Whether settings' Your data stays in a phone's width: none of its rows
+/// past the screen's edge, nor the page or the section wider than it shows.
+const YOUR_DATA_FITS: &str = "(() => { const d = document.getElementById('settings-data'); const p = document.getElementById('settings-page'); if (!d || !p) return { ok: false, missing: true }; \
+    d.scrollIntoView({ block: 'center' }); const out = [...d.querySelectorAll('*')].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.dataset.action || e.className || e.tagName); \
+    return { ok: out.length === 0 && p.scrollWidth <= p.clientWidth && d.scrollWidth <= d.clientWidth, out, page: [p.scrollWidth, p.clientWidth], section: [d.scrollWidth, d.clientWidth] }; })()";
+
+/// The fields a phone would zoom into on focus (text under 16px): none.
+const SMALL_FIELDS: &str = "[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=file]):not([type=range]), textarea, select')] \
+    .map((e) => [e.id || e.name || e.getAttribute('aria-label') || e.placeholder || e.tagName, parseFloat(getComputedStyle(e).fontSize)]).filter(([, px]) => px < 16)";
+
+/// A message the page must hold without widening: a word that never
+/// breaks, a long line of code, and a wide table.
+const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpialidociousandthensomemoreletterswithoutanyspaceatallforthephone\n\n```js\nconst line = 'a very long line of code that must scroll inside its own block and never widen the page at all';\n```\n\n| column one | column two | column three | column four | column five | column six |\n|---|---|---|---|---|---|\n| a wide table cell | another wide cell | and another one | four four four | five five five | six six six |";
+
+/// The shell on a phone, as an app (Paul, 2026-10-13: "staying strictly in
+/// the viewport (shouldn't feel overflow scrolly, shouldn't zoom on text
+/// input, should feel like a native app)"), at 320, 375, 390 and 430 px in
+/// Chrome's phone emulation: the page never wider than the screen nor
+/// scrolling, with its sidebar open and closed, a chat holding a long
+/// word, code and a wide table (the table scrolls in its own box), the
+/// launcher, settings (its Your data with an export ready, its widest
+/// rows), the share sheet and an app's window; and no field a
+/// phone zooms into on focus (16px or more), in the shell, the chat, the
+/// launcher, settings and the sheet. Safari's keyboard, bounce and zoom are
+/// not Chrome's: a phone tests those.
+fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    b.color_scheme(page, "light")?;
+    let home = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])')";
+    b.viewport(page, 375, 812, true)?;
+    b.reload(page)?;
+    b.until(page, home, wait);
+    // a chat of theirs (theirs to invite to), their newest
+    let listed = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let chat = listed.body["fragments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["kind"] == "chat" && f["role"] == "owner" && f["archived"] != true)
+        .max_by_key(|f| f["previewAt"].as_i64().unwrap_or(0))
+        .and_then(|f| f["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    anyhow::ensure!(!chat.is_empty(), "a chat of theirs: {listed}");
+    open_row(b, page, &chat, wait)?;
+    // the wide message, and its echo, in that chat
+    let r = shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "phone-wide-1", "body": { "text": WIDE_MESSAGE } })), &[])?;
+    anyhow::ensure!(r.status == 200, "the wide message: {r}");
+    let echoed = s.eventually(agent_wait, || b.eval_in_frame(page, &chat, "!!document.querySelector('.msg.agent .md-table table')").ok() == Some(Value::Bool(true)));
+    // an export of theirs, built while the first width's chat is looked at
+    let r = shell(api, session, "POST", "/api/export", None, &[])?;
+    anyhow::ensure!(r.status == 200, "the export: {r}");
+    let mut small: Vec<Value> = Vec::new();
+    for w in [320u32, 375, 390, 430] {
+        b.viewport(page, w, 812, true)?;
+        b.reload(page)?;
+        b.until(page, home, wait);
+        open_row(b, page, &chat, wait)?;
+        let mut places: Vec<(&str, Value)> = Vec::new();
+        // the chat open, the sidebar closed; its page in its frame, the table in its own box
+        places.push(("chat", b.eval(page, PAGE_FITS)?));
+        let _ = s.eventually(wait, || b.eval_in_frame(page, &chat, "!!document.querySelector('.msg.agent .md-table table')").ok() == Some(Value::Bool(true)));
+        b.eval_in_frame(page, &chat, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
+        let framed = b.eval_in_frame(
+            page,
+            &chat,
+            &format!("(() => {{ const p = {PAGE_FITS}; const t = [...document.querySelectorAll('.msg.agent .md-table')].pop(); const c = [...document.querySelectorAll('.msg.agent pre')].pop(); \
+              return {{ ...p, ok: p.ok && !!t && t.getBoundingClientRect().right <= innerWidth + 1 && (!c || c.getBoundingClientRect().right <= innerWidth + 1), table: t ? [t.scrollWidth, t.clientWidth] : null }}; }})()"),
+        )?;
+        places.push(("its chat's page, a long word, code and a wide table", framed));
+        if let Ok(Value::Array(l)) = b.eval_in_frame(page, &chat, SMALL_FIELDS) { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "chat", "field": f }))); }
+        if w == 320 || w == 430 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-chat.png")));
+        }
+        // the list, over the chat
+        b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
+        b.until(page, "document.getElementById('layout').classList.contains('left-open') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
+        places.push(("the list", b.eval(page, PAGE_FITS)?));
+        // the launcher, words typed
+        b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+        b.until(page, "document.getElementById('search-dialog').open", wait);
+        b.eval(page, &fill("#workspace-search", "garden"))?;
+        b.until(page, "!!document.querySelector('#search-results .search-result')", wait);
+        places.push(("the launcher", b.eval(page, PAGE_FITS)?));
+        if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "launcher", "field": f }))); }
+        b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+        b.until(page, "!document.getElementById('search-dialog').open", wait);
+        // settings
+        b.eval(page, "(document.getElementById('scrim').click(), document.getElementById('settings').click(), true)")?;
+        b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-access')", wait);
+        places.push(("settings", b.eval(page, PAGE_FITS)?));
+        if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "settings", "field": f }))); }
+        if w == 320 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-settings.png")));
+        }
+        // its Your data, the export ready: its download, size, until when, and again
+        let ready = b.until(page, "document.querySelector('#settings-data .settings-export')?.dataset.state === 'ready' && !!document.querySelector('#settings-data [data-action=export-download]')", agent_wait);
+        let data = b.eval(page, YOUR_DATA_FITS)?;
+        places.push(("settings' Your data, an export ready", json!({ "ok": ready && data["ok"] == true, "seen": data })));
+        if w == 320 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-your-data.png")));
+        }
+        // the share sheet, over the chat
+        // (the chat of theirs, from its row: at / the newest chat opens, maybe one shared with them)
+        open_row(b, page, &chat, wait)?;
+        let invite = "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Invite…'); if (i) { i.click(); return true; } \
+            if (!document.querySelector('#menu button')) document.getElementById('chat-options')?.click(); return false; })()";
+        let sheet = b.until(page, invite, wait) && b.until(page, "document.getElementById('sheet').open", wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[type=email]')").ok() == Some(Value::Bool(true)));
+        places.push(("the share sheet", b.eval(page, PAGE_FITS)?));
+        let inside = b.eval_in_frame(page, "/share/", "({ ok: document.documentElement.scrollWidth <= innerWidth, wide: document.documentElement.scrollWidth, width: innerWidth })").unwrap_or(Value::Null);
+        places.push(("the share sheet's page", json!({ "ok": sheet && inside["ok"] == true, "inside": inside })));
+        if let Ok(Value::Array(l)) = b.eval_in_frame(page, "/share/", SMALL_FIELDS) { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "share sheet", "field": f }))); }
+        b.eval(page, "(document.getElementById('sheet').close(), true)")?;
+        // an app's window: the desktop's sheet
+        b.eval(page, "(document.getElementById('toggle-right').click(), true)")?;
+        b.until(page, "document.getElementById('layout').classList.contains('right-open') && !!document.querySelector('#apps [data-key^=\"app:\"]')", wait);
+        b.eval(page, "(document.querySelector('#apps [data-key^=\"app:\"]')?.click(), true)")?;
+        b.until(page, "!!document.querySelector('#stack .pane iframe')", wait);
+        places.push(("an app's window", b.eval(page, PAGE_FITS)?));
+        let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
+        s.ok(
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet and an app's window"),
+            echoed && bad.is_empty(),
+            json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
+        );
+    }
+    s.ok("on a phone no field is under 16px (Safari zooms in on one as it takes focus): the chat's composer, the launcher, settings and the share sheet", small.is_empty(), json!(small));
     Ok(())
 }
 

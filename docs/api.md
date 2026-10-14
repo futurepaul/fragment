@@ -2069,6 +2069,24 @@ zone). Anything else opens nothing. The chat's page asks so from the
 (`/auth/fragment`) and, in More, Copy link (its canonical URL). On a
 phone the viewer is a sheet from the bottom.
 
+**On a phone it is an app** (Paul, 2026-10-13: "staying strictly in the
+viewport"). The page itself never scrolls, bounces or zooms: its html and
+body are pinned (`overscroll-behavior: none`), and only its real scroll
+areas scroll (the chat list, settings, the launcher's results, sheets, a
+window's frame), each holding its own overscroll. The body is as tall as
+the visual viewport, from where it is, read on its `resize` and `scroll`,
+and holds everything fixed in the page: Safari ignores
+`interactive-widget` and only shrinks and pans the visual viewport for its
+keyboard, so the composer, the launcher's input and a window's fields sit
+just above the keyboard. No field is under 16px on a narrow screen
+(Safari zooms in on one as it takes focus), the viewport stays at its
+scale, and the chrome (buttons, rows, menus, the dock) is neither
+selected nor held, its taps immediate; what people write and read stays
+selectable. Added to a home screen it opens standalone (the manifest; the
+`apple-mobile-web-app-*` tags), its bars the page's own colour, light or
+dark, and its edges keep clear of the status bar, the home indicator and
+a notch (`env(safe-area-inset-*)`).
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a

@@ -293,6 +293,21 @@ export function mount(root) {
   // nothing.
   let setup = framed && new URLSearchParams(location.search).has("setup") ? { steps: [], error: null } : null;
   root.classList.add("fragment-chat");
+  // What is visible: the page is as tall as the visual viewport, from where
+  // it is (chat.css, --viewport-*). A phone's keyboard shrinks that viewport
+  // and Safari pans it, leaving the layout viewport be, so the page follows
+  // it and the composer sits just above the keyboard; the page itself never
+  // scrolls under it. Framed, the frame is the viewport, as tall as the
+  // shell gives it (the shell follows the keyboard the same way).
+  const visible = window.visualViewport;
+  const fitViewport = () => {
+    if (!visible) return;
+    document.documentElement.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+    document.documentElement.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+  };
+  visible?.addEventListener("resize", fitViewport);
+  visible?.addEventListener("scroll", fitViewport);
+  fitViewport();
   root.innerHTML = `
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
     <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>

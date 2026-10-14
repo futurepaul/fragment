@@ -587,8 +587,9 @@ struct Owned<'a> {
 /// as the agent's turn; a message sent while the agent works is marked
 /// queued until its turn starts; Steer sends the typed words into the
 /// running turn as `/steer`, no turn of their own; Reply quotes a message,
-/// above what is typed and above the message sent, and the agent is handed
-/// the quoted words. Screenshots in the run's scratch (`chat/`).
+/// above what is typed and above the message sent, its record naming it
+/// (`reply_to`), and the agent is handed the quoted words, at a desktop's
+/// width and a phone's. Screenshots in the run's scratch (`chat/`).
 fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, o: Owned, shots: &Path) -> Result<()> {
     chrome.viewport(page, 1280, 860, false)?;
     chrome.color_scheme(page, "light")?;
@@ -691,6 +692,24 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     typed(chrome, "/btw which file?")?;
     chrome.press(page, "Enter", false)?;
     s.ok("/btw is answered as a message of the agent's own", shows(chrome, &replied("aside: /btw which file?")), "");
+    // and on a phone, the page fitted to its visual viewport, its fields 16px
+    chrome.viewport(page, 375, 812, true)?;
+    chrome.eval(page, &format!("(() => {{ document.querySelector('.msg.agent[data-seq=\"{reply_seq}\"] .actions .reply')?.click(); return true; }})()"))?;
+    let phone_shown = shows(chrome, &quoting);
+    typed(chrome, "and on a phone")?;
+    chrome.press(page, "Enter", false)?;
+    let phone_quoted = "document.getElementById('quoting').hidden && [...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'and on a phone' && m.querySelector('.quote .quote-text')?.textContent === 'ran /usage')";
+    let phone_sent = shows(chrome, phone_quoted);
+    let on_phone = chat_records().into_iter().find(|r| r["body"]["text"] == "and on a phone").unwrap_or_default();
+    let phone_handed = shows(chrome, &replied("and on a phone (quoting itself: ran /usage)"));
+    let _ = chrome.screenshot(page, &shots.join("quote-phone.png"));
+    s.ok(
+        "on a phone too, Reply quotes the message, the message sent shows it, its record names it (`reply_to`) and the agent is handed it",
+        phone_shown && phone_sent && on_phone["body"]["reply_to"] == reply_seq && phone_handed,
+        &on_phone,
+    );
+    chrome.viewport(page, 1280, 860, false)?;
+    chrome.until(page, "innerWidth === 1280", TURN);
     Ok(())
 }
 
