@@ -7,6 +7,15 @@ description = "The files the release serves from the cell's Static Assets (templ
 build = "build.rs"
 
 [features]
+default = ["platform"]
+# The platform's own files: its blessed templates (src/blessed_names.rs:
+# agent, chat, brain, skills), which the cell makes fragments of and serves
+# (blessed.rs), and the shell's (cell/shell/). The CLI builds without: it
+# scaffolds the other templates alone (`fragment new --list`) and serves no
+# shell, so a change to the chat page, a blessed template or the shell is
+# no change to it, nor to the computer image that carries it
+# (docs/computers.md, "Stable and canary").
+platform = []
 # Each file's bytes beside its index entry: the CLI scaffolds them, xtask
 # writes them into the assets directory a cell build uploads, and the e2e
 # compares what the cell serves with them. The cell builds without, and

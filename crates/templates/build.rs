@@ -9,6 +9,10 @@
 // hash of its paths and bytes, is made here, so a cell that never holds
 // the bytes names it all the same.
 //
+// Without the `platform` feature (the CLI) it reads no blessed template and
+// no shell: `ALL` is the templates a person or an agent scaffolds, and
+// `SHELL` is empty, so neither is an input of the CLI's build.
+//
 // A template may hold another's files through a symlink (the brain's
 // viewer is the notes template's, `templates/brain/site/assets`; the
 // chat's agent.png is the agent's, and so is the shell's): one asset, and
@@ -18,6 +22,8 @@ use std::collections::BTreeMap;
 use std::{env, fs, path::Path, path::PathBuf};
 
 use sha2::{Digest, Sha256};
+
+include!("src/blessed_names.rs");
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -58,11 +64,16 @@ fn entry(path: &str, bytes: &[u8], id: usize, embed: bool) -> String {
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
     let embed = env::var_os("CARGO_FEATURE_EMBED").is_some();
+    // the platform's own files (the `platform` feature): the blessed
+    // templates and the shell's; the CLI builds without, and reads neither
+    let platform = env::var_os("CARGO_FEATURE_PLATFORM").is_some();
     let repo = fs::canonicalize(Path::new(&manifest).join("../..")).expect("the repo");
     let tdir = repo.join("templates");
     let shell = repo.join("cell/shell");
     let docs = [("SKILL_MD", repo.join("cli/SKILL.md")), ("GUIDE_MD", repo.join("cli/GUIDE.md"))];
-    for watched in [&tdir, &shell].into_iter().chain(docs.iter().map(|(_, p)| p)) {
+    let names_file = Path::new(&manifest).join("src/blessed_names.rs");
+    let watched = [&tdir, &names_file].into_iter().chain(platform.then_some(&shell));
+    for watched in watched.chain(docs.iter().map(|(_, p)| p)) {
         println!("cargo:rerun-if-changed={}", watched.display());
     }
     let mut names: Vec<String> = fs::read_dir(&tdir)
@@ -70,6 +81,7 @@ fn main() {
         .flatten()
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| platform || !BLESSED.contains(&n.as_str()))
         .collect();
     names.sort();
     let mut statics = Statics { ids: BTreeMap::new() };
@@ -103,19 +115,22 @@ fn main() {
         src.push_str(&format!("    &{},\n", name.to_uppercase()));
     }
     src.push_str("];\n");
-    let mut files = Vec::new();
-    collect(&shell, &shell, &mut files);
-    // its sources are files too: the shell has no src/ to skip
-    assert!(!shell.join("src").exists(), "cell/shell/src would be skipped");
-    files.sort();
-    src.push_str("pub static SHELL: &[File] = &[\n");
-    for (rel, path) in files {
-        let real = fs::canonicalize(&path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
-        assert!(real.starts_with(&repo), "cell/shell/{rel} is a symlink out of the repo");
-        let bytes = fs::read(&real).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
-        src.push_str(&format!("    {},\n", entry(&rel, &bytes, statics.id(real), embed)));
+    if platform {
+        let mut files = Vec::new();
+        assert!(shell.is_dir(), "cell/shell/: the platform's files hold the shell's");
+        collect(&shell, &shell, &mut files);
+        // its sources are files too: the shell has no src/ to skip
+        assert!(!shell.join("src").exists(), "cell/shell/src would be skipped");
+        files.sort();
+        src.push_str("pub static SHELL: &[File] = &[\n");
+        for (rel, path) in files {
+            let real = fs::canonicalize(&path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
+            assert!(real.starts_with(&repo), "cell/shell/{rel} is a symlink out of the repo");
+            let bytes = fs::read(&real).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
+            src.push_str(&format!("    {},\n", entry(&rel, &bytes, statics.id(real), embed)));
+        }
+        src.push_str("];\n");
     }
-    src.push_str("];\n");
     for (name, path) in &docs {
         let bytes = fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let file = path.file_name().expect("a doc is a file").to_string_lossy().to_string();

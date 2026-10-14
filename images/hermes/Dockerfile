@@ -18,7 +18,17 @@
 #   2. Ours (about 21 MB): the bridge, hermes-boot, the fragment CLI, and
 #      the image's own files. Most changes are only here.
 #   3. What `hermes-boot build-info` writes, then the image's version: a
-#      few KB each.
+#      few KB each. Neither stamps a time, a commit or a deploy: build-info
+#      writes what the layers below it hold, and the version is the
+#      IMAGE_VERSION build variable (the e2e's second build), 1 otherwise.
+#
+# Its inputs are what it runs, and nothing else: images/, the base by its
+# digest, and the fragment CLI's build (its stage, below). A change to the
+# cell, the shell, the chat page, the e2e or the docs builds this same
+# image, every step cached, so its digest, its version, stays, and no
+# computer is told of an update (docs/computers.md, "Stable and canary":
+# what changes a version). That holds while the deploying machine's build
+# cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
 # Hermes v0.21.6, the first stable of upstream's release pipeline (git tag
 # v0.21.6, commit 818c13be1dc4; its install stamp says 0.21.6), pinned by
@@ -53,16 +63,38 @@ RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
 # agent its profile names, through the computer's API egress, with no key
 # (cli/GUIDE.md, "As an agent"; docs/computers.md). Its sources are touched
 # as the build stage's are.
+# Its inputs are what the CLI builds from and no more, so a change to the
+# cell, the shell, the chat page or the other blessed templates, the e2e,
+# xtask or the docs leaves this stage cached and the image's digest as it
+# was (docs/computers.md, "Stable and canary": what changes a version): the
+# root workspace's manifest and lock; the CLI and the crates it depends on;
+# the templates it scaffolds (each of templates/ but the platform's own,
+# crates/templates/src/blessed_names.rs: the CLI builds without them); and
+# the workspace's other members as their manifests alone, each with an
+# empty src/lib.rs, so cargo loads the workspace and its lock as they are
+# (--locked) without their sources. xtask's host test
+# `the_cli_stage_copies_what_the_cli_builds_from` keeps this list the CLI's.
 FROM rust:1.99-alpine AS cli
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY cli cli
-COPY crates crates
-COPY templates templates
-COPY xtask xtask
+COPY crates/core crates/core
+COPY crates/nip98 crates/nip98
+COPY crates/proto crates/proto
+COPY crates/templates crates/templates
+COPY templates/blank templates/blank
+COPY templates/calories templates/calories
+COPY templates/inbox templates/inbox
+COPY templates/notes templates/notes
+COPY templates/todo templates/todo
+COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
+COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
+COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
-    find cli crates templates -type f -exec touch {} + \
+    for m in crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+ && find cli crates templates -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 

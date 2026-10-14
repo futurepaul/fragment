@@ -294,6 +294,29 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   master's). A computer pinned to it is on the canary: every deploy that
   changes its image tells it an update is ready, as any deploy that
   changes an image tells (above).
+- **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
+  frontend, that don't change the hermes image shouldn't require a hermes
+  image rollout"). The image's inputs are what it runs, and no more:
+  `images/` (the bridge, hermes-boot, the image's own files, its
+  Dockerfile), the Hermes base by its digest, and the fragment CLI's build:
+  `cli/` (its code, GUIDE.md and SKILL.md), the crates it builds from
+  (`crates/core`, `nip98`, `proto`, `templates`), the templates it
+  scaffolds (`blank`, `calories`, `inbox`, `notes`, `todo`), and the root
+  manifest and lock. A change to anything else (the cell, the shell, the
+  chat page and the other blessed templates, the e2e, xtask, the docs)
+  leaves every build step cached, so the canary's digest, and its
+  version, stay as they were, and no one is told of an update. The CLI
+  builds without the platform's own files (crates/templates' `platform`
+  feature: the blessed templates and the shell's), which no one
+  scaffolds, and the image's build copies the workspace's other members as
+  manifests alone (xtask's `the_cli_stage_copies_what_the_cli_builds_from`
+  holds the Dockerfile to cargo's account of what the CLI builds from). A
+  change to a crate the CLI shares with the cell (`crates/core`, `proto`)
+  rebuilds the CLI; when its binary comes out the same bytes, the build's
+  cache, which goes by content, keeps the digest too. Two limits: a
+  deploying machine that lost its build cache rebuilds every layer, each
+  stamped anew, and pushes a new digest (and the whole base); and a change
+  to the CLI is a change to the image, whatever it is for.
 - **Who is on it** is the operators' to say, a person at a time: `fragment
   operator pin <npub> hermes-canary` (`PUT
   /api/admin/people/{npub}/computer/image`, logged as `pin`; docs/api.md,
@@ -1626,7 +1649,8 @@ and how a runtime finds them, is the image's.
 
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
-  repo's root). Each profile's `.env` names its agent and its owner
+  repo's root, and its CLI stage copies only what the CLI builds from:
+  "Stable and canary", above). Each profile's `.env` names its agent and its owner
   (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and its config passes those two to
   its terminal (`terminal.env_passthrough`, scoped to the profile under the
   one gateway), so a command in an agent's terminal acts as that agent:

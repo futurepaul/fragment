@@ -9,7 +9,10 @@
 //! its Static Assets by its hash (cell/src/assets.rs), so an isolate pays
 //! for a file only when it reads one. The `embed` feature adds each file's
 //! bytes (the CLI scaffolds them, xtask writes them into the assets
-//! directory a cell build uploads: `write_assets`).
+//! directory a cell build uploads: `write_assets`). The `platform` feature
+//! (on by default) adds the platform's own files: the blessed templates
+//! (`blessed`) and the shell's. The CLI builds without it, so its inputs
+//! are the templates it scaffolds and the agent docs alone.
 
 /// One file, as the build found it.
 #[derive(Debug, PartialEq, Eq)]
@@ -53,6 +56,7 @@ pub static CATALOG: [&Template; 4] = [&BLANK, &TODO, &INBOX, &CALORIES];
 
 /// A file of cell/shell/ by its path there: a published one, or a page
 /// (`index.html`, `admin.html`).
+#[cfg(feature = "platform")]
 pub fn shell(name: &str) -> Option<&'static File> {
     SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
 }
@@ -60,6 +64,7 @@ pub fn shell(name: &str) -> Option<&'static File> {
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
+#[cfg(feature = "platform")]
 const SHELL_PUBLISHED: [(&str, &str); 17] = [
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
@@ -85,15 +90,18 @@ const SHELL_PUBLISHED: [(&str, &str); 17] = [
 ];
 
 /// A file the shell publishes, by its name, and its content type.
+#[cfg(feature = "platform")]
 pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
     let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
     Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
 }
 
+#[cfg(feature = "platform")]
 pub mod blessed;
 
 /// Every file the cell may read from its Static Assets, each once: the
 /// blessed and catalog templates', the shell's and the agent docs.
+#[cfg(feature = "platform")]
 pub fn release_files() -> Vec<&'static File> {
     let templates = blessed::BLESSED.iter().filter_map(|n| blessed::template(n)).chain(CATALOG);
     let all = templates.flat_map(|t| t.files.iter()).chain(SHELL).chain([&SKILL_MD, &GUIDE_MD]);
@@ -106,7 +114,7 @@ pub fn release_files() -> Vec<&'static File> {
 /// there: the directory a cell build uploads as its Static Assets
 /// (cell/wrangler.jsonc, `assets`). Each file's bytes are checked against
 /// its hash first. Answers how many files, and their bytes.
-#[cfg(feature = "embed")]
+#[cfg(all(feature = "embed", feature = "platform"))]
 pub fn write_assets(dir: &std::path::Path) -> std::io::Result<(usize, u64)> {
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -144,11 +152,11 @@ pub fn write_assets(dir: &std::path::Path) -> std::io::Result<(usize, u64)> {
     Ok((files.len(), total))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "platform"))]
 #[path = "../../../images/hermes/boot/src/skill_references.rs"]
 mod skill_references;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "platform"))]
 pub(crate) mod tests {
     use super::*;
     use sha2::{Digest, Sha256};

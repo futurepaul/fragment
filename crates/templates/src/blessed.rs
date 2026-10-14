@@ -19,8 +19,7 @@ use crate::{File, Template};
 use fragment_core::manifest::{self, Manifest};
 use fragment_proto::limits;
 
-/// The templates the platform serves from its release.
-pub const BLESSED: [&str; 4] = ["agent", "chat", "brain", "skills"];
+include!("blessed_names.rs");
 
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
