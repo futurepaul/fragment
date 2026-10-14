@@ -16,11 +16,84 @@ async draw({ prompt }, job) {
   await job.ai.image({ prompt, path: "images/cover.jpg", steps: 4 });
   return { path: "images/cover.jpg" };
 }
+
+async categorize({ item }, job) {
+  const out = await job.ai.decide({
+    input: item,
+    questions: {
+      aisle: {
+        type: "choice",
+        instructions: "Choose the aisle for the finished product.",
+        options: {
+          snacks: "Chips, crackers and popcorn",
+          produce: "Fresh fruit and vegetables",
+          grocery: "Shelf-stable foods, including nut butter",
+          frozen: "Frozen foods, including ice cream",
+          other: "Other items",
+        },
+      },
+    },
+  });
+  return { aisle: out.answers.aisle.choice };
+}
+
+// a photo or a voice note someone uploaded from the page:
+// const { sha256, type } = await fragment.blob(file); fragment.call("sort", { sha256, type })
+async sort({ sha256, type }, job) {
+  const out = await job.ai.decide({
+    model: type.startsWith("image/") ? "clef-flash" : "clef-omni", // audio and video: clef-omni
+    input: "Something left for the household",
+    media: [{ sha256, type }],
+    questions: {
+      kind: { type: "choice", instructions: "What is this about?", options: {
+        groceries: "Food or supplies to buy", chores: "A job around the house", other: "Anything else" } },
+      urgent: { type: "predicate", instructions: "Does it need doing today?" },
+    },
+  });
+  return { kind: out.answers.kind.choice, urgent: out.answers.urgent.probability > 0.7 };
+}
 ```
 
 - Text runs on a tier: `cheap` (the default) or `medium`. GLM can spend a
   small `max_tokens` thinking: `reasoning_effort` is `low` unless you ask
   for `high`.
+- Use `ai.decide` when you need a category, route or gate, about text,
+  JSON, photos, voice notes or video. It returns typed answers, never
+  prose to parse: `choice` with `options: {id: description}`, `predicate`
+  with `.probability` of true, or `score` with ordered `levels:
+  [description, ...]` and a weighted zero-based `.score`. Choice and
+  score return full `probabilities` and the model's `confidence`.
+  - `model`: `clef-flash` (the default, cheapest: text and images),
+    `clef` (larger), `clef-omni` (also audio and video).
+  - `media`: up to 4 items. A file uploaded with `fragment.blob(file)`
+    is `{sha256, type}` as it returns (a chat's attachments pass as they
+    are); a small image may go inline as `{data: "data:image/png;base64,…"}`.
+    PNG, JPEG, WebP; WAV, MP3, MP4, WebM on `clef-omni` only (a
+    browser's `audio/webm` recording is refused: convert to WAV). 4 MiB an
+    image, 8 MiB an audio or video clip, 8 MiB in all.
+  - 1–64 questions, 2–255 choices or 2–10 levels; nonempty instructions
+    and descriptions; input and questions at most 16 KiB on clef-flash,
+    48 KiB on the others. A wrong model, type, size or shape fails the
+    step before anything is spent, saying why.
+  - Billed for input tokens only (media counts as input): Clef-flash
+    $0.038, Clef $0.24, Clef-omni $0.15 per million, plus the fee and
+    margin.
+  - Typed answers can still be wrong. Prefer saved exact-item
+    corrections before inference; keep a correction UI and tune any
+    review threshold against labeled examples rather than trusting
+    confidence alone.
+- From your own computer (a tool or a script you build, or a decision of
+  your own), the same contract is `POST $FRAGMENT_MODEL/v1/decide` with
+  your usual model credentials (`x-fragment-agent: $FRAGMENT_AS_AGENT`, or
+  `Authorization: Bearer agent:<you>`), its media inline as `{data}`
+  (a 6 MiB request at most), billed to your owner:
+
+  ```sh
+  curl -s "$FRAGMENT_MODEL/v1/decide" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+    -H 'content-type: application/json' \
+    -d '{"input": "Invoice 42 is 30 days overdue", "questions": {"urgent": {"type": "predicate", "instructions": "Does this need a reply today?"}}}'
+  # {"model":"@cf/cloudflare/clef-flash","answers":{"urgent":{"type":"predicate","probability":0.91}},"usage":{…}}
+  ```
 - An image is a JPEG written to a path ending in `.jpg` or `.jpeg`, served
   from the fragment like any file. There is no image editing, no masks and
   no reference images: text to image only.

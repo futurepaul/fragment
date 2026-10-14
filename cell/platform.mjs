@@ -348,6 +348,9 @@ class Job {
   //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage, timing }
   //     (its arguments at most AI_TEXT_MAX_BYTES of JSON; with a draft, its
   //     text so far is that channel's draft as it streams)
+  //   ai.decide({ model?, input, questions, media? }) → { answers, model, usage }: typed choices,
+  //     predicates and scores on the Clef family (clef-flash unless named), about text, JSON and
+  //     media: the fragment's blobs ({ sha256, type }, as fragment.blob(file) answers) or small inline ({ data })
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
   //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
@@ -359,6 +362,7 @@ class Job {
         if (overBytes(JSON.stringify(args), AI_TEXT_MAX_BYTES)) throw new Error(`job.ai.text's arguments are at most ${AI_TEXT_MAX_BYTES} bytes of JSON`);
         return step("ai.text", args);
       },
+      decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };

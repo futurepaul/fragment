@@ -492,6 +492,22 @@ speaking Cloudflare's APIs) returns once this product works.
     then switch to the route's `fallback` name (the deployment's fallback
     model), about 40 s after the stall began, and start the next turn on
     their tier again (docs/computers.md, Models).
+    Status, 2026-10-09 (Paul, `ai.decide`): jobs have a typed decision
+    step alongside text and images: choice, predicate and score questions
+    over text or JSON. The first implementation is Clef-flash on the same
+    Workers AI binding and gateway, metered in input tokens only, billed
+    to the fragment's owner. Its paid answers, including malformed-answer
+    rejections, are kept for retries and replay. The app contract is
+    independent of the provider's question names (docs/api.md, AI).
+    Status, 2026-10-14 (Paul: typed decisions for app jobs and agents,
+    on the whole Clef family, media included): `model` names
+    `clef-flash` (the default), `clef` or `clef-omni`; a decision reads
+    images on all three, audio and video on clef-omni, from the
+    fragment's own blobs or small and inline; agents ask the same
+    contract on the model route (`POST /api/models/v1/decide`, and
+    `/v1/decide` on a computer's model intercept), metered to their
+    owner. Each reserves its model's context window and settles at its
+    input tokens (docs/api.md, Decisions).
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;

@@ -49,6 +49,13 @@
 //!   its key (`agent:<itself>` unless `as` names another) and, with
 //!   `header`, by `x-fragment-agent` too: the reply is `heard: <the text>`,
 //!   or the refusal's status and its first 300 characters;
+//! - `decide <text>`: one decision through the intercept, `POST
+//!   /v1/decide`, as a tool the agent built would make it, its agent named
+//!   by its key (`agent:<itself>`): whether `<text>` is a snack, on
+//!   clef-flash; `decide heard <words>`: whether a voice memo saying
+//!   `<words>`, sent inline, is, on clef-omni. The reply is `decided:
+//!   <model id> snack <probability>`, or `decide refused: <status> <its
+//!   first 300 characters>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -404,6 +411,50 @@ async fn transcribe(agent: &str, rest: &str) -> Result<String, String> {
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
 }
 
+/// `decide <text>`: one decision through the intercept (`POST
+/// /v1/decide`), as a tool an agent built would make it, its agent named
+/// by its key alone (`agent:<itself>`): is `<text>` a snack, on
+/// clef-flash; `decide heard <words>`: is the voice memo saying `<words>`
+/// (`memo`, inline) a snack, on clef-omni. The answer: the model's id and
+/// the predicate's probability, or the refusal.
+async fn decide(agent: &str, rest: &str) -> Result<String, String> {
+    use base64::Engine;
+    use http_body_util::{BodyExt, Full, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
+    let base = crate::net::Base::parse(&model)?;
+    let snack = serde_json::json!({ "snack": { "type": "predicate", "instructions": "Is it a snack?" } });
+    let body = match rest.strip_prefix("heard ") {
+        Some(words) => {
+            let audio = format!("data:audio/wav;base64,{}", base64::engine::general_purpose::STANDARD.encode(memo(words.trim())));
+            serde_json::json!({ "model": "clef-omni", "input": "a voice memo", "questions": snack, "media": [{ "data": audio }] })
+        }
+        None => serde_json::json!({ "input": rest.trim(), "questions": snack }),
+    }
+    .to_string();
+    let req = hyper::Request::post(base.url("/v1/decide"))
+        .header("host", base.authority())
+        .header("authorization", format!("Bearer agent:{agent}"))
+        .header("content-type", "application/json")
+        .header("content-length", body.len())
+        .body(Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| e.to_string())?;
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let call = async {
+        let res = client.request(req).await.map_err(|e| e.to_string())?;
+        let status = res.status().as_u16();
+        let bytes = Limited::new(res.into_body(), 64 * 1024).collect().await.map_err(|e| e.to_string())?.to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        match (status, v["model"].as_str(), v["answers"]["snack"]["probability"].as_f64()) {
+            (200, Some(model), Some(p)) => Ok(format!("{model} snack {p}")),
+            _ => Err(format!("{status} {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>())),
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
+}
+
 /// Waits `pace`, hearing a Stop meanwhile (true).
 async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     tokio::select! {
@@ -481,6 +532,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         reply = match transcribe(&ts.agent.fragment, rest).await {
             Ok(text) => format!("heard: {text}"),
             Err(e) => format!("transcribe refused: {e}"),
+        };
+    }
+    if let Some(rest) = ts.text.strip_prefix("decide ") {
+        reply = match decide(&ts.agent.fragment, rest).await {
+            Ok(answer) => format!("decided: {answer}"),
+            Err(e) => format!("decide refused: {e}"),
         };
     }
     if text.starts_with("fetch ") {

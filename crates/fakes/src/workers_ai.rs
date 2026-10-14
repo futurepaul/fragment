@@ -19,6 +19,19 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! The decision models (the Clef family: `fragment_core::decide::Model`)
+//! take System One's input as their catalog schemas say: `model` their own
+//! selector, `state`, `questions`, and media as base64 `data:` URLs,
+//! `images` for all three and `audio` and `videos` for clef-omni alone
+//! (another's is a 400, as its schema refuses an unknown field). Each
+//! answers System One's answers and its input usage, counted as
+//! `decision_tokens` does: the text's bytes at `CHARS_PER_TOKEN`, an
+//! image `IMAGE_TOKENS`, audio and video a token a KiB. Past the model's
+//! context window it is a 400, as Clef's request "fails". Its default
+//! answer is mechanical: each choice's first option, each score's first
+//! level, 0.5 for a predicate; `decide_next` scripts raw answers (a
+//! malformed one too), never an accuracy claim.
+//!
 //! The transcription model (`TRANSCRIBE_MODEL`, Whisper) answers as its
 //! catalog's output schema says, `{text, word_count, transcription_info:
 //! {language, duration, …}, segments, vtt}`, from the audio's own bytes: a
@@ -89,6 +102,12 @@ use crate::http::{Handler, Request, Response, Server};
 pub use fragment_core::media::IMAGE_MODEL;
 /// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
 pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
+/// The decision models (the Clef family): a typed-decision vendor
+/// boundary, never proof of a real model's accuracy.
+pub use fragment_core::decide::Model as DecisionModel;
+/// What a decision's image counts as, in input tokens: a 512×512 image's
+/// 32-pixel patches and its 3 markers (Clef's tokenization).
+pub const IMAGE_TOKENS: u64 = 16 * 16 + 3;
 /// What Whisper hears in audio that carries no words of `spoken_wav`'s.
 pub const NO_WORDS: &str = "(no words)";
 
@@ -208,6 +227,8 @@ struct State {
     hung_up: Arc<AtomicU64>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
+    /// Raw System One answers queued by tests, including malformed ones.
+    decisions: VecDeque<Value>,
     /// The next streamed answers end before their usage, in order.
     breaks: VecDeque<bool>,
     delays: VecDeque<u64>,
@@ -657,6 +678,76 @@ fn failure(face: Face, status: u16) -> Response {
     }
 }
 
+/// A decision's input tokens as the fake counts them (the module's doc),
+/// or why its input is refused: a selector not its own, media its model
+/// does not take, a field that is no list of base64 `data:` URLs of its
+/// kind, or more than its context window.
+pub fn decision_tokens(model: DecisionModel, input: &Value) -> Result<u64, String> {
+    use fragment_core::decide::Kind;
+    if input["model"] != model.name() {
+        return Err(format!("{}: model is {:?}", model.id(), model.name()));
+    }
+    let text = json!({ "state": input["state"], "questions": input["questions"] }).to_string().len();
+    let mut tokens = (text / CHARS_PER_TOKEN).max(1) as u64;
+    for (field, kind, prefix) in [("images", Kind::Image, "image/"), ("audio", Kind::Audio, "audio/"), ("videos", Kind::Video, "video/")] {
+        let Some(items) = input.get(field) else { continue };
+        if !model.takes(kind) {
+            return Err(format!("{} takes no {field}: an unknown field", model.id()));
+        }
+        let items = items.as_array().ok_or(format!("{field} is a list"))?;
+        for url in items {
+            let url = url.as_str().ok_or(format!("{field} holds data: URLs"))?;
+            let Some((head, data)) = url.strip_prefix("data:").and_then(|r| r.split_once(',')) else { return Err(format!("{field} holds data: URLs; a remote URL is not accepted")) };
+            if !head.starts_with(prefix) || !head.ends_with(";base64") {
+                return Err(format!("{field} holds base64 {prefix}* data: URLs, not {head:?}"));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| format!("{field}: not base64: {e}"))?;
+            tokens += match kind {
+                Kind::Image => {
+                    kind_of(&bytes).filter(|k| *k != "GIF").ok_or("an image is a PNG, a JPEG or a WebP")?;
+                    IMAGE_TOKENS
+                }
+                Kind::Audio | Kind::Video => (bytes.len() as u64).div_ceil(1024).max(1),
+            };
+        }
+    }
+    if tokens > model.context_tokens() {
+        return Err(format!("the request's media and questions ({tokens} tokens) exceed the context window of {}", model.id()));
+    }
+    Ok(tokens)
+}
+
+/// A decision model's answer (the module's doc). Tests supply semantic
+/// answers explicitly (`decide_next`); a refused input takes none of them.
+fn decision_answer(s: &mut State, model: DecisionModel, input: &Value, log_id: &str) -> Response {
+    let counted = match decision_tokens(model, input) {
+        Ok(n) => n,
+        Err(why) => return problem(400, &why),
+    };
+    let answer = s.decisions.pop_front().unwrap_or_else(|| {
+        let mut answers = serde_json::Map::new();
+        for (id, q) in input["questions"].as_object().into_iter().flatten() {
+            let a = match q["type"].as_str() {
+                Some("noul") => json!({ "type": "noul", "noul": 0.5 }),
+                Some("choice") => {
+                    let keys: Vec<&String> = q["criteria"].as_object().into_iter().flatten().map(|(k, _)| k).collect();
+                    let ps: serde_json::Map<String, Value> = keys.iter().enumerate().map(|(i, k)| ((*k).clone(), json!(if i == 0 { 1.0 } else { 0.0 }))).collect();
+                    json!({ "type": "choice", "choice": keys.first(), "probabilities": ps, "confidence": 1.0 })
+                },
+                Some("score") => {
+                    let ps: serde_json::Map<String, Value> = (0..q["criteria"].as_array().map_or(0, Vec::len)).map(|i| (i.to_string(), json!(if i == 0 { 1.0 } else { 0.0 }))).collect();
+                    json!({ "type": "score", "score": 0.0, "probabilities": ps, "confidence": 1.0 })
+                },
+                _ => Value::Null,
+            };
+            answers.insert(id.clone(), a);
+        }
+        let tokens = s.usage.pop_front().map_or(counted, |u| u.prompt);
+        json!({ "model": model.name(), "answers": answers, "usage": { "input_tokens": tokens, "output_tokens": 0 } })
+    });
+    Response::json(200, &answer).with_header("cf-aig-log-id", log_id)
+}
+
 fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == OPENAI_PATH {
         return openai_answer(s, req);
@@ -683,6 +774,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     }
     if model == TRANSCRIBE_MODEL {
         return transcription_answer(&body, &log_id);
+    }
+    if let Some(decides) = DecisionModel::of_id(&model) {
+        return decision_answer(s, decides, &body, &log_id);
     }
     if let Some(why) = image_refusal(&model, &body) {
         return problem(400, &why);
@@ -866,6 +960,7 @@ impl WorkersAi {
         let mut s = self.state();
         s.said.clear();
         s.usage.clear();
+        s.decisions.clear();
         s.breaks.clear();
         s.paces.clear();
         s.delays.clear();
@@ -895,6 +990,12 @@ impl WorkersAi {
     /// What the next answers report they used, in order.
     pub fn set_usage(&self, used: &[Used]) {
         self.state().usage.extend(used.iter().copied());
+    }
+
+    /// Supply the decision model's raw response, rather than claiming the
+    /// deterministic fake can classify real input.
+    pub fn decide_next(&self, answers: &[Value]) {
+        self.state().decisions.extend(answers.iter().cloned());
     }
 
     /// The next streamed answer ends before its usage (a dropped stream).
@@ -1294,6 +1395,63 @@ mod tests {
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!((v["text"].clone(), v["transcription_info"]["duration"].clone(), v["word_count"].clone()), (json!("hello from a voice memo"), json!(3.0), json!(5)));
         assert_eq!(fragment_core::transcribe::usage_of(&v), Some(fragment_core::price::Usage::Neurons { milli: 2_332 }), "the cell meters what the answer says");
+    }
+
+    /// Goal: each Clef model answers System One's shape, mechanically and
+    /// the same each time, counts its media as input, and refuses what its
+    /// schema refuses. Method: a choice, a predicate and a score with an
+    /// image on each model, audio on each, and an answer past the context.
+    #[test]
+    fn decisions_answer_as_the_clef_family_does() {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let ask = |model: DecisionModel, extra: Value| {
+            let mut input = json!({ "model": model.name(), "state": "chips", "questions": {
+                "aisle": { "type": "choice", "instructions": "Aisle?", "criteria": { "snacks": "Chips", "produce": "Vegetables" } },
+                "snack": { "type": "noul", "instructions": "A snack?" },
+                "urgency": { "type": "score", "instructions": "How soon?", "criteria": ["Later", "Now"] }
+            } });
+            input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            input
+        };
+        let mut s = State::default();
+        let answered = |s: &mut State, model: DecisionModel, input: &Value| {
+            let r = decision_answer(s, model, input, "log");
+            (r.status, serde_json::from_slice::<Value>(&r.body).unwrap())
+        };
+        let text = decision_tokens(DecisionModel::ClefFlash, &ask(DecisionModel::ClefFlash, json!({}))).unwrap();
+        for model in fragment_core::decide::MODELS {
+            let input = ask(model, json!({ "images": [png_url()] }));
+            let (status, v) = answered(&mut s, model, &input);
+            assert_eq!(status, 200, "{v}");
+            assert_eq!(v["model"], model.name());
+            assert_eq!(v["answers"]["aisle"], json!({ "type": "choice", "choice": "produce", "probabilities": { "produce": 1.0, "snacks": 0.0 }, "confidence": 1.0 }), "the first option, as the criteria map orders it");
+            assert_eq!(v["answers"]["snack"], json!({ "type": "noul", "noul": 0.5 }));
+            assert_eq!(v["answers"]["urgency"]["score"], 0.0);
+            assert_eq!(v["usage"]["input_tokens"], text + IMAGE_TOKENS, "an image counts as its tokens");
+            let call = fragment_core::decide::bound(&json!({ "model": model.name(), "input": "chips", "questions": {
+                "aisle": { "type": "choice", "instructions": "Aisle?", "options": { "snacks": "Chips", "produce": "Vegetables" } },
+                "snack": { "type": "predicate", "instructions": "A snack?" },
+                "urgency": { "type": "score", "instructions": "How soon?", "levels": ["Later", "Now"] }
+            } }), fragment_core::decide::Asker::Job).unwrap();
+            assert!(call.answer(&v).is_ok(), "the cell reads the fake's answer as valid");
+            let heard = ask(model, json!({ "audio": [format!("data:audio/wav;base64,{}", b64(&spoken_wav("hi", 1)))] }));
+            let (status, v) = answered(&mut s, model, &heard);
+            if model == DecisionModel::ClefOmni {
+                assert_eq!((status, v["usage"]["input_tokens"].clone()), (200, json!(text + 32)), "32 KiB of WAV: a token a KiB");
+            } else {
+                assert_eq!(status, 400, "{} hears no audio: {v}", model.name());
+            }
+        }
+        let wrong = ask(DecisionModel::Clef, json!({}));
+        assert_eq!(answered(&mut s, DecisionModel::ClefOmni, &wrong).0, 400, "a selector not its own");
+        for bad in [json!({ "images": ["https://example.com/a.png"] }), json!({ "images": [format!("data:audio/wav;base64,{}", b64(b"RIFF"))] }), json!({ "videos": ["data:video/mp4;base64,!!"] })] {
+            assert_eq!(answered(&mut s, DecisionModel::ClefOmni, &ask(DecisionModel::ClefOmni, bad.clone())).0, 400, "{bad}");
+        }
+        let long = ask(DecisionModel::ClefFlash, json!({ "state": "x".repeat(4 * 24_577) }));
+        assert_eq!(answered(&mut s, DecisionModel::ClefFlash, &long).0, 400, "past its context window");
+        s.decisions.push_back(json!({ "answers": {} }));
+        assert_eq!(answered(&mut s, DecisionModel::ClefFlash, &wrong).0, 400, "a refused input takes no scripted answer");
+        assert_eq!(answered(&mut s, DecisionModel::Clef, &wrong).1, json!({ "answers": {} }), "the next does");
     }
 
     #[test]

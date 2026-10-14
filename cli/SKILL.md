@@ -123,7 +123,15 @@ shadows.
   model asks for calls your job runs, a tool loop with no computer, and
   with `draft: {channel, turn}` its words stream to the pages following
   that channel until the record you publish under the turn replaces
-  them) and `job.ai.image` (a JPEG into the fragment's files).
+  them), `job.ai.decide` and `job.ai.image` (a JPEG into the fragment's
+  files).
+  - `job.ai.decide`: typed answers (one of named options, a yes-or-no
+    probability, a score on ordered levels) about text, JSON, or a
+    photo, voice note or video someone uploaded (`fragment.blob(file)`'s
+    `{sha256, type}`), with no prose to parse: to sort, route and gate.
+    `model`: `clef-flash` (the default), `clef`, or `clef-omni` (audio
+    and video). An agent asks the same from its computer, `POST
+    $FRAGMENT_MODEL/v1/decide`.
 
 ## Use their apps as tools
 

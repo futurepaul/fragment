@@ -249,13 +249,13 @@ fragment's owner for its jobs' paid steps, an agent's owner for its
 turns: Ledger, below). The same table is in cli/GUIDE.md, so
 `/llms-full.txt` carries it (Agent docs, below).
 
-| | call operations | read or write records | use models | share and invite | deploy |
-|---|---|---|---|---|---|
-| **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: a template from the shell's catalog is live as it is made; the rest is an agent's |
-| **their agent, on its computer** (signed by its computer's egress, `for` its owner) | `POST /api/f/{name}/ops/{op}` (`fragment call`), at its own grants, or `for` its owner at the lower of theirs and its cap (at most `editor`) | channels and posts at that role; its chats are records (docs/chat-records.md) | the model route (Models), on its tier or its owner's own model, paid by its owner | `for` its owner, on what its owner owns (above): members, invites, visibility, rotation; never a delete or a cap | `files` and `deploy` at that role: an editor's; what it creates is its owner's |
-| **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels, and a text step's draft to them as it streams (no `post` role needed); a channel trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image` (AI, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
-| **a coding agent, with the CLI** (a key a person approved: `fragment login`) | `fragment call`, as that person | `fragment channel [--follow]`, `fragment post` | its own; the platform's only through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate`: the owner's | `fragment sync`, `write`, `deploy`, `rollback`: an editor's |
-| **an MCP client, through `fragment mcp`** (that CLI, over stdio) | the fragment's operations that have a `description`, as tools, at the key's role: its queries, and with `--write` its mutations and jobs | none but through operations | its own; the platform's through a described job | none | none |
+| | call operations | read or write records | use models | decide | share and invite | deploy |
+|---|---|---|---|---|---|---|
+| **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | through their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: a template from the shell's catalog is live as it is made; the rest is an agent's |
+| **their agent, on its computer** (signed by its computer's egress, `for` its owner) | `POST /api/f/{name}/ops/{op}` (`fragment call`), at its own grants, or `for` its owner at the lower of theirs and its cap (at most `editor`) | channels and posts at that role; its chats are records (docs/chat-records.md) | the model route (Models), on its tier or its owner's own model, paid by its owner | the decision route (Decisions: `POST /api/models/v1/decide`, `/v1/decide` on its intercept), its media inline, paid by its owner | `for` its owner, on what its owner owns (above): members, invites, visibility, rotation; never a delete or a cap | `files` and `deploy` at that role: an editor's; what it creates is its owner's |
+| **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels, and a text step's draft to them as it streams (no `post` role needed); a channel trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image` (AI, below) | `job.ai.decide`, about text, JSON and the fragment's blobs (Decisions, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
+| **a coding agent, with the CLI** (a key a person approved: `fragment login`) | `fragment call`, as that person | `fragment channel [--follow]`, `fragment post` | its own; the platform's only through the jobs it calls | only through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate`: the owner's | `fragment sync`, `write`, `deploy`, `rollback`: an editor's |
+| **an MCP client, through `fragment mcp`** (that CLI, over stdio) | the fragment's operations that have a `description`, as tools, at the key's role: its queries, and with `--write` its mutations and jobs | none but through operations | its own; the platform's through a described job | through a described job | none | none |
 
 ## Identities
 
@@ -1356,14 +1356,16 @@ goes through the platform's model route (Models, below) by tier; images
 are FLUX.1 [schnell] (`@cf/black-forest-labs/flux-1-schnell`) on Workers
 AI, on the model route's transport (the `AI` binding through the
 deployment's AI Gateway), metered in neurons at Workers AI's price for
-it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`).
-No app holds a key: the binding is pre-authenticated, and a text step on
-an OpenAI-compatible API (Finite Private) carries the deployment's key,
-which the platform adds.
+it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`);
+decisions are the Clef family on that Workers AI transport, metered in
+input tokens (Decisions, below). No app holds a key: the binding is
+pre-authenticated, and a text step on an OpenAI-compatible API (Finite
+Private) carries the deployment's key, which the platform adds.
 
 Each paid step reserves its worst case on the owner's ledger before its
 call (text: its request's bytes as tokens in and its tier's capped
-`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps),
+`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps; a
+decision: its model's context window),
 under the step's reference,
 `step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
 It keeps what the call bought beside the step (by
@@ -1393,6 +1395,12 @@ The steps:
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`). Tools, drafts
   and timing are below (Text steps).
+- `job.ai.decide({model?, input, questions, media?})` → `{model,
+  answers, usage}`: a typed decision on the Clef family (Decisions,
+  below). Its paid answer is kept as text's is; one that does not answer
+  what was asked is kept as a rejection (`ai.decide-refused`), charged,
+  and thrown as the step's error, and a retry or a replay reuses it. A
+  429 or 5xx is retried on the same model: decisions have no fallback.
 - `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
   mediaType}`: a JPEG (`image/jpeg`) written to `main` at `path`, which
   ends in `.jpg` or `.jpeg` (a file is served by its extension: bug 5),
@@ -1404,7 +1412,7 @@ The steps:
 - `job.ai.video(…)` is refused, saying "video steps are off until they
   run on Cloudflare" (the debt ledger); nothing is reserved or called.
 
-A model's 429 or 5xx is answered by the fallback model (Models, below),
+A text model's 429 or 5xx is answered by the fallback model (Models, below),
 sent the same request (its tools too); when the fallback fails too, the
 step is retried. Other refusals fail the step with the model's message.
 A run answers `costMicros`: what its paid steps were charged (none when
@@ -1529,6 +1537,113 @@ fragment.subscribe("chat", (rec) => { drafts.delete(rec.body.turn); show(rec); }
 });
 ```
 
+### Decisions
+
+A decision answers typed questions about text, JSON, images, audio or
+video with probabilities, never prose to parse: which category, whether
+something holds, how much. Apps ask it as a job's step
+(`job.ai.decide`, AI, above), agents on the model route (`POST
+/api/models/v1/decide`, Models, below), with one contract
+(`fragment_core::decide`). It runs on Workers AI's Clef family, through
+the `AI` binding and the deployment's AI Gateway, as images do. Its names are Fragment's own: the
+platform maps them to Clef's System One wire (`state`, `noul`,
+`criteria`), which apps never see.
+
+**The request**, `{model?, input, questions, media?}`; any other key is
+refused:
+
+- `model`: one of
+
+  | `model` | catalog id | context | reads | input price (list) |
+  | --- | --- | --- | --- | --- |
+  | `clef-flash` (the default) | `@cf/cloudflare/clef-flash` | 24,576 tokens | text, images | $0.038 per million tokens |
+  | `clef` | `@cf/cloudflare/clef` | 65,536 tokens | text, images | $0.24 per million tokens |
+  | `clef-omni` | `@cf/cloudflare/clef-omni` | 64,000 tokens | text, images, audio, video | $0.15 per million tokens |
+
+  (Cloudflare's model pages and its pricing page, read 2026-10-14.) Any
+  other name is refused.
+- `input`: nonempty text, an object or an array (Clef truncates long
+  text to fit its context).
+- `questions`: 1 to 64 ids (1 to 100 ASCII letters, digits, `_`, `.` or
+  `-`), each one of:
+  - `{type: "choice", instructions, options}`: `options` maps 2 to 255
+    ids (at most 100 bytes) to descriptions. Answers `{type: "choice",
+    choice, probabilities, confidence}`: `choice` one of the ids,
+    `probabilities` every id's.
+  - `{type: "predicate", instructions}`: answers `{type: "predicate",
+    probability}`, the probability that it holds.
+  - `{type: "score", instructions, levels}`: `levels` 2 to 10
+    descriptions, lowest first. Answers `{type: "score", score, levels,
+    probabilities, confidence}`: `score` the probability-weighted
+    zero-based level (it may land between two), `probabilities` keyed by
+    index (`"0"`, `"1"`, …).
+
+  Instructions and descriptions are nonempty strings. The input and the
+  questions encode to at most 16 KiB on `clef-flash`, 48 KiB on `clef`
+  and `clef-omni` (each under its context, with room for media).
+- `media`: at most 4 items, at most 2 of them videos, each one of:
+  - a blob of the asking fragment, `{sha256, type}` (Blobs, above): what
+    a page's `fragment.blob(file)` answers and a chat's records name as
+    attachments, whose `size` and `name` may ride along unread. A job's
+    only: a blob the fragment does not hold is refused;
+  - inline, `{data}`: a base64 `data:` URL. A job's inline media is at
+    most 256 KiB of URL in all (its args travel with the run: larger
+    media is a blob); an agent's is bounded by its route's 6 MiB body.
+
+  Its `type` is one Clef takes: `image/png`, `image/jpeg`, `image/webp`
+  (any model); `audio/wav` (or `audio/x-wav`, `audio/wave`) and
+  `audio/mpeg` (or `audio/mp3`); `video/mp4` and `video/webm`
+  (`clef-omni` alone). A browser's own voice memo (WebM, Ogg or MP4
+  audio) is none of them. Each item is at most 4 MiB for an image (Clef's
+  own), 8 MiB for audio (Clef's) and 8 MiB for a video (Clef's is 16:
+  ours keeps every request under Clef's 13 MiB body), and all of it at
+  most 8 MiB, decoded. No remote URL: Clef takes none.
+
+Everything above is checked before anything is reserved or sent, and a
+refusal says which bound it broke; a job's blobs are sized before any is
+read.
+
+**The answer**, `{model, answers, usage}`: `model` the catalog id that
+answered, `answers` by question id, `usage` the model's own
+(`{input_tokens, output_tokens}`). Every answer is checked against its
+question before it leaves the platform: probabilities and confidence in
+[0, 1], a complete distribution summing to 1 (within 0.001), a choice
+that is a highest-probability option, a score that matches its
+distribution (within 0.01). Confidence is the model's estimate, not a
+guarantee: an app owns its review thresholds, and keeps the corrections
+people make.
+
+**The money.** A decision reserves its model's whole context window
+(1,471 micro-dollars on `clef-flash`, 24,773 on `clef`, 15,120 on
+`clef-omni`, at the default book's fee and margin): Clef scores every
+question in one pass over one context, media and questions included,
+and a request past it fails, so no call's input exceeds it. It settles
+at `usage.input_tokens` (media is counted as input tokens) at its
+model's input price; output is never charged. A call that reports no
+usage is charged its reservation (`ai.cost-missing`); one that reports
+more is charged what it reports (docs/ledger.md).
+
+A job sorting a photo or a voice note someone uploaded (the page
+uploads it with `fragment.blob(file)` and calls `sort({sha256, type})`):
+
+```js
+async sort({ sha256, type }, job) {
+  const audio = type.startsWith("audio/");
+  const out = await job.ai.decide({
+    model: audio ? "clef-omni" : "clef-flash",
+    input: audio ? "A voice note left for the household" : "A photo left for the household",
+    media: [{ sha256, type }],
+    questions: {
+      kind: { type: "choice", instructions: "What is this about?", options: {
+        groceries: "Food or supplies to buy", chores: "A job around the house", other: "Anything else" } },
+      urgent: { type: "predicate", instructions: "Does it need doing today?" },
+    },
+  });
+  const { kind, urgent } = out.answers;
+  return { kind: kind.choice, urgent: urgent.probability > 0.7, sure: kind.confidence };
+}
+```
+
 ### Models (docs/cloudflare-v1.md, decisions 23 and 61)
 
 One OpenAI-shaped chat completion on a tier's model, metered on its
@@ -1572,6 +1687,7 @@ job's step may name.
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 | `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
+| `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` names whom it acts for) | a decision, `{model?, input, questions, media?}`, its media inline → `{model, answers, usage}` (Decisions, above) |
 
 Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
 memo is one the agent transcribes itself, through this route):
@@ -1636,6 +1752,20 @@ line (streamed) or its status (read whole), `ms` to its settle, `calls`
 its tries (2 when it fell back), `model` the one that answered. A later
 latency lane reads these, as it reads a job's text step's `timing`
 (AI, above).
+
+A decision on the route (`models::decide_route`) is a job's
+`ai.decide` with its media inline (Decisions, above): a blob is refused,
+since the route reads no fragment's blob store (an agent reads one with
+`GET /api/f/{name}/blobs/{sha256}` and sends its bytes). Its caller,
+payer, `fragment`, 6 MiB body and ledger refusals are the chat route's.
+A body that is no decision (not one, a key unknown, a bound past) is
+400 saying why, nothing reserved or sent. It reserves its model's
+context window under an `aig:<hex>` reference, as an agent's turn, and
+settles at the input tokens the model counted. The model's refusal is
+released and passed through as it came; an answer that does not answer
+what was asked is settled (it was paid for) and answered 502
+`upstream_failed`. A computer's guest asks it as `POST /v1/decide` on
+its model intercept (docs/computers.md, Models).
 
 The same call, as a Rust function the cell's other parts make
 (`models::complete`: the payer, the agent, the fragment, the tier, the
