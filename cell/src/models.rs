@@ -10,8 +10,11 @@
 //! clamped, none of the client's headers), and settled with its last,
 //! cumulative usage (input less what was cached). A call that failed
 //! before it used anything is released; one whose stream broke settles
-//! without usage, at its worst case. Nothing of the request or its answer
-//! is kept: only the usage, on the ledger.
+//! without usage, at its worst case. A stream settles at its `[DONE]`, not
+//! at its end: the gateway has held one open ~150 s after its answer. Nothing
+//! of the request or its answer is kept: only the usage, on the ledger,
+//! and the call's timing on its `model.settled` line (`first_ms`, `ms`,
+//! `calls`).
 //!
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx) is made once more, the same, on the deployment's fallback
@@ -39,6 +42,9 @@
 //!   key bound for the call's slot (keys.rs) as its bearer token, and no
 //!   metadata (its limit is its key's). Its answers are OpenAI's shape
 //!   already. The e2e's is the same fake's OpenAI-compatible face.
+//!
+//! A job's text step makes a tier's call the same way, streamed, falling
+//! back the same, unmetered here (`streamed`: ai.rs meters it).
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
@@ -147,18 +153,30 @@ struct Held {
     model: &'static str,
     /// What the call named: a tier, `vision` or `whisper`.
     name: &'static str,
+    /// When its first try was made: its log line says how long it took.
+    t0: i64,
+    /// Its tries (a second when the first fell back).
+    calls: u32,
+    /// When the model began to answer, ms after `t0`: a stream's first
+    /// data line, or an answer read whole's status.
+    first_ms: Option<i64>,
 }
 
 impl Held {
     /// The call's end, charged once: its usage, or its worst case when it
     /// reported none (or the stream broke). A settle that does not land is
     /// left held, and the ledger's sweep charges it at its worst case after
-    /// six hours: the money path fails closed.
+    /// six hours: the money path fails closed. Its log line says its timing
+    /// (docs/api.md, Models: a latency lane reads it).
     async fn settle(&self, usage: Option<Usage>, log_id: Option<String>) {
         let settle = Settle { reference: self.reference.clone(), usage };
+        let ms = js::now_ms() - self.t0;
         match ledger::retried(&self.env, &self.payer, &settle).await {
             // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "charge": settled.charge, "basis": settled.basis })),
+            Ok(settled) => console_log!(
+                "{}",
+                json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
+            ),
             Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
     }
@@ -204,7 +222,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         capped,
     };
     ledger::hold(env, call.payer, &reserve).await?;
-    let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model.id(), name: call.named.as_str() };
+    let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model.id(), name: call.named.as_str(), t0: js::now_ms(), calls: 0, first_ms: None };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // a tier's call falls back; `vision`'s model reads images the fallback
     // may not, and `fallback` is the fallback already
@@ -212,8 +230,9 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         Named::Tier(_) => Some(cfg.models.fallback()),
         Named::Vision | Named::Fallback => None,
     };
-    let (answer, model) = tried(env, cfg, &bounded, fallback, &meta).await;
+    let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     held.model = model.id();
+    held.calls = calls;
     let model = model.id();
     let mut upstream = match answer {
         Ok(r) => r,
@@ -233,6 +252,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         return Ok(resp);
     }
     if !bounded.stream {
+        held.first_ms = Some(js::now_ms() - held.t0);
         let bytes = match read_whole(&mut upstream).await {
             Ok(b) => b,
             Err(e) => {
@@ -252,13 +272,21 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's stream had no body"));
     };
     // one branch for the client, one read to its end for the meter: a
-    // client that goes away mid-answer does not leave the call unsettled
+    // client that goes away mid-answer does not leave the call unsettled.
+    // The call settles at its `[DONE]`, where its usage is whole: a gateway
+    // has held a stream open ~150 s past it, and a settle at the stream's
+    // end came that late, or was cut with the Worker's waitUntil. Both
+    // branches are read on to the end, as before: a branch dropped at
+    // `[DONE]` changed nothing for the client in the e2e's held stream, and
+    // how a tee's branches part is the runtime's.
     let (client, meter) = js::tee(source)?;
     after.later(Box::pin(async move {
         let mut stream = Stream::default();
         let mut bytes = ByteStream::from(meter);
         let mut broke = false;
-        // bounded by the model's answer: at most the tier's max_tokens
+        let mut settled = false;
+        // bounded by the model's answer: at most the tier's max_tokens, then
+        // the stream's end (nothing after `[DONE]` is read into it)
         while let Some(chunk) = bytes.next().await {
             match chunk {
                 Ok(c) => stream.push(&c, None),
@@ -267,10 +295,19 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
                     break;
                 }
             }
+            if held.first_ms.is_none() && stream.began() {
+                held.first_ms = Some(js::now_ms() - held.t0);
+            }
+            if stream.done() && !settled {
+                settled = true;
+                held.settle(stream.usage().and_then(|u| bounds::usage_of(model, u)), log_id.clone()).await;
+            }
         }
-        stream.finish(None);
-        let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-        held.settle(usage, log_id).await;
+        if !settled {
+            stream.finish(None);
+            let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
+            held.settle(usage, log_id).await;
+        }
     }));
     let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default(), done: false };
     let mut resp = Response::from_stream(normalized)?;
@@ -279,35 +316,46 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     Ok(resp)
 }
 
-/// One bounded call of a tier, unmetered, falling back as `complete`'s
-/// does: its status, its answer (read whole), the gateway's log id, and
-/// the model whose answer it is. Its caller meters it, as that model's: a
-/// job's text step keeps what it bought before it settles (ai.rs).
-pub(crate) async fn call(env: &Env, bounded: &Bounded<'static>, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>, &'static str)> {
-    assert!(!bounded.stream, "an unmetered call is read whole");
+/// A job's text step's call (ai.rs): one bounded, streamed call of a tier,
+/// where the deployment runs it, unmetered, falling back as `complete`'s
+/// does, the same request (its tools too) to the fallback model.
+pub(crate) struct Streamed {
+    /// The answer that is the call's, its body unread: a refusal's to read
+    /// whole, a 200's to read to its `[DONE]`.
+    pub answer: Response,
+    pub log_id: Option<String>,
+    /// The model whose answer it is: its caller meters it as that model's.
+    pub model: &'static str,
+    /// Its tries (a second when the first fell back).
+    pub calls: u32,
+}
+
+/// `Streamed`'s call; the caller keeps what it bought before it settles.
+pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str, agent: Option<&str>) -> CellResult<Streamed> {
+    assert!(bounded.stream, "a step's call streams: its answer is read as it comes");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let (answer, model) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
-    let mut resp = answer?;
-    let status = resp.status_code();
-    let log_id = resp.headers().get("cf-aig-log-id")?;
-    let bytes = read_whole(&mut resp).await?;
-    Ok((status, bytes, log_id, model.id()))
+    let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
+    let answer = answer?;
+    let log_id = answer.headers().get("cf-aig-log-id")?;
+    Ok(Streamed { answer, log_id, model: model.id(), calls })
 }
 
 /// A bounded call made on its model, then, when that one fails before
 /// answering anything, once more on `fallback` (`Tries`: at most two
 /// tries, the second only after the first failed): the answer that is the
-/// call's, its body unread, and the model whose answer it is.
-async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata) -> (CellResult<Response>, Model<'static>) {
+/// call's, its body unread, the model whose answer it is, and the tries.
+async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata) -> (CellResult<Response>, Model<'static>, u32) {
     let mut tries = Tries::new(bounded.model, fallback);
+    let mut calls = 0;
     // bounded by `Tries`: a second try at most
     loop {
         let model = tries.model();
         let t0 = js::now_ms();
+        calls += 1;
         let answer = transport(env, cfg, model, &bounded.input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
-        let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model) };
+        let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model, calls) };
         // what the vendor said (its error, never the request's words)
         let why = match answer {
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
@@ -350,7 +398,6 @@ impl futures_util::Stream for Normalized {
                 return Poll::Ready(None);
             }
             match futures_util::ready!(this.source.as_mut().poll_next(cx)) {
-
                 Some(Ok(chunk)) => {
                     let mut out = Vec::new();
                     this.stream.push(&chunk, Some(&mut out));
@@ -439,7 +486,7 @@ async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &
 }
 
 /// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).
-async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
+pub(crate) async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
     match crate::cs::read_answer(resp, ANSWER_MAX_BYTES).await? {
         (_, true) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes"))),
         (bytes, false) => Ok(bytes),
@@ -550,7 +597,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
         capped: false,
     };
     ledger::hold(env, &owner, &reserve).await?;
-    let held = Held { env: env.clone(), payer: owner.clone(), reference: reserve.reference, model: transcribe::TRANSCRIBE_MODEL, name: transcribe::WHISPER };
+    let mut held = Held { env: env.clone(), payer: owner.clone(), reference: reserve.reference, model: transcribe::TRANSCRIBE_MODEL, name: transcribe::WHISPER, t0: js::now_ms(), calls: 1, first_ms: None };
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
     let mut upstream = match workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
         Ok(r) => r,
@@ -559,6 +606,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
             return Err(e);
         }
     };
+    held.first_ms = Some(js::now_ms() - held.t0);
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {

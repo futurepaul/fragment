@@ -1,5 +1,9 @@
 //! AI steps (a job's `ai.*`; docs/api.md, AI). Text goes through the
-//! platform's model route by tier (models.rs); an image is FLUX.1
+//! platform's model route by tier (models.rs), streamed and read to its
+//! `[DONE]`: OpenAI's tools pass through, and its answer is one message
+//! (its text, its tool calls, why it stopped; never its reasoning) and its
+//! timing. With a draft, its text so far is that app channel's draft as it
+//! streams, from the run's principal, as `PUT …/draft` puts one. An image is FLUX.1
 //! [schnell] on Workers AI, on the model route's transport (the AI binding
 //! through the deployment's gateway), priced in neurons by its tiles and
 //! steps (fragment_core::media). A generated image is a file written to
@@ -26,10 +30,12 @@
 
 use fragment_core::ledger::{Release, Released, Reserve, Reserved, Settle, Spend};
 use fragment_core::media;
-use fragment_core::models as bounds;
+use fragment_core::models::{self as bounds, Answer, Bounded, Stream};
 use fragment_core::price::Usage;
 use fragment_core::steps::{AiText, Step};
 use fragment_core::{blob, npub};
+use fragment_proto::limits;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -43,6 +49,11 @@ use crate::ops::JOB_ID_PREFIX;
 
 /// Holds released per pass, of runs that ended.
 const RELEASE_BATCH: i64 = 25;
+/// A text step's drafts go at most this often: 4 a second.
+const DRAFT_EVERY_MS: i64 = 250;
+/// While its model has no words yet, its draft says it is thinking at
+/// most this often (a page counts the seconds on its own between them).
+const THINKING_EVERY_MS: i64 = 1000;
 
 /// A model's refusal: passing (429, 5xx) or lasting.
 fn model_failure(status: u16, body: &[u8]) -> StepFail {
@@ -262,10 +273,11 @@ impl FragmentCell {
         resp.bytes().await.map_err(|e| retry(e.into()))
     }
 
-    /// `job.ai.*` steps (the module's doc).
-    pub(crate) async fn step_ai(&self, run: &RunRow, index: u32, step: &Step) -> Result<Value, StepFail> {
+    /// `job.ai.*` steps (the module's doc); `tried`: the Workflow's try of
+    /// the step, from 1, when it says.
+    pub(crate) async fn step_ai(&self, run: &RunRow, index: u32, step: &Step, tried: Option<u32>) -> Result<Value, StepFail> {
         match step {
-            Step::AiText(t) => self.step_text(run, index, t).await,
+            Step::AiText(t) => self.step_text(run, index, t, tried).await,
             Step::AiImage(image) => {
                 let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
@@ -319,45 +331,154 @@ impl FragmentCell {
         failed
     }
 
-    /// `job.ai.text`: the model route's call, unstreamed, kept, then settled.
-    async fn step_text(&self, run: &RunRow, index: u32, t: &AiText) -> Result<Value, StepFail> {
+    /// `job.ai.text`: the model route's call, streamed (`read_text`), kept,
+    /// then settled. Its answer is the model's text, its message (`{role,
+    /// content, tool_calls?}`, never its reasoning), why it stopped, and its
+    /// timing; a step tried again after it was kept answers what was kept.
+    async fn step_text(&self, run: &RunRow, index: u32, t: &AiText, tried: Option<u32>) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
         if let Some(kept) = self.kept(&p.key)? {
             self.settle_kept(&p, &kept).await?;
             return Ok(kept.result);
         }
-        let messages = match (&t.messages, &t.prompt) {
-            (Some(m), _) => Value::Array(m.clone()),
-            (None, Some(prompt)) => json!([{ "role": "user", "content": prompt }]),
-            (None, None) => return Err(permanent("ai.text needs messages or a prompt")),
-        };
         let tier = bounds::tier_named(t.model.as_deref()).map_err(|why| permanent(why.message()))?;
-        let mut body = json!({ "messages": messages });
-        if let Some(n) = t.max_tokens {
-            body["max_tokens"] = json!(n);
-        }
-        if let Some(effort) = &t.reasoning_effort {
-            body["reasoning_effort"] = json!(effort);
-        }
+        let body = bounds::text_body(t).map_err(|why| permanent(why.message()))?;
+        let drafting = bounds::draft_of(t).map(|d| self.drafting(run, d)).transpose()?;
         let body_bytes = body.to_string().len();
+        // where the deployment runs the tier (Workers AI, or an
+        // OpenAI-compatible API: Finite Private on Finite's own), streamed
         let models = &crate::config::Config::from_env(&self.env).models;
-        let bounded = models.capped(bounds::Named::Tier(tier)).and_then(|m| bounds::bound(m, body, false)).map_err(|why| permanent(why.message()))?;
+        let bounded = models.capped(bounds::Named::Tier(tier)).and_then(|m| bounds::bound(m, body, true)).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
-        // its tier's model, or the fallback's when that one failed (models.rs)
-        let (status, bytes, log_id, model) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
-        if status != 200 {
-            return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
-        }
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let usage = bounds::usage_of(model, &v["usage"]);
+        let read = match self.read_text(&p, &bounded, drafting.as_ref()).await {
+            Ok(read) => read,
+            Err(failed) => {
+                // its draft stops; a try again starts it afresh
+                if let Some(d) = &drafting {
+                    self.put_draft(d, None, None);
+                }
+                return Err(failed);
+            }
+        };
+        let usage = bounds::usage_of(read.model, &read.used);
         if usage.is_none() {
-            self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+            self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": read.log_id }));
         }
-        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-        let result = json!({ "text": text, "model": model, "tier": tier, "usage": v["usage"] });
+        // how long it took (docs/api.md, AI): kept with what it bought
+        let timing = json!({ "first_ms": read.first_ms, "ms": read.ms, "model": read.model, "calls": read.calls, "tries": tried });
+        let a = &read.answer;
+        let result = json!({ "text": a.content, "message": a.message(), "finish_reason": a.finish_reason, "model": read.model, "tier": tier, "usage": read.used, "timing": timing });
         self.keep(&p, &result, usage.as_ref())?;
         self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
     }
+
+    /// A text step's draft: a channel the app declares (whoever may read
+    /// it sees it), drafted as the run's principal, whose record with the
+    /// same turn then replaces it on a page.
+    fn drafting(&self, run: &RunRow, (channel, turn): (&str, &str)) -> Result<Drafting, StepFail> {
+        if self.declared_channel(channel).map_err(retry)?.is_none() {
+            return Err(permanent(format!("ai.text drafts to a channel fragment.json declares, and it declares no {channel:?}")));
+        }
+        Ok(Drafting { channel: channel.to_string(), turn: turn.to_string(), principal: npub::display(&run.principal) })
+    }
+
+    /// A text step's call (models.rs `streamed`: its tier's model, or the
+    /// fallback's when that one failed before answering), its answer and
+    /// usage read as they come, to its `[DONE]`, where the connection is
+    /// dropped (the gateway can hold it open for minutes after). With a
+    /// draft: thinking from the call's start, its text so far at most every
+    /// `DRAFT_EVERY_MS` (none past a record's size), and its whole text once
+    /// more at its end. A refusal for good releases the hold; a stream that
+    /// breaks, or ends before its answer says it is whole, is the step's to
+    /// try again under the same hold.
+    async fn read_text(&self, p: &Paying, bounded: &Bounded<'static>, d: Option<&Drafting>) -> Result<Read, StepFail> {
+        let t0 = crate::js::now_ms();
+        if let Some(d) = d {
+            self.put_draft(d, Some(""), Some(0));
+        }
+        let crate::models::Streamed { mut answer, log_id, model, calls } = crate::models::streamed(&self.env, bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+        let status = answer.status_code();
+        if status != 200 {
+            let body = crate::models::read_whole(&mut answer).await.unwrap_or_default();
+            return Err(self.unpaid(p, model_failure(status, &body)).await);
+        }
+        let mut bytes = answer.stream().map_err(|e| retry(e.into()))?;
+        let mut stream = Stream::answering();
+        let mut first_ms = None;
+        // the text drafted so far, and when the last draft of any kind went
+        let (mut sent, mut drafted_at) = (0usize, t0);
+        // bounded by the model's answer: at most the tier's max_tokens, to its [DONE]
+        while let Some(chunk) = bytes.next().await {
+            let chunk = chunk.map_err(|e| StepFail::Retry(format!("the model's stream broke: {e}")))?;
+            stream.push(&chunk, None);
+            let now = crate::js::now_ms();
+            if first_ms.is_none() && stream.began() {
+                first_ms = Some(now - t0);
+            }
+            if let Some(d) = d {
+                let text = &stream.answer().expect("an answering stream keeps its answer").content;
+                if text.len() > sent && now - drafted_at >= DRAFT_EVERY_MS {
+                    if self.put_draft(d, Some(text), None) {
+                        (sent, drafted_at) = (text.len(), now);
+                    }
+                } else if text.is_empty() && now - drafted_at >= THINKING_EVERY_MS {
+                    // no words yet: still thinking, this long
+                    drafted_at = now;
+                    self.put_draft(d, Some(""), Some(u64::try_from(now - t0).unwrap_or(0)));
+                }
+            }
+            if stream.done() {
+                break;
+            }
+        }
+        drop(bytes);
+        stream.finish(None);
+        let answer = stream.answer().cloned().expect("an answering stream keeps its answer");
+        if !stream.done() && answer.finish_reason.is_none() {
+            return Err(StepFail::Retry("the model's stream ended before its answer did".into()));
+        }
+        let ms = crate::js::now_ms() - t0;
+        if let Some(d) = d.filter(|_| answer.content.len() > sent) {
+            // its whole text once more, at the drafts' pace
+            let wait = DRAFT_EVERY_MS - (crate::js::now_ms() - drafted_at);
+            if wait > 0 {
+                Delay::from(std::time::Duration::from_millis(wait.unsigned_abs())).await;
+            }
+            self.put_draft(d, Some(&answer.content), None);
+        }
+        let used = stream.usage().cloned().unwrap_or(Value::Null);
+        Ok(Read { answer, used, log_id, first_ms, ms, calls, model })
+    }
+
+    /// One draft to the channel's live readers: whether it went (none past
+    /// a record's size, or past the fragment's pace of drafts).
+    fn put_draft(&self, d: &Drafting, text: Option<&str>, thinking: Option<u64>) -> bool {
+        text.is_none_or(|t| t.len() <= limits::RECORD_BODY_MAX_BYTES) && self.broadcast_draft(&d.channel, &d.principal, &d.turn, text, thinking)
+    }
+}
+
+/// A text step's call, read: its answer, the usage it reported, its
+/// gateway log id, and its timing.
+struct Read {
+    answer: Answer,
+    used: Value,
+    log_id: Option<String>,
+    /// When its first data line came, ms after the call began (one did:
+    /// an answer whole has its `[DONE]` or its finish reason).
+    first_ms: Option<i64>,
+    /// The whole call, to its `[DONE]`.
+    ms: i64,
+    /// Its tries (a second when the first fell back).
+    calls: u32,
+    /// The model that answered: its tier's, or the fallback.
+    model: &'static str,
+}
+
+/// Where a text step's drafts go, and who drafts them.
+struct Drafting {
+    channel: String,
+    turn: String,
+    principal: String,
 }

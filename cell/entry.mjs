@@ -114,7 +114,8 @@ export class Job extends WorkflowEntrypoint {
           continue;
         }
         try {
-          const done = await step.do(`${kind} ${i}`, retrying, () => post("effect", { index: i, kind, args }));
+          // `try`: this step's try, from 1 (a text step's timing says it)
+          const done = await step.do(`${kind} ${i}`, retrying, (ctx) => post("effect", { index: i, kind, args, try: ctx?.attempt }));
           if (done.stop) return done;
         } catch (e) {
           failed = { index: i, kind, error: String((e && e.message) || e) };

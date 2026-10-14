@@ -55,6 +55,7 @@ import {
   PUSH_WHO_MAX_CHARS,
   PUSH_PAYLOAD_MAX_BYTES,
   PEOPLE_MAX,
+  AI_TEXT_MAX_BYTES,
   RESERVED_OP_NAMES,
   utf8Bytes,
   validKind,
@@ -343,14 +344,21 @@ class Job {
   // Text through the platform's model route (a tier: cheap unless named),
   // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
   // for each (docs/ledger.md):
-  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, tier, usage }
+  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
+  //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage, timing }
+  //     (its arguments at most AI_TEXT_MAX_BYTES of JSON; with a draft, its
+  //     text so far is that channel's draft as it streams)
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
   //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
     const step = (kind, args) => this.#step(kind, args);
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
     return {
-      text: (opts) => step("ai.text", clean(opts)),
+      text: (opts) => {
+        const args = clean(opts);
+        if (overBytes(JSON.stringify(args), AI_TEXT_MAX_BYTES)) throw new Error(`job.ai.text's arguments are at most ${AI_TEXT_MAX_BYTES} bytes of JSON`);
+        return step("ai.text", args);
+      },
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };

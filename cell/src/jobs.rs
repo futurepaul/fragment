@@ -285,6 +285,10 @@ struct EffectCall {
     index: u32,
     kind: String,
     args: Value,
+    /// The Workflow's try of this step, from 1 (its step context's
+    /// `attempt`), when it says: a text step's timing reports it.
+    #[serde(default, rename = "try")]
+    tried: Option<u32>,
 }
 
 /// `POST /job/finish`
@@ -802,7 +806,7 @@ impl FragmentCell {
         }
         if !self.is_kept(run.id, run.attempt, index)? {
             let out = match Step::from_parts(&call.kind, call.args) {
-                Ok(step) => self.perform(&run, index, step).await,
+                Ok(step) => self.perform(&run, index, step, call.tried).await,
                 // the args come from the app's realm: the job sees why, and may catch it
                 Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
             };
@@ -825,8 +829,8 @@ impl FragmentCell {
         Ok(json!({ "kept": index }))
     }
 
-    /// Performs one step of `run`.
-    async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
+    /// Performs one step of `run`, on the Workflow's try `tried` of it.
+    async fn perform(&self, run: &RunRow, index: u32, step: Step, tried: Option<u32>) -> Result<Value, StepFail> {
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
             Step::Fetch(f) => self.step_fetch(run, index, f).await,
@@ -852,7 +856,7 @@ impl FragmentCell {
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
             ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
-                self.step_ai(run, index, &ai).await
+                self.step_ai(run, index, &ai, tried).await
             }
             // what the fragment's own page reads, read for its code: who is
             // in it, their names, and who is here
