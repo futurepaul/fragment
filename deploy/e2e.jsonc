@@ -27,7 +27,10 @@
   },
   // Models through this gateway: the cheap tier's GLM-5.3 Flash, its
   // fallback DeepSeek V4 Flash, and GLM-5.3 Flash for vision, each the cell's
-  // default (no `fallback_model` or `vision_model` here)
+  // default. No `models` here: a preview holds no Finite Private key
+  // (`fragment-finite-private-key`), so its tiers run on Workers AI, and it
+  // deploys without one. A preview that should run Finite's own tiers adds
+  // deploy/example.jsonc's `models` once the key is in its store.
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",
   // The operators (npubs): they grant credit, set plans, release
@@ -100,6 +103,6 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
-  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 4
-  "price_book_version": 4
+  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 5
+  "price_book_version": 5
 }

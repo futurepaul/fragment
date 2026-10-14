@@ -49,7 +49,26 @@
 //! models that are down (`down`): each call to one answers as Workers AI
 //! answered every call to GLM-5.3 Flash for five minutes on 2026-10-09, a
 //! 502 "could not route request to AI model" (its internal code 4002),
-//! until the test brings it up again.
+//! until the test brings it up again. A hang is a delay past its caller's
+//! patience.
+//!
+//! **Its OpenAI-compatible face**, Finite Private as the route calls it on
+//! Finite's own deployment (decision 61): `POST /v1/chat/completions`, the
+//! body's `model` the model, answered as finite-mono's
+//! `finite-private-limiter` answers in front of SGLang (read 2026-10-14):
+//! - a request past 2 MiB is 413 (its body limit); one without the key the
+//!   test let in (`accept_key`) as `Authorization: Bearer …` is 401, as is
+//!   one with another key; a model it does not serve is 400
+//!   (`unsupported_model`); each before any answer;
+//! - unstreamed, a `chat.completion` whose `usage` names no cached tokens
+//!   (SGLang reports none); streamed, OpenAI's chunks, each with `usage:
+//!   null`, then one with no choices and the whole call's usage (the
+//!   limiter always asks for it), and `[DONE]`; no `cf-aig-log-id`;
+//! - the same levers as the Workers AI face, one queue for both: a failure
+//!   queued is the limiter's error shape (a 429 its spent window's,
+//!   `usage_limit`), and a model that is down answers its 502
+//!   `upstream_unavailable`. It takes no images (they are not qualified
+//!   there: the route sends them to Workers AI).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -69,8 +88,27 @@ pub const NO_WORDS: &str = "(no words)";
 /// The chat models the platform calls that read images: those Workers AI's
 /// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
 /// default vision model; DeepSeek V4 Flash, the fallback, and GLM-5.3, the
-/// medium tier's, have none).
+/// medium tier's, have none). Finite Private's is not among them: its
+/// images are not qualified (decision 61).
 pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
+/// The models the OpenAI-compatible face serves: Finite Private's GLM-5.3
+/// Flash, by the id its limiter takes (its aliases are not the route's).
+pub const OPENAI_MODELS: [&str; 1] = [fragment_core::models::FINITE_PRIVATE_FLASH];
+/// The largest request the OpenAI-compatible face takes: Finite Private's
+/// limiter's (axum's default body limit, 2 MiB).
+pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Its path.
+pub const OPENAI_PATH: &str = "/v1/chat/completions";
+
+/// Which of the fake's faces a call came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Face {
+    /// Workers AI's (`/run/<model>`), as the AI binding answers.
+    WorkersAi,
+    /// An OpenAI-compatible API's (`/v1/chat/completions`), as Finite
+    /// Private's limiter answers.
+    OpenAi,
+}
 /// What a model is told of an image it was shown: `describe_image`'s
 /// answer starts so.
 pub const SEEN: &str = "I see an image";
@@ -109,7 +147,10 @@ const ARGS_PIECE_CHARS: usize = 1024;
 /// One call as the fake took it.
 #[derive(Clone, Debug)]
 pub struct AiCall {
-    /// The catalog model its path named.
+    /// The face it came to.
+    pub face: Face,
+    /// The catalog model its path named (Workers AI's face), or its body's
+    /// `model` (the OpenAI-compatible face's).
     pub model: String,
     /// The input, as sent.
     pub body: Value,
@@ -147,8 +188,11 @@ struct State {
     answers: u64,
     /// Calls answer `transcript_reply`, in pieces.
     transcripts: bool,
-    /// Models every call to which answers `unroutable`.
+    /// Models every call to which answers `unroutable` (or, on the
+    /// OpenAI-compatible face, the limiter's `upstream_unavailable`).
     down: Vec<String>,
+    /// The key the OpenAI-compatible face lets in (`accept_key`).
+    key: Option<String>,
 }
 
 /// Workers AI's answer when it cannot reach a model (as the binding passed
@@ -331,6 +375,12 @@ fn delta_usage(prompt: u64, completion: u64) -> Value {
     json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion, "prompt_tokens_details": { "cached_tokens": 0 } })
 }
 
+/// A call's usage as SGLang reports it behind Finite Private's limiter: no
+/// cached tokens told (a test's `cached` is counted as prompt).
+fn openai_usage(u: Used) -> Value {
+    json!({ "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion, "prompt_tokens_details": null })
+}
+
 fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, usage: Value) -> String {
     let c = json!({
         "id": id, "object": "chat.completion.chunk", "created": 0, "model": model,
@@ -350,12 +400,20 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
     (kept, n < text.chars().count())
 }
 
-/// A reply streamed as Workers AI streams it (S4's shapes); `broken` ends
-/// it before the usage and `[DONE]`, as a dropped stream does.
-fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
+/// A reply streamed as Workers AI streams it (S4's shapes), or, on the
+/// OpenAI-compatible face, as OpenAI does (each chunk's usage null, the
+/// whole call's on a last chunk with no choices); `broken` ends it before
+/// the usage and `[DONE]`, as a dropped stream does.
+#[allow(clippy::too_many_arguments)]
+fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
     *ids += 1;
     let id = format!("fake{ids:08x}");
-    let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
+    // Workers AI's per-chunk deltas of usage; OpenAI's none
+    let delta = |prompt: u64, completion: u64| match face {
+        Face::WorkersAi => delta_usage(prompt, completion),
+        Face::OpenAi => Value::Null,
+    };
+    let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta(used.prompt, 0));
     let mut parts: Vec<Value> = Vec::new();
     // text, in pieces, so a client's draft grows
     let text_parts = |text: &str, parts: &mut Vec<Value>, budget: &mut Option<usize>| -> bool {
@@ -405,17 +463,23 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
     };
     // the completion's tokens, spread over its chunks as deltas
     let n = parts.len().max(1) as u64;
-    for (i, delta) in parts.iter().enumerate() {
+    for (i, part) in parts.iter().enumerate() {
         let share = used.completion / n + u64::from((i as u64) < used.completion % n);
-        out += &chunk(&id, model, delta.clone(), None, delta_usage(0, share));
+        out += &chunk(&id, model, part.clone(), None, delta(0, share));
     }
     if broken {
         return out;
     }
     let finish = if cut { "length" } else { finish };
-    out += &chunk(&id, model, json!({}), Some(finish), delta_usage(0, 0));
-    out += &format!("data: {}\n\n", json!({ "id": id, "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": delta_usage(0, 0) }));
-    out += &format!("data: {}\n\n", json!({ "response": "", "usage": usage_json(used) }));
+    out += &chunk(&id, model, json!({}), Some(finish), delta(0, 0));
+    let last = match face {
+        Face::WorkersAi => delta_usage(0, 0),
+        Face::OpenAi => openai_usage(used),
+    };
+    out += &format!("data: {}\n\n", json!({ "id": id, "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": last }));
+    if face == Face::WorkersAi {
+        out += &format!("data: {}\n\n", json!({ "response": "", "usage": usage_json(used) }));
+    }
     out + "data: [DONE]\n\n"
 }
 
@@ -542,7 +606,31 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
 }
 
+/// Finite Private's limiter's refusal: OpenAI's error shape, its `code`
+/// and `type` as the limiter names them.
+fn limiter_error(status: u16, kind: &str, code: &str, message: &str) -> Response {
+    let mut error = json!({ "message": message, "type": kind, "code": code });
+    if kind == "usage_limit" {
+        let extra = json!({ "retry_after": 600, "reset_at": "2026-10-14T18:00:00Z", "dashboard_url": "https://finite.computer/dashboard", "request_id": "fp_req_fake" });
+        error.as_object_mut().expect("an object").extend(extra.as_object().expect("an object").clone());
+    }
+    Response::json(status, &json!({ "error": error }))
+}
+
+/// A failure a test queued, as the face it came to says it.
+fn failure(face: Face, status: u16) -> Response {
+    match (face, status) {
+        (Face::WorkersAi, _) => problem(status, "a failure the test asked for"),
+        (Face::OpenAi, 429) => limiter_error(429, "usage_limit", "burst_window_limit_exceeded", "a failure the test asked for: this key's usage window is spent"),
+        (Face::OpenAi, s) if s >= 500 => limiter_error(s, "server_error", "upstream_unavailable", "a failure the test asked for"),
+        (Face::OpenAi, s) => limiter_error(s, "invalid_request_error", "test_failure", "a failure the test asked for"),
+    }
+}
+
 fn answer(s: &mut State, req: &Request) -> Response {
+    if req.path == OPENAI_PATH {
+        return openai_answer(s, req);
+    }
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
         return problem(405, "the binding runs a model with a POST");
@@ -551,9 +639,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let metadata = req.header("x-fragment-ai-metadata").and_then(|m| serde_json::from_str(m).ok()).unwrap_or(Value::Null);
     let affinity = req.header("x-session-affinity").map(str::to_string);
     let authorization = req.header("authorization").map(str::to_string);
-    s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity, authorization });
+    s.calls.push(AiCall { face: Face::WorkersAi, model: model.clone(), body: body.clone(), metadata, affinity, authorization });
     if let Some(Some(status)) = s.failures.pop_front() {
-        return problem(status, "a failure the test asked for");
+        return failure(Face::WorkersAi, status);
     }
     if s.down.contains(&model) {
         return unroutable(s.calls.len());
@@ -569,17 +657,57 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if let Some(why) = image_refusal(&model, &body) {
         return problem(400, &why);
     }
+    chat_answer(s, Face::WorkersAi, &model, &body).with_header("cf-aig-log-id", &log_id)
+}
+
+/// The OpenAI-compatible face (the module's doc): Finite Private, as its
+/// limiter answers.
+fn openai_answer(s: &mut State, req: &Request) -> Response {
+    if req.method != "POST" {
+        return limiter_error(405, "invalid_request_error", "method_not_allowed", "chat completions are a POST");
+    }
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let model = body["model"].as_str().unwrap_or_default().to_string();
+    let authorization = req.header("authorization").map(str::to_string);
+    s.calls.push(AiCall { face: Face::OpenAi, model: model.clone(), body: body.clone(), metadata: Value::Null, affinity: req.header("x-session-affinity").map(str::to_string), authorization: authorization.clone() });
+    if req.body.len() > OPENAI_BODY_MAX_BYTES {
+        return limiter_error(413, "invalid_request_error", "payload_too_large", "length limit exceeded");
+    }
+    let presented = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
+    match (presented, s.key.as_deref()) {
+        (None, _) => return limiter_error(401, "invalid_api_key", "missing_authorization", "Finite Private API key is required."),
+        (Some(p), Some(k)) if p == k => {}
+        (Some(_), _) => return limiter_error(401, "usage_limit", "invalid_api_key", "Finite Private API key is invalid or revoked."),
+    }
+    if !OPENAI_MODELS.contains(&model.as_str()) {
+        return limiter_error(400, "invalid_request_error", "unsupported_model", "The requested model is not available through Finite Private.");
+    }
+    if let Some(Some(status)) = s.failures.pop_front() {
+        return failure(Face::OpenAi, status);
+    }
+    if s.down.contains(&model) {
+        return limiter_error(502, "server_error", "upstream_unavailable", "Finite Private's model did not answer.");
+    }
+    s.answers += 1;
+    if let Some(why) = image_refusal(&model, &body) {
+        return limiter_error(400, "invalid_request_error", "invalid_request", &why);
+    }
+    chat_answer(s, Face::OpenAi, &model, &body)
+}
+
+/// A chat call's answer on `face`, from the test's levers or as it would.
+fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response {
     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
     let said = s.said.pop_front();
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
-    if s.transcripts && said.is_none() && follows_a_tool(&body) {
+    if s.transcripts && said.is_none() && follows_a_tool(body) {
         s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
     }
     let broken = s.breaks.pop_front().unwrap_or(false);
     let reply = match said {
         Some(text) => Reply::Text(text),
-        None if s.transcripts => transcript_reply(&body),
+        None if s.transcripts => transcript_reply(body),
         None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
     };
     if body["stream"] == true {
@@ -591,8 +719,8 @@ fn answer(s: &mut State, req: &Request) -> Response {
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
         let pieces = if s.transcripts { 3 } else { 1 };
-        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
-        return Response::bytes(200, "text/event-stream", events.into_bytes()).with_header("cf-aig-log-id", &log_id);
+        let events = stream(face, model, &reply, &mut s.tool_calls, usage_of(used, body, written), budget, broken, pieces);
+        return Response::bytes(200, "text/event-stream", events.into_bytes());
     }
     let tool_calls = |calls: &[(String, Value)]| -> Vec<Value> {
         calls.iter().enumerate().map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } })).collect()
@@ -608,13 +736,17 @@ fn answer(s: &mut State, req: &Request) -> Response {
             (json!({ "role": "assistant", "content": text }), "stop", n)
         }
     };
-    let used = usage_of(used, &body, written);
+    let used = usage_of(used, body, written);
+    let usage = match face {
+        Face::WorkersAi => usage_json(used),
+        Face::OpenAi => openai_usage(used),
+    };
     let answer = json!({
         "id": format!("fake{:08x}", s.answers), "object": "chat.completion", "created": 0, "model": model,
         "choices": [{ "index": 0, "finish_reason": finish, "logprobs": null, "message": message }],
-        "usage": usage_json(used),
+        "usage": usage,
     });
-    Response::json(200, &answer).with_header("cf-aig-log-id", &log_id)
+    Response::json(200, &answer)
 }
 
 pub struct WorkersAi {
@@ -697,6 +829,13 @@ impl WorkersAi {
         self.state().down = models.iter().map(|m| m.to_string()).collect();
     }
 
+    /// The key the OpenAI-compatible face lets in (as Finite Private's
+    /// limiter lets in a key finite.computer issued): every call with
+    /// another, or none, is its 401.
+    pub fn accept_key(&self, key: &str) {
+        self.state().key = Some(key.to_string());
+    }
+
     /// Calls answer from their transcript (`transcript_reply`), in pieces
     /// (`true`), or echo their last message.
     pub fn transcripts(&self, on: bool) {
@@ -723,14 +862,14 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
+        let text = stream(Face::WorkersAi, "@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
         let last = lines.last().unwrap();
         assert_eq!((last["response"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!(""), json!(23), json!(15)));
         assert!(text.ends_with("data: [DONE]\n\n"));
-        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
+        let broken = stream(Face::WorkersAi, "m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
     }
 
@@ -755,7 +894,7 @@ mod tests {
         assert!(!follows_a_tool(&again), "a tool's result before the newest message is an earlier turn's");
 
         let used = Used { prompt: 10, cached: 0, completion: 9 };
-        let text = stream("m", &reply, &mut 0, used, None, false, 3);
+        let text = stream(Face::WorkersAi, "m", &reply, &mut 0, used, None, false, 3);
         let deltas: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str::<Value>(d).unwrap()).filter_map(|l| l["choices"][0]["delta"].as_object().cloned().map(Value::Object)).collect();
         let kinds: Vec<&str> = deltas.iter().filter_map(|d| if d["tool_calls"].is_array() { Some("call") } else if d["content"].as_str().is_some_and(|c| !c.is_empty()) { Some("text") } else { None }).collect();
         assert_eq!(kinds, ["text", "text", "text", "call"], "the text's pieces, then the call: {deltas:?}");
@@ -767,7 +906,7 @@ mod tests {
         assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
 
         // a budget that cuts the text: no call, and it ends `length`
-        let short = stream("m", &reply, &mut 0, used, Some(4), false, 1);
+        let short = stream(Face::WorkersAi, "m", &reply, &mut 0, used, Some(4), false, 1);
         assert!(!short.contains("tool_calls\":[") && short.contains("\"finish_reason\":\"length\""), "{short}");
 
         // unstreamed, one message carries both
@@ -867,6 +1006,92 @@ mod tests {
         ai.down(&[]);
         assert_eq!(post(flash), 200, "up again");
         assert_eq!(ai.calls().len(), 4, "each call recorded, the failed ones too");
+    }
+
+    /// The data lines of a streamed answer, `[DONE]` left out.
+    fn events(body: &[u8]) -> Vec<Value> {
+        String::from_utf8_lossy(body).lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect()
+    }
+
+    /// Goal: the OpenAI-compatible face answers as Finite Private's limiter
+    /// does: OpenAI's shapes (unstreamed, streamed with its usage last, a
+    /// tool call), no cached tokens and no gateway log id; its refusals
+    /// before any answer (no key, another key, another model, a body past
+    /// 2 MiB); and the shared levers in its own error shapes (a spent
+    /// window's 429, a 5xx, a model down). Every call is recorded, with the
+    /// key it carried. Method: its handler, each way, and a call again (a
+    /// replay answers the same).
+    #[test]
+    fn the_openai_face_answers_as_finite_privates_limiter() {
+        let mut s = State { key: Some("fpk_live_test".into()), ..State::default() };
+        let ask = |body: &Value, auth: Option<&str>| {
+            let mut h = vec![("content-type", "application/json")];
+            h.extend(auth.map(|a| ("authorization", a)));
+            Request::new("POST", OPENAI_PATH, &h, body.to_string().as_bytes())
+        };
+        let chat = |stream: bool| json!({ "model": "glm-5-3-flash", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
+        let key = Some("Bearer fpk_live_test");
+        let json_of = |r: &Response| serde_json::from_slice::<Value>(&r.body).unwrap();
+        for _replay in 0..2 {
+            let r = answer(&mut s, &ask(&chat(false), key));
+            let v = json_of(&r);
+            assert_eq!((r.status, v["choices"][0]["message"]["content"].clone(), v["model"].clone()), (200, json!("echo: hello"), json!("glm-5-3-flash")), "{v}");
+            assert_eq!(v["usage"]["prompt_tokens_details"], Value::Null, "SGLang tells no cached tokens");
+            assert!(v["usage"]["completion_tokens"].as_u64().is_some() && v["usage"].get("neurons").is_none() && !r.headers.iter().any(|(k, _)| k == "cf-aig-log-id"));
+        }
+        // streamed: each chunk's usage null, the whole call's last, as the route's meter reads it
+        s.usage.push_back(Used { prompt: 40, cached: 0, completion: 12 });
+        let r = answer(&mut s, &ask(&chat(true), key));
+        let lines = events(&r.body);
+        assert!(lines.iter().all(|l| l.get("response").is_none()), "no Workers AI line");
+        let (last, chunks) = lines.split_last().unwrap();
+        assert!(chunks.iter().all(|l| l["usage"].is_null() && l["choices"].as_array().is_some_and(|c| !c.is_empty())));
+        assert_eq!((last["choices"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!([]), json!(40), json!(12)));
+        assert!(String::from_utf8_lossy(&r.body).ends_with("data: [DONE]\n\n"));
+        let mut metered = fragment_core::models::Stream::default();
+        metered.push(&r.body, None);
+        metered.finish(None);
+        assert_eq!(metered.usage().and_then(|u| fragment_core::models::usage_of("glm-5-3-flash", u)), Some(fragment_core::price::Usage::Tokens { model: "glm-5-3-flash".into(), input: 40, cached_input: 0, cache_write: 0, output: 12 }));
+        // a tool call, streamed
+        s.transcripts = true;
+        let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
+        let run = json!({ "model": "glm-5-3-flash", "stream": true, "tools": tools, "messages": [{ "role": "user", "content": "[paul] run: ls" }] });
+        let lines = events(&answer(&mut s, &ask(&run, key)).body);
+        let called = lines.iter().find_map(|l| l["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str().map(str::to_string));
+        assert_eq!(called.as_deref(), Some("terminal"));
+        assert!(lines.iter().any(|l| l["choices"][0]["finish_reason"] == "tool_calls"));
+        s.transcripts = false;
+
+        // refused before any answer, each recorded
+        let before = s.calls.len();
+        let refusal = |r: Response| (r.status, json_of(&r)["error"]["code"].as_str().unwrap_or_default().to_string());
+        assert_eq!(refusal(answer(&mut s, &ask(&chat(false), None))), (401, "missing_authorization".into()));
+        assert_eq!(refusal(answer(&mut s, &ask(&chat(false), Some("Bearer fpk_live_other")))), (401, "invalid_api_key".into()));
+        assert_eq!(refusal(answer(&mut s, &ask(&json!({ "model": "@cf/zai-org/glm-5.3-flash", "messages": [] }), key))), (400, "unsupported_model".into()));
+        let large = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": "x".repeat(OPENAI_BODY_MAX_BYTES) }] });
+        assert_eq!(refusal(answer(&mut s, &ask(&large, key))), (413, "payload_too_large".into()));
+        let image = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": png_url() } }] }] });
+        assert_eq!(answer(&mut s, &ask(&image, key)).status, 400, "no images: they are not qualified there");
+        assert_eq!(s.calls.len(), before + 5);
+        assert!(s.calls[before..].iter().all(|c| c.face == Face::OpenAi));
+        assert_eq!(s.calls[before + 1].authorization.as_deref(), Some("Bearer fpk_live_other"), "the key each carried, for a test to read");
+
+        // the shared levers, in the limiter's shapes
+        s.failures.extend([Some(429), Some(503)]);
+        let r = answer(&mut s, &ask(&chat(false), key));
+        let e = json_of(&r)["error"].clone();
+        assert_eq!((r.status, e["type"].clone(), e["code"].clone()), (429, json!("usage_limit"), json!("burst_window_limit_exceeded")));
+        assert!(e["retry_after"].is_u64() && e["reset_at"].is_string(), "{e}");
+        assert_eq!(refusal(answer(&mut s, &ask(&chat(false), key))), (503, "upstream_unavailable".into()));
+        s.down = vec!["glm-5-3-flash".into()];
+        assert_eq!(refusal(answer(&mut s, &ask(&chat(true), key))), (502, "upstream_unavailable".into()));
+        s.down.clear();
+        assert_eq!(answer(&mut s, &ask(&chat(false), key)).status, 200, "up again");
+        // the Workers AI face is as it was, beside it
+        let flash = Request::new("POST", "/run/@cf/zai-org/glm-5.3-flash", &[], json!({ "messages": [{ "role": "user", "content": "hi" }] }).to_string().as_bytes());
+        let r = answer(&mut s, &flash);
+        assert!(r.status == 200 && r.headers.iter().any(|(k, _)| k == "cf-aig-log-id") && json_of(&r)["usage"]["neurons"].is_number());
+        assert_eq!(s.calls.last().map(|c| c.face), Some(Face::WorkersAi));
     }
 
     /// Goal: what a model says of an image tells which image it was:

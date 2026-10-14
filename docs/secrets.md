@@ -28,7 +28,7 @@ the old one still open, and come back resealed, which the cell stores.
 | A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in. One with a sign-in (OpenRouter's, decision 60) is never pasted: the provider makes it when the person connects from settings, the platform exchanges the sign-in's code for it and the computer seals it at once; it is in no answer, no page and no log, and the guest holds only its placeholder. Revoking it is the person's, at the provider |
 | A sign-in to an own key's provider under way | its PKCE verifier, sealed in the person's computer's cell under the nonce's hash for at most 10 minutes, deleted when the provider sends the browser back (once) or when it expires (`fragment_core::own_signin`) |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
+| The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the key of each model the route runs on an OpenAI-compatible API (Finite Private's, decision 61), the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Workers AI's models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
 | An operator key (a wipe's: docs/api.md, Operators) | a file on the operator's machine, its secret's 64 hex (`fragment operator key <file>` makes it, 0600, and prints only its npub); the deployment holds its npub alone (`operators`), never the secret. The hosted e2e's is named on its command line (`--operator-key-file`, below) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
@@ -55,6 +55,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
 | `stripe.key`, `stripe.webhook_secret` (seats sold: docs/billing.md) | `STRIPE_KEY` (the account's restricted key), `STRIPE_WEBHOOK` (this deployment's endpoint's signing secret; a branch whose deploy makes its own endpoint binds none, and its deploy uploads the endpoint's as the Worker secret `FRAGMENT_STRIPE_WEBHOOK`: decision 58) | the platform Worker |
+| a model's `key` (`models.<name>.key`: a slot of the model route on an OpenAI-compatible API) | `MODEL_KEY_<NAME>` (`cheap` → `MODEL_KEY_CHEAP`), one binding a slot, though two slots may name one secret (Finite's tiers name `fragment-finite-private-key`) | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
 - **Reading.** `cell/src/keys.rs` is the one place they are read.
@@ -169,6 +170,34 @@ through the minute's cache, so it is in use within a minute, with no
 deploy. The local e2e and dev use test values of their own, in the local
 store, sent only to the upstream fake.
 
+## Finite Private's key (Paul, 2026-10-14; decision 61)
+
+Finite's own deployment runs its tiers on Finite Private, whose limiter
+lets in a key finite.computer issues (`fpk_live_` and 64 hex; finite-mono
+keeps only its SHA-256). The deployment holds it as the store secret
+`fragment-finite-private-key`, which its config names for each slot that
+runs there (`models.cheap.key`, `models.medium.key`), bound as
+`MODEL_KEY_CHEAP` and `MODEL_KEY_MEDIUM`.
+
+- **Setting it** is Paul's, once finite-mono has issued the key
+  (cloudflare-v1.md, decision 61, the ask): `cargo xtask secret set
+  fragment-finite-private-key --config <the deployment's config>`, which
+  prompts for it (or reads standard input, or `--from-file`, once).
+- **Its use.** `cell/src/keys.rs` reads it (`model_key`) as a call
+  leaves for `<base_url>/chat/completions`, its bearer token there and
+  nowhere else; no log, answer or page carries it. A deploy whose config
+  names it refuses to go on while the store lacks it, naming that
+  command once for both slots.
+- **Rotating it**: finite-mono issues a new key (its admin's rotate),
+  `secret set` it again; warm isolates use it within a minute, with no
+  deploy; then finite-mono revokes the old one. Until a value is set, or
+  if it is revoked, a call answers the limiter's 401 (the call's: it does
+  not fall back; a decision for Paul).
+- **A preview** names no `models` (deploy/e2e.jsonc), so it needs no
+  key, and its tiers run on Workers AI. The local e2e's
+  `finite-private` section binds a test value in its local store, which
+  only the model fake takes.
+
 ## The test secret (previews and the local e2e)
 
 The hosted e2e (`cargo xtask e2e --hosted`, crates/e2e/src/hosted.rs)
@@ -239,15 +268,20 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   adds the credential on the way out: a job's `job.fetch` names a secret
   as `{{NAME}}` in a header, and the supervisor opens it only as the
   request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
-  point). `job.ai.*` steps need no key: text and images go through the
-  Worker's AI binding (cell/src/ai.rs, models.rs).
+  point). `job.ai.*` steps name no key: text goes through the model route
+  and images through the Worker's AI binding (cell/src/ai.rs, models.rs),
+  and the platform adds a model's key where one is needed (below).
 - **Agents in cells** call models through the platform's model route
-  (cell/src/models.rs), which holds no key either: the Worker's AI
-  binding is pre-authenticated, and the payer's ledger meters each call.
+  (cell/src/models.rs), and hold no key: the Worker's AI binding is
+  pre-authenticated, a model on an OpenAI-compatible API (Finite
+  Private's) gets the deployment's key for it from `keys.rs` as the call
+  leaves, toward that API alone, and the payer's ledger meters each call.
 
 ## Models need no per-person credential
 
-*Superseded 2026-10-03 (docs/cloudflare-v1.md, phase 3; decision 23):*
+*Superseded 2026-10-03 (docs/cloudflare-v1.md, phase 3; decision 23);
+since 2026-10-14 Finite's own tiers run on Finite Private with one key
+the deployment holds (above), still no per-person credential:*
 the per-person OpenRouter keys (minted with a management key, their
 limit the month's allowance) are gone. Models are Workers AI through the
 deployment's AI Gateway, called through the AI binding, and each call is

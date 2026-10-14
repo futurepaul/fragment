@@ -15,31 +15,39 @@
 //!
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx) is made once more, the same, on the deployment's fallback
-//! model (`FRAGMENT_FALLBACK_MODEL`, DeepSeek V4 Flash unless named, behind
-//! the cheap tier's GLM-5.3 Flash; `fragment_core::models::Tries`), logged
-//! as `model.fallback`, under the same hold, and settled as the fallback's.
+//! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
+//! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind Finite
+//! Private on Finite's own; `fragment_core::models::Tries`), logged as
+//! `model.fallback`, under the same hold, and settled as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
-//! through as any. `vision` has none (the fallback reads no images), nor a
-//! transcription.
+//! through as any. `vision` has none (the default fallback, DeepSeek, reads
+//! no images), nor a transcription.
 //!
-//! Two transports, one input. Production calls the Worker's `AI` binding
-//! through the deployment's AI Gateway (`AI_GATEWAY_ID`), its logs off and
-//! its metadata opaque ids (`opaque`). Dev and the e2e set
-//! `FRAGMENT_AI_URL` instead, and the same input is POSTed to
-//! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
-//! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
-//! A job's image step calls its model on the same transport (`run`).
+//! Where a model runs is the deployment's (`FRAGMENT_MODELS`, config.rs;
+//! decision 61), on one of two kinds of upstream, one input:
+//! - Workers AI (`workers_ai`). Production calls the Worker's `AI` binding
+//!   through the deployment's AI Gateway (`AI_GATEWAY_ID`), its logs off
+//!   and its metadata opaque ids (`opaque`). Dev and the e2e set
+//!   `FRAGMENT_AI_URL` instead, and the same input is POSTed to
+//!   `<url>/run/<model>`, its answer read the same way: a lower-rung fake
+//!   at the vendor boundary (crates/fakes, `workers_ai`), never product
+//!   proof. A job's image step and a transcription call their models here
+//!   (`run`).
+//! - An OpenAI-compatible API (`openai`, Finite Private's): the same input
+//!   and its model's id, POSTed to `<base_url>/chat/completions` with the
+//!   key bound for the call's slot (keys.rs) as its bearer token, and no
+//!   metadata (its limit is its key's). Its answers are OpenAI's shape
+//!   already. The e2e's is the same fake's OpenAI-compatible face.
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
 //! naming whom it acts for and `fragment` the turn's fragment; `complete`
 //! is the call itself. The payer is the agent's owner (decision 36).
-//! A call names a tier, `vision`: the deployment's vision model
-//! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
-//! image (Hermes' screenshots), or `fallback`: the deployment's fallback
-//! model (`FRAGMENT_FALLBACK_MODEL`), for a runtime's own switch when its
-//! model stalls (Hermes' `fallback_providers`), each metered the same way.
+//! A call names a tier, `vision`: the deployment's vision model, for a
+//! runtime's calls about an image (Hermes' screenshots), or `fallback`: the
+//! deployment's fallback model, for a runtime's own switch when its model
+//! stalls (Hermes' `fallback_providers`), each metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 //!
@@ -55,7 +63,7 @@
 use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
-use fragment_core::models::{self as bounds, Bounded, Named, Stream, Tried, Tries};
+use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
 use fragment_core::{multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
@@ -173,7 +181,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let model = bounds::capped(call.named, cfg.vision_model.as_str(), cfg.fallback_model.as_str()).map_err(refused)?;
+    let model = cfg.models.capped(call.named).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     // whose cap applies: the payer's own fragment's on its ledger; another
     // owner's, asked of theirs, unless the spender is that owner's
@@ -196,16 +204,17 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         capped,
     };
     ledger::hold(env, call.payer, &reserve).await?;
-    let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, name: call.named.as_str() };
+    let mut held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model.id(), name: call.named.as_str() };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // a tier's call falls back; `vision`'s model reads images the fallback
-    // does not, and `fallback` is the fallback already
+    // may not, and `fallback` is the fallback already
     let fallback = match call.named {
-        Named::Tier(_) => Some(cfg.fallback_model.as_str()),
+        Named::Tier(_) => Some(cfg.models.fallback()),
         Named::Vision | Named::Fallback => None,
     };
     let (answer, model) = tried(env, cfg, &bounded, fallback, &meta).await;
-    held.model = model;
+    held.model = model.id();
+    let model = model.id();
     let mut upstream = match answer {
         Ok(r) => r,
         Err(e) => {
@@ -274,23 +283,23 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
 /// does: its status, its answer (read whole), the gateway's log id, and
 /// the model whose answer it is. Its caller meters it, as that model's: a
 /// job's text step keeps what it bought before it settles (ai.rs).
-pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>, &'static str)> {
+pub(crate) async fn call(env: &Env, bounded: &Bounded<'static>, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>, &'static str)> {
     assert!(!bounded.stream, "an unmetered call is read whole");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let (answer, model) = tried(env, cfg, bounded, Some(cfg.fallback_model.as_str()), &meta).await;
+    let (answer, model) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
     let mut resp = answer?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
     let bytes = read_whole(&mut resp).await?;
-    Ok((status, bytes, log_id, model))
+    Ok((status, bytes, log_id, model.id()))
 }
 
 /// A bounded call made on its model, then, when that one fails before
 /// answering anything, once more on `fallback` (`Tries`: at most two
 /// tries, the second only after the first failed): the answer that is the
 /// call's, its body unread, and the model whose answer it is.
-async fn tried(env: &Env, cfg: &Config, bounded: &Bounded, fallback: Option<&'static str>, meta: &Metadata) -> (CellResult<Response>, &'static str) {
+async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata) -> (CellResult<Response>, Model<'static>) {
     let mut tries = Tries::new(bounded.model, fallback);
     // bounded by `Tries`: a second try at most
     loop {
@@ -304,16 +313,16 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded, fallback: Option<&'st
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
             Err(e) => e.message,
         };
-        console_log!("{}", json!({ "event": "model.fallback", "from": model, "to": next, "status": status, "ms": js::now_ms() - t0, "why": why }));
+        console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
     }
 }
 
-/// One call of a catalog model with its input, on the same transport,
-/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
-/// caller bounds the input and meters it).
+/// One call of a Workers AI model with its input, unmetered and read whole
+/// (a job's image step: ai.rs, whose caller bounds the input and meters
+/// it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let mut resp = transport(env, Config::from_env(env), model, input, &meta).await?;
+    let mut resp = workers_ai(env, Config::from_env(env), model, input, &meta).await?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
     let bytes = read_whole(&mut resp).await?;
@@ -370,10 +379,36 @@ struct Metadata {
     agent_id: Option<String>,
 }
 
-/// Makes a bounded call: `input` to `model`, through the AI binding and
-/// the deployment's gateway, or, in dev and the e2e, to the fake at
-/// `FRAGMENT_AI_URL`.
-async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata) -> CellResult<Response> {
+/// Makes a bounded call on `model`, where the deployment runs it.
+async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
+    match model.upstream {
+        Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
+        Upstream::Openai { base_url, model: id } => openai(env, model.named, base_url, id, input).await,
+    }
+}
+
+/// Makes a bounded call on an OpenAI-compatible API: `input` and the
+/// model's `id`, POSTed to `<base_url>/chat/completions` with the key bound
+/// for the call's slot (`keys::model_key`) as its bearer token, and nothing
+/// of the client's or of the payer's. A key the deployment does not bind is
+/// a model not reached (its call falls back), said in the log without it.
+async fn openai(env: &Env, named: Named, base_url: &str, id: &str, input: &Value) -> CellResult<Response> {
+    let key = crate::keys::model_key(env, named.as_str()).await?;
+    let mut body = input.clone();
+    body["model"] = json!(id);
+    let h = Headers::new();
+    h.set("content-type", "application/json")?;
+    h.set("authorization", &format!("Bearer {key}"))?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
+    let req = Request::new_with_init(&format!("{base_url}/chat/completions"), &init)?;
+    Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
+}
+
+/// Makes a bounded call: `input` to Workers AI's `model`, through the AI
+/// binding and the deployment's gateway, or, in dev and the e2e, to the
+/// fake at `FRAGMENT_AI_URL`.
+async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata) -> CellResult<Response> {
     let mut metadata = json!({ "user_id": meta.user_id });
     if let Some(agent) = &meta.agent_id {
         metadata["agent_id"] = json!(agent);
@@ -517,7 +552,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     ledger::hold(env, &owner, &reserve).await?;
     let held = Held { env: env.clone(), payer: owner.clone(), reference: reserve.reference, model: transcribe::TRANSCRIBE_MODEL, name: transcribe::WHISPER };
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
-    let mut upstream = match transport(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
+    let mut upstream = match workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;

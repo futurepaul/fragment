@@ -255,9 +255,18 @@ pub struct PriceBook {
 /// S4; the gateway's own `cost` matched these on every call). Workers AI's
 /// models have no cache writes: a write price is the input price, so a
 /// write one reported would never be free.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
+///
+/// Finite Private's GLM-5.3 Flash (decision 61), which publishes no price
+/// (finite-mono meters a key in weighted tokens against its window, never
+/// in dollars), is at Workers AI's GLM-5.3 Flash's list price, the credits
+/// fee and the margin with it, so a person pays the same for a call
+/// whichever of the two answers it (decision for Paul). Its SGLang reports
+/// no cached tokens, so its prompts are all priced uncached.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
+    // Finite Private's (Finite's tiers'), at Workers AI's GLM-5.3 Flash's
+    ("glm-5-3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
@@ -267,11 +276,12 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 4] = [
 ];
 /// The default book's version. A ledger takes a book only when its version
 /// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 4 for Hermes' tool keys (2026-10-09), after
-/// 3 for DeepSeek V4 Flash, past the 2 that finite.place's preview configs
+/// to the defaults raises it: 5 for Finite Private's GLM-5.3 Flash
+/// (2026-10-14), after 4 for Hermes' tool keys (2026-10-09) and 3 for
+/// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 4;
+pub const DEFAULT_BOOK_VERSION: u32 = 5;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -604,6 +614,7 @@ mod tests {
     const GLM: &str = "@cf/zai-org/glm-5.3";
     const OPUS: &str = "anthropic/claude-opus-5.5";
     const DEEPSEEK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
+    const PRIVATE: &str = "glm-5-3-flash";
 
     /// Goal: the default book is one a ledger accepts, at the version its
     /// last change raised it to. Method: validate it.
@@ -611,9 +622,22 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 4);
-        assert_eq!(book.models.len(), 4);
+        assert_eq!(book.version, 5);
+        assert_eq!(book.models.len(), 5);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
+    }
+
+    /// Goal: Finite Private's GLM-5.3 Flash is priced as Workers AI's
+    /// (decision 61, a decision for Paul): one turn charges the same on
+    /// either. Method: S3's $0.004 Flash turn on both.
+    #[test]
+    fn finite_private_is_priced_as_workers_ais_flash() {
+        let book = PriceBook::defaults();
+        let p = |model: &str| book.models.iter().find(|m| m.model == model).unwrap().price;
+        assert_eq!(p(PRIVATE), p(FLASH));
+        let turn = |model: &str| book.price(&tokens(model, 26_000, 0, 0, 200)).unwrap();
+        assert_eq!(turn(PRIVATE), Priced { list: 4_000, cost: 4_200, charge: 6_300 });
+        assert_eq!(turn(PRIVATE), turn(FLASH));
     }
 
     /// Goal: decision 24's formula on S3's simple turn. Method: a Flash

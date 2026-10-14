@@ -19,6 +19,7 @@ mod credentials;
 mod delegation;
 mod export;
 mod deliver;
+mod finite_private;
 mod frames;
 pub mod hermes;
 mod identities;
@@ -105,6 +106,7 @@ const LANES: &[Lane] = &[
     deliver::ai,
     ledger::ledger_lane,
     ledger::transcribe_lane,
+    finite_private::finite_private,
     orgs::orgs,
     billing::billing,
     billing::billing_page,
@@ -145,7 +147,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["chat", "shell-ui", "wipe", "sync", "restart"],
+    &["finite-private", "chat", "shell-ui", "wipe", "sync", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",

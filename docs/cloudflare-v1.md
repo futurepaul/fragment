@@ -445,6 +445,11 @@ speaking Cloudflare's APIs) returns once this product works.
     agents may run on, paid by that account. The platform's own tiers
     are unchanged.)
 
+    Status, 2026-10-14: Finite's own deployment runs its tiers on Finite
+    Private, Workers AI behind them (decision 61); every model below is
+    now named in the config's `models`, which replaced `vision_model` and
+    `fallback_model`, and is Workers AI's as below when unnamed.
+
     Status, 2026-10-05 (branch `claude/vision-model`; Paul: "yes, vision
     model for computer_use. deepseek flash is apparently pretty good"):
     the model route takes `vision` beside the tiers, the deployment's
@@ -947,6 +952,100 @@ connect them from settings ideally."
       - Nous' `claude-subscription-directsdk` plugin runs each turn
         through the `claude` CLI.
       - Neither is for a hosted product.
+
+### Finite Private (Paul, 2026-10-14)
+
+Paul: fbfc's main model is **Finite Private**. Workers AI allows 20 to 50
+calls a minute per model per account, which a launch with real users
+passes.
+
+61. **The tiers run on Finite Private; Workers AI is behind them.**
+    Finite Private is Finite's own GLM-5.3 Flash (`zai-org/GLM-5.3-Flash`
+    on SGLang, 393,216 tokens of context) on Tinfoil, behind finite-mono's
+    `finite-private-limiter`, which admits each call by its key
+    (`fpk_live_…`) against finite.computer and meters it against the
+    key's window (docs/computers.md, Models, has what it serves and how
+    it refuses).
+    - **Where each model runs is the deployment's config** (`models`,
+      `FRAGMENT_MODELS`; `fragment_core::models::Models`). Each of the
+      route's names (`cheap`, `medium`, `fallback`, `vision`) is a Workers
+      AI model through the gateway, or a model on an OpenAI-compatible
+      API: its `base_url`, its key's name in the Secrets Store (bound as
+      `MODEL_KEY_<NAME>`, read only by keys.rs: docs/secrets.md) and its
+      model's id. A name left out is Workers AI's as before (decision 23),
+      so a preview without the key deploys and runs as it did. The config
+      replaced `vision_model` and `fallback_model` (a hard cut: a deploy
+      naming either is refused, saying what replaced it).
+    - **Finite's own** (deploy/example.jsonc): `cheap` and `medium` on
+      Finite Private's `glm-5-3-flash`; `fallback` and `vision` on Workers
+      AI's GLM-5.3 Flash. Vision stays there: finite.computer declares
+      Finite Private vision-capable, but nothing tests it, and its limiter
+      takes 2 MiB a request (a screenshot call is up to 6 MiB).
+    - **The rule for falling back is decision 23's**: a call Finite
+      Private fails before answering (not reached, 429: its key's window
+      spent, 502: its model, 503: finite.computer not answering) is made
+      once more on Workers AI's GLM-5.3 Flash. A call that answers nothing
+      is the runtime's: Hermes' stale switch names the route's `fallback`,
+      Workers AI's here.
+    - **Price** (a decision for Paul): Workers AI's GLM-5.3 Flash's list
+      price, the fee and the margin (docs/ledger.md, "Finite Private's
+      price"): a person pays the same whichever answered, and pays for
+      prompts uncached until Finite Private reports its cached tokens.
+      Price book 5.
+    - **Decisions for Paul.** (a) The price above. (b) A key Finite
+      Private refuses (401: revoked, or never set) and a denial (403) are
+      the call's, as any refusal of a request is: falling back on them
+      too would keep agents up through a revoked key, on Workers AI's
+      limit. (c) A text call past 2 MiB is the limiter's 413, passed
+      through (Workers AI takes 6 MiB): an agent's context near its
+      393,216 tokens is about that size.
+
+    **The ask for finite-mono** (Paul to pass on; their code read
+    2026-10-14):
+    1. Issue a Finite Private key for fbfc on a grant of its own: a
+       dedicated email (fbfc's, not a person's: a key issued to an email
+       that has a grant resets that grant), through `/dashboard/admin`'s
+       "Issue friend key" or `finite-saas-core
+       finite-private-friend-key-issue --email <fbfc's> --limit-profile-id
+       <id>`. Every fbfc user's call shares that one key's window.
+    2. Size its window for a launch. A profile is weighted tokens per 5
+       hours, `(prompt + 3 × completion) × min(1 + prompt/100000, 3)` a
+       call. fbfc's calls are Hermes agents' turns: about 30,000 prompt
+       tokens (Hermes' system prompt and tools, then the conversation)
+       and 600 completion tokens a call, about 4 calls a turn, so about
+       41,000 units a call and 165,000 a turn. At 6 turns an hour for each
+       person active at a peak, every 100 such people are about 40 calls
+       a minute and 500 million units every 5 hours: the 5x profile
+       (`finite-private-generous-5x-v1`, 500M) holds about 100, the
+       default (200M) about 40. Ask for a profile of its own (a migration,
+       as `0018` added the 5x one) of **2.5 billion units per 5 hours, no
+       weekly limit** (about 500 people active at once, 200 calls a
+       minute), to raise as fbfc measures; the 5x profile until it lands.
+       A spent window is the limiter's 429, and every fbfc agent falls
+       back to Workers AI (20 to 50 calls a minute) until it resets.
+    3. Confirm the GPUs behind it take that: per 100 people active,
+       about 40 calls a minute, 1.2 million prompt tokens a minute (most
+       a repeated prefix, which SGLang's radix cache serves) and 24,000
+       completion tokens a minute; per call, the route sends `max_tokens`
+       up to 16,384, so the limiter reserves about 100,000 units a call
+       in flight.
+    4. Confirm the limiter's admission mode: in its degraded allowlist
+       mode only keys in `FINITE_ADMISSION_ALLOWLIST` are let in, and
+       fbfc's would need adding there.
+    5. Report cached tokens (SGLang's `--enable-cache-report`, passed
+       through as `usage.prompt_tokens_details.cached_tokens`), so fbfc
+       prices a cached prefix at the cached price (docs/ledger.md).
+    6. Nothing of fbfc's users reaches them: no user id, no header but
+       the key; the route sends OpenAI's chat completion and nothing else.
+
+    **Going live** (Paul's): finite-mono issues the key; `cargo xtask
+    secret set fragment-finite-private-key --config <production's
+    config>` (it prompts); add example.jsonc's `models` to that config
+    (and take out `vision_model` or `fallback_model` if it names one);
+    deploy. The deploy refuses to go on while the store lacks the key. On
+    the Worker's logs, `model.settled` names `glm-5-3-flash` for the
+    tiers' calls, and `model.fallback` from it says why a call went to
+    Workers AI (a 429 there is the window spent).
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

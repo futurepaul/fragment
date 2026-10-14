@@ -70,18 +70,33 @@
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,
-  // models and images are off.
+  // Workers AI's models and images are off.
   // "ai_gateway": "fragment",
-  // The model a runtime's calls about an image run on (the model route's
-  // `vision`: Hermes' computer_use screenshots, whatever an agent's tier).
-  // GLM-5.3 Flash unless named here; it must be one the price book prices
-  // (fragment_core::price), or the deploy is refused.
-  // "vision_model": "@cf/zai-org/glm-5.3-flash",
-  // The model a tier's call is made on once more when its own fails before
-  // answering (not reached, 429 or a 5xx), settled at its prices. DeepSeek
-  // V4 Flash unless named here (the cheap tier is GLM-5.3 Flash); one the
-  // price book prices, or the deploy is refused. `vision` has no fallback.
-  // "fallback_model": "@cf/deepseek-ai/deepseek-v4-flash-0731",
+  // Where each of the model route's names runs (docs/computers.md,
+  // Models): the tiers (`cheap`, every agent's default, and `medium`),
+  // `fallback` (a tier's call is made on it once more when its own fails
+  // before answering: not reached, 429 or a 5xx; and Hermes' own switch
+  // when a call stalls) and `vision` (a runtime's calls about an image:
+  // Hermes' computer_use screenshots). Each is a Workers AI model through
+  // the gateway, `{"provider": "workers_ai", "model": <catalog id>}`, or a
+  // model on an OpenAI-compatible API, `{"provider": "openai", "base_url",
+  // "key": <its secret's name in the store>, "model": <its id there>}`. A
+  // slot left out is on Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3,
+  // fallback DeepSeek V4 Flash, vision GLM-5.3 Flash. Every model is one
+  // the price book prices (fragment_core::price), or the deploy is
+  // refused. Finite's own (decision 61): its tiers on Finite Private,
+  // Finite's GLM-5.3 Flash on Tinfoil (its key, `fpk_live_…`, issued by
+  // finite.computer), and Workers AI's GLM-5.3 Flash behind them and for
+  // images. Leave `models` out (as a preview without the key does) and every
+  // tier runs on Workers AI.
+  "models": {
+    "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+    "medium": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+                "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+    "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
+    "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
   // Where a person whose computer will not start gets help: an https page
@@ -186,8 +201,8 @@
   // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
-  // (fragment_core::price::DEFAULT_BOOK_VERSION, 4 since Hermes' tool keys
-  // were priced): raise it past both with every change to a key's price, or
-  // ledgers keep their book.
-  "price_book_version": 4
+  // (fragment_core::price::DEFAULT_BOOK_VERSION, 5 since Finite Private's
+  // GLM-5.3 Flash was priced): raise it past both with every change to a
+  // key's price, or ledgers keep their book.
+  "price_book_version": 5
 }

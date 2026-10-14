@@ -340,7 +340,8 @@ impl FragmentCell {
             body["reasoning_effort"] = json!(effort);
         }
         let body_bytes = body.to_string().len();
-        let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, false)).map_err(|why| permanent(why.message()))?;
+        let models = &crate::config::Config::from_env(&self.env).models;
+        let bounded = models.capped(bounds::Named::Tier(tier)).and_then(|m| bounds::bound(m, body, false)).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
         // its tier's model, or the fallback's when that one failed (models.rs)
         let (status, bytes, log_id, model) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;

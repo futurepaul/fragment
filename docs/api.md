@@ -1298,7 +1298,9 @@ are FLUX.1 [schnell] (`@cf/black-forest-labs/flux-1-schnell`) on Workers
 AI, on the model route's transport (the `AI` binding through the
 deployment's AI Gateway), metered in neurons at Workers AI's price for
 it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`).
-Nothing holds a key: the binding is pre-authenticated.
+No app holds a key: the binding is pre-authenticated, and a text step on
+an OpenAI-compatible API (Finite Private) carries the deployment's key,
+which the platform adds.
 
 Each paid step reserves its worst case on the owner's ledger before its
 call (text: its request's bytes as tokens in and its tier's capped
@@ -1346,27 +1348,33 @@ when the fallback fails too, the step is retried. Other refusals fail
 the step with the model's message. A run answers `costMicros`: what its paid steps were
 charged (none when nothing was).
 
-### Models (docs/cloudflare-v1.md, decision 23)
+### Models (docs/cloudflare-v1.md, decisions 23 and 61)
 
 One OpenAI-shaped chat completion on a tier's model, metered on its
 payer's ledger (cell/src/models.rs). Tiers: `cheap` (the default for
-agents and calls naming no tier; GLM-5.3 Flash,
-`@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
-both on Workers AI through the deployment's AI Gateway (Unified Billing,
-its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
-payer's and the agent's identities). `high` (Opus) is refused, 400,
-saying why, until Cloudflare raises Unified Billing's Opus limit; a model
-id is never a tier. `vision` names the deployment's vision model (its
-config's `vision_model`, GLM-5.3 Flash unless named, one the price book
-prices), for a runtime's calls about an image (Hermes' screenshots:
+agents and calls naming no tier) and `medium`. `high` (Opus) is refused,
+400, saying why, until Cloudflare raises Unified Billing's Opus limit; a
+model id is never a tier. `vision` names the deployment's vision model,
+for a runtime's calls about an image (Hermes' screenshots:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
 
+Where each runs is the deployment's (its config's `models`; decision 61):
+a Workers AI model through the deployment's AI Gateway (Unified Billing,
+its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
+payer's and the agent's identities), or a model on an OpenAI-compatible
+API with the deployment's key for it and nothing else of the call's
+(Finite Private, on Finite's own deployment). Unnamed, `cheap` is GLM-5.3
+Flash (`@cf/zai-org/glm-5.3-flash`), `medium` GLM-5.3
+(`@cf/zai-org/glm-5.3`), `vision` GLM-5.3 Flash and the fallback DeepSeek
+V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`), all on Workers AI;
+Finite's own runs `cheap` and `medium` on Finite Private's GLM-5.3 Flash
+(`glm-5-3-flash`) and `vision` and the fallback on Workers AI's GLM-5.3
+Flash. Each is a model the price book prices.
+
 A tier's call whose model fails before answering anything (not reached,
 429, or a 5xx) is made once more, the same, on the deployment's fallback
-model (its config's `fallback_model`, DeepSeek V4 Flash,
-`@cf/deepseek-ai/deepseek-v4-flash-0731`, unless named; one the price
-book prices), and its answer is the call's: settled from its usage at
+model, and its answer is the call's: settled from its usage at
 its prices, under the call's one hold. An answer that began is final; a
 refusal of the request (another 4xx) is the call's; when the fallback
 fails too, its failure is the call's, released, after two tries in all.

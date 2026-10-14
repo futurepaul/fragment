@@ -722,12 +722,52 @@ expires within 30 days. The container application is the deployment's
   signed as the agent: docs/api.md, docs/ledger.md), which allows only
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
-  calls the model through AI Gateway, streams its answer back, and
-  settles the final usage (lesson 7). A call whose model fails before
+  calls the model where the deployment runs it, streams its answer back,
+  and settles the final usage (lesson 7). A call whose model fails before
   answering (not reached, 429, or a 5xx) is made once more on the
-  deployment's fallback model, DeepSeek V4 Flash (behind the cheap tier's
-  GLM-5.3 Flash) unless its config names another (docs/api.md,
-  Models): the guest sees only the answer.
+  deployment's fallback model (docs/api.md, Models): the guest sees only
+  the answer.
+- **Where each model runs** is the deployment's config's `models`
+  (`FRAGMENT_MODELS`; `fragment_core::models::Models`; decision 61): each
+  of the route's names (`cheap`, `medium`, `fallback`, `vision`) on a
+  Workers AI model through AI Gateway, or on a model of an
+  OpenAI-compatible API, whose key is a Secrets Store secret bound for
+  that name (`MODEL_KEY_<NAME>`; docs/secrets.md). A name the config
+  leaves out is on Workers AI:
+
+  | Name | Finite's own deployment (deploy/example.jsonc) | Unnamed (a preview's) |
+  |---|---|---|
+  | `cheap`, every agent's default | Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) | GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`) |
+  | `medium` | Finite Private's GLM-5.3 Flash | GLM-5.3 (`@cf/zai-org/glm-5.3`) |
+  | `fallback` | Workers AI's GLM-5.3 Flash | DeepSeek V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`) |
+  | `vision` | Workers AI's GLM-5.3 Flash | GLM-5.3 Flash |
+
+  Finite Private is Finite's own GLM-5.3 Flash (`zai-org/GLM-5.3-Flash`
+  on SGLang, 393,216 tokens of context) on Tinfoil, behind finite-mono's
+  `finite-private-limiter` at
+  `https://finite-private.finite.containers.tinfoil.dev/v1` (read from
+  finite-mono 2026-10-14: `infra/tinfoil/confidential-finite-private`,
+  `finitecomputer-v2/crates/finite-private-limiter`):
+  - **The call.** `POST <base_url>/chat/completions` with the deployment's
+    key (`fpk_live_…`) as `Authorization: Bearer`, the route's bounded
+    input and the model's id, nothing of the guest's or the payer's (no
+    gateway metadata: its limit is the key's).
+  - **What it serves.** Streaming (its limiter always asks for the usage,
+    which comes on a last chunk with no choices), tools (SGLang's
+    `glm47` tool-call parser, streamed tool calls included) and GLM's
+    reasoning (`reasoning_effort`; the limiter fills in `high` only when
+    none is sent, and the route always sends one). Images: finite.computer
+    declares it vision-capable, but nothing tests it and its limiter takes
+    at most 2 MiB a request, so `vision` stays on Workers AI. It reports
+    no cached tokens.
+  - **Its refusals.** Past 2 MiB, 413; a key missing, unknown or revoked,
+    401; a model it does not serve, 400; each the call's. Its key's window
+    spent, 429; finite.computer (which admits each call) not answering,
+    503; its model failing, 502: each falls back to Workers AI. Its own
+    deadlines: 120 s to a first byte, 600 s of a stream's silence.
+  - **Its limit** is its key's grant's: weighted tokens in a 5-hour
+    window, no rate in calls, shared by every call the deployment makes
+    (cloudflare-v1.md, decision 61, sizes it).
 - A call that answers nothing (no first byte, a stream that stalls) is
   the runtime's own to give up on. Our Hermes image's text-tier profiles
   (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a
@@ -738,8 +778,9 @@ expires within 30 days. The container application is the deployment's
   default), tries it once more (`HERMES_STREAM_RETRIES=1`, the gateway's
   environment), then, its one retry spent (`agent.api_max_retries: 1`),
   switches to its `fallback_providers`: the route's `fallback` (the
-  deployment's fallback model, its key `agent:<name>` naming the agent),
-  about 40 s after the stall began. The next turn starts on its tier
+  deployment's fallback model, its key `agent:<name>` naming the agent;
+  Workers AI's GLM-5.3 Flash on Finite's own deployment, so a stall on
+  Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
   again (Hermes' `restore_primary_runtime`). An owner's own model and the
   high tier have none. The Docker lane stalls the scripted model to prove
   it (images/bridge/tests/docker.rs).
@@ -752,10 +793,10 @@ expires within 30 days. The container application is the deployment's
   (`/anthropic/v1/messages`) comes with the high tier, which is off
   (decision 23).
 - `model` may also be `vision`: the deployment's vision model (its
-  config's `vision_model`, the cell's `FRAGMENT_VISION_MODEL`), GLM-5.3
-  Flash unless it names another (Paul, 2026-10-05). Workers AI's catalog
+  config's `models.vision`), GLM-5.3 Flash unless it names another (Paul,
+  2026-10-05). Workers AI's catalog
   marks GLM-5.3 Flash "Vision: Yes"; neither DeepSeek V4 Flash, the
-  fallback, nor GLM-5.3, the medium tier's, reads images. The vision
+  default fallback, nor GLM-5.3, the default medium tier's, reads images. The vision
   model must be one the price book prices, or the deploy is refused (and
   the cell, at its first request); GLM-5.3 Flash is the cheap tier's own
   row. `vision` is

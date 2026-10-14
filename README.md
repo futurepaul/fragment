@@ -134,7 +134,7 @@ crates/proto   wire types and limits
 crates/core    the cell's pure logic, host-tested (schemas, cron, globs, the ledger and price book, web push)
 crates/nip98   NIP-98 signing and verification
 crates/templates  the release's files (templates/, the shell, the agent docs): embedded in the CLI, an index in the cell (their bytes are its Static Assets)
-crates/fakes   code.storage, Workers AI, WorkOS, and push-service fakes
+crates/fakes   code.storage, Workers AI (and Finite Private: its OpenAI-compatible face), WorkOS, and push-service fakes
 
 crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite

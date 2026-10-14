@@ -155,18 +155,17 @@ pub struct Config {
     /// before keep their book.
     pub providers: fragment_core::catalog::Catalog,
     pub price_book_version: u32,
-    /// `FRAGMENT_VISION_MODEL` (the deploy config's `vision_model`): the
-    /// model the route's `vision` runs, for a runtime's calls about an
-    /// image (Hermes' screenshots: docs/computers.md, Models). GLM-5.3
-    /// Flash unless named; one the price book does not price is refused
-    /// (`fragment_core::models::vision_model`), at the deploy and here.
-    pub vision_model: String,
-    /// `FRAGMENT_FALLBACK_MODEL` (the deploy config's `fallback_model`):
-    /// the model a tier's call is made on once more when its own fails
-    /// before answering (`fragment_core::models::Tries`). DeepSeek V4 Flash
-    /// unless named; one the price book does not price is refused, at the
-    /// deploy and here.
-    pub fallback_model: String,
+    /// `FRAGMENT_MODELS` (the deploy config's `models`, less its keys): where
+    /// each of the model route's names runs, its tiers', `fallback` (a
+    /// tier's call is made on it once more when its own fails before
+    /// answering) and `vision` (a runtime's calls about an image): a Workers
+    /// AI model, or a model on an OpenAI-compatible API, whose key is bound
+    /// for its slot (`secrets_store::model_key`). Each slot unnamed is on
+    /// Workers AI as before (`fragment_core::models::Models`); one out of
+    /// shape, or whose model the price book does not price, is refused, at
+    /// the deploy and here. A local fleet's may name its fake on
+    /// 127.0.0.1.
+    pub models: fragment_core::models::Models,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
@@ -315,10 +314,8 @@ impl Config {
             price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
                 .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
                 .unwrap_or(1),
-            vision_model: fragment_core::models::vision_model(var(env, "FRAGMENT_VISION_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
-                .unwrap_or_else(|e| panic!("FRAGMENT_VISION_MODEL: {e}")),
-            fallback_model: fragment_core::models::fallback_model(var(env, "FRAGMENT_FALLBACK_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
-                .unwrap_or_else(|e| panic!("FRAGMENT_FALLBACK_MODEL: {e}")),
+            models: fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
+                .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
