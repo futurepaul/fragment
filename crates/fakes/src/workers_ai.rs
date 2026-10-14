@@ -38,15 +38,19 @@
 //! (`describe_image`: its kind and size), so a test sees which image a
 //! model was shown.
 //!
-//! A call answers the text a test set for it (`say_next`), else an echo of
-//! its last message, or, for a real agent runtime (`transcripts`),
-//! `transcript_reply`: a pure function of the transcript (lesson 13), which
-//! an agent's own auxiliary calls (titles, its approval guardian) cannot put
-//! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
-//! Levers: the calls made (with the gateway metadata the cell would send),
-//! failures queued for the next calls, a delay, the usage the next answers
-//! report (`set_usage`), a stream cut before its usage (`break_next`), and
-//! models that are down (`down`): each call to one answers as Workers AI
+//! A call answers the text or tool calls a test set for it (`say_next`,
+//! `reply_next`), else an echo of its last message, or, for a real agent
+//! runtime (`transcripts`), `transcript_reply`: a pure function of the
+//! transcript (lesson 13), which an agent's own auxiliary calls (titles, its
+//! approval guardian) cannot put out of order; its answer after a tool's
+//! result waits `FOLLOW_UP_MS`. Levers: the calls made (with the gateway
+//! metadata the cell would send), failures queued for the next calls, a
+//! delay, the usage the next answers report (`set_usage`), a stream cut
+//! before its usage (`break_next`), a stream's pace (`pace_next`: its events
+//! written apart in time, after reasoning, and its connection held open past
+//! its `[DONE]`, as the gateway held one ~150 s on 2026-10-07; `hung_up`
+//! counts the readers that dropped it first), and models that are down
+//! (`down`): each call to one answers as Workers AI
 //! answered every call to GLM-5.3 Flash for five minutes on 2026-10-09, a
 //! 502 "could not route request to AI model" (its internal code 4002),
 //! until the test brings it up again. A hang is a delay past its caller's
@@ -71,7 +75,10 @@
 //!   there: the route sends them to Workers AI).
 
 use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -171,13 +178,34 @@ pub struct Used {
     pub completion: u64,
 }
 
+/// How a streamed answer is written (`pace_next`): its events `every_ms`
+/// apart (its text in `TEXT_PIECES_PACED` pieces), after `thinking` deltas
+/// of reasoning, and its connection held open `hold_ms` past its `[DONE]`
+/// before the stream ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pace {
+    pub every_ms: u64,
+    pub thinking: usize,
+    pub hold_ms: u64,
+}
+
+/// A paced answer's text streams in this many pieces, so a draft grows.
+pub const TEXT_PIECES_PACED: usize = 6;
+/// What a paced answer reasons, each of its `thinking` deltas.
+pub const THOUGHT: &str = "considering";
+
 #[derive(Default)]
 struct State {
     calls: Vec<AiCall>,
     /// How the next calls answer, in order: a status, or `None` as they would.
     failures: VecDeque<Option<u16>>,
-    /// The texts the next calls answer, in order; then as they would.
-    said: VecDeque<String>,
+    /// The replies the next calls answer, in order; then as they would.
+    said: VecDeque<Reply>,
+    /// How the next streamed answers are written, in order; then at once.
+    paces: VecDeque<Pace>,
+    /// Paced answers whose reader dropped the connection while it was held
+    /// past their `[DONE]`.
+    hung_up: Arc<AtomicU64>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
     /// The next streamed answers end before their usage, in order.
@@ -402,10 +430,11 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
 
 /// A reply streamed as Workers AI streams it (S4's shapes), or, on the
 /// OpenAI-compatible face, as OpenAI does (each chunk's usage null, the
-/// whole call's on a last chunk with no choices); `broken` ends it before
-/// the usage and `[DONE]`, as a dropped stream does.
+/// whole call's on a last chunk with no choices), after `thinking` deltas
+/// of reasoning; `broken` ends it before the usage and `[DONE]`, as a
+/// dropped stream does.
 #[allow(clippy::too_many_arguments)]
-fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
+fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize, thinking: usize) -> String {
     *ids += 1;
     let id = format!("fake{ids:08x}");
     // Workers AI's per-chunk deltas of usage; OpenAI's none
@@ -414,7 +443,8 @@ fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut
         Face::OpenAi => Value::Null,
     };
     let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta(used.prompt, 0));
-    let mut parts: Vec<Value> = Vec::new();
+    // GLM's reasoning first (`reasoning_content`), when the test paces it so
+    let mut parts: Vec<Value> = vec![json!({ "reasoning_content": THOUGHT }); thinking];
     // text, in pieces, so a client's draft grows
     let text_parts = |text: &str, parts: &mut Vec<Value>, budget: &mut Option<usize>| -> bool {
         let (text, was_cut) = within(text, budget);
@@ -706,7 +736,7 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
     }
     let broken = s.breaks.pop_front().unwrap_or(false);
     let reply = match said {
-        Some(text) => Reply::Text(text),
+        Some(reply) => reply,
         None if s.transcripts => transcript_reply(body),
         None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
     };
@@ -718,9 +748,18 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
             Reply::Narrated(t, calls) => t.chars().count() + called(calls),
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
-        let pieces = if s.transcripts { 3 } else { 1 };
-        let events = stream(face, model, &reply, &mut s.tool_calls, usage_of(used, body, written), budget, broken, pieces);
-        return Response::bytes(200, "text/event-stream", events.into_bytes());
+        let pace = s.paces.pop_front();
+        let pieces = match pace {
+            Some(_) => TEXT_PIECES_PACED,
+            None if s.transcripts => 3,
+            None => 1,
+        };
+        let thinking = pace.map_or(0, |p| p.thinking);
+        let events = stream(face, model, &reply, &mut s.tool_calls, usage_of(used, body, written), budget, broken, pieces, thinking);
+        return match pace {
+            Some(pace) => paced(events, pace, Arc::clone(&s.hung_up)),
+            None => Response::bytes(200, "text/event-stream", events.into_bytes()),
+        };
     }
     let tool_calls = |calls: &[(String, Value)]| -> Vec<Value> {
         calls.iter().enumerate().map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } })).collect()
@@ -747,6 +786,47 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
         "usage": usage,
     });
     Response::json(200, &answer)
+}
+
+/// A streamed answer written as `pace` says: chunked, an event at a time,
+/// `every_ms` apart, then its connection held `hold_ms` past its `[DONE]`
+/// with nothing more sent, as the gateway held one; a reader that drops it
+/// meanwhile is counted in `hung_up`.
+fn paced(events: String, pace: Pace, hung_up: Arc<AtomicU64>) -> Response {
+    let events: Vec<String> = events.split_inclusive("\n\n").map(str::to_string).collect();
+    let write = move |mut s: std::net::TcpStream| {
+        let chunk = |e: &str| format!("{:x}\r\n{e}\r\n", e.len());
+        for (i, e) in events.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(pace.every_ms));
+            }
+            if s.write_all(chunk(e).as_bytes()).and_then(|()| s.flush()).is_err() {
+                return;
+            }
+        }
+        // held open: a reader that hangs up reads as the socket's end here
+        let until = Instant::now() + Duration::from_millis(pace.hold_ms);
+        let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut buf = [0u8; 64];
+        // bounded by the hold: each pass waits at most 100 ms
+        while Instant::now() < until {
+            match s.read(&mut buf) {
+                Ok(0) => {
+                    hung_up.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(_) => {
+                    hung_up.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        let _ = s.write_all(b"0\r\n\r\n");
+    };
+    let headers = vec![("content-type".into(), "text/event-stream".into()), ("transfer-encoding".into(), "chunked".into())];
+    Response { status: 200, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(write)) }
 }
 
 pub struct WorkersAi {
@@ -781,18 +861,35 @@ impl WorkersAi {
         self.state.lock().expect("workers ai state")
     }
 
-    /// Drops any texts, usages, breaks and delays set and not yet used.
+    /// Drops any replies, usages, breaks, paces and delays set and not yet used.
     pub fn clear_script(&self) {
         let mut s = self.state();
         s.said.clear();
         s.usage.clear();
         s.breaks.clear();
+        s.paces.clear();
         s.delays.clear();
     }
 
     /// The texts the next calls answer, in order (a model's JSON, say).
     pub fn say_next(&self, texts: &[&str]) {
-        self.state().said.extend(texts.iter().map(|t| t.to_string()));
+        self.state().said.extend(texts.iter().map(|t| Reply::Text(t.to_string())));
+    }
+
+    /// The replies the next calls answer, in order: text, tool calls, or both.
+    pub fn reply_next(&self, replies: &[Reply]) {
+        self.state().said.extend(replies.iter().cloned());
+    }
+
+    /// How the next streamed answers are written, in order (`Pace`).
+    pub fn pace_next(&self, paces: &[Pace]) {
+        self.state().paces.extend(paces.iter().copied());
+    }
+
+    /// Paced answers whose reader dropped the connection while it was held
+    /// open past their `[DONE]`.
+    pub fn hung_up(&self) -> u64 {
+        self.state().hung_up.load(Ordering::Relaxed)
     }
 
     /// What the next answers report they used, in order.
@@ -862,15 +959,71 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream(Face::WorkersAi, "@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
+        let text = stream(Face::WorkersAi, "@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1, 0);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
         let last = lines.last().unwrap();
         assert_eq!((last["response"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!(""), json!(23), json!(15)));
         assert!(text.ends_with("data: [DONE]\n\n"));
-        let broken = stream(Face::WorkersAi, "m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
+        let broken = stream(Face::WorkersAi, "m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1, 0);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
+    }
+
+    /// A paced answer to `asked`, as a reader on its own socket takes it:
+    /// each event's arrival (ms after the head), and the events.
+    fn read_paced(ai: &WorkersAi, asked: &Value, until_done: bool) -> (Vec<(u128, String)>, std::net::TcpStream) {
+        let body = serde_json::to_vec(asked).unwrap();
+        let mut socket = std::net::TcpStream::connect(ai.url.trim_start_matches("http://")).unwrap();
+        let head = format!("POST /run/{} HTTP/1.1\r\nhost: fake\r\ncontent-length: {}\r\n\r\n", fragment_core::models::CHEAP_MODEL, body.len());
+        socket.write_all(&[head.as_bytes(), &body].concat()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let t0 = Instant::now();
+        let (mut seen, mut buf, mut events) = (String::new(), [0u8; 4096], Vec::new());
+        // bounded by the answer: its events end at [DONE], or the read times out
+        while !(until_done && seen.contains("data: [DONE]")) {
+            let n = socket.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+            for line in seen.lines().filter(|l| l.starts_with("data: ")).skip(events.len()).collect::<Vec<_>>() {
+                events.push((t0.elapsed().as_millis(), line.to_string()));
+            }
+        }
+        (events, socket)
+    }
+
+    /// Goal: a paced answer streams as a slow model does: reasoning
+    /// first, its text in pieces, its events apart in time, then its
+    /// connection held open past `[DONE]`; a reader that hangs up then is
+    /// counted. Method: a paced call read on a raw socket, closed once its
+    /// `[DONE]` came; another read to the stream's end.
+    #[test]
+    fn a_paced_answer_streams_apart_and_is_held_past_its_done() {
+        let ai = WorkersAi::start(0).unwrap();
+        let asked = json!({ "stream": true, "messages": [{ "role": "user", "content": "slowly" }] });
+        ai.pace_next(&[Pace { every_ms: 30, thinking: 2, hold_ms: 3_000 }]);
+        let (events, socket) = read_paced(&ai, &asked, true);
+        let deltas: Vec<Value> = events.iter().filter_map(|(_, l)| serde_json::from_str::<Value>(&l[6..]).ok()).filter_map(|v| v["choices"][0].get("delta").cloned()).collect();
+        assert_eq!(deltas.iter().filter(|d| d["reasoning_content"] == THOUGHT).count(), 2, "reasoning first: {deltas:?}");
+        let said: Vec<&str> = deltas.iter().filter_map(|d| d["content"].as_str()).filter(|t| !t.is_empty()).collect();
+        assert_eq!((said.len(), said.concat()), (TEXT_PIECES_PACED, "echo: slowly".to_string()), "its text in pieces");
+        let (first, last) = (events.first().unwrap().0, events.last().unwrap().0);
+        assert!(last - first >= 30 * (events.len() as u128 - 2), "apart in time: {first}..{last} ms for {}", events.len());
+        assert_eq!(ai.hung_up(), 0);
+        drop(socket);
+        let t0 = Instant::now();
+        while ai.hung_up() == 0 && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(ai.hung_up(), 1, "a reader that hangs up past [DONE] is counted");
+        // read to its end: the stream ends only after the hold
+        ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 600 }]);
+        let t0 = Instant::now();
+        let (events, _socket) = read_paced(&ai, &asked, false);
+        assert!(events.last().is_some_and(|(_, l)| l == "data: [DONE]") && t0.elapsed() >= Duration::from_millis(600), "held {:?}", t0.elapsed());
+        assert_eq!(ai.hung_up(), 1, "a reader that waited out the hold is none");
     }
 
     /// Goal: a narrated call is one answer carrying text and a tool call,
@@ -894,7 +1047,7 @@ mod tests {
         assert!(!follows_a_tool(&again), "a tool's result before the newest message is an earlier turn's");
 
         let used = Used { prompt: 10, cached: 0, completion: 9 };
-        let text = stream(Face::WorkersAi, "m", &reply, &mut 0, used, None, false, 3);
+        let text = stream(Face::WorkersAi, "m", &reply, &mut 0, used, None, false, 3, 0);
         let deltas: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str::<Value>(d).unwrap()).filter_map(|l| l["choices"][0]["delta"].as_object().cloned().map(Value::Object)).collect();
         let kinds: Vec<&str> = deltas.iter().filter_map(|d| if d["tool_calls"].is_array() { Some("call") } else if d["content"].as_str().is_some_and(|c| !c.is_empty()) { Some("text") } else { None }).collect();
         assert_eq!(kinds, ["text", "text", "text", "call"], "the text's pieces, then the call: {deltas:?}");
@@ -906,7 +1059,7 @@ mod tests {
         assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
 
         // a budget that cuts the text: no call, and it ends `length`
-        let short = stream(Face::WorkersAi, "m", &reply, &mut 0, used, Some(4), false, 1);
+        let short = stream(Face::WorkersAi, "m", &reply, &mut 0, used, Some(4), false, 1, 0);
         assert!(!short.contains("tool_calls\":[") && short.contains("\"finish_reason\":\"length\""), "{short}");
 
         // unstreamed, one message carries both
