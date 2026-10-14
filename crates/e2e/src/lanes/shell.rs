@@ -1164,11 +1164,12 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-settings.png")));
         }
         // the share sheet, over the chat
+        // (the page left for, not settings' page before it goes; its ⋯ then holds Invite…)
         b.eval(page, "(location.assign('/'), true)")?;
-        b.until(page, home, wait);
-        b.eval(page, "(document.getElementById('chat-options').click(), true)")?;
-        let _ = menu_item(b, page, "Invite…")?;
-        let sheet = b.until(page, "document.getElementById('sheet').open", wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[type=email]')").ok() == Some(Value::Bool(true)));
+        b.until(page, &format!("location.pathname === '/' && !document.querySelector('#settings-access') && {home}"), wait);
+        let invite = "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Invite…'); if (i) { i.click(); return true; } \
+            if (!document.querySelector('#menu button')) document.getElementById('chat-options')?.click(); return false; })()";
+        let sheet = b.until(page, invite, wait) && b.until(page, "document.getElementById('sheet').open", wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('input[type=email]')").ok() == Some(Value::Bool(true)));
         places.push(("the share sheet", b.eval(page, PAGE_FITS)?));
         let inside = b.eval_in_frame(page, "/share/", "({ ok: document.documentElement.scrollWidth <= innerWidth, wide: document.documentElement.scrollWidth, width: innerWidth })").unwrap_or(Value::Null);
         places.push(("the share sheet's page", json!({ "ok": sheet && inside["ok"] == true, "inside": inside })));
