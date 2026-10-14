@@ -77,7 +77,7 @@ prebuilt bundle is in the debt ledger).
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
   to the system's cache. Moving the pin: README.md, "The pinned Node".
 - `cargo xtask build`: the cell for wasm32, held to its budget
-  (`CELL_WASM_MAX_BYTES`, 6 MB raw, xtask/src/build.rs: it fails over
+  (`CELL_WASM_MAX_BYTES`, 6.5 MB raw, xtask/src/build.rs: it fails over
   it, saying so), and the release's files (the templates, the shell's
   files, the agent docs) into `cell/build/assets`, each named by its
   SHA-256: the Worker's Static Assets, which the cell reads by the index
