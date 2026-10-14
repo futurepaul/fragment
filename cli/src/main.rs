@@ -3,6 +3,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod mcp;
 mod operator;
 mod sync;
 mod watch;
@@ -262,6 +263,16 @@ enum Cmd {
     Blob {
         #[command(subcommand)]
         sub: BlobCmd,
+    },
+    /// Serve a fragment's described operations as tools to an MCP client
+    /// (Claude Code, Codex) over stdio: its queries, and with --write its
+    /// mutations and jobs too. `claude mcp add <name> -- fragment mcp <fragment>`
+    Mcp {
+        name: String,
+        /// Serve its operations that change state too (mutations and jobs);
+        /// without it, its queries alone
+        #[arg(long)]
+        write: bool,
     },
     /// Post a record to a channel fragment.json declares with a post role;
     /// prints the record (a retry with the same --id appends nothing)
@@ -839,9 +850,14 @@ fn error_body(e: &anyhow::Error) -> (Value, Code) {
 }
 
 fn main() {
-    let json_mode = json_env_flag();
+    let mut json_mode = json_env_flag();
     let result = match Cli::try_parse() {
-        Ok(cli) => run(cli),
+        Ok(cli) => {
+            // an MCP server's stdout is the protocol's alone: its failure to
+            // start goes to stderr, whatever FRAGMENT_OUTPUT says
+            json_mode &= !matches!(cli.cmd, Cmd::Mcp { .. });
+            run(cli)
+        }
         // help and version (exit 0), and clap's own usage text for a person (exit 2)
         Err(e) if !json_mode || !e.use_stderr() => e.exit(),
         Err(e) => Err(usage(e.to_string())),
@@ -1823,6 +1839,10 @@ fn run(cli: Cli) -> Result<()> {
             let v = c.call(c.put_blob(&path, bytes, Some(kind))?)?;
             json_exit(j, &v);
             println!("{sha}");
+        }
+        Cmd::Mcp { name, write } => {
+            // stdout carries the protocol's messages and nothing else
+            mcp::serve(&c, &name, write, std::io::stdin().lock(), std::io::stdout().lock())?;
         }
         Cmd::Post { name, channel, body, id } => {
             let body: Value = serde_json::from_str(&body).map_err(|e| usage(format!("--body must be JSON: {e}")))?;

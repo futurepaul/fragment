@@ -58,6 +58,7 @@ fragment create <label> --template todo          # a new one (`fragment new --li
 fragment write <name> site/index.html --from index.html   # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment call <name> <operation> --input '{}'    # one of its operations
+fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
 ```
 
 A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds

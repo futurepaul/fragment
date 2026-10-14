@@ -1037,8 +1037,9 @@ the code the fragment's own.
   whitespace), longer, holds a control character, or is not a string is
   refused at deploy, naming the operation (`status.code.error`; `fragment
   deploy` exits 1 with `invalid_request`). `status.code.operations` shows
-  it as given; an operation without one shows none. Describe every
-  operation.
+  it as given; an operation without one shows none. It makes the
+  operation a tool of `fragment mcp` (Operations as MCP tools, below).
+  Describe every operation.
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
   *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
   <app channel>, "run": op}` (each new record; with `"from": "person" |
@@ -1855,6 +1856,40 @@ files), so they never drift from it. They answer anyone, as
 `text/plain; charset=utf-8` with `Cache-Control: no-cache` and an ETag
 of their hash (304 when `If-None-Match` names it), as `__fragment.js`
 does. On a fragment's host the same paths are the fragment's own.
+
+### Operations as MCP tools (`fragment mcp`)
+
+`fragment mcp <fragment> [--write]` (cli/src/mcp.rs; cli/GUIDE.md,
+"Your operations as tools") is an MCP server over stdio that the CLI
+runs, for an MCP client on the same machine: JSON-RPC 2.0, one message a
+line, `initialize`, `ping`, `tools/list` and `tools/call` (revisions
+2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05 answered in kind).
+The platform serves nothing new for it: it reads `GET status` (at
+`initialize` and at each `tools/list`) and calls `POST
+ops/{op}`, signed as every CLI request is (this machine's key, or a
+computer's agent: `FRAGMENT_AS_AGENT`).
+
+- A tool is an operation of `status.code.operations` with a
+  `description`, whose `role` the caller's role there reaches, and
+  whose `input` is an object's schema (none: any object): a query
+  always, and a mutation or a job only with `--write` (they change
+  state). Its `name` and `description` are the operation's, its
+  `inputSchema` its `input` (with `"type": "object"` added when it names
+  no type), and its annotations say a query only reads.
+- A call's `arguments` are the operation's input as they are, sent as
+  `{id, input}` with a fresh id (`mcp-` and 16 hex digits); the CLI's
+  retries of the one request reuse it, so each call runs once. A result
+  answers as its JSON text, and as `structuredContent` when it is an
+  object.
+- A call to an operation that is no tool (no description, a write
+  without `--write`, a role beyond the caller's, an input that is no
+  object, no such operation) is JSON-RPC's `-32602`, saying which, and
+  nothing is sent. A call the platform refuses is the tool's error
+  (`isError: true`) carrying its `ErrorBody`: `structuredContent: {error:
+  {code, status, message}, id}`; one with no answer carries the CLI's
+  `unavailable` or `outcome_unknown` (no `status`), and its id replays
+  it (`fragment call … --id`).
+- One server serves one fragment.
 
 ## Connections (decisions 22 and 37)
 
