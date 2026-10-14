@@ -1,5 +1,5 @@
 //! The brain template (docs/cloudflare-v1.md, decision 30): a fragment app
-//! on the blessed `brain` template, made as the shell makes it, whose repo
+//! on the blessed `brain` template, made as the CLI makes it, whose repo
 //! holds only its face and its files. Its files are wikis (raw/ wiki/ …,
 //! index.md, log.md); its search is FTS5 sections ranked by BM25 in the
 //! app's own SQLite, kept by a file trigger. An agent's path through it:
@@ -124,14 +124,12 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let session = api.sign_in(&crate::cli_email(&npub::encode(keys.pubkey_hex()))?)?;
     let label = s.name("garden");
 
-    // made as the shell's catalog makes it: blessed, named, with a title
-    let catalog = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), ..Call::default() })?;
-    s.ok("the shell's catalog offers a Brain, on the blessed template", catalog.status == 200 && catalog.text.contains(r#"template: "brain", name: "Brain""#), catalog.status);
-    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "brain", "title": "Garden" })), &[])?;
-    let name = made.body["name"].as_str().unwrap_or("").to_string();
-    s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &made);
-    anyhow::ensure!(made.status == 200, "no brain to test: {made}");
-    let repo = made.body["repo"].as_str().unwrap_or("").to_string();
+    // made as the CLI makes it (`fragment create --template brain`): blessed, named, with a title
+    let made = s.cli_json(api, &home, &["create", &label, "--template", "brain", "--title", "Garden", "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let name = made["name"].as_str().unwrap_or("").to_string();
+    s.ok("the CLI makes a brain on the blessed brain template", fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &made);
+    anyhow::ensure!(!name.is_empty(), "no brain to test: {made}");
+    let repo = made["repo"].as_str().unwrap_or("").to_string();
     let listed = s.eventually(WAIT, || {
         shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| {
             r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == name.as_str() && f["kind"] == "brain" && f["title"] == "Garden"))

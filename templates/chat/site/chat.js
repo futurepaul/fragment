@@ -1667,6 +1667,27 @@ export function mount(root) {
     renderQuoting();
     input.focus();
   };
+  // A way to ask for an app the shell puts here (its Add, its empty
+  // desktop's): the person's to change and send, so nothing is sent. It
+  // replaces what is typed and any quote (a request of its own), and
+  // selects its first `…`, the part to make theirs. Taken only from the
+  // frame's parent at the platform's own origin, as the hello names it.
+  function compose(event, text) {
+    fragment.me().then((hello) => {
+      if (event.origin !== hello.platform || !canPost() || input.disabled) return;
+      if (!text.trim() || new TextEncoder().encode(text).length > TEXT_MAX_BYTES) return;
+      state.replyTo = null;
+      renderQuoting();
+      input.value = text;
+      closeMentions();
+      closeCommands();
+      grow();
+      input.focus();
+      const slot = text.indexOf("…");
+      if (slot >= 0) input.setSelectionRange(slot, slot + 1);
+      else input.setSelectionRange(text.length, text.length);
+    });
+  }
   $("steer").onclick = () => {
     const words = input.value.trim();
     if (words) send(`/steer ${words}`);
@@ -2248,8 +2269,8 @@ export function mount(root) {
   };
 
   // The shell that frames the chat may say light or dark, hand over its
-  // person's agents, and answer an add. Only its frame listens, and only to
-  // its parent.
+  // person's agents, answer an add, and put a prompt in the composer. Only
+  // its frame listens, and only to its parent.
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
@@ -2257,6 +2278,7 @@ export function mount(root) {
       document.documentElement.dataset.theme = d.mode;
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
+    else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)

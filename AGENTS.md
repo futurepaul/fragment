@@ -230,8 +230,9 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, and `calories`: a channel trigger and a text step); the
-  shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`, and `calories`: a channel trigger and a text step), and
+  `fragment create --template` makes one on the platform; the shell offers
+  no templates: its dock's Add teaches how to ask an agent for an app.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store

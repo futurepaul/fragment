@@ -925,21 +925,26 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // an app's window: the desktop's (its dock and its windows)
     let desktop = b.until(&page, "document.getElementById('layout').classList.contains('right-open') && document.getElementById('viewer').getBoundingClientRect().width > 0 && !!document.querySelector('#apps #add-app')", wait);
+    // its windows (the agents' screens) closed: the desktop itself
+    b.eval(&page, "([...document.querySelectorAll('#stack .pane button[aria-label=Close]')].forEach((b) => b.click()), true)")?;
+    let bare = b.until(&page, "document.getElementById('viewer').classList.contains('is-empty') && document.getElementById('desktop-empty').getBoundingClientRect().height > 0", wait);
     let empty = b.eval(&page, "({ title: document.querySelector('#desktop-empty .desktop-empty-title')?.textContent ?? null, asks: [...document.querySelectorAll('#desktop-empty .desktop-suggestion')].map((b) => b.textContent), apps: document.querySelectorAll('#apps [data-key^=\"app:\"]').length })")?;
     s.ok(
-        "at a desktop's width the desktop shows beside the chat: no apps yet, it says where they land and offers requests of their agent, and its dock offers Add",
-        desktop && empty["apps"] == 0 && empty["title"] == "Your apps land here" && empty["asks"].as_array().is_some_and(|l| l.len() == 3),
+        "at a desktop's width the desktop shows beside the chat: no apps yet, it says where they land and offers three ways to ask their agent for one, and its dock offers Add",
+        desktop && bare && empty["apps"] == 0 && empty["title"] == "Your apps land here" && empty["asks"].as_array().is_some_and(|l| l.len() == 3),
         &empty,
     );
     let _ = b.screenshot(&page, &shots.join("desktop-empty.png"));
-    b.click(&page, "#add-app")?;
-    let catalog = b.until(&page, "document.querySelector('.catalog form')", wait);
-    s.ok("the dock's Add opens the catalog in a window on the desktop", catalog, "");
-    // named by its maker: its label, and its title
-    b.eval(&page, &fill(".catalog form input[name=label]", "groceries"))?;
-    b.eval(&page, "document.querySelector('.catalog form')?.requestSubmit()")?;
+    let asked_in = app_prompts_ui(s, api, &mut b, &page, &session, &empty["asks"], &shots)?;
+    // an app made elsewhere, as the CLI makes one from a template (the
+    // shell offers none): in the dock with no reload, its window on a click
+    let home = cli_home(s, api, &session, "desktop-cli-home")?;
+    let made = s.cli_json(api, &home, &["create", "groceries", "--template", "todo", "--title", "groceries", "--json"])?;
+    let groceries = made["name"].as_str().unwrap_or("").to_string();
+    let docked = b.until(&page, &format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{groceries}\"]"))), wait);
+    b.eval(&page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#apps [data-key=\"app:{groceries}\"]"))))?;
     let window = b.until(&page, "document.querySelectorAll('#apps [data-key^=\"app:\"]').length === 1 && document.querySelector('.viewer iframe') && document.getElementById('desktop-empty').hidden", wait);
-    s.ok("an app from the catalog opens in a window on the desktop, its icon in the dock", window, "");
+    s.ok("an app the CLI makes from a template (`fragment create --template todo`) lands in the dock with no reload, and opens in a window on the desktop", label_of(&groceries) == "groceries" && docked && window, &made);
     // its card, once the platform has shot it: read with the shell's session,
     // shown as a blob URL (the shell's CSP allows `img-src blob:`), larger
     // over its icon while a pointer is on it
@@ -950,13 +955,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         super::site::CARD_WAIT,
     );
     s.ok("a pointer over its dock icon shows its card, a blob URL of the 1280×800 shot, larger above it", carded, b.eval(&page, "document.querySelector('.card-peek')?.outerHTML.slice(0, 200) ?? null")?);
-    // deployed (its card is shot after), its face is the name it was given, not its template's
+    // deployed (its card is shot after), its face is the title it was given, not its template's
     let named = b.eval(&page, &format!("{icon}?.querySelector('.label')?.textContent ?? null"))?;
-    s.ok("and its icon is titled with the name its maker gave it, not its template's", named == "groceries", &named);
+    s.ok("and its icon is titled with the title its maker gave it, not its template's", named == "groceries", &named);
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
-    let groceries = own_named(api, &session, "groceries")?;
+    compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
@@ -1123,10 +1128,11 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// scrolling, with its sidebar open and closed, a chat holding a long
 /// word, code and a wide table (the table scrolls in its own box), the
 /// launcher, settings (its Your data with an export ready, its widest
-/// rows), the share sheet and an app's window; and no field a
-/// phone zooms into on focus (16px or more), in the shell, the chat, the
-/// launcher, settings and the sheet. Safari's keyboard, bounce and zoom are
-/// not Chrome's: a phone tests those.
+/// rows), the share sheet, an app's window and the ways to ask for one;
+/// no field a phone zooms into on focus (16px or more), in the shell, the
+/// chat, the launcher, settings and the sheet; and, at 375, a way to ask
+/// pressed goes into the chat's composer, the desktop's sheet closed.
+/// Safari's keyboard, bounce and zoom are not Chrome's: a phone tests those.
 fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
@@ -1156,6 +1162,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let r = shell(api, session, "POST", "/api/export", None, &[])?;
     anyhow::ensure!(r.status == 200, "the export: {r}");
     let mut small: Vec<Value> = Vec::new();
+    let mut phone_prompt: Option<(bool, Value)> = None;
     for w in [320u32, 375, 390, 430] {
         b.viewport(page, w, 812, true)?;
         b.reload(page)?;
@@ -1222,14 +1229,40 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.eval(page, "(document.querySelector('#apps [data-key^=\"app:\"]')?.click(), true)")?;
         b.until(page, "!!document.querySelector('#stack .pane iframe')", wait);
         places.push(("an app's window", b.eval(page, PAGE_FITS)?));
+        // ways to ask for an app: the dock's Add, in the desktop's sheet
+        let prompts = "#stack .pane[data-key=prompts] .app-prompt";
+        b.eval(page, "(document.getElementById('add-app')?.click(), true)")?;
+        b.until(page, &format!("document.querySelectorAll('{prompts}').length === 8"), wait);
+        places.push(("ways to ask for an app", b.eval(page, PAGE_FITS)?));
+        if w == 375 {
+            b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-prompts.png")));
+            let text = b.eval(page, &format!("document.querySelectorAll('{prompts}')[3]?.textContent ?? ''"))?.as_str().unwrap_or("").to_string();
+            let before = chat_count(api, session, &chat);
+            b.eval(page, &format!("(document.querySelectorAll('{prompts}')[3]?.click(), true)"))?;
+            let filled = s.eventually(wait, || b.eval_in_frame(page, &chat, COMPOSER).ok().is_some_and(|v| v["value"] == text.as_str() && v["focused"] == true));
+            let uncovered = b.until(page, "!document.getElementById('layout').classList.contains('right-open') && !document.getElementById('layout').classList.contains('left-open') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
+            let seen = b.eval_in_frame(page, &chat, "(() => { const r = document.getElementById('text').getBoundingClientRect(); return { top: r.top, bottom: r.bottom, innerHeight }; })()")?;
+            let shows = seen["top"].as_f64().is_some_and(|t| t >= 0.0) && seen["bottom"].as_f64().zip(seen["innerHeight"].as_f64()).is_some_and(|(b, h)| b <= h);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let after = chat_count(api, session, &chat);
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-prompt-composed.png")));
+            phone_prompt = Some((
+                !text.is_empty() && filled && uncovered && shows && after == before,
+                json!({ "composer": b.eval_in_frame(page, &chat, COMPOSER).unwrap_or(Value::Null), "box": seen, "records": [before, after], "uncovered": uncovered }),
+            ));
+            b.eval_in_frame(page, &chat, "(() => { const t = document.getElementById('text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return true; })()")?;
+        }
         let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
         s.ok(
-            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet and an app's window"),
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet, an app's window and the ways to ask for one"),
             echoed && bad.is_empty(),
             json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
         );
     }
     s.ok("on a phone no field is under 16px (Safari zooms in on one as it takes focus): the chat's composer, the launcher, settings and the share sheet", small.is_empty(), json!(small));
+    let (composed, seen) = phone_prompt.unwrap_or((false, Value::Null));
+    s.ok("on a phone, a way to ask from the dock's Add goes into the chat's composer: the desktop's sheet closes, the composer shows, focused, and nothing is sent", composed, seen);
     Ok(())
 }
 
@@ -2324,18 +2357,127 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
+/// A CLI home in the run's scratch (`name`), its key approved for the
+/// person `session` signs in, as `fragment login` leaves one.
+fn cli_home(s: &mut Suite, api: &Api, session: &str, name: &str) -> Result<std::path::PathBuf> {
+    let home = s.dir(name);
+    let keys = fragment_nip98::Keys::generate();
+    api.approve(session, &keys)?;
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
+    Ok(home)
+}
+
+/// The composer of `chat`'s page, framed: what it holds, whether it has
+/// its page's focus, what of it is selected, whether it quotes a message.
+const COMPOSER: &str = "(() => { const t = document.getElementById('text'); return { value: t?.value ?? null, focused: document.activeElement === t, selected: t ? t.value.slice(t.selectionStart, t.selectionEnd) : null, quoting: !document.getElementById('quoting')?.hidden }; })()";
+
+/// How many records `chat`'s chat channel holds.
+fn chat_count(api: &Api, session: &str, chat: &str) -> usize {
+    shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=1000"), None, &[]).ok().and_then(|r| r.body["records"].as_array().map(Vec::len)).unwrap_or(usize::MAX)
+}
+
+/// Asking for an app (Paul, 2026-10-14: "rather than spawning generic apps
+/// we teach the user how to prompt for new apps"), on a desktop's width:
+/// the empty desktop's three ways to ask (`asks`) and the dock's Add's
+/// eight, no templates; one pressed goes into the open chat's composer
+/// (one of theirs), focused, in place of what was typed and of a quote,
+/// its `…` selected, and nothing is sent (the chat's records stay as they
+/// were). The chat it went to.
+fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, asks: &Value, shots: &std::path::Path) -> Result<String> {
+    let wait = std::time::Duration::from_secs(30);
+    let open = open_chat(b, page);
+    anyhow::ensure!(own_named(api, session, label_of(&open)).is_ok_and(|n| n == open), "the open chat is theirs: {open}");
+    let chat = open.as_str();
+    let _ = s.eventually(wait, || b.eval_in_frame(page, chat, "!!document.getElementById('text') && !document.getElementById('text').disabled").ok() == Some(Value::Bool(true)));
+    let before = chat_count(api, session, chat);
+    let first = asks[0].as_str().unwrap_or("").to_string();
+    b.eval(page, "(document.querySelector('#desktop-empty .desktop-suggestion')?.click(), true)")?;
+    let filled = s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER).ok().is_some_and(|v| v["value"] == first.as_str() && v["focused"] == true));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let after = chat_count(api, session, chat);
+    s.ok(
+        "a way to ask on the empty desktop goes into the open chat's composer, focused, and nothing is sent",
+        !first.is_empty() && filled && after == before,
+        json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after] }),
+    );
+
+    // a quote in the composer, then the dock's Add
+    b.eval_in_frame(page, chat, "([...document.querySelectorAll('.msg.agent .actions .reply')].pop()?.click(), true)")?;
+    let quoted = s.eventually(wait, || b.eval_in_frame(page, chat, "!document.getElementById('quoting').hidden").ok() == Some(Value::Bool(true)));
+    b.click(page, "#add-app")?;
+    let pane = "#stack .pane[data-key=prompts]";
+    let listed = b.until(page, &format!("document.querySelectorAll('{pane} .app-prompt').length === 8"), wait);
+    let shown = b.eval(
+        page,
+        &format!("({{ title: document.querySelector('{pane} .pane-title')?.textContent ?? null, prompts: [...document.querySelectorAll('{pane} .app-prompt')].map((b) => b.textContent), templates: !!document.querySelector('{pane} form, {pane} input, .catalog') }})"),
+    )?;
+    let prompts: Vec<String> = shown["prompts"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect();
+    s.ok(
+        "the dock's Add opens ways to ask their agent for an app, in a window on the desktop, and no templates: eight, the empty desktop's three first, some with a … to make theirs",
+        listed
+            && shown["title"] == "Ask for an app"
+            && shown["templates"] == false
+            && prompts.len() == 8
+            && asks.as_array().is_some_and(|a| a.iter().zip(&prompts).all(|(x, p)| x == p.as_str()))
+            && prompts.iter().any(|p| p.contains('…')),
+        &shown,
+    );
+    b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
+    let _ = b.screenshot(page, &shots.join("desktop-prompts.png"));
+    let pick = prompts.iter().position(|p| p.contains('…')).unwrap_or(0);
+    let text = prompts.get(pick).cloned().unwrap_or_default();
+    let before = chat_count(api, session, chat);
+    b.eval(page, &format!("(document.querySelectorAll('{pane} .app-prompt')[{pick}]?.click(), true)"))?;
+    let composed = s.eventually(wait, || {
+        b.eval_in_frame(page, chat, COMPOSER).ok().is_some_and(|v| v["value"] == text.as_str() && v["focused"] == true && v["selected"] == "…" && v["quoting"] == false)
+    });
+    let closed = b.until(page, &format!("!document.querySelector('{pane}')"), wait);
+    // the shell's focus is the chat's frame, so typing goes there
+    let framed = b.eval(page, &format!("document.activeElement?.dataset?.fragment === {}", js(chat)))? == true;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let after = chat_count(api, session, chat);
+    let _ = b.screenshot(page, &shots.join("desktop-prompt-composed.png"));
+    s.ok(
+        "one pressed goes into the open chat's composer in place of what was there and of its quote, focused, its … selected to type over; the window closes, and nothing is sent",
+        quoted && composed && closed && framed && after == before,
+        json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after], "quoted": quoted, "framed": framed }),
+    );
+    Ok(open)
+}
+
+/// A `compose` from any page but the shell's does nothing: from an app's
+/// page (another origin, to every frame of the shell) and from the chat's
+/// own page to itself, the composer keeps what it held. Then it is emptied
+/// for the checks after.
+fn compose_elsewhere_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let held = b.eval_in_frame(page, chat, COMPOSER)?;
+    let before = chat_count(api, session, chat);
+    let from_app = s.eventually(wait, || {
+        b.eval_in_frame(page, app, "(() => { for (let i = 0; i < parent.frames.length; i++) parent.frames[i].postMessage({ fragment: 'compose', text: 'from an app of theirs' }, '*'); return true; })()").ok() == Some(Value::Bool(true))
+    });
+    b.eval_in_frame(page, chat, "(window.postMessage({ fragment: 'compose', text: 'from its own page' }, '*'), true)")?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let now = b.eval_in_frame(page, chat, COMPOSER)?;
+    let after = chat_count(api, session, chat);
+    s.ok(
+        "a compose from an app's page (another origin) or from the chat's own page does nothing: the composer keeps what it held, and nothing is sent",
+        from_app && held["value"].is_string() && now["value"] == held["value"] && after == before,
+        json!({ "held": held, "now": now, "records": [before, after] }),
+    );
+    b.eval_in_frame(page, chat, "(() => { const t = document.getElementById('text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return true; })()")?;
+    Ok(())
+}
+
 /// `fragment ask` as a person (an agent's runs in its computer: the hosted
 /// lane's, and our Hermes image's): their direct chat with the agent, its
 /// answer waited for and printed; the same `--id` again posts nothing and
 /// finds the same answer; `--chat` adds the agent to a chat it is not in
 /// first. Invalid: an agent that is none of theirs, an empty question.
 fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
-    let home = s.dir("ask-cli-home");
-    let keys = fragment_nip98::Keys::generate();
-    api.approve(me.session, &keys)?;
-    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
-    std::fs::create_dir_all(&config)?;
-    std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
+    let home = cli_home(s, api, me.session, "ask-cli-home")?;
     let ids = agent_ids(api, me.session, &["reader"])?;
     let reader = ids[0].clone();
     let said = "hello from the cli";

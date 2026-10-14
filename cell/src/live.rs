@@ -205,7 +205,7 @@ impl FragmentCell {
             self.live.borrow_mut().credentials.insert(st.id.clone(), credential);
         }
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence });
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, platform: self.cfg.platform(), presence });
         Ok(Response::from_websocket(pair.client)?)
     }
 

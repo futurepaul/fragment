@@ -103,9 +103,11 @@ impl From<Subscribe> for SubscribeFrame {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveOut {
     /// First on every socket: who the page is to the fragment (the role is
-    /// fixed while the socket stays open), and everyone on the page who
-    /// shares presence.
-    Hello { id: String, principal: String, role: Role, presence: Vec<Present> },
+    /// fixed while the socket stays open), the platform's origin (the one
+    /// page that frames it with its person's session, whose messages a
+    /// framed page may take: docs/api.md, The shell), and everyone on the
+    /// page who shares presence.
+    Hello { id: String, principal: String, role: Role, platform: String, presence: Vec<Present> },
     /// A record of a channel: one of a page, or a new one while live.
     Record(#[serde(deserialize_with = "record_through_value")] ChannelRecord),
     /// After each page: the cursor past it, and whether more follow. With
@@ -310,9 +312,10 @@ mod tests {
                     id: "ab".into(),
                     principal: "anon:x".into(),
                     role: Role::Public,
+                    platform: "https://fragment.club".into(),
                     presence: vec![Present { id: "cd".into(), principal: "id:y".into(), data: json!({ "name": "paul" }) }],
                 },
-                json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public", "presence": [{ "id": "cd", "principal": "id:y", "data": { "name": "paul" } }] }),
+                json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public", "platform": "https://fragment.club", "presence": [{ "id": "cd", "principal": "id:y", "data": { "name": "paul" } }] }),
             ),
             (
                 LiveOut::Record(record),

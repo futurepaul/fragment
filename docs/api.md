@@ -1701,8 +1701,11 @@ the upgrade, as a call does.
   of 10: a faster change is dropped, with an error), `{type: "query",
   id, op, input}` (a query run as the socket's principal and role; `id`
   is the page's, `^[A-Za-z0-9._:-]{1,128}$`), `{type: "ping"}`
-- server → client: `{type: "hello", id, principal, role, presence:
-  [{id, principal, data}]}` (everyone sharing presence as it opens),
+- server → client: `{type: "hello", id, principal, role, platform,
+  presence: [{id, principal, data}]}` (`platform` the platform's origin,
+  `FRAGMENT_PLATFORM_URL`: the one page that frames a fragment with its
+  person's session, whose messages a framed page may take; everyone
+  sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
   `{type: "draft", channel, principal, turn, text, at}` (a record its
@@ -1776,7 +1779,7 @@ fragment's blobs, its SHA-256 computed in the page, as an editor; answers
 `./__blob/<sha256>`), `observePosts(fn)` (this page's post attempts:
 `{channel, id, body, status: "posting" | "posted" | "failed", record?, error?}`;
 a page may render an error on its message and retry the same id and body),
-`me()`, `closed(fn)`. The page's
+`me()` (`{id, principal, role, platform}`, the hello's), `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
 half times a backoff that doubles from 1 to 30 seconds), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
@@ -1909,9 +1912,9 @@ which downloads on the click with the platform session, and a refusal's
 reason); its sidebar shows their agent and lists their chats, its
 desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
 dialog (their own's "Share…" or "Invite…"; someone else's "People…",
-where they see who is in and may leave), and the dock's Add opens the
-catalog, which makes an app from a
-template, titled with the name its maker gives it (or the template's).
+where they see who is in and may leave), and the dock's Add shows ways
+to ask their agent for an app (below), not templates: the templates are
+the CLI's (`fragment create --template`) and its agents'.
 It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
@@ -1932,13 +1935,27 @@ one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
-windows, then Add (the catalog, above), open beside the chat on a
+windows, then Add, open beside the chat on a
 desktop's width, a sheet from the bottom on a phone. Any other agents of
 theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. A desktop with
-no apps says what lands there, and for a seat offers a few requests of
-their agent, each a real one: pressed, it starts a chat with those words
-as its first message, as the launcher does (below). It is live: the page holds
+with one of them is a chat, listed and found as any other. **Add teaches
+how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
+apps we teach the user how to prompt for new apps"): a window of eight
+ways to ask, each saying who the app is for and what it does, `…` the
+part to make their own (`APP_PROMPTS`, one list in shell.js), and a
+desktop with no apps says what lands there and offers its first three.
+They are suggestions: nothing is made, sent or shown as if it were.
+Pressed, one goes into the composer of the person's chat, selected at its
+`…`, for them to change and send: the chat open, if it is their own; else
+their agent's newest chat, or a new one with it (New chat, below). On a
+phone the desktop's sheet closes on it. The shell puts it there with
+`postMessage({fragment: "compose", text})` to that chat's frame, at the
+fragment's own origin, once the page in it has asked `agents?` (below;
+one pressed before then waits for it). The chat's page takes it only
+from its parent at the platform's origin (its hello's `platform`, Live
+above), only from a person who may post there, and sends nothing: it
+replaces what was typed and any quote, and focuses the composer. A
+message from any other page or origin does nothing. It is live: the page holds
 `GET /api/fragments/watch` (above), and on each `changed` (a moment
 after, so a burst is one read) reads the list again and patches the
 sidebar in place, so an app their agent makes, one someone shares with

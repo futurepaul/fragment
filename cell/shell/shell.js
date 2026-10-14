@@ -48,13 +48,22 @@ const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
 const CURRENT = "shell.chat.v1";
-// the templates an app starts from (the platform's catalog: publish.rs),
-// each made with a title: the name its maker gives it, or the template's
-const CATALOG = [
-  { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
-  { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
-  { template: "blank", name: "Blank", about: "One page to start from." },
-  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search." },
+// How to ask an agent for an app (Paul, 2026-10-14: "rather than spawning
+// generic apps we teach the user how to prompt for new apps"): each says
+// who it is for and what it does, `…` the part to make their own. The
+// dock's Add lists them, an empty desktop its first three; pressed, one
+// goes into their chat's composer, theirs to change and send
+// (`composeApp`). Suggestions, not data: nothing is made or sent, and
+// nothing pretends to exist. Change them here.
+const APP_PROMPTS = [
+  "Make a shared grocery list my family can add to from their phones",
+  "Build a habit tracker that shows my weekly streak for: …",
+  "Make an RSVP page for my dinner on Saturday that tells me who's coming",
+  "Make a dashboard that checks the price of … every morning and charts it",
+  "Make a reading list where I paste a link and it keeps the title and a one-line summary",
+  "Build a chore chart for our house that rotates the jobs each week between: …",
+  "Make a page where my team votes on … and everyone sees the results live",
+  "Make a trip planner for … that my friends can add ideas and dates to",
 ];
 
 // me: the signed-in person; guest: whether their plan is a guest's, who
@@ -340,6 +349,10 @@ addEventListener("message", async (event) => {
   if (d.fragment === "agents?") {
     rosterTo.set(event.source, origin);
     event.source.postMessage({ fragment: "agents", agents: roster(), setup: setupFor(name) }, origin);
+    // a prompt pressed before its chat's page was there (`composeApp`)
+    const text = composing.get(name);
+    composing.delete(name);
+    if (text !== undefined) event.source.postMessage({ fragment: "compose", text }, origin);
     return;
   }
   const asker = event.source;
@@ -852,7 +865,7 @@ function showPeek(row, name) {
 const hidePeek = () => { peek.hidden = true; };
 // The desktop's dock: the person's apps (their list's, less the archived),
 // each its icon and title, one shared with them saying their role there;
-// then, for a seat, Add (the catalog).
+// then, for a seat, Add (how to ask for one: `showPrompts`).
 function renderApps() {
   hidePeek();
   const rows = shown(apps()).map((f) => {
@@ -876,22 +889,21 @@ function renderApps() {
     const add = el("button", "dock-app dock-add");
     add.type = "button";
     add.id = "add-app";
-    add.dataset.key = "catalog";
-    add.title = "Add an app";
+    add.dataset.key = "prompts";
+    add.title = "Ask for an app";
     const art = el("span", "dock-art");
     art.innerHTML = svg("plus");
     add.append(art, el("span", "label", "Add"));
-    add.onclick = () => { hidePeek(); showCatalog(); leaveSidebar(); };
+    add.onclick = () => { hidePeek(); showPrompts(); leaveSidebar(); };
     rows.push(add);
   }
   patch($("apps"), rows);
   $("apps").parentElement.hidden = !rows.length;
   renderDesktopEmpty(empty);
 }
-// A desktop with no apps says what lands there. A seat's also offers a few
-// requests of their agent, each a real one: pressed, it starts a chat with
-// it, its words the first message (the launcher's `startFromSearch`).
-const SUGGESTIONS = ["Make me a to-do list I can share", "Make a page to keep track of what I read", "Make a tracker for this week's habits"];
+// A desktop with no apps says what lands there. A seat's also offers the
+// first few ways to ask their agent for one (APP_PROMPTS), each put in
+// their chat's composer as the dock's Add's are.
 function renderDesktopEmpty(empty) {
   const box = $("desktop-empty");
   const primary = primaryAgent();
@@ -906,10 +918,10 @@ function renderDesktopEmpty(empty) {
   if (!asks) return;
   box.append(el("p", "desktop-empty-text", `Ask ${titleOf(primary.fragment)} for one:`));
   const list = el("div", "desktop-suggestions");
-  for (const text of SUGGESTIONS) {
+  for (const text of APP_PROMPTS.slice(0, 3)) {
     const b = el("button", "desktop-suggestion", text);
     b.type = "button";
-    b.onclick = () => { openSearch(b, text); startFromSearch(); };
+    b.onclick = () => composeApp(text);
     list.append(b);
   }
   box.append(list);
@@ -1119,39 +1131,60 @@ async function titleFromFirst(name) {
   }
 }
 
-// ---- the catalog: a new app from one of the platform's templates, its
-// window on the desktop (the dock's Add) ----
-function showCatalog() {
-  const box = el("div", "catalog");
-  box.replaceChildren(...CATALOG.map((t) => {
-    const card = el("form", "card");
-    const input = el("input");
-    input.name = "label";
-    input.placeholder = t.template;
-    input.pattern = "[a-z0-9]([a-z0-9\\-]*[a-z0-9])?";
-    input.maxLength = 63;
-    const error = el("div", "error");
-    const add = el("button", null, "Make it");
-    card.append(appIcon(t.template), el("strong", null, t.name), el("p", null, t.about), input, add, error);
-    card.onsubmit = async (e) => {
-      e.preventDefault();
-      add.disabled = true;
-      error.textContent = "";
-      try {
-        const label = input.value.trim();
-        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, title: label || t.name });
-        await load();
-        viewer.close("catalog");
-        openApp(made.name);
-      } catch (err) {
-        error.textContent = err.message;
-      } finally {
-        add.disabled = false;
-      }
-    };
-    return card;
-  }));
-  show({ key: "catalog", title: "Add an app", icon: paneIcon("grid"), body: box, persist: false });
+// ---- asking for an app: the dock's Add, a window of ways to ask
+// (APP_PROMPTS). An app is a message to the person's agent like any other;
+// one pressed goes into their chat's composer, to change and send. The
+// templates stay the CLI's and the agents' (`fragment create --template`).
+function showPrompts() {
+  const primary = primaryAgent();
+  const box = el("div", "app-prompts");
+  box.append(el("p", "app-prompts-lede", `${primary ? titleOf(primary.fragment) : "Your agent"} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`));
+  const list = el("div", "app-prompt-list");
+  for (const text of APP_PROMPTS) {
+    const b = el("button", "app-prompt", text);
+    b.type = "button";
+    b.onclick = () => composeApp(text);
+    list.append(b);
+  }
+  box.append(list);
+  show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
+}
+// The chat a prompt goes to: the open one when it is the person's own;
+// else their agent's newest, or a new chat with it (`newChat`).
+async function promptChat() {
+  const open = !state.page && byName(state.current);
+  if (open && open.kind === "chat" && own(open)) return open.name;
+  const primary = primaryAgent();
+  if (!primary?.identity) return null;
+  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newest)[0];
+  return theirs?.name ?? (await newChat(primary.identity, { quiet: true })) ?? null;
+}
+// A prompt waiting for its chat's page to ask `agents?` (a frame just
+// made): chat -> text.
+const composing = new Map();
+// Puts `text` in the composer of the person's chat and focuses it, sending
+// nothing: `{fragment: "compose", text}` to its frame, at its fragment's
+// origin (docs/api.md, The shell). On a phone the desktop's sheet goes, so
+// the composer is what shows.
+async function composeApp(text) {
+  let name;
+  try {
+    name = await promptChat();
+  } catch (e) {
+    return notice("The chat was not made", e.message);
+  }
+  if (!name) return notice("No agent yet", "Ask for an app once your agent is in your chat.");
+  viewer.close("prompts");
+  if (layout.narrow) {
+    layout.hide("right");
+    layout.hide("left");
+  }
+  if (state.page || state.current !== name) openChat(name);
+  const frame = state.frames.get(name);
+  frame?.focus();
+  const origin = frame && rosterTo.get(frame.contentWindow);
+  if (origin) frame.contentWindow.postMessage({ fragment: "compose", text }, origin);
+  else composing.set(name, text);
 }
 
 // ---- renaming: the chat's title (and, its own chat's, its agent's, so they stay one) ----

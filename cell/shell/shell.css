@@ -76,7 +76,7 @@ body { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-heigh
 /* the chrome is the app's, not text to select or hold; what people write and read stays selectable */
 button, .row, .menu, .topbar, .sidebar-top, .settings-nav, .pane-head, .desktop-dock, .chip { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 button, a, .row, summary, label { touch-action: manipulation; }
-.rows, .page, .pane-body, .search-dialog, .search-results, .menu, .catalog, .first-run { overscroll-behavior: contain; }
+.rows, .page, .pane-body, .search-dialog, .search-results, .menu, .first-run { overscroll-behavior: contain; }
 button, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 svg { width: var(--icon-size); height: var(--icon-size); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
@@ -214,15 +214,13 @@ body.reordering iframe { pointer-events: none; }
 .pane-action svg { width: var(--icon-size); height: var(--icon-size); }
 .pane-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; scrollbar-width: thin; }
 .pane-body > iframe { flex: 1; width: 100%; border: 0; background: var(--bg-window); }
-/* the catalog, a window on the desktop (shell.js showCatalog) */
-.catalog { padding: 14px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; align-content: start; }
-.card { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); }
-.card strong { font-size: 15px; }
-.card p { margin: 0; font-size: 13px; color: var(--text-secondary); flex: 1; }
-.card button { align-self: flex-start; border: 1px solid var(--border-strong); background: none; border-radius: 999px; padding: 4px 14px; font-size: 13px; font-weight: 600; }
-.card button:disabled { opacity: .48; }
-.card input { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-window); color: var(--text-primary); width: 100%; }
-.card .error { color: var(--danger-text); font-size: 12px; min-height: 1em; }
+/* asking for an app, a window on the desktop (shell.js showPrompts): each
+   a way to ask, pressed into the chat's composer */
+.app-prompts { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.app-prompts-lede { margin: 0 2px; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.app-prompt-list { display: flex; flex-direction: column; gap: 8px; }
+.app-prompt { width: 100%; padding: 11px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; transition: background-color .15s, border-color .15s; }
+.app-prompt:hover, .app-prompt:focus-visible { border-color: var(--border-strong); background: var(--bg-hover); outline: none; }
 
 /* ---- narrow: the sides become overlays over the chat ---- */
 .scrim { display: none; }
