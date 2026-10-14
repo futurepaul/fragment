@@ -2403,9 +2403,7 @@ fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after] }),
     );
 
-    // a quote in the composer, then the dock's Add
-    b.eval_in_frame(page, chat, "([...document.querySelectorAll('.msg.agent .actions .reply')].pop()?.click(), true)")?;
-    let quoted = s.eventually(wait, || b.eval_in_frame(page, chat, "!document.getElementById('quoting').hidden").ok() == Some(Value::Bool(true)));
+    // the dock's Add
     b.click(page, "#add-app")?;
     let pane = "#stack .pane[data-key=prompts]";
     let listed = b.until(page, &format!("document.querySelectorAll('{pane} .app-prompt').length === 8"), wait);
@@ -2426,6 +2424,9 @@ fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     );
     b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
     let _ = b.screenshot(page, &shots.join("desktop-prompts.png"));
+    // a reply's quote in the composer: an app's request is no reply, so the prompt clears it
+    b.eval_in_frame(page, chat, "([...document.querySelectorAll('.msg.agent .actions .reply')].pop()?.click(), true)")?;
+    let quoted = s.eventually(wait, || b.eval_in_frame(page, chat, "!document.getElementById('quoting').hidden").ok() == Some(Value::Bool(true)));
     let pick = prompts.iter().position(|p| p.contains('…')).unwrap_or(0);
     let text = prompts.get(pick).cloned().unwrap_or_default();
     let before = chat_count(api, session, chat);
@@ -2440,7 +2441,7 @@ fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let after = chat_count(api, session, chat);
     let _ = b.screenshot(page, &shots.join("desktop-prompt-composed.png"));
     s.ok(
-        "one pressed goes into the open chat's composer in place of what was there and of its quote, focused, its … selected to type over; the window closes, and nothing is sent",
+        "one pressed goes into the open chat's composer in place of what was typed, and clears the reply's quote set just before (a request is no reply), focused, its … selected to type over; the window closes, and nothing is sent",
         quoted && composed && closed && framed && after == before,
         json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after], "quoted": quoted, "framed": framed }),
     );
