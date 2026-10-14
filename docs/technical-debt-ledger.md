@@ -1200,3 +1200,43 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** any report of a downgrade.
 - **Delete when:** both zones send HSTS (at cutover, when they move to
   Cloudflare), checked by the hosted lane.
+
+## An agent's own chat's title is a copy its owner's shell keeps
+
+- **Observed:** 2026-10-14 (Paul on p5): his agent renamed itself (its
+  fragment's `meta.title`, deployed), and its own chat, titled with its
+  old name when the shell made it, kept that name in the sidebar and the
+  chat's header.
+- **Shortcut:** the shell shows an agent's own chat (`<label>-chat`, its
+  person's) by its agent's title, and, seeing the chat's own title differ,
+  writes the agent's name into the chat's `fragment.json` and deploys it,
+  once a page (cell/shell/shell.js, `followNames`; docs/api.md, "An
+  agent's name and picture").
+- **Risk:** until its owner opens the shell, what reads the chat's own
+  title (its share sheet's heading, search, the access view, an export)
+  says the old name; two of the owner's tabs may both write it (the second
+  commits nothing).
+- **First proof:** the e2e's `shell-ui` renames the agent as the CLI does,
+  and waits for the chat's own title to follow.
+- **Delete when:** a chat that is an agent's own names no title of its own
+  (the platform shows it by its agent's, as the shell does), or the
+  platform keeps the two one where it installs the agent's.
+
+## A chat's page not framed by its owner learns a rename at the agent's next turn
+
+- **Observed:** 2026-10-14, building one name and picture for an agent:
+  a chat's page reads `__people` once per identity, and no live event
+  tells a page of one fragment that another (the agent's) changed its face.
+- **Shortcut:** framed by its owner's shell, the page takes the roster's
+  title and picture, which follow the owner's list live; anywhere else
+  (a guest's page, a chat in a tab of its own) it asks `__people` again as
+  each of an agent's turns ends (templates/chat/site/chat.js, `again`).
+- **Risk:** someone else's open chat shows an agent's old name and picture
+  until that agent's next turn ends, or a reload, when the agent was
+  renamed from Settings rather than in a turn.
+- **First proof:** a second person's browser on a shared chat, the owner
+  renaming the agent in Settings: their page keeps the old name until the
+  agent speaks.
+- **Delete when:** a fragment's pages hear its agents' face changes (an
+  agent fragment's install telling the chats it is in, as its joining
+  does).

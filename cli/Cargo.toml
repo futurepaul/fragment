@@ -23,6 +23,7 @@ serde_json = "1"
 # intranet's, or its TLS-inspecting proxy's), installed in the OS's store
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots"] }
 sha2 = "0.10"
+base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
 dirs = "5"

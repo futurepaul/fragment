@@ -97,6 +97,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .agent-avatar.large { width: 70px; height: 70px; margin-bottom: 22px; }
 .agent-avatar.small { width: 26px; height: 26px; }
 .agent-avatar.tiny { width: 20px; height: 20px; }
+/* an agent's own picture (its avatar.png), round, in its mark's room */
+.agent-avatar.picture { background: none; -webkit-mask: none; mask: none; border-radius: 50%; overflow: hidden; }
+.agent-avatar.picture::after { content: none; }
+.agent-avatar.picture img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
 /* the chat's name, when no shell frames it */
 .chat-head { flex: none; display: flex; justify-content: center; padding: 12px 8px 0; }

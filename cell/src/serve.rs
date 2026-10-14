@@ -214,17 +214,7 @@ impl FragmentCell {
                 Some(p) if self.member_role(p)?.is_some() => self.members_among(&ids)?,
                 _ => vec![],
             };
-            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of, agents_of: vec![] }).await?;
-            let platform = self.cfg.platform();
-            // bounded: the registry answers at most 64 profiles
-            for p in answer.profiles.values_mut() {
-                p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
-                if let Some(fragment) = p.fragment.clone() {
-                    let face = crate::fragment::ask(&self.env, &fragment, "computer/face", &json!({})).await.unwrap_or(Value::Null);
-                    p.title = face["title"].as_str().map(str::to_string);
-                }
-            }
-            json_response(&answer)?
+            json_response(&self.people(ids, emails_of).await?)?
         } else if let Some(channel) = path.strip_prefix("__channel/") {
             if req.method() != Method::Get {
                 return Err(CellError::invalid("read a channel with GET"));

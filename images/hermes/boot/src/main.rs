@@ -735,19 +735,31 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
 }
 
 /// An agent's Bot Mode identity (bots.rs, `profile_yaml`): its agent
-/// fragment's title, read from its list (a title unread is its name on the
-/// computer), and its job's first line from its SOUL.md as the sync left
-/// it.
+/// fragment's title, its name everywhere (docs/api.md, "An agent's name and
+/// picture"), read from its status, and its job's first line from its
+/// SOUL.md as the sync left it. Written when it changed: at its boot, as
+/// a sync pulls its job, and as its owner or the agent renames it (read
+/// again with its model, every `HERMES_BOOT_MODEL_MS`), nothing restarted:
+/// Hermes reads `profile.yaml` again as it uses it. A title unread leaves
+/// the file as it was, or, with none yet, names it by its name on the
+/// computer. Bot Mode has no picture (Hermes v0.21.6 reads a profile's
+/// title, display name and description alone).
 async fn write_identity(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>) {
-    let title = match api.fragments(&a.fragment).await {
-        Ok(list) => list.into_iter().find(|f| f.name == a.fragment).map(|f| f.title),
+    let path = dir.join("profile.yaml");
+    let title = match api.title(&a.fragment, &a.fragment).await {
+        Ok(title) => title,
+        Err(e) if path.exists() => return ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string(), "kept": true }),
         Err(e) => {
             ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string() });
             None
         }
     };
     let soul = std::fs::read_to_string(dir.join("SOUL.md")).ok();
-    write_whole(&dir.join("profile.yaml"), &bots::profile_yaml(a, title.as_deref(), soul.as_deref()), ids);
+    let yaml = bots::profile_yaml(a, title.as_deref(), soul.as_deref());
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(yaml.as_str()) {
+        write_whole(&path, &yaml, ids);
+        ev!("profile.identity", { "agent": a.fragment, "title": title });
+    }
 }
 
 /// Each agent's profile at a boot, and the profiles of agents that left
@@ -1353,11 +1365,14 @@ async fn boot_main() {
                     Err(_) => {}
                 }
             }
-            // each agent's model, as its owner last picked it (agent.json)
+            // each agent's model, as its owner last picked it (agent.json),
+            // and its name, as it or its owner last named it
             if last_models.elapsed() >= Duration::from_millis(models_every) {
                 last_models = Instant::now();
                 for a in &agents {
-                    write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &model, &credential_env, high_on).await;
+                    let dir = hermes::profile_dir(&home, &a.fragment);
+                    write_config(&api, a, &dir, ids, &model, &credential_env, high_on).await;
+                    write_identity(&api, a, &dir, ids).await;
                 }
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {

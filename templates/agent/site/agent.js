@@ -1,8 +1,10 @@
-// The agent's page: its name (the fragment's title), its colour and its
-// model (`agent.json`: its tier, or a model of a provider its owner
-// connected, `model: {provider, id}`), its job
-// (`SOUL.md`) and the skills in its repo, read from the fragment's own
-// files (`__file`, `__files`).
+// The agent's page: its name (the fragment's title), its picture
+// (`avatar.png`, else its image in its colour), its model (`agent.json`:
+// its tier, or a model of a provider its owner connected, `model:
+// {provider, id}`), its job (`SOUL.md`) and the skills in its repo, read
+// from the fragment's own files (`__file`, `__files`). Its name and picture
+// are changed from Settings, or by the agent (`fragment agent`: docs/api.md,
+// "An agent's name and picture").
 const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 
 const text = async (path) => {
@@ -29,7 +31,15 @@ async function main() {
   try {
     settings = JSON.parse((await text("agent.json")) || "{}");
   } catch {}
-  document.getElementById("avatar").style.setProperty("--agent-color", settings.color || colorOf(name));
+  const avatar = document.getElementById("avatar");
+  avatar.style.setProperty("--agent-color", settings.color || colorOf(name));
+  const picture = new Image();
+  picture.alt = "";
+  picture.onload = () => {
+    avatar.classList.add("picture");
+    avatar.replaceChildren(picture);
+  };
+  picture.src = "__file?path=avatar.png";
   document.getElementById("tier").textContent = settings.model?.id ? `${settings.model.id} (${settings.model.provider})` : settings.tier ? `${settings.tier} model` : "";
   const soul = await text("SOUL.md");
   const box = document.getElementById("soul");

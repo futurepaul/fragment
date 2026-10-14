@@ -86,7 +86,10 @@ pub fn profile_yaml(agent: &Agent, title: Option<&str>, soul: Option<&str>) -> S
     let name = [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty());
     let name = name.unwrap_or_else(|| label(&agent.fragment));
     let about = soul.map(description).unwrap_or_default();
-    let mut y = format!("# Written by hermes-boot for {} at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n", agent.fragment);
+    let mut y = format!(
+        "# Written by hermes-boot for {}, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n",
+        agent.fragment
+    );
     y.push_str(&format!("display_name: {}\n", q(name)));
     if !about.is_empty() {
         y.push_str(&format!("description: {}\n", q(&about)));
@@ -244,7 +247,7 @@ mod tests {
         let y = profile_yaml(&agent("juniper", "juniper"), Some("Juniper"), Some("You tend the garden: \"weeds\" first.\n"));
         assert_eq!(
             y,
-            "# Written by hermes-boot for juniper--k3x9 at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n\
+            "# Written by hermes-boot for juniper--k3x9, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n\
              display_name: \"Juniper\"\n\
              description: \"You tend the garden: \\\"weeds\\\" first.\"\n\
              ui_meta:\n  hermes-bots:\n    title: \"Juniper\"\n    description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
@@ -257,6 +260,20 @@ mod tests {
         let odd = profile_yaml(&agent("x", "x"), Some("a: b\n# c"), Some("line: one"));
         assert!(odd.contains("display_name: \"a: b\\n# c\"\n"), "a name is one scalar, never more YAML: {odd}");
         assert!(GATEWAY_PROFILE_YAML.contains("description: ") && !GATEWAY_PROFILE_YAML.contains("hermes-bots"), "the gateway is no bot");
+        // renamed (its fragment's title), the bot is its new name alone
+        let renamed = profile_yaml(&agent("juniper", "juniper"), Some("Frank"), Some("You tend the garden.\n"));
+        assert!(renamed.contains("display_name: \"Frank\"\n") && renamed.contains("    title: \"Frank\"\n") && !renamed.contains("\"Juniper\""), "{renamed}");
+    }
+
+    /// What every agent is told of its name and picture (the platform
+    /// skill's page, computer.md): the one way to change them, and never by
+    /// the profile's files, which the boot writes again.
+    #[test]
+    fn an_agent_is_told_how_to_rename_itself() {
+        let page = include_str!("computer.md");
+        for said in ["fragment agent --name", "fragment agent --picture", "fragment agent --no-picture", "`profile.yaml`", "256 KiB"] {
+            assert!(page.contains(said), "computer.md says {said}");
+        }
     }
 
     /// Valid: a fresh profile gets `hooks/` and the link; replay: the same

@@ -2629,6 +2629,18 @@ async fn bots_message_each_other() {
     fake.until(180_000, "Hermes' bridge to follow the agents' chats", |w| w.live_sockets() >= 7).await;
     let yaml = c.exec_out(&["cat", "/data/hermes/profiles/maple--k3x9/profile.yaml"]);
     assert!(yaml.contains("display_name: \"Maple\"\n") && yaml.contains("ui_meta:\n  hermes-bots:\n    title: \"Maple\"\n"), "maple is a bot, named by her fragment's title: {yaml}");
+    // renamed while it runs (its fragment's title, as Settings or `fragment
+    // agent --name` sets it: docs/api.md, "An agent's name and picture"),
+    // a bot's identity follows within seconds, nothing restarted
+    fake.with(|w| w.fragments.get_mut("fern--k3x9").expect("fern's fragment").title = "Fernando".into());
+    let fern = || c.exec_out(&["cat", "/data/hermes/profiles/fern--k3x9/profile.yaml"]);
+    let t = Instant::now();
+    while !fern().contains("display_name: \"Fernando\"\n") {
+        assert!(t.elapsed() < Duration::from_secs(40), "fern's Bot Mode identity follows her new name: {}", fern());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(fern().contains("ui_meta:\n  hermes-bots:\n    title: \"Fernando\"\n"), "her bot's title too: {}", fern());
+    assert_eq!(c.logs().matches("\"boot.init\"").count(), 1, "nothing restarted for it");
     // each bot's first message in its own chat makes its session there
     for (chat, agent) in [(&jchat, "juniper--k3x9"), (&mchat, "maple--k3x9")] {
         let said = fake.say(chat, &person("paul"), json!({ "text": "hello" }));

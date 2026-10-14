@@ -482,6 +482,9 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
     let Some(role) = World::role_in(f, &me, acting_for.as_deref()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
     match (method, &p[3..]) {
+        // what a status says of it that the image reads: its title (an
+        // agent's name: hermes-boot's Bot Mode identity)
+        (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title })),
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();
             answer(StatusCode::OK, json!({ "channels": list }))

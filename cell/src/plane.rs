@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 
 use fragment_core::tree::{self, Indexed, TreeDiff};
-use fragment_core::{manifest, npub, site};
-use fragment_proto::{limits, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_core::{face, manifest, npub, site};
+use fragment_proto::{limits, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
 use fragment_templates::{blessed, File};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -394,6 +394,15 @@ impl FragmentCell {
                 Err(why) => return self.code_refused(sha, &why),
             },
         };
+        // an agent's picture, checked as a write of it is (docs/api.md, "An
+        // agent's name and picture"): a live commit with one that is not is refused
+        let picture = match manifest.kind() {
+            FragmentKind::Agent => match self.read_picture(&cs, &repo, sha).await? {
+                Ok(p) => p,
+                Err(why) => return self.code_refused(sha, &why),
+            },
+            _ => None,
+        };
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
@@ -402,7 +411,17 @@ impl FragmentCell {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
             None => self.del_meta(MetaKey::Blessed)?,
         }
-        self.face_is(manifest.kind(), manifest.title())?;
+        let shown = match &picture {
+            Some((hash, mime)) => {
+                self.set_meta(MetaKey::Picture, &format!("{hash} {mime} {sha}"))?;
+                Some(face::picture_path(&self.must(MetaKey::Npub)?, hash))
+            }
+            None => {
+                self.del_meta(MetaKey::Picture)?;
+                None
+            }
+        };
+        self.face_is(manifest.kind(), manifest.title(), shown.as_deref())?;
         let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
@@ -497,6 +516,22 @@ impl FragmentCell {
             modules.insert(path, text);
         }
         Ok(Ok((source, modules, format!("app:{}", hex::encode(hasher.finalize())))))
+    }
+
+    /// An agent fragment's picture at live (`face::AGENT_PICTURE`): none,
+    /// its SHA-256 and type, checked as a write of it is, or why it is
+    /// refused.
+    async fn read_picture(&self, cs: &Cs<'_>, repo: &str, sha: &str) -> CellResult<Result<Option<(String, &'static str)>, String>> {
+        let path = face::AGENT_PICTURE;
+        let Some(row) = self.tree_row("live", path)? else { return Ok(Ok(None)) };
+        // a blob's pointer (1 MiB and up), or a file past the limit, is too large unread
+        let pointed = self.rows("SELECT size FROM pointers WHERE ref = 'live' AND path = ?", vec![path.into()])?.first().and_then(|r| r["size"].as_u64());
+        let size = pointed.unwrap_or(row.size);
+        if pointed.is_some() || size > limits::PICTURE_MAX_BYTES as u64 {
+            return Ok(Err(face::Refused::TooLarge(size).message(path)));
+        }
+        let bytes = cs.read(repo, sha, path, limits::PICTURE_MAX_BYTES).await?.unwrap_or_default();
+        Ok(face::check_picture(&bytes).map(|mime| Some((hex::encode(Sha256::digest(&bytes)), mime))).map_err(|r| r.message(path)))
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {

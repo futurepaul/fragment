@@ -397,8 +397,12 @@ pub(crate) enum MetaKey {
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
-    /// What its members' lists show of it (`{kind, title}`), as last sent.
+    /// What its members' lists show of it (`{kind, title, picture?}`), as
+    /// last sent.
     Face,
+    /// An agent fragment's picture as live's install read it (`<sha256>
+    /// <type> <commit>`): what `computer/picture` answers.
+    Picture,
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
@@ -474,6 +478,7 @@ impl MetaKey {
             MetaKey::MetaLive => "meta_live",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
+            MetaKey::Picture => "picture",
             MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
@@ -881,6 +886,9 @@ impl FragmentCell {
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            if route == "picture" {
+                return self.picture().await;
+            }
             let route = route.to_string();
             let body: Value = body_json(&mut req).await?;
             return json_response(&self.runs_on(&route, &body).await?);
@@ -1162,7 +1170,7 @@ impl FragmentCell {
             // which sets it from the same manifest)
             if let Ok(Ok(m)) = crate::assets::blessed_manifest(&self.env, t).await {
                 let title = body.title.as_deref().map(str::trim).or(m.title());
-                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title))?;
+                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, None))?;
             }
         }
         self.index_change(&owner, Some(Role::Owner))?;

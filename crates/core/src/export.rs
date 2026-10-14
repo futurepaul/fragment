@@ -466,7 +466,7 @@ pub struct FragmentMeta {
     pub code_error: Option<String>,
     /// Its members as its owner's share sheet shows them: a person with
     /// their email and their agents (a share is a person's and their
-    /// agents'), an agent with its name and its owner's email.
+    /// agents'), an agent with its name (its label), its title and its owner's email.
     pub members: Vec<Value>,
     /// The invites waiting on an email.
     pub invites: Vec<Value>,
@@ -776,15 +776,15 @@ template it runs (if one), its npub, its owner, its visibility, whether a
 share link or an inbox token exists (never the tokens), the commits its
 `main` and `live` are at, the code live runs, its members (a person with
 their email and their agents, who reach what they do: a share is a
-person's and their agents'; an agent with its name and its owner's email),
+person's and their agents'; an agent with its name, its title and its owner's email),
 the invites waiting on an email, its secrets'
 names (never their values), and how many files, rows, records and blobs it
 holds. `skipped` names anything the export could not take, and why.
 
 `files/` is the fragment's files at `main`, its working copy, byte for byte:
 a file of 1 MiB or more is there whole (git holds it as a pointer to its
-blob). An agent's soul, memories and skills are its fragment's files
-(`SOUL.md`, `memories/`, `skills/`). Git's history is not in the archive.
+blob). An agent's soul, memories, skills and picture are its fragment's files
+(`SOUL.md`, `memories/`, `skills/`, `avatar.png`). Git's history is not in the archive.
 
 `database/schema.sql` is the `CREATE` statements of the app's SQLite
 database, each ending in `;`. Each `database/<table>.jsonl` holds one row a

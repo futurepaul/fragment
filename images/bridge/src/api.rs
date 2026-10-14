@@ -300,6 +300,19 @@ impl Api {
         Ok(a.fragments)
     }
 
+    /// `GET /api/f/{name}/status`'s title: what the fragment is called, as
+    /// its live `fragment.json` last said (none when it names none). An
+    /// agent's own is its name (docs/api.md, "An agent's name and picture").
+    pub async fn title(&self, agent: &str, fragment: &str) -> Result<Option<String>, ApiError> {
+        #[derive(Deserialize)]
+        struct A {
+            #[serde(default)]
+            title: Option<String>,
+        }
+        let a: A = self.json(Method::GET, &format!("/api/f/{}/status", name(fragment)?), Some(agent), None).await?;
+        Ok(a.title)
+    }
+
     /// `GET /api/f/{name}/channels`.
     pub async fn channels(&self, agent: &str, fragment: &str) -> Result<Vec<ChannelInfo>, ApiError> {
         #[derive(Deserialize)]

@@ -522,26 +522,31 @@ async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
     }
 }
 
-/// A picture's type from its first bytes (a request's content-type is not trusted).
-pub(crate) fn picture_type(bytes: &[u8]) -> Option<&'static str> {
-    match bytes {
-        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
-        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
-        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
-        _ => None,
-    }
+/// A picture refused (`fragment_core::face`): one too large is 413, one
+/// that is no picture 400.
+pub(crate) fn picture_refused(r: fragment_core::face::Refused, what: &str) -> CellError {
+    let code = match r {
+        fragment_core::face::Refused::TooLarge(_) => ErrorCode::TooLarge,
+        fragment_core::face::Refused::NotAnImage => ErrorCode::InvalidRequest,
+    };
+    CellError::new(code, r.message(what))
 }
 
-/// `GET /api/identities/<npub>/picture`: anyone may see a person's
-/// picture (a page shows it beside their name).
+/// `GET /api/identities/<npub>/picture`: anyone may see an identity's
+/// picture (a page shows it beside their name). A person's is the
+/// registry's; an agent's is its agent fragment's `avatar.png` at live,
+/// which that fragment answers (docs/api.md, "An agent's name and picture").
 async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
     if !npub::is_identity(identity) {
         return Err(CellError::new(ErrorCode::NotFound, format!("{identity:?} is no identity")));
     }
-    let picture = ask_registry(env, &calls::PictureOf { identity: identity.to_string() })
-        .await?
-        .ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{identity} has no picture")))?;
+    let none = || CellError::new(ErrorCode::NotFound, format!("{identity} has no picture"));
+    let Some(picture) = ask_registry(env, &calls::PictureOf { identity: identity.to_string() }).await? else {
+        let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![], agents_of: vec![] }).await?;
+        let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
+        let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
+        return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
+    };
     let blob = js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();
     headers.set("content-type", &picture.mime)?;
@@ -718,10 +723,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
     };
     match (method, rest) {
         (Method::Put, ["me", "picture"]) => {
-            if body.len() > limits::PICTURE_MAX_BYTES {
-                return Err(CellError::too_large("a picture", body.len(), limits::PICTURE_MAX_BYTES));
-            }
-            let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
+            let mime = fragment_core::face::check_picture(&body).map_err(|r| picture_refused(r, "the picture"))?;
             // Two round trips, on purpose: the bytes land in BLOBS before the
             // registry names them, so no one it does not know stores any.
             ask_registry(env, &calls::View { identity: None, by: by() }).await?;

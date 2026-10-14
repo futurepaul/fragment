@@ -72,6 +72,7 @@ fragment create <label> --template todo          # one with no folder (`fragment
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
+fragment agent <agent> --name Frank --picture frank.jpg   # an agent's name and picture (an agent: its own, no <agent>)
 ```
 
 A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds

@@ -114,6 +114,16 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         access_before["members"].as_array().is_some_and(|m| m.iter().any(|m| m["email"] == MEMBER_EMAIL && m["role"] == "editor")) && access_before["invites"][0]["email"] == invitee.as_str(),
         "access setup: {access_before}"
     );
+    // an agent's name and picture (faces.rs): its fragment's, in its own
+    // storage and its git, shown from its face
+    let (face_owner, face_session) = super::templates::person(&api)?;
+    let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
+    let faced = faced["name"].as_str().unwrap_or("").to_string();
+    let face_png = super::faces::orange();
+    let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
+    let face_path = super::faces::picture_path(&face_id, &face_png);
+    let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
+    anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
     // a tool loop held after the call it bought (a tool call), its next
     // call refused for good (ai_tools.rs)
     let tooled = ai_tools::tools_fragment(s, &api, &owner, "restart-tools")?;
@@ -126,6 +136,14 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
 
     s.stop()?;
     let api = s.start(false)?;
+    let face_row = super::faces::row(&api, &face_owner, &faced);
+    let face_got = super::faces::fetched(&api, &face_path)?;
+    let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
+    s.ok(
+        "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them",
+        face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
+        json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
+    );
     let access_after = access_row(&api);
     s.ok(
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",

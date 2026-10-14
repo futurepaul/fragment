@@ -265,10 +265,24 @@ function size(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function avatar(color, extra = "") {
+/// An agent's mark: its picture when it has one (its agent fragment's
+/// `avatar.png`, served by the platform), else its image in its color. A
+/// picture that does not load leaves the image.
+function avatar(color, extra = "", picture = null) {
   const mark = el("span", `agent-avatar ${extra}`);
   mark.style.setProperty("--agent-color", color);
   mark.setAttribute("aria-hidden", "true");
+  if (picture) {
+    const img = el("img");
+    img.alt = "";
+    img.src = picture;
+    img.onerror = () => {
+      img.remove();
+      mark.classList.remove("picture");
+    };
+    mark.classList.add("picture");
+    mark.append(img);
+  }
   return mark;
 }
 
@@ -355,7 +369,7 @@ export function mount(root) {
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
     expandedNotes: new Set(), // turn:step, a commentary someone expanded
-    roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
+    roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title, picture }]
     failed: new Map(), // post id -> the message and its transport error
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
@@ -467,6 +481,13 @@ export function mount(root) {
     asking.add(principal);
     if (!askTimer) askTimer = setTimeout(ask, 20);
   }
+  // An agent's name and picture change while the page is open (it renamed
+  // itself in a turn): it is asked again as each of its turns ends.
+  function again(principal) {
+    if (!profiles.get(principal)) return;
+    profiles.delete(principal);
+    want(principal);
+  }
   async function ask() {
     askTimer = 0;
     const ids = [...asking];
@@ -498,9 +519,12 @@ export function mount(root) {
     want(principal);
     const p = profiles.get(principal);
     if (isAgent(principal)) {
+      // its agent fragment's title and picture: the owner's shell's roster
+      // as its list says now, else the fragment's `__people`
       const r = inRoster(principal);
-      const name = p?.title ?? r?.title ?? (p?.name ? capital(p.name) : r ? capital(r.name) : "Agent");
-      return { agent: true, name, color: colorOf(principal) };
+      const name = r?.title ?? p?.title ?? (p?.name ? capital(p.name) : "Agent");
+      const picture = r ? r.picture : typeof p?.picture === "string" ? p.picture : null;
+      return { agent: true, name, color: colorOf(principal), picture };
     }
     // a member's email shows to a member (decision 48); anyone else is their npub's end
     const name = p?.email ?? (p ? `npub…${principal.slice(-6)}` : "…");
@@ -545,7 +569,7 @@ export function mount(root) {
   }
 
   function face(principal, w = who(principal), agentSize = "tiny") {
-    if (w.agent) return avatar(w.color, agentSize);
+    if (w.agent) return avatar(w.color, agentSize, w.picture);
     const f = el("span", "face");
     if (w.picture) {
       const img = el("img");
@@ -693,6 +717,7 @@ export function mount(root) {
       t.end = { outcome: b.outcome, error: typeof b.error === "string" ? b.error : "", at: record.at, n };
       state.drafts.delete(b.turn);
       state.stopping.delete(b.turn);
+      if (history.workReady) again(t.agent);
     }
     want(t.agent);
     // an agent this page did not know is in the chat: it was added since
@@ -953,7 +978,13 @@ export function mount(root) {
     const title = names.length ? names.join(", ") : "Chat";
     if (document.title !== title) document.title = title;
     $("head-label").textContent = title;
-    $("head-marks").replaceChildren(...(agents.length ? agents : [first]).slice(0, 3).map((a) => avatar(colorOf(a), "tiny")));
+    // its agents' faces, drawn again only when one changed (a picture's image is kept)
+    const marked = (agents.length ? agents : [first]).slice(0, 3);
+    const marks = JSON.stringify(marked.map((a) => [a, a ? who(a).picture : null]));
+    if ($("head-marks").dataset.shown !== marks) {
+      $("head-marks").dataset.shown = marks;
+      $("head-marks").replaceChildren(...marked.map((a) => (a ? face(a, who(a)) : avatar(colorOf(a), "tiny"))));
+    }
     const mine = myTurn();
     const stop = $("stop");
     stop.disabled = !mine || state.stopping.has(mine.id);
@@ -1462,12 +1493,12 @@ export function mount(root) {
   function emptyNode() {
     const agents = chatAgents();
     const names = agents.map((a) => who(a).name);
-    const sig = `${names.join(",")}|${canPost()}`;
+    const sig = `${names.join(",")}|${agents.map((a) => who(a).picture ?? "").join(",")}|${canPost()}`;
     return [
       "empty",
       cached("empty", sig, () => {
         const wrap = el("div", "empty");
-        wrap.append(avatar(colorOf(agents[0]), "large"), el("h2", null, names.length ? names.join(", ") : "New chat"));
+        wrap.append(agents[0] ? face(agents[0], who(agents[0]), "large") : avatar(colorOf(null), "large"), el("h2", null, names.length ? names.join(", ") : "New chat"));
         wrap.append(el("p", null, !canPost() ? "Nothing has been said here yet." : names.length ? "A fresh start. What should we work on together?" : "No agent is in this chat yet."));
         if (canPost() && names.length) {
           const chips = el("div", "suggestions");
@@ -1889,7 +1920,7 @@ export function mount(root) {
         b.setAttribute("role", "option");
         b.setAttribute("aria-selected", String(i === picking.index));
         b.dataset.agent = a;
-        b.append(avatar(colorOf(a), "tiny"), who(a).name);
+        b.append(face(a, who(a)), who(a).name);
         if (!here.includes(a)) {
           b.classList.add("outside");
           b.append(el("span", "mention-note", "adds them to this chat"));
@@ -1982,7 +2013,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
       if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
         setup = {
           steps: d.setup.steps

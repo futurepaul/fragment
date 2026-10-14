@@ -64,9 +64,10 @@ use crate::routed::{Routed, Signed};
 const FORM_MAX_BYTES: usize = 4 * 1024;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
-/// Agent members whose titles the sheet asks their fragments for, at most
-/// (a chat's agents are fewer): past it, an agent shows by its label.
-const TITLED_AGENTS_MAX: usize = limits::LISTED_AGENTS_MAX;
+/// Agent fragments one naming asks for their faces, at most (`name_agents`:
+/// a page's `__people` names at most 64 identities; a chat's agents are
+/// fewer): past it, an agent shows by its label.
+pub(crate) const FACES_MAX: usize = 64;
 
 /// The shell's look (cell/fragment.css: its warm greys, its one blue,
 /// pill buttons), as a card: the page's, or, in the shell's dialog
@@ -306,7 +307,37 @@ pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String
             Err(e) => console_error!("sharing's profiles: {:?} {}", e.code, e.message),
         }
     }
+    name_agents(env, &mut all).await;
     all
+}
+
+/// Names each agent among `profiles`, and each person's agents they list,
+/// by its agent fragment's face (its title, and its picture's address on
+/// the platform), the one source every page and the platform show an agent
+/// by (docs/api.md, "An agent's name and picture"): at most `FACES_MAX`
+/// fragments asked at once, the profiles' own agents first. One not asked,
+/// or whose fragment does not answer, keeps its label.
+pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profile>) {
+    let mut asked: Vec<String> = vec![];
+    let own = profiles.values().filter_map(|p| p.fragment.clone());
+    for f in own.chain(profiles.values().flat_map(|p| p.agents.iter().filter_map(|a| a.fragment.clone()))) {
+        if asked.len() < FACES_MAX && !asked.contains(&f) {
+            asked.push(f);
+        }
+    }
+    let none = json!({});
+    let faces = join_all(asked.iter().map(|f| crate::fragment::ask(env, f, "computer/face", &none))).await;
+    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).collect();
+    let face = |f: &Option<String>, key: &str| f.as_ref().and_then(|f| faces.get(f)).and_then(|v| v[key].as_str()).map(str::to_string);
+    for p in profiles.values_mut() {
+        if p.kind == IdentityKind::Agent && p.fragment.is_some() {
+            p.title = face(&p.fragment, "title");
+            p.picture = face(&p.fragment, "picture");
+        }
+        for a in &mut p.agents {
+            a.title = face(&a.fragment, "title");
+        }
+    }
 }
 
 /// The ids a member list needs named: its members, and its agent
@@ -353,7 +384,7 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
-    let theirs: Vec<String> = p.map_or(&[][..], |p| &p.agents[..]).iter().map(|a| esc(a.name.as_deref().unwrap_or(&npub::display(&a.id)))).collect();
+    let theirs: Vec<String> = p.map_or(&[][..], |p| &p.agents[..]).iter().map(|a| esc(a.title.as_deref().or(a.name.as_deref()).unwrap_or(&npub::display(&a.id)))).collect();
     if !theirs.is_empty() {
         under.push(format!("With their agent{} {}", if theirs.len() == 1 { "" } else { "s" }, theirs.join(", ")));
     }
@@ -431,19 +462,8 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
-    let mut profiles = profiles(env, named_ids(&members.members)).await;
-    // an agent by its title, as the shell names it (a chat's agents are few)
-    let agents: Vec<String> = profiles.iter().filter_map(|(id, p)| p.fragment.clone().map(|f| (id, f))).take(TITLED_AGENTS_MAX).map(|(id, _)| id.clone()).collect();
-    let faces = join_all(agents.iter().map(|id| {
-        let fragment = profiles[id].fragment.clone().unwrap_or_default();
-        async move { crate::fragment::ask(env, &fragment, "computer/face", &json!({})).await.unwrap_or(Value::Null) }
-    }))
-    .await;
-    for (id, face) in agents.iter().zip(faces) {
-        if let (Some(p), Some(t)) = (profiles.get_mut(id), face["title"].as_str()) {
-            p.title = Some(t.to_string());
-        }
-    }
+    // an agent by its title and picture, as the shell shows it
+    let profiles = profiles(env, named_ids(&members.members)).await;
     Ok(Sheet {
         me: who.id.clone(),
         role,
@@ -816,7 +836,7 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
 /// members and invites as `who`, its first `ACCESS_ASKED_MAX` at most,
 /// `ACCESS_ASKED_AT_ONCE` at a time; the rest have their list's counts
 /// alone, which no fragment is woken for. Members are named by email (an
-/// agent by its label and its owner's email), at most
+/// agent by its label, its title and its owner's email), at most
 /// `ACCESS_PROFILES_MAX` identities.
 pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Access> {
     if who.kind != IdentityKind::Person {
@@ -874,11 +894,12 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                             kind: m.kind,
                             email: email(&m.principal),
                             name: named.get(&m.principal).and_then(|p| p.name.clone()),
+                            title: named.get(&m.principal).and_then(|p| p.title.clone()),
                             owner: m.owner.clone(),
                             owner_email: m.owner.as_deref().and_then(email),
                             agents: named
                                 .get(&m.principal)
-                                .map(|p| p.agents.iter().map(|a| AccessAgent { principal: a.id.clone(), name: a.name.clone() }).collect())
+                                .map(|p| p.agents.iter().map(|a| AccessAgent { principal: a.id.clone(), name: a.name.clone(), title: a.title.clone() }).collect())
                                 .unwrap_or_default(),
                         })
                         .collect();

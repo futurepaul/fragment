@@ -525,6 +525,7 @@ name = "fragment-cli"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "dirs",
  "fragment-core",

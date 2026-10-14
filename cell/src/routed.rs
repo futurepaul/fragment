@@ -23,7 +23,7 @@ use fragment_proto::{routed, valid_fragment_name, ErrorCode, Identity, IdentityK
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*};
-use worker::{Env, Headers, Method, Request, RequestInit, Url};
+use worker::{Env, Headers, Method, Request, RequestInit, Response, Url};
 
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
@@ -230,6 +230,13 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
     let code = v["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::json!(c)).ok()).unwrap_or(ErrorCode::HostFailed);
     let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
     Err(CellError::new(code, message))
+}
+
+/// The internal call `path` on the Durable Object `name` of `binding`, its
+/// answer as it is (a picture's bytes, or its refusal).
+pub(crate) async fn fetch_object(env: &Env, binding: &str, name: &str, path: &str) -> CellResult<Response> {
+    let req = internal_request(path, "{}")?;
+    Ok(env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?)
 }
 
 /// `internal_request` for `entry.mjs` (the job driver and the `Files`

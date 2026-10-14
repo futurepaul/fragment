@@ -679,6 +679,27 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
+An agent's name and picture are its agent fragment's: its title
+(`fragment.json`'s `meta.title`) and its `avatar.png` (a PNG, JPEG, WebP
+or GIF of at most 256 KiB), as live has them. Every page shows the agent
+by them (your shell, its chats, the share sheet, push notifications),
+and so does its runtime (Hermes' Bot Mode), within seconds of a change:
+
+```
+fragment agent juniper--k3x9 --name Frank          # its name
+fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture takes it away)
+fragment agent juniper--k3x9                       # what they are now
+```
+
+`fragment agent` checks the picture, writes both in one commit and puts
+it live; an agent on a computer leaves its own name out. A picture too
+large or that is no picture is refused before anything is written; one
+committed by hand is refused when it is deployed (`fragment deploy` and
+`fragment status` say why), and the last good name and picture stay.
+Its `@name`, the word that mentions it, stays its label. Its runtime's
+own files (Hermes' `profile.yaml`) are written from its name: never edit
+them to rename it.
+
 ## Secrets
 
 ```
@@ -729,6 +750,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
+fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`; else the host

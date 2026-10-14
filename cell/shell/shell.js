@@ -100,8 +100,18 @@ async function api(method, path, body) {
 const byName = (name) => state.fragments.find((f) => f.name === name);
 // a name is its label and a random suffix (decision 47): `todo--k3x9`
 const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
-const titleOf = (name) => byName(name)?.title || labelOf(name);
 const own = (f) => f.role === "owner";
+// The person's agent fragment whose own chat `name` is: the chat the shell
+// made with it, `<label>-chat` beside its `<label>` (defaultAgent), theirs.
+function ownChatOf(name) {
+  const f = byName(name);
+  const label = f?.kind === "chat" && own(f) ? labelOf(name).match(/^(.+)-chat$/)?.[1] : null;
+  return label ? state.fragments.find((a) => a.kind === "agent" && own(a) && labelOf(a.name) === label)?.name ?? null : null;
+}
+// A fragment's title; an agent's own chat is called by its agent, whose
+// name is its agent fragment's title, however that changed (docs/api.md,
+// "An agent's name and picture").
+const titleOf = (name) => byName(ownChatOf(name))?.title || byName(name)?.title || labelOf(name);
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
@@ -119,6 +129,11 @@ const colorOf = (id) => {
   for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
   return COLORS[h % COLORS.length];
 };
+// An agent's face: its colour, by its identity, and its picture (its agent
+// fragment's avatar.png, as the person's list last said: an address on this
+// platform), shown instead of its tinted image when it has one.
+const agentFace = (fragment, id) => ({ color: colorOf(id), picture: byName(fragment)?.picture ?? null });
+const faceOf = (id) => agentFace(state.agents.get(id)?.fragment, id);
 // The identity of the agent a fragment is (`maple--k3x9`), or of a direct
 // chat's (`maple-chat--p2m4`, labeled for it), while its row names no agents.
 const agentOf = (name) => {
@@ -129,21 +144,21 @@ const agentOf = (name) => {
 // agent while it names none.
 const agentsOf = (name) => byName(name)?.agents ?? [agentOf(name)].filter(Boolean);
 const isGroup = (name) => agentsOf(name).length >= 2;
-// a chat's face: its title, its lead agent's colour, and its agents' colours
+// a chat's face: its title, its lead agent's face, and its agents' faces
 const identity = (name) => {
-  const agents = agentsOf(name);
-  return { title: titleOf(name), color: colorOf(agents[0] ?? null), colors: agents.map(colorOf), preview: byName(name)?.preview ?? "" };
+  const faces = agentsOf(name).map(faceOf);
+  return { title: titleOf(name), ...(faces[0] ?? faceOf(null)), faces, preview: byName(name)?.preview ?? "" };
 };
 // A chat's mark: its agent's avatar, or a group's agents' stacked (at most
-// three, the lead first), coloured by identity as the chat's page does.
+// three, the lead first), as the chat's page shows them.
 function mark(name, size = "") {
   const who = identity(name);
   if (!isGroup(name)) return avatar(who, size);
   const stack = el("span", `avatar-stack ${size}`);
-  const colors = who.colors.slice(0, 3);
-  stack.dataset.count = String(colors.length);
+  const faces = who.faces.slice(0, 3);
+  stack.dataset.count = String(faces.length);
   stack.setAttribute("aria-hidden", "true");
-  stack.append(...colors.map((color) => avatar({ color })));
+  stack.append(...faces.map((face) => avatar(face)));
   return stack;
 }
 
@@ -279,9 +294,11 @@ fitViewport();
 // A frame of a fragment the person owns may ask for their agents
 // (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
 // origin only (its status's canonical URL), `{fragment: "agents", agents:
-// [{identity, fragment, name, title, phase?}]}` (`phase` their computer's,
+// [{identity, fragment, name, title, picture?, phase?}]}` (`picture` its
+// picture's address, whole, on this platform; `phase` their computer's,
 // as the platform last said: `asleep`, `starting`, `awake`, `sleeping` or
-// `wont_wake`), and again whenever any of it changes.
+// `wont_wake`), and again whenever any of it changes: a rename or a new
+// picture reaches the page as it reaches this one.
 // It may then ask for one of them in its fragment (`{fragment: "add-agent",
 // identity, nonce}`): the shell asks its person, in its own dialog (never
 // in the frame: a page is code its author or an agent wrote, so it asks
@@ -310,7 +327,10 @@ function originOf(name) {
 }
 const roster = () => {
   const phase = state.computer?.phase;
-  return [...state.agents.values()].map((a) => ({ identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(phase ? { phase } : {}) }));
+  return [...state.agents.values()].map((a) => {
+    const picture = agentFace(a.fragment, a.identity).picture;
+    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}) };
+  });
 };
 let rosterSent = "";
 function rosterChanged() {
@@ -634,7 +654,7 @@ function renderChats() {
     row.setAttribute("aria-controls", "menu");
     row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
     const face = el("span", "sidebar-agent-mark");
-    face.append(avatar({ color: colorOf(primary.identity) }, "small"));
+    face.append(avatar(agentFace(primary.fragment, primary.identity), "small"));
     row.append(face, el("strong", "title", titleOf(primary.fragment)));
     row.onclick = () => openPrimaryMenu(row);
     agentRows.push(row);
@@ -1195,11 +1215,18 @@ async function retitle(name, title, message) {
   await api("POST", `/api/f/${seg(name)}/files`, { message, files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
   await api("POST", `/api/f/${seg(name)}/deploy`, {});
 }
+// What a rename of `name` retitles: an agent (its fragment, from Settings),
+// with its own chat; an agent's own chat, with its agent, so they stay one;
+// any other chat alone.
+function renamed(name) {
+  if (byName(name)?.kind === "agent") return [name, agentsOwnChat(name)?.name].filter(Boolean);
+  const agent = ownChatOf(name) ?? (isAgentsOwnChat(name) ? agentOfChat(name) : null);
+  return [agent, name].filter(Boolean);
+}
 let renaming = null;
 function rename(name) {
   renaming = name;
-  // an agent's own chat names it too; any other names only itself
-  const agent = isAgentsOwnChat(name);
+  const agent = renamed(name).length > 1 || byName(name)?.kind === "agent";
   $("rename-title").textContent = agent ? "Name your agent" : "Name this chat";
   $("rename-label").textContent = agent ? "Agent name" : "Chat name";
   $("agent-name").value = titleOf(name);
@@ -1213,7 +1240,7 @@ $("rename-form").onsubmit = async (e) => {
   const title = $("agent-name").value.trim();
   if (!title || !renaming) return;
   try {
-    for (const name of [renaming, isAgentsOwnChat(renaming) ? agentOfChat(renaming) : null].filter(Boolean)) await retitle(name, title, "rename");
+    for (const name of renamed(renaming)) await retitle(name, title, "rename");
     $("rename-agent").close();
     await load();
   } catch (err) {
@@ -1221,6 +1248,20 @@ $("rename-form").onsubmit = async (e) => {
     $("rename-error").hidden = false;
   }
 };
+// An agent's own chat keeps its agent's name (`renamed`), however the agent
+// was renamed (by itself, from its fragment or the CLI: docs/api.md, "An
+// agent's name and picture"): one whose title the list says differs is
+// retitled to it, once a page.
+const following = new Set();
+function followNames() {
+  for (const f of chats()) {
+    const title = byName(ownChatOf(f.name))?.title;
+    const key = `${f.name}\n${title}`;
+    if (!title || f.title === title || following.has(key)) continue;
+    following.add(key);
+    retitle(f.name, title, "its agent's name").catch(() => following.delete(key));
+  }
+}
 
 // ---- the launcher: one input for starting a chat or finding one again ----
 // The sidebar's +, the phone's top bar + and ⌘K (Skyler, 2026-10-12).
@@ -1850,18 +1891,20 @@ async function openSettings(push = true) {
   // the models a provider the person connected offers (its own credit pays)
   const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
   if (mine.length && modeled.length) agents.append(say("Each agent runs on Workers AI's model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-  agents.append(...(mine.length ? mine.map((a) => {
+  agents.append(...(mine.length ? mine.flatMap((a) => {
     const row = el("button", "row", "Open");
     row.type = "button";
     row.onclick = () => openApp(a.fragment);
     const name = el("span", "settings-agent-name");
-    name.append(avatar({ color: colorOf(a.identity) }, "small"), titleOf(a.fragment));
-    const agentRow = actionLine(name, row);
-    return modeled.length ? modelPicker(a, agentRow, modeled) : agentRow;
+    name.dataset.agentFace = a.fragment;
+    const [actions, said] = faceControls(a);
+    const agentRow = actionLine(name, actions, row);
+    return [modeled.length ? modelPicker(a, agentRow, modeled) : agentRow, said];
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
+  renderAgentFaces();
 }
 
 // Building with a coding agent: one prompt that names this platform's
@@ -1905,6 +1948,108 @@ function buildSection() {
   );
 }
 
+// ---- an agent's name and picture (docs/api.md, "An agent's name and
+// picture"): its agent fragment's title and its avatar.png, written and
+// put live as any of its files are (POST …/files, then …/deploy). Every
+// page and the platform show it by them; the rows here follow the list. ----
+const AGENT_PICTURE = "avatar.png";
+// What the platform takes (fragment_core::face): a PNG, JPEG, WebP or GIF
+// of at most 256 KiB. A larger one, or any other image the browser reads,
+// is drawn again at most PICTURE_PX square: a PNG, else a JPEG, that fits.
+const PICTURE_MAX_BYTES = 256 * 1024;
+const PICTURE_PX = 512;
+async function pictureOf(file) {
+  if (file.size <= PICTURE_MAX_BYTES && /^image\/(png|jpeg|webp|gif)$/.test(file.type)) return file;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error("That file is not a picture: choose a PNG, JPEG, WebP or GIF.");
+  }
+  const scale = Math.min(1, PICTURE_PX / Math.max(bitmap.width, bitmap.height));
+  const canvas = el("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  for (const [type, quality] of [["image/png"], ["image/jpeg", 0.9], ["image/jpeg", 0.7]]) {
+    const blob = await new Promise((done) => canvas.toBlob(done, type, quality));
+    if (blob && blob.size <= PICTURE_MAX_BYTES) return blob;
+  }
+  throw new Error("That picture stays over 256 KiB however it is drawn: choose a smaller one.");
+}
+async function base64Of(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+// The agent's picture from `file`, or none (null), put live.
+async function setPicture(agent, file) {
+  const write = file ? { path: AGENT_PICTURE, base64: await base64Of(await pictureOf(file)) } : { path: AGENT_PICTURE, delete: true };
+  await api("POST", `/api/f/${seg(agent)}/files`, { message: file ? "its picture" : "no picture", files: [write] });
+  await api("POST", `/api/f/${seg(agent)}/deploy`, {});
+}
+// An agent's row's Rename, its picture (Add, Change, Remove), and a line
+// that says what they did or why not.
+function faceControls(a) {
+  const said = el("p", "muted agent-face-said");
+  said.hidden = true;
+  const tell = (text) => {
+    said.textContent = text;
+    said.hidden = !text;
+  };
+  const renameIt = el("button", "quiet", "Rename");
+  renameIt.type = "button";
+  renameIt.dataset.renameAgent = a.fragment;
+  renameIt.onclick = () => rename(a.fragment);
+  const picture = el("label", "quiet picture");
+  const label = el("span");
+  label.dataset.pictureLabel = a.fragment;
+  const file = el("input");
+  file.type = "file";
+  file.accept = "image/png,image/jpeg,image/webp,image/gif";
+  file.dataset.pictureFor = a.fragment;
+  file.hidden = true;
+  picture.append(label, file);
+  const remove = el("button", "quiet", "Remove picture");
+  remove.type = "button";
+  remove.dataset.pictureRemove = a.fragment;
+  const change = async (chosen) => {
+    for (const b of [renameIt, remove, file]) b.disabled = true;
+    tell(chosen ? "Saving its picture…" : "Taking its picture away…");
+    try {
+      await setPicture(a.fragment, chosen);
+      tell("");
+      await load();
+    } catch (e) {
+      tell(e.message);
+    } finally {
+      for (const b of [renameIt, remove, file]) b.disabled = false;
+      file.value = "";
+    }
+  };
+  file.onchange = () => file.files?.[0] && change(file.files[0]);
+  remove.onclick = () => change(null);
+  const actions = el("span", "agent-face-actions");
+  actions.append(renameIt, picture, remove);
+  return [actions, said];
+}
+// Settings' agent rows as the list says now: each one's face and name, and
+// whether it has a picture to change or remove.
+function renderAgentFaces() {
+  for (const name of document.querySelectorAll("[data-agent-face]")) {
+    const fragment = name.dataset.agentFace;
+    const id = [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null;
+    const face = agentFace(fragment, id);
+    const shown = JSON.stringify([face.picture, titleOf(fragment)]);
+    if (name.dataset.shown === shown) continue;
+    name.dataset.shown = shown;
+    name.replaceChildren(avatar(face, "small"), titleOf(fragment));
+  }
+  for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
+  for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
+}
+
 // ---- settings' Sharing: who has access to what the person owns (GET
 // /api/access), by fragment or by person; each fragment opens its share
 // sheet, where it changes ----
@@ -1920,20 +2065,22 @@ const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` 
 // a member as the view names them, and what they are to the person; a
 // person's agents reach what they do (a share is "all the pubkeys under the
 // umbrella of this email": Paul, 2026-10-13)
-const theirAgents = (m) => (m.agents ?? []).map((a) => a.name ?? shortId(a.principal));
+// (an agent by its title, its agent fragment's: docs/api.md, "An agent's
+// name and picture")
+const theirAgents = (m) => (m.agents ?? []).map((a) => a.title ?? a.name ?? shortId(a.principal));
 function accessWho(m) {
   if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: theirAgents(m).length ? `with their agents ${theirAgents(m).join(", ")}` : "" };
   if (m.owner === state.me.id) {
     const mine = state.agents.get(m.principal);
-    return { name: mine ? titleOf(mine.fragment) : m.name ?? shortId(m.principal), about: "your agent" };
+    return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), about: "your agent" };
   }
   const whose = m.ownerEmail ?? (m.owner ? shortId(m.owner) : null);
-  return { name: m.name ?? shortId(m.principal), about: whose ? `${whose}'s agent: they read what it reads` : "an agent" };
+  return { name: m.title ?? m.name ?? shortId(m.principal), about: whose ? `${whose}'s agent: they read what it reads` : "an agent" };
 }
 // a fragment's own line: its title (its sheet), what it is, and who may open it
 function accessHead(row) {
   const head = el("div", "access-head");
-  const open = el("button", "access-name", row.title || labelOf(row.name));
+  const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
   open.type = "button";
   open.title = "Open its share sheet";
   open.dataset.share = row.name;
@@ -2022,7 +2169,7 @@ function accessByPerson(rows) {
     }
     for (const { row, role } of entries) {
       const li = el("li");
-      const open = el("button", "access-name", row.title || labelOf(row.name));
+      const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
       open.type = "button";
       open.onclick = () => share(row.name);
       li.append(open, el("span", "muted", role));
@@ -2761,7 +2908,9 @@ async function load(changed = false) {
   renderComputer();
   rosterChanged();
   markSeen();
+  renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
+  followNames();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});

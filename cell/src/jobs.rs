@@ -865,9 +865,10 @@ impl FragmentCell {
                 if ids.len() > fragment_core::steps::PEOPLE_MAX {
                     return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));
                 }
-                // the fragment's own code shows its members' emails, as its members see them
+                // the fragment's own code shows its members' emails, as its
+                // members see them, and its agents as its page does
                 let emails_of = self.members_among(&ids).map_err(|e| StepFail::Retry(e.message))?;
-                match crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of, agents_of: vec![] }).await {
+                match self.people(ids, emails_of).await {
                     Ok(answer) => Ok(json!(answer)),
                     Err(e) if e.code == ErrorCode::InvalidRequest => Err(permanent(e.message)),
                     Err(e) => Err(StepFail::Retry(e.message)),
