@@ -1130,15 +1130,18 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let asked = b.until(page, "document.getElementById('rename-agent').open && document.getElementById('rename-title').textContent === 'Name your agent'", wait);
     b.eval(page, &fill("#agent-name", "Frank"))?;
     b.eval(page, "(document.getElementById('rename-form').requestSubmit(), true)")?;
+    let screen = js(&format!("[data-screen-for={}]", js(&agent)));
     let renamed = b.until(
         page,
-        &format!("document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === 'Frank'"),
+        &format!(
+            "document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === 'Frank' && document.querySelector({screen})?.textContent === \"Open Frank's screen\""
+        ),
         wait,
     );
     s.ok(
-        "Settings' Agents renames the person's agent: its name shows in the sidebar, its own chat's row and its settings row, with no reload",
+        "Settings' Agents renames the person's agent: its name shows in the sidebar, its own chat's row, its settings row and its screen's button, with no reload",
         asked && renamed,
-        b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent }})"))?,
+        b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
     );
     // a picture, from a file
     let orange = super::faces::orange();

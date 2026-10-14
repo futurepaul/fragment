@@ -1861,6 +1861,7 @@ async function openSettings(push = true) {
   for (const a of c ? state.agents.values() : []) {
     const screen = el("button", "quiet", `Open ${titleOf(a.fragment)}'s screen`);
     screen.type = "button";
+    screen.dataset.screenFor = a.fragment;
     screen.onclick = () => openScreen(a.fragment);
     screens.push(screen);
   }
@@ -2035,8 +2036,11 @@ function faceControls(a) {
   return [actions, said];
 }
 // Settings' agent rows as the list says now: each one's face and name, and
-// whether it has a picture to change or remove.
+// whether it has a picture to change or remove; and the names its other
+// controls carry (each agent's screen, its model).
 function renderAgentFaces() {
+  for (const b of document.querySelectorAll("[data-screen-for]")) b.textContent = `Open ${titleOf(b.dataset.screenFor)}'s screen`;
+  for (const pick of document.querySelectorAll("[data-model-for]")) pick.setAttribute("aria-label", `${titleOf(pick.dataset.modelFor)}'s model`);
   for (const name of document.querySelectorAll("[data-agent-face]")) {
     const fragment = name.dataset.agentFace;
     const id = [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null;
