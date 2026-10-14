@@ -146,13 +146,13 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 
 ## Who can do what, where
 
-| | call operations | read or write records | use models | share and invite | deploy |
-|---|---|---|---|---|---|
-| **the person, in a browser** | on an app's pages (`fragment.call`), at their role | the channels their role reads, live; posts where a channel's `post` role lets them | through their agents and their apps' jobs | the owner, from the share sheet: members by email, the link, visibility | no: they make one from a template (the shell's Add) and ask an agent for the rest |
-| **their agent, on its computer** | `fragment call`, at its own grants, or for its owner at their role (at most an editor's) | `fragment channel`, `fragment post`; its chats are records | its turns, on its tier, paid by its owner | for its owner, on what its owner owns, when asked (never a delete or a cap) | `fragment write`, `fragment deploy` (an editor's); what it makes is its owner's |
-| **an app's own jobs** | its own operations (`job.call`); a triggered run acts as the fragment, an editor | `job.publish` to its own channels, and a text step's draft to them as it streams; a trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image`, paid by the fragment's owner | no | no: `job.files.write` writes to `main`, live at the next deploy |
-| **a coding agent, with the CLI** | `fragment call`, as the person whose key it holds | `fragment channel --follow`, `fragment post` | its own; the platform's through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate` (the owner's) | `fragment deploy`, `rollback` (an editor's) |
-| **an MCP client, through `fragment mcp`** | the described operations, as tools: queries, and with `--write` mutations and jobs | only through operations | its own; the platform's through a described job | no | no |
+| | call operations | read or write records | use models | decide | share and invite | deploy |
+|---|---|---|---|---|---|---|
+| **the person, in a browser** | on an app's pages (`fragment.call`), at their role | the channels their role reads, live; posts where a channel's `post` role lets them | through their agents and their apps' jobs | through their apps' jobs | the owner, from the share sheet: members by email, the link, visibility | no: they make one from a template (the shell's Add) and ask an agent for the rest |
+| **their agent, on its computer** | `fragment call`, at its own grants, or for its owner at their role (at most an editor's) | `fragment channel`, `fragment post`; its chats are records | its turns, on its tier, paid by its owner | `POST $FRAGMENT_MODEL/v1/decide` from its computer (Clef, its media inline), paid by its owner; and through its owner's apps' jobs | for its owner, on what its owner owns, when asked (never a delete or a cap) | `fragment write`, `fragment deploy` (an editor's); what it makes is its owner's |
+| **an app's own jobs** | its own operations (`job.call`); a triggered run acts as the fragment, an editor | `job.publish` to its own channels, and a text step's draft to them as it streams; a trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image`, paid by the fragment's owner | `job.ai.decide` (Clef, about text, JSON and the fragment's blobs), paid by the fragment's owner | no | no: `job.files.write` writes to `main`, live at the next deploy |
+| **a coding agent, with the CLI** | `fragment call`, as the person whose key it holds | `fragment channel --follow`, `fragment post` | its own; the platform's through the jobs it calls | through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate` (the owner's) | `fragment deploy`, `rollback` (an editor's) |
+| **an MCP client, through `fragment mcp`** | the described operations, as tools: queries, and with `--write` mutations and jobs | only through operations | its own; the platform's through a described job | through a described job | no | no |
 
 Every row acts as someone: a person, their agent, or the fragment
 itself, each held to that one's role on the fragment (People, below).
@@ -376,7 +376,7 @@ export class App extends DurableObject {
   secret `NAME`, filled in outside your code), `job.publish(channel,
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
-  `job.push(who, payload)`, `job.ai.text|image|video(...)`. A step that
+  `job.push(who, payload)`, `job.ai.text|decide|image|video(...)`. A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -445,6 +445,61 @@ Its page shows the reply as it streams: `fragment.subscribe("chat",
 show, { onDraft: (d) => d.text === null ? clear(d.turn) : d.thinking !==
 undefined ? showThinking(d.turn, d.thinking) : showDraft(d.turn, d.text)
 })`, and the record with the same `turn` replaces the draft.
+- **Decisions** (jobs): `job.ai.decide({model, input, questions,
+  media})` answers typed questions about text, JSON, photos, voice notes
+  or video clips, with no prose to parse. Use it to sort, route and gate;
+  use text for writing or for pulling out arbitrary fields.
+  - `model`: `"clef-flash"` (the default: cheapest, text and images),
+    `"clef"` (larger: text and images), or `"clef-omni"` (text, images,
+    audio and video).
+  - `input`: text or JSON about the thing decided.
+  - `questions`: 1–64, each `{type, instructions}`: `choice` with
+    `options: {id: description}` (2–255), `predicate`, or `score` with
+    ordered `levels: [description, ...]` (2–10). Read
+    `out.answers[id].choice`, `.probability` or `.score` (a weighted
+    zero-based level); choice and score also give `probabilities` and
+    `confidence`.
+  - `media`: up to 4 items (2 videos). A file people uploaded from your
+    page is `{sha256, type}`, exactly what `fragment.blob(file)` returns
+    (a chat's `attachments` pass as they are); a small image can go
+    inline as `{data: "data:image/png;base64,…"}` (256 KiB in all).
+    Types: PNG, JPEG, WebP images on any model; WAV or MP3 audio and MP4
+    or WebM video on `clef-omni` only. A browser's own recording
+    (`audio/webm`) is refused: record or convert to WAV. At most 4 MiB
+    an image, 8 MiB an audio clip or video, 8 MiB in all.
+
+  A wrong model, type, size or shape fails the step before anything is
+  spent, saying why. You pay for input tokens only (media counts as
+  input), from your ledger: Clef-flash $0.038, Clef $0.24, Clef-omni
+  $0.15 per million, plus the platform's fee and margin. A page
+  uploading a photo or a voice note, and the job sorting it:
+
+  ```js
+  // the page, from a file input
+  const blob = await fragment.blob(input.files[0]); // an editor's page: {sha256, size, type, name}
+  await fragment.call("sort", { sha256: blob.sha256, type: blob.type });
+  ```
+
+  ```js
+  async sort({ sha256, type }, job) {
+    const audio = type.startsWith("audio/");
+    const out = await job.ai.decide({
+      model: audio ? "clef-omni" : "clef-flash",
+      input: audio ? "A voice note left for the household" : "A photo left for the household",
+      media: [{ sha256, type }],
+      questions: {
+        kind: { type: "choice", instructions: "What is this about?", options: {
+          groceries: "Food or supplies to buy", chores: "A job around the house", other: "Anything else" } },
+        urgent: { type: "predicate", instructions: "Does it need doing today?" },
+      },
+    });
+    const { kind, urgent } = out.answers;
+    return { kind: kind.choice, urgent: urgent.probability > 0.7, sure: kind.confidence };
+  }
+  ```
+
+  Typed answers can still be wrong: keep the corrections people make,
+  and tune thresholds against examples from your app.
 
 ## Pages
 

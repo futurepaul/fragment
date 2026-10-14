@@ -298,7 +298,207 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
         &r,
     );
+    decisions(s, api, &owner, &name, wait)?;
     calories(s, api, wait)
+}
+
+/// Typed decisions (docs/api.md, AI): the Clef family by name, its media
+/// the fragment's own blobs (as a page's `fragment.blob(file)` and a chat's
+/// attachments name them) or small and inline, each refused before any
+/// reservation or vendor call when it is outside the contract, and billed
+/// for input tokens alone, once, whatever retries. Vendor-boundary
+/// fixtures prove the transport, the media and the money, not a real
+/// model's accuracy: that is the hosted lane's.
+fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, wait: Duration) -> Result<()> {
+    use super::ledger::entries;
+    use base64::Engine;
+    use fragment_core::decide::{Kind, Model};
+    use fragment_core::price::{PriceBook, Usage};
+    use fragment_fakes::workers_ai::{spoken_wav, Used};
+    s.ai.clear_script();
+    let owner_id = api.identity(owner)?;
+    let run = |id: &str, input: Value| -> Result<Value> {
+        let r = api.op(owner, name, "decide", id, input)?;
+        Ok(settle(api, owner, name, started(&r), &["succeeded", "held"], wait))
+    };
+    let price = |m: Model, input: u64| PriceBook::defaults().price(&Usage::Tokens { model: m.id().into(), input, cached_input: 0, cache_write: 0, output: 0 }).map_or(-1, |p| p.charge);
+    let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
+    // the ledger's reservations of one run's steps, every attempt's
+    let paid = |r: &Value| -> Vec<Value> {
+        let marker = format!("/run/{}/attempt/", r["id"]);
+        entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
+    };
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let opts = json!({ "input": "tallow potato chips", "questions": {
+        "aisle": { "type": "choice", "instructions": "Choose the aisle for the finished product", "options": { "snacks": "Chips and crackers", "produce": "Fresh fruit and vegetables", "grocery": "Shelf-stable foods", "frozen": "Frozen foods" } },
+        "snack": { "type": "predicate", "instructions": "Is it a snack?" },
+        "urgency": { "type": "score", "instructions": "How soon?", "levels": ["Later", "Now"] }
+    } });
+    let with = |extra: Value| {
+        let mut v = opts.clone();
+        if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+            o.extend(e.clone());
+        }
+        v
+    };
+    for (i, (item, aisle)) in [("tallow potato chips", "snacks"), ("kale chips", "snacks"), ("potato", "produce"), ("peanut butter", "grocery"), ("ice cream", "frozen")].iter().enumerate() {
+        let mut ps = json!({ "snacks": 0.0, "produce": 0.0, "grocery": 0.0, "frozen": 0.0 });
+        ps[*aisle] = json!(1.0);
+        s.ai.decide_next(&[json!({ "model": "clef-flash", "answers": {
+            "aisle": { "type": "choice", "choice": aisle, "probabilities": ps, "confidence": 1.0 },
+            "snack": { "type": "noul", "noul": 0.9 },
+            "urgency": { "type": "score", "score": 0.25, "legend": { "0": "Later", "1": "Now" }, "probabilities": { "0": 0.75, "1": 0.25 }, "confidence": 0.5 }
+        }, "usage": { "input_tokens": 300, "output_tokens": 40 } })]);
+        let r = run(&format!("decision-{i}"), with(json!({ "input": item })))?;
+        s.ok(
+            &format!("ai.decide passes the fixture's {item} → {aisle}, with typed probabilities, on clef-flash unless named, billed for its input alone"),
+            r["status"] == "succeeded" && r["output"]["model"] == Model::ClefFlash.id() && r["output"]["answers"]["aisle"]["choice"] == *aisle
+                && r["output"]["answers"]["snack"]["probability"] == 0.9 && r["output"]["answers"]["urgency"]["score"] == 0.25
+                && cost(&r) == price(Model::ClefFlash, 300),
+            &r,
+        );
+    }
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "a decision is System One's input on the model route's transport: the provider's names, the payer by an opaque id, no key",
+        call.as_ref().is_some_and(|c| c.model == Model::ClefFlash.id() && c.body["model"] == "clef-flash" && c.body["state"] == "ice cream"
+            && c.body["questions"]["snack"]["type"] == "noul" && c.body["questions"]["aisle"]["criteria"] == opts["questions"]["aisle"]["options"]
+            && c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16) && c.authorization.is_none()),
+        format!("{call:?}"),
+    );
+    s.ai.set_usage(&[Used { prompt: 500, cached: 0, completion: 0 }]);
+    let r = run("decision-clef", with(json!({ "model": "clef" })))?;
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "`model: clef` runs Clef, its selector its own, at its price",
+        r["status"] == "succeeded" && r["output"]["model"] == Model::Clef.id() && cost(&r) == price(Model::Clef, 500)
+            && call.as_ref().is_some_and(|c| c.model == Model::Clef.id() && c.body["model"] == "clef"),
+        json!({ "run": r, "call": call.map(|c| json!({ "model": c.model, "selector": c.body["model"] })) }),
+    );
+
+    // media: the fragment's own blobs, as a page uploads them
+    let upload = |bytes: &[u8], kind: &str| -> Result<String> {
+        let sha = fragment_core::blob::sha256_hex(bytes);
+        let url = format!("{}/api/f/{name}/blobs/{sha}", api.base);
+        let r = api.call(Call { method: "PUT", url, body: Some(bytes.to_vec()), content_type: Some(kind), keys: Some(owner), ..Call::default() })?;
+        anyhow::ensure!(r.status == 200, "a blob's upload: {r}");
+        Ok(sha)
+    };
+    let photo: &[u8] = b"\x89PNG\r\n\x1a\na-photo-of-tallow-chips";
+    let memo = spoken_wav("buy more chips", 2);
+    let clip: &[u8] = b"\x00\x00\x00\x18ftypmp42a-clip-of-the-snack-aisle";
+    let (photo_sha, memo_sha, clip_sha) = (upload(photo, "image/png")?, upload(&memo, "audio/wav")?, upload(clip, "video/mp4")?);
+    let big = upload(&vec![0x89; Kind::Image.max_bytes() as usize + 1], "image/png")?;
+    // posted, as a chat's attachments are: a record naming a blob keeps it
+    // (one nothing names goes after the e2e's grace of seconds)
+    let attachments: Vec<Value> = [&photo_sha, &memo_sha, &clip_sha, &big].iter().map(|sha| json!({ "sha256": sha })).collect();
+    let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/uploads"), Some(&json!({ "id": "uploads-1", "body": { "attachments": attachments } })))?;
+    anyhow::ensure!(r.status == 200, "the uploads' record: {r}");
+    s.ai.set_usage(&[Used { prompt: 1_300, cached: 0, completion: 0 }]);
+    // a chat's attachment, as its record carries it
+    let attachment = json!({ "sha256": photo_sha, "size": photo.len(), "type": "image/png", "name": "chips.png" });
+    let r = run("decision-photo", with(json!({ "input": "a photo someone uploaded", "media": [attachment] })))?;
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "a photo people uploaded (a blob, named as a chat's attachment is) is decided about on clef-flash: its bytes reach the model as a data: URL, its tokens billed as input",
+        r["status"] == "succeeded" && cost(&r) == price(Model::ClefFlash, 1_300)
+            && call.as_ref().is_some_and(|c| c.model == Model::ClefFlash.id() && c.body["images"] == json!([format!("data:image/png;base64,{}", b64(photo))]) && c.body.get("audio").is_none()),
+        json!({ "run": r, "images": call.map(|c| c.body["images"].clone()) }),
+    );
+    let inline = format!("data:image/png;base64,{}", b64(photo));
+    let r = run("decision-inline", with(json!({ "model": "clef", "media": [{ "data": inline }] })))?;
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "a small image inline goes as it came, to Clef too",
+        r["status"] == "succeeded" && call.as_ref().is_some_and(|c| c.model == Model::Clef.id() && c.body["images"] == json!([inline])),
+        json!({ "run": r }),
+    );
+    s.ai.set_usage(&[Used { prompt: 2_000, cached: 0, completion: 0 }]);
+    let media = json!([{ "sha256": memo_sha, "type": "audio/wav" }, { "sha256": clip_sha, "type": "video/mp4" }]);
+    let r = run("decision-omni", with(json!({ "model": "clef-omni", "input": "a voice note and a clip", "media": media })))?;
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "a voice note and a video clip are heard and watched on clef-omni, each in its own field, billed at its price",
+        r["status"] == "succeeded" && r["output"]["model"] == Model::ClefOmni.id() && cost(&r) == price(Model::ClefOmni, 2_000)
+            && call.as_ref().is_some_and(|c| c.model == Model::ClefOmni.id() && c.body["model"] == "clef-omni"
+                && c.body["audio"] == json!([format!("data:audio/wav;base64,{}", b64(&memo))]) && c.body["videos"] == json!([format!("data:video/mp4;base64,{}", b64(clip))])),
+        json!({ "run": r }),
+    );
+
+    // refused before any reservation or vendor call, saying why
+    let calls = s.ai.calls().len();
+    let refusals = [
+        ("audio on clef-flash", with(json!({ "media": [{ "sha256": memo_sha, "type": "audio/wav" }] })), "clef-omni alone"),
+        ("a video on clef", with(json!({ "model": "clef", "media": [{ "sha256": clip_sha, "type": "video/mp4" }] })), "clef-omni alone"),
+        ("an image past 4 MiB", with(json!({ "media": [{ "sha256": big, "type": "image/png" }] })), "image is at most 4 MiB"),
+        ("five media items", with(json!({ "media": vec![json!({ "sha256": photo_sha, "type": "image/png" }); 5] })), "at most 4 media items"),
+        ("a blob the fragment does not hold", with(json!({ "media": [{ "sha256": fragment_core::blob::sha256_hex(b"never uploaded"), "type": "image/png" }] })), "does not hold"),
+        ("a browser's voice memo type, which Clef does not hear", with(json!({ "model": "clef-omni", "media": [{ "sha256": memo_sha, "type": "audio/webm" }] })), "media is one of"),
+        ("a remote URL", with(json!({ "media": [{ "url": "https://example.com/chips.png" }] })), "media is a list of blobs"),
+        ("a model no Clef's", with(json!({ "model": "cheap" })), "model is one of clef-flash, clef, clef-omni"),
+        ("a question of no type it takes", json!({ "input": "chips", "questions": { "x": { "type": "rank", "instructions": "Rank it" } } }), "question is {type"),
+        ("no questions", json!({ "input": "chips", "questions": {} }), "1 to 64 questions"),
+        ("a choice of one", json!({ "input": "chips", "questions": { "x": { "type": "choice", "instructions": "Aisle?", "options": { "only": "One" } } } }), "2 to 255"),
+        ("text past clef-flash's 16 KiB", with(json!({ "input": "x".repeat(Model::ClefFlash.request_max_bytes()) })), "at most 16384 bytes on clef-flash"),
+    ];
+    for (i, (what, input, why)) in refusals.into_iter().enumerate() {
+        let r = run(&format!("decision-invalid-{i}"), input)?;
+        s.ok(
+            &format!("{what} is refused, saying why, before any reservation or vendor call"),
+            r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains(why)) && cost(&r) == 0 && paid(&r).is_empty() && s.ai.calls().len() == calls,
+            json!({ "run": r, "calls": s.ai.calls().len() - calls }),
+        );
+    }
+
+    let r = api.op(owner, name, "decide_inline", "decision-inline-big", json!({ "bytes": 200 * 1024 }))?;
+    let r = settle(api, owner, name, started(&r), &["succeeded", "held"], wait);
+    s.ok(
+        "inline media past a job's 256 KiB (a larger file is a blob) is refused, saying why, before any reservation or vendor call",
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("inline media is at most 256 KiB")) && cost(&r) == 0 && paid(&r).is_empty() && s.ai.calls().len() == calls,
+        &r,
+    );
+
+    // a step retried after its paid call answered is billed once: its kept answer, its media unread again
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-after-paid", "times": 1 })))?;
+    let calls = s.ai.calls().len();
+    let r = run("decision-retry-paid", with(json!({ "media": [{ "sha256": photo_sha, "type": "image/png" }] })))?;
+    let receipts = paid(&r);
+    s.ok(
+        "a decision about a photo that failed after its paid call retries from its kept answer: one vendor call, one charge",
+        r["status"] == "succeeded" && s.ai.calls().len() == calls + 1 && receipts.len() == 1 && receipts[0]["entry"]["end"]["end"] == "settled" && receipts[0]["entry"]["end"]["charge"] == r["costMicros"],
+        json!({ "run": r, "paid": receipts }),
+    );
+    s.ai.fail_next(&[503]);
+    let calls = s.ai.calls().len();
+    let r = run("decision-503", with(json!({ "model": "clef-omni" })))?;
+    s.ok(
+        "a decision model's 503 retries on the same model",
+        r["status"] == "succeeded" && s.ai.calls().len() == calls + 2 && s.ai.calls()[calls..].iter().all(|c| c.model == Model::ClefOmni.id()),
+        &r,
+    );
+    s.ai.fail_next(&[400]);
+    let r = run("decision-400", opts.clone())?;
+    s.ok("a decision model's permanent refusal releases its reservation", r["status"] == "held" && cost(&r) == 0, &r);
+
+    // missing usage pays the reservation, the model's context; a malformed
+    // answer is paid too, and kept as a rejection: a replay never buys it again
+    s.ai.decide_next(&[json!({ "answers": {} })]);
+    let calls = s.ai.calls().len();
+    let held = run("decision-malformed", opts.clone())?;
+    let receipts = paid(&held);
+    s.ok(
+        "a malformed paid decision is held, and missing usage is charged at the reservation: clef-flash's context window",
+        held["status"] == "held" && cost(&held) == price(Model::ClefFlash, Model::ClefFlash.context_tokens()) && receipts.len() == 1 && receipts[0]["entry"]["end"]["basis"] == "reservation",
+        json!({ "run": held, "entries": receipts }),
+    );
+    api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;
+    let again = settle(api, owner, name, held["id"].as_i64().unwrap_or(0), &["held"], wait);
+    s.ok(
+        "replaying a malformed paid decision reuses its rejection and never calls again",
+        again["status"] == "held" && again["error"] == held["error"] && s.ai.calls().len() == calls + 1,
+        &again,
+    );
+    Ok(())
 }
 
 /// The calories template, with no agent (Paul, 2026-10-07): a signed-in

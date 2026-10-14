@@ -2549,12 +2549,14 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
-/// /v1/chat/completions`, OpenAI's shape, with `model` a tier, or `POST
+/// /v1/chat/completions`, OpenAI's shape, with `model` a tier, `POST
 /// /v1/audio/transcriptions`, OpenAI's multipart shape, with `model`
-/// `whisper`; each names its agent (`models::agent_named`: the
+/// `whisper`, or `POST /v1/decide`, a typed decision on the Clef family;
+/// each names its agent (`models::agent_named`: the
 /// `x-fragment-agent` header, or the key `agent:<name>` from a client that
 /// sends no header of its own). It is the platform's model route as that
-/// agent (`models::route`, `models::transcription_route`, signed as
+/// agent (`models::route`, `models::transcription_route`,
+/// `models::decide_route`, signed as
 /// egress_api signs, only for an agent that runs on this computer), which
 /// bounds it, meters it to the agent's owner, and refuses at zero credit.
 /// The guest's auth headers, its key among them, go nowhere: only the
@@ -2564,7 +2566,8 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let (route, max) = match (req.method(), req.path().as_str()) {
         (Method::Post, "/v1/chat/completions") => ("/api/models/v1/chat/completions", crate::models::MODEL_BODY_MAX_BYTES),
         (Method::Post, "/v1/audio/transcriptions") => ("/api/models/v1/audio/transcriptions", fragment_core::transcribe::BODY_MAX_BYTES),
-        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions and /v1/audio/transcriptions")),
+        (Method::Post, "/v1/decide") => ("/api/models/v1/decide", crate::models::MODEL_BODY_MAX_BYTES),
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions, /v1/audio/transcriptions and /v1/decide")),
     };
     let named = fragment_core::models::agent_named(req.headers().get(AGENT_HEADER)?.as_deref(), req.headers().get("authorization")?.as_deref());
     let agent = named.map_err(|why| CellError::new(ErrorCode::Unauthenticated, why.message()))?;

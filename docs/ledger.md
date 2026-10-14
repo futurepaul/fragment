@@ -84,7 +84,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`, Finite's tiers') the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`, Finite's tiers') the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -101,10 +101,10 @@ calls. The defaults are consts in `price.rs`, each with its source. The
 operator's book comes from the deploy's configuration and is versioned:
 a ledger takes only a newer version, and a hold keeps the price it was
 held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 5 since
-Finite Private's GLM-5.3 Flash was priced on 2026-10-14, after 4 for
-Hermes' tool keys and 3 for DeepSeek V4 Flash), so a change to the
-defaults reaches every ledger at its next call.
+`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 6 since
+the Clef family was priced on 2026-10-14, after 5 for Finite Private's
+GLM-5.3 Flash, 4 for Hermes' tool keys and 3 for DeepSeek V4 Flash), so a change
+to the defaults reaches every ledger at its next call.
 
 **Finite Private's price** (decision 61; a decision for Paul): its list
 price is Workers AI's GLM-5.3 Flash's, and its rows take the credits fee
@@ -280,7 +280,9 @@ mark sends the same batch again, which answers as before.
   per-user spend rule is only a backstop. A Finite Private call has
   neither: finite-mono meters the deployment's one key against its
   window, and this ledger alone meters each person. The payer is the
-  agent's owner; the fragment is the agent's.
+  agent's owner; the fragment is the agent's. An agent's decision
+  (`/v1/decide`) is reserved and settled as a decision step is (below),
+  under its own call id.
 - **AI steps** (a job's `ai.*`, voice input). The step's reference
   (`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`:
   a replay is a new attempt, so a step released before reserves again) is
@@ -298,6 +300,20 @@ mark sends the same batch again, which answers as before.
   reserved a 1024×1024 image's. The payer is the fragment's owner,
   `capped` when the run's principal is neither the owner nor an agent of
   theirs.
+  A decision (`job.ai.decide`, the Clef family: docs/api.md, Decisions)
+  reserves its model's context window in input tokens, the documented
+  bound on one call: Clef scores every question in one pass over one
+  context, its media and questions counted in it, and a request past it
+  fails. It settles its reported `usage.input_tokens` (media included)
+  with no output charge; more than reserved is charged as reported (it
+  happened), and missing or malformed usage is charged the reservation.
+  A malformed paid answer is kept as a rejection before settlement, so a
+  retry or replay reuses it, including after a restart. At the default
+  book, 300 input tokens cost 18 micro-dollars on Clef-flash
+  (ceil($0.038/M × 300 × 1.05 × 1.5)), 114 on Clef and 71 on Clef-omni;
+  a reservation holds 1,471 (Clef-flash's 24,576 tokens), 24,773
+  (Clef's 65,536) or 15,120 (Clef-omni's 64,000), releasing what was
+  unused on settlement.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
 - **Operator keys** (decision 37): reserved and settled the same way as

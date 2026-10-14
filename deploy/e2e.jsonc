@@ -103,6 +103,6 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
-  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 5
-  "price_book_version": 5
+  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 6
+  "price_book_version": 6
 }

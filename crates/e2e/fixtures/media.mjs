@@ -23,6 +23,17 @@ export class App extends DurableObject {
     return await job.ai.text({ model: "medium", prompt: text, reasoning_effort: "high" });
   }
 
+  async decide(input, job) {
+    return await job.ai.decide(input);
+  }
+
+  // an image inline, made in the job: `bytes` of a PNG's head and filler
+  // (an operation's input is at most 256 KiB, so the job builds it)
+  async decide_inline({ bytes }, job) {
+    const data = "data:image/png;base64," + btoa("\x89PNG\r\n\x1a\n" + "x".repeat(bytes));
+    return await job.ai.decide({ input: "an inline image", questions: { snack: { type: "predicate", instructions: "Is it a snack?" } }, media: [{ data }] });
+  }
+
   // the high tier is off (decision 23): the step says so
   async summarize_high({ text }, job) {
     return await job.ai.text({ model: "high", prompt: text });

@@ -1,6 +1,8 @@
 {
   "operations": {
     "summarize": { "kind": "job" },
+    "decide": { "kind": "job", "role": "viewer" },
+    "decide_twice": { "kind": "job" },
     "twice": { "kind": "job" },
     "draw": { "kind": "job" },
     "ask": { "kind": "job", "role": "viewer" },

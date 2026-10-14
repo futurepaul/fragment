@@ -848,7 +848,17 @@ expires within 30 days. The container application is the deployment's
   transcription route as the agent: Workers AI's Whisper, at most 10 MiB
   of audio, metered to the agent's owner at 46.63 neurons a minute of
   audio (docs/api.md, Models).
-- **Whose call it is**, one rule for both paths
+- `POST http://model.fragment.internal/v1/decide`: a typed decision on
+  the Clef family, the contract a job's `ai.decide` takes, its media
+  inline (docs/api.md, Decisions). It is the platform's decision route
+  as the agent (`POST /api/models/v1/decide`): `clef-flash` unless it
+  names `clef` or `clef-omni` (which hears audio and watches video),
+  reserved at its model's context window and settled at the input tokens
+  it counted, metered to the agent's owner. A tool the agent builds on
+  its computer calls it as it calls a model, with the same base URL and
+  credentials (`$FRAGMENT_MODEL/v1/decide`, `x-fragment-agent` or the
+  key `agent:<name>`).
+- **Whose call it is**, one rule for every path
   (`fragment_core::models::agent_named`):
   - its `x-fragment-agent`; or
   - from a client that sends no header of its own (OpenAI's SDKs take a

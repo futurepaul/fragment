@@ -4,9 +4,11 @@
     "headline": { "kind": "mutation" },
     "announce": { "kind": "job" },
     "summarize": { "kind": "job" },
+    "decide": { "kind": "job" },
+    "decide_inline": { "kind": "job" },
     "summarize_high": { "kind": "job" },
     "draw": { "kind": "job" },
     "film": { "kind": "job" }
   },
-  "channels": { "news": { "read": "viewer" } }
+  "channels": { "news": { "read": "viewer" }, "uploads": { "read": "viewer", "post": "editor" } }
 }

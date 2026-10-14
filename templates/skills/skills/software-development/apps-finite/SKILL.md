@@ -150,8 +150,15 @@ fragment rollback garden                  # live back to the deploy before
   shows it).
 - **Webhooks, schedules, background work**: a job, and a trigger on the
   inbox, a cron, or changed files.
-- **AI in the app**: `job.ai.text` and `job.ai.image` steps, billed to your
+- **AI in the app**: `job.ai.text`, `job.ai.decide` and `job.ai.image` steps, billed to your
   owner. Read `fragment guide` for the job and AI step contract.
+- **Sorting, routing, gating**: `job.ai.decide` answers typed questions
+  (a choice, a yes/no probability, a score) about text, JSON, or a photo,
+  voice note or video someone uploaded (`clef-omni` for audio and
+  video), with no prose to parse. From your computer, the same contract
+  is `POST $FRAGMENT_MODEL/v1/decide` with your usual model credentials:
+  reach for it in tools you build too. `references/shared/20-llm-api.md`
+  has both.
 
 ## Check it in a real browser
 
