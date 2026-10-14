@@ -242,10 +242,10 @@ fn text_of(content: &Value) -> String {
 ///
 /// - after a tool's result (since the last user message):
 ///   `scripted: the tool ran: <its first line>`;
-/// - Hermes' smart-approval guardian, asking for one word: `ESCALATE`, so a
-///   person decides;
 /// - a user message whose newest line is `run: <command>`, when the call
 ///   offers a `terminal` tool: that tool, called with the rest of the line;
+/// - `clarify: <question> | <choice> | …`, when the call offers Hermes'
+///   `clarify`: that question asked with those choices (a card);
 /// - one saying `look at your screen`: a `computer_use` capture of the
 ///   screen, called directly or through Hermes' `tool_call` bridge (Hermes
 ///   defers the tool behind `tool_search`), and once its result is in, an
@@ -277,10 +277,8 @@ pub fn transcript_reply(body: &Value) -> Reply {
         let first = result.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect::<String>();
         return Reply::Text(format!("scripted: the tool ran: {first}"));
     }
-    if said.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
-        return Reply::Text("ESCALATE".into());
-    }
-    let has_terminal = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "terminal"));
+    let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
+    let has_terminal = offered("terminal");
     // a person's line: `[name] text`, the name one word
     let named = |l: &str| l.strip_prefix('[').and_then(|r| r.split_once("] ")).filter(|(n, _)| !n.is_empty() && !n.contains(' ')).map(|(_, t)| t.to_string());
     let lines: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -291,8 +289,12 @@ pub fn transcript_reply(body: &Value) -> Reply {
     if let (Some(command), true) = (newest.strip_prefix("narrate: ").map(str::trim), has_terminal) {
         return Reply::Narrated(NARRATION.into(), vec![("terminal".into(), json!({ "command": command }))]);
     }
+    if let (Some(asked), true) = (newest.strip_prefix("clarify: "), offered("clarify")) {
+        let mut parts = asked.split('|').map(str::trim);
+        let question = parts.next().unwrap_or_default();
+        return Reply::Tools(vec![("clarify".into(), json!({ "questions": [{ "question": question, "choices": parts.collect::<Vec<_>>() }] }))]);
+    }
     if newest.contains("look at your screen") {
-        let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
         let listed = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains("computer_use"))));
         let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
         if offered("computer_use") {
@@ -925,7 +927,11 @@ mod tests {
         assert!(matches!(transcript_reply(&run), Reply::Tools(c) if c == vec![("terminal".to_string(), json!({ "command": "echo tool-ran" }))]));
         let ran = json!({ "messages": [{ "role": "user", "content": "run: echo x" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools });
         assert!(matches!(transcript_reply(&ran), Reply::Text(t) if t == "scripted: the tool ran: tool-ran"));
-        assert!(matches!(transcript_reply(&say("Respond with exactly one word: APPROVE, DENY, or ESCALATE.")), Reply::Text(t) if t == "ESCALATE"));
+        // a question with choices, when Hermes offers its clarify: a card
+        let clarify = json!([{ "type": "function", "function": { "name": "clarify" } }]);
+        let asked = json!({ "messages": [{ "role": "user", "content": "[paul] clarify: Which pot? | clay | plastic" }], "tools": clarify });
+        assert!(matches!(transcript_reply(&asked), Reply::Tools(c) if c == vec![("clarify".to_string(), json!({ "questions": [{ "question": "Which pot?", "choices": ["clay", "plastic"] }] }))]));
+        assert!(matches!(transcript_reply(&say("[paul] clarify: Which pot? | clay")), Reply::Text(t) if t == "scripted: clarify: Which pot? | clay [1]"), "without the tool, only words");
         let image = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "look" }, { "type": "image_url", "image_url": { "url": png_url() } }] }] });
         assert!(matches!(transcript_reply(&image), Reply::Text(t) if t == "scripted: I see an image, a 1x1 PNG"));
         // without a terminal tool, `run:` is only words

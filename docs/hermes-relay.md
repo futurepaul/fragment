@@ -153,8 +153,10 @@ onboarding: {profile_build: "off"}
 streaming: {enabled: true, transport: "draft"}
 display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", tool_preview_length: 140, long_running_notifications: false, interim_assistant_messages: false}
 platforms: {relay: {gateway_restart_notification: false}}
-approvals: {mode: "smart", timeout: 3600, destructive_slash_confirm: false}
-agent: {disabled_toolsets: ["cronjob"]}   # its routines are fragment cron (decision 38)
+approvals: {mode: "off", timeout: 3600, destructive_slash_confirm: false}   # nothing technical asks (docs/computers.md)
+agent: {disabled_toolsets: ["cronjob"], clarify_timeout: 3600}   # its routines are fragment cron (decision 38)
+platform_hints: {relay: {append: "…"}}   # how it asks its people: about outcomes, in plain words (hermes::ASKING)
+security: {allow_lazy_installs: false, protected_instruction_files: false}
 plugins: {disabled: [platforms/…, dashboard_auth/…]}
 ```
 

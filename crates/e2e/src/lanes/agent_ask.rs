@@ -31,7 +31,7 @@ use crate::{Need, Suite};
 pub const SECTION: &str = "agent-ask";
 
 /// The paid calls the run lends the section's person: Juniper's turn (a
-/// model call before and after its terminal step, Hermes' guardian and
+/// model call before and after its terminal step, and Hermes'
 /// title), and Fred's (a call or two, and his title).
 const PAID_CALLS: u64 = 24;
 /// A new computer's first start on a preview, to its agents following.

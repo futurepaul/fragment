@@ -33,7 +33,7 @@ use crate::{Need, Suite};
 pub const SECTION: &str = "checkout";
 
 /// The paid calls the run lends the person: their agent's first turn (its
-/// reply, Hermes' title and guardian).
+/// reply, Hermes' title).
 const PAID_CALLS: u64 = 10;
 /// Stripe's sandbox card that pays at once, without 3-D Secure, and what
 /// else Checkout asks of it (each by its field's id): any future date, any

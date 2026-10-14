@@ -141,7 +141,9 @@ pub enum Action {
     /// stream-is-the-message chats: elsewhere the final is a `send`).
     Draft { chat: String, draft_id: u64, content: String, done: bool },
     /// A question with buttons; its answer is an inbound `prompt_response`.
-    Prompt { chat: String, prompt_id: String, content: String, options: Vec<PromptOption>, timeout_s: Option<u64> },
+    /// `clarify`: the model's own question (`prompt_kind: "clarify"`), not
+    /// an approval.
+    Prompt { chat: String, prompt_id: String, content: String, options: Vec<PromptOption>, timeout_s: Option<u64>, clarify: bool },
     /// A file, uploaded to `/relay/media` first (`source_url`).
     SendMedia { chat: String, media_kind: String, source_url: String, caption: String, filename: Option<String> },
     GetChatInfo { chat: String },
@@ -206,7 +208,7 @@ fn action(a: &Value) -> Action {
             let clarify = s("prompt_kind") == "clarify";
             let content = s("content");
             let content = if clarify { question(&content).unwrap_or(content) } else { content };
-            Action::Prompt { chat: s("chat_id"), prompt_id: s("prompt_id"), content, options: options(&a["options"], clarify), timeout_s: a["timeout_s"].as_u64() }
+            Action::Prompt { chat: s("chat_id"), prompt_id: s("prompt_id"), content, options: options(&a["options"], clarify), timeout_s: a["timeout_s"].as_u64(), clarify }
         }
         "send_media" => Action::SendMedia {
             chat: s("chat_id"),
@@ -408,9 +410,13 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
     json!({ "type": "inbound", "bufferId": buffer_id, "event": event })
 }
 
-/// What a Stop answers a question asked in words with, so the clarify
-/// waiting on it lets go and the interrupted turn ends.
-pub const STOP_WORDS: &str = "Stop.";
+/// What a Stop answers a clarify waiting on its person with (one asked in
+/// words, or a card of choices): Hermes' own word for skipping a question
+/// (v0.21.6's `clarify_gateway.SKIP_WORD`, which any clarify takes, choices
+/// or none). Its wait never reads an interrupt, so without an answer the
+/// interrupted turn would wait out the clarify's timeout; answered, it
+/// lets go and the turn ends.
+pub const STOP_WORDS: &str = "skip";
 
 /// Hermes asking its person something to answer in words, as Relay carries
 /// it: an open `clarify` (the base adapter's `❓ <question>`, its choices
@@ -770,14 +776,14 @@ mod tests {
         assert_eq!(out(json!({ "op": "send", "chat_id": "c", "content": "x", "metadata": { "notify": true } })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Send { chat: "c".into(), content: "x".into(), reply: true, reply_to: None } });
         assert_eq!(out(json!({ "op": "draft", "chat_id": "c", "draft_id": 3, "content": "He", "final": false })), FromGateway::Outbound { request_id: "r1".into(), action: Action::Draft { chat: "c".into(), draft_id: 3, content: "He".into(), done: false } });
         let p = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.12", "options": [{ "id": "once", "label": "Allow Once", "style": "primary" }, { "id": "deny", "label": "Deny" }] }));
-        let FromGateway::Outbound { action: Action::Prompt { prompt_id, options, .. }, .. } = p else { panic!("a prompt") };
-        assert_eq!(prompt_id, "ab.12");
+        let FromGateway::Outbound { action: Action::Prompt { prompt_id, options, clarify, .. }, .. } = p else { panic!("a prompt") };
+        assert_eq!((prompt_id.as_str(), clarify), ("ab.12", false), "an approval");
         assert_eq!(options[0], PromptOption { id: "once".into(), label: "Allow Once".into(), style: Some("primary".into()), words: false });
         assert_eq!(options[1].style, None);
         // a clarify's choices (Hermes' send_clarify): the question without its glyph, and "Other" answered in words
         let c = out(json!({ "op": "prompt", "chat_id": "c", "content": "❓ Which color?", "prompt_kind": "clarify", "prompt_id": "q.1", "options": [{ "id": "c0", "label": "red" }, { "id": "other", "label": "✏️ Other (type answer)" }] }));
-        let FromGateway::Outbound { action: Action::Prompt { content, options, .. }, .. } = c else { panic!("a prompt") };
-        assert_eq!(content, "Which color?");
+        let FromGateway::Outbound { action: Action::Prompt { content, options, clarify, .. }, .. } = c else { panic!("a prompt") };
+        assert_eq!((content.as_str(), clarify), ("Which color?", true), "the model's own question");
         assert_eq!(options.iter().map(|o| (o.id.as_str(), o.words)).collect::<Vec<_>>(), vec![("c0", false), ("other", true)]);
         let FromGateway::Outbound { action: Action::Prompt { options, .. }, .. } = out(json!({ "op": "prompt", "chat_id": "c", "content": "Run?", "prompt_kind": "approval", "prompt_id": "ab.13", "options": [{ "id": "other", "label": "Other" }] })) else { panic!("a prompt") };
         assert!(!options[0].words, "only a clarify's Other takes words");

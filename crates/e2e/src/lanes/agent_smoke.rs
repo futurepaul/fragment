@@ -21,8 +21,8 @@
 //!    asked to open a browser, its screen (a ticket, in Chrome) connects,
 //!    draws a frame that is not blank, follows the desktop while open,
 //!    takes Take over, and shows the browser opened again;
-//! 5. a command Hermes' smart approvals asks about is a card its owner
-//!    answers, and the next message is answered;
+//! 5. nothing technical asks its owner: a recursive delete, which Hermes
+//!    flags, runs with no card, and the next message is answered;
 //! 6. after its desktop ran, its work's end is saved awake, held (its
 //!    guest answered the hold); asleep at its owner's first ask (nothing of
 //!    its own, its guest's sockets included, starts it again), every save
@@ -54,8 +54,9 @@ use crate::{Need, Suite};
 pub const SECTION: &str = "agent-smoke";
 
 /// The paid calls the run lends the section's person: its turns' model
-/// calls (each tool call is one, Hermes' guardian and titles one each).
-/// Measured on master (2026-10-05): 49, 31 of them the browser's turn.
+/// calls (each tool call is one, Hermes' titles one each; its guardian, one
+/// a flagged command, is off since 2026-10-14). Measured on master
+/// (2026-10-05): 49, 31 of them the browser's turn.
 /// Its ledger refuses the one past it; the run's default budget is 60.
 const PAID_CALLS: u64 = 56;
 /// A new computer's first start on a preview (the 3.8 GB image pulled to
@@ -594,69 +595,23 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     drop(chrome);
     count(api, "browser", &browsed, &mut spent);
 
-    // ---- 5. an approval, answered through the API
-    // Hermes flags every recursive delete, and its guardian (a model, at
-    // temperature 0 but not the same answer every time) approves those it
-    // finds safe: of five runs on master (2026-10-05/06), a plain
-    // `rm -rf <scratch>` ran without a card once in one, a delete whose
-    // path a file may name in one of three. So a second, a folder of
-    // backups, is asked for when the first ran unasked. Neither is there:
-    // either removes nothing.
+    // ---- 5. nothing technical asks its owner (Paul, 2026-10-14): a
+    // recursive delete, which Hermes flags, runs with no card. The folder
+    // is not there: it removes nothing.
     let scratch = s.name("scratch");
-    let asks = [
-        format!("Please run this exact command in your terminal now: rm -rf \"$(cat {scratch}.path 2>/dev/null || echo {scratch})\" (it removes a scratch folder, whose path may be kept in {scratch}.path; there is no need to ask me first in chat)"),
-        format!("Thanks. Now please run this exact command in your terminal: rm -rf ~/{scratch}-backups (an old folder of backups I no longer need; there is no need to ask me first in chat)"),
-    ];
-    let (mut risky, mut card, mut unasked) = (String::new(), None, vec![]);
-    // bounded: two asks
-    for (n, ask) in asks.iter().enumerate() {
-        risky = c.say(&format!("smoke-5{}", ["a", "b"][n]), ask)?;
-        card = within(WORK, || c.of_kind(&risky, "turn.prompt").into_iter().next().map(Some).or_else(|| c.ended(&risky).map(|_| None))).flatten();
-        if card.is_some() {
-            break;
-        }
-        let _ = c.finish(&risky, REPLY);
-        println!("      (ask {}: no card, its turn {})", n + 1, c.ended(&risky).map_or("did not end".into(), |e| format!("ended {}", e["outcome"])));
-        unasked.push(c.summary(&risky));
-    }
+    let risky = c.say("smoke-5", &format!("Please run this exact command in your terminal now: rm -rf ~/{scratch}-backups (an old folder of backups I no longer need)"))?;
+    let end = c.finish(&risky, WORK);
+    let deleted = c.of_kind(&risky, "turn.step").iter().any(|st| st["tool"] == "terminal" && st["args"].as_str().is_some_and(|a| a.contains("rm -rf") && a.contains(&scratch)));
     s.ok(
-        "a command Hermes' smart approvals asks about (a recursive delete) is a card on work, asking the agent's owner, of two asked for (model-dependent: the agent runs it, and Hermes' guardian, a model, does not approve it alone)",
-        card.as_ref().is_some_and(|k| k["asks"] == owner_id.as_str()),
-        match &card {
-            Some(k) => k.to_string(),
-            None => format!("Hermes' guardian approved both, or the agent ran neither: {}", json!(unasked)),
-        },
+        "a command Hermes flags (a recursive delete) runs with no card asking its owner, and its turn ends (model-dependent: the agent runs it)",
+        deleted && end.is_some() && c.of_kind(&risky, "turn.prompt").is_empty(),
+        c.why(&risky, end.is_some(), "run it and end its turn", WORK),
     );
-    let answer_label = "its owner's answer through the API (allow once) closes the card as answered, and its turn ends";
-    match card {
-        None => {
-            let _ = c.finish(&risky, REPLY);
-            s.skip(answer_label, "there was no card to answer");
-        }
-        Some(card) => {
-            let prompt = card["prompt"].as_str().unwrap_or("").to_string();
-            let options = card["options"].as_array().cloned().unwrap_or_default();
-            let once = options.iter().find(|o| o["id"] == "once").or_else(|| options.iter().find(|o| o["id"] != "deny")).and_then(|o| o["id"].as_str()).unwrap_or("once").to_string();
-            let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": once } });
-            let r = api.signed(&keys, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
-            let end = c.finish(&risky, REPLY);
-            let closed = c.of_kind(&risky, "turn.prompt.closed").into_iter().next().unwrap_or_default();
-            s.ok(
-                answer_label,
-                r.status == 200 && closed["outcome"] == "answered" && closed["option"] == once.as_str() && end.is_some(),
-                format!("answer {}; {}", r.status, c.why(&risky, end.is_some(), "end its turn after the answer", REPLY)),
-            );
-        }
-    }
-    count(api, "approval", &risky, &mut spent);
+    count(api, "no approval", &risky, &mut spent);
     let next = c.say("smoke-6", "Thanks. Reply with one short sentence.")?;
     let answered = within(REPLY, || c.replies(&next).into_iter().find(|t| !t.trim().is_empty()));
     let _ = c.finish(&next, REPLY);
     s.ok("and the next message is answered (model-dependent)", answered.is_some(), c.why(&next, answered.is_some(), "reply", REPLY));
-    s.skip(
-        "an approval card that expires stalls nothing: the next message is answered",
-        "a card expires after an hour (the bridge's PROMPT_TTL_MS_DEFAULT), past a hosted run: the bridge's local tests make one expire (#159: images/bridge/src/engine_tests.rs an_open_card_keeps_its_computer_awake_until_it_expires, images/bridge/tests/relay.rs an_expired_card_ends_its_turn_and_the_next_message_is_answered)",
-    );
     count(api, "after", &next, &mut spent);
 
     // ---- its work's end is saved awake, its desktop used: the hold is

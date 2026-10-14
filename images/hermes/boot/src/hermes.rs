@@ -157,24 +157,33 @@ fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
 
-/// How long Hermes waits on an approval: the bridge's prompt lifetime, so a
-/// card and its command expire together.
-pub const APPROVAL_TIMEOUT_S: u64 = fragment_bridge::limits::PROMPT_TTL_MS_DEFAULT / 1000;
+/// How long Hermes waits on a card it asks (a `clarify` with choices, or
+/// one of the few approvals it still asks: `managed_config`): the bridge's
+/// prompt lifetime, so a card and Hermes' wait on it expire together.
+pub const CARD_TIMEOUT_S: u64 = fragment_bridge::limits::PROMPT_TTL_MS_DEFAULT / 1000;
 
-/// The approval timeout a boot uses, in seconds: `setting`
-/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`, a test's) within the bounds the
-/// bridge holds a prompt's life to, else `APPROVAL_TIMEOUT_S`. The bridge
-/// is given the same (`BRIDGE_PROMPT_TTL_MS`), so a card and its command
-/// still expire together.
-pub fn approval_timeout_s(setting: Option<&str>) -> u64 {
+/// The card timeout a boot uses, in seconds: `setting`
+/// (`HERMES_BOOT_CARD_TIMEOUT_S`, a test's) within the bounds the bridge
+/// holds a prompt's life to, else `CARD_TIMEOUT_S`. The bridge is given the
+/// same (`BRIDGE_PROMPT_TTL_MS`), so a card and Hermes' wait on it still
+/// expire together.
+pub fn card_timeout_s(setting: Option<&str>) -> u64 {
     use fragment_bridge::limits::{PROMPT_TTL_MS_MAX, PROMPT_TTL_MS_MIN};
-    setting.and_then(|v| v.trim().parse::<u64>().ok()).map_or(APPROVAL_TIMEOUT_S, |s| s.clamp(PROMPT_TTL_MS_MIN / 1000, PROMPT_TTL_MS_MAX / 1000))
+    setting.and_then(|v| v.trim().parse::<u64>().ok()).map_or(CARD_TIMEOUT_S, |s| s.clamp(PROMPT_TTL_MS_MIN / 1000, PROMPT_TTL_MS_MAX / 1000))
 }
 
-/// The managed overlay: how every profile streams, shows progress, asks for
-/// approvals (waiting `approval_timeout_s` on each), when its desktop is
+/// What every agent is told of the people it talks to, in its system
+/// prompt on every turn in our chats (Hermes' `platform_hints.relay`,
+/// appended to the relay's hint, which is empty): they are not technical,
+/// so it asks them about outcomes in plain words, never about a command,
+/// a file or code (Paul, 2026-10-14). The `fragment` skill's first page
+/// (`computer.md`, "Asking your owner") says the same at more length.
+pub const ASKING: &str = "You are in a Fragment chat, and its people are not technical. Never ask them to approve a command, a file, a path or code: do the technical work yourself, and tell them what changed in plain words. Ask only about outcomes that are theirs to decide, in plain words, with the clarify tool and its choices (its card is your owner's to answer): before you make something of theirs public or share it with someone new, send an email or a message in their name, delete something of theirs, or spend their money, unless they asked for exactly that in this chat.";
+
+/// The managed overlay: how every profile streams, shows progress, asks
+/// (nothing technical; a card waits `card_timeout_s`), when its desktop is
 /// idle (`screen_idle_ms`), and what it never runs.
-pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, screen_idle_ms: u64) -> String {
+pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_idle_ms: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -200,16 +209,24 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
         fragment_bridge::limits::STEP_ARGS_MAX_CHARS
     ));
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
-    // Approvals default to Hermes' `smart` mode (decision 16): a terminal command
-    // Hermes flags, or an execute_code script, goes first to its guardian (the
-    // agent's own model, through the route, as the agent), and only one it
-    // escalates is a card. The agent's desktop is never asked about
-    // (`DESKTOP_ACTIONS`, each profile's own config). A card waits as long as the
-    // bridge's prompt does. Slash confirmations stay off: a person's leading `/`
-    // never reaches Hermes as a command.
-    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
-    // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
-    y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
+    // No technical approvals (Paul, 2026-10-14: its people are not technical,
+    // and a question about a command makes no sense to them; finite-mono ran
+    // Hermes so). `off` is Hermes' own switch past its approval gate: a
+    // terminal command it flags, an execute_code script, a computer_use
+    // action, a write to an SSH config, and a plugin's rule all run unasked,
+    // with no smart guardian. Its hard floors come before the gate and
+    // stand (docs/computers.md, "Approvals in our Hermes image"). What still
+    // asks (a card filling a saved payment card) waits as long as the
+    // bridge's prompt does. Slash confirmations stay off: `/new` from the
+    // menu asks nothing.
+    y.push_str(&format!("approvals:\n  mode: \"off\"\n  timeout: {card_timeout_s}\n  destructive_slash_confirm: false\n"));
+    // Hermes' own cron is off: an agent's routines are its fragment's cron
+    // (decision 38). A clarify's card waits as long as the bridge's prompt
+    // does, as an approval's (Hermes' default is an hour, the bridge's too).
+    y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n"));
+    // The agent asks its people about outcomes alone, in plain words
+    // (`ASKING`).
+    y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(ASKING)));
     // A voice memo's transcript is no message of its own: the agent hears it
     // and answers once (one reply a turn, #160). The gateway reads this from
     // its own home's config, with this overlay merged over it; each profile
@@ -238,7 +255,12 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     // route, its chat the relay). What our agents use is in the image (Edge's
     // speech for text_to_speech: images/hermes/Dockerfile). Software the
     // agent wants is its terminal's to install.
-    y.push_str("security:\n  allow_lazy_installs: false\n");
+    // A write to a project's `AGENTS.md`, `CLAUDE.md`, `SOUL.md`,
+    // `.cursorrules` or `.hermes/` (a brain's guide, an app's notes, an
+    // agent fragment synced to its work) asks no one: Hermes asks for these
+    // whatever `approvals.mode` says, and they are the agent's own files to
+    // keep.
+    y.push_str("security:\n  allow_lazy_installs: false\n  protected_instruction_files: false\n");
     if !disabled_plugins.is_empty() {
         // Messaging platforms this computer never serves (it is reached through its
         // bridge) and the dashboard's auth providers: the gateway imports every one
@@ -249,43 +271,6 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
         }
     }
     y
-}
-
-/// Every `computer_use` action Hermes v0.21.6 asks a person about, and its
-/// `bring_to_front` scope (`tools/computer_use/tool.py`: each `_ACTIONS`
-/// entry marked `destructive`, which is every one but `capture`, `wait`,
-/// `list_apps` and `list_windows`; `handle_computer_use` asks for each scope
-/// in turn). Its gate (`_request_approval`, through `tools/approval.py`'s
-/// `_run_approval_gate`) never consults the smart guardian: only `/yolo`,
-/// `approvals.mode: off`, or a standing grant pass it, so in `smart` mode
-/// every scroll and every focus change was a card (Paul on p5, 2026-10-09:
-/// "asking me for permission for silly things like changing focus in
-/// computer use and scrolling").
-///
-/// The desktop these drive is the agent's own (an Xvnc of its own in the
-/// computer; Take over is the person's way onto it), so each profile holds
-/// them all granted (`desktop_grants`), in both delivery modes: what the
-/// agent does there is what its browser tools do in the same Chromium, which
-/// Hermes never asks about. What still asks: Hermes' dangerous commands in
-/// its terminal and its execute_code scripts, after the smart guardian
-/// (`managed_config`), and the writes Hermes always asks about (an SSH
-/// config; a project's `AGENTS.md`, `SOUL.md`, `CLAUDE.md`, `.cursorrules`).
-/// Hermes' hard blocks on the desktop (a log-out key, `curl … | sh` typed)
-/// stand: they come before the gate.
-pub const DESKTOP_ACTIONS: [&str; 11] = ["click", "double_click", "right_click", "middle_click", "drag", "scroll", "type", "key", "set_value", "focus_app", "bring_to_front"];
-
-/// `computer_use`'s delivery modes: a grant is per action and mode
-/// (`cua:<action>:<mode>`), foreground (it raises the window) apart.
-pub const DELIVERY_MODES: [&str; 2] = ["background", "foreground"];
-
-/// The standing grants each profile holds: one `command_allowlist` key
-/// (`cua:<action>:<mode>`, Hermes' own, as its "always" answer would store
-/// it) for each of `DESKTOP_ACTIONS` in each of `DELIVERY_MODES`. Hermes
-/// reads a profile's list as its gate's first answer (`is_approved`). No
-/// key is a terminal command's pattern, and none a glob, so the terminal's
-/// commands are flagged and reviewed as before.
-pub fn desktop_grants() -> Vec<String> {
-    DESKTOP_ACTIONS.iter().flat_map(|a| DELIVERY_MODES.iter().map(move |m| format!("cua:{a}:{m}"))).collect()
 }
 
 /// An agent's profile config: its model, through the model intercept, as
@@ -422,10 +407,6 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
         // through BU_NAME=remote browser-harness; the desktop stays local.
         y.push_str("  cloud_provider: \"local\"\n");
     }
-    // Its approvals: its own desktop is never asked about (`DESKTOP_ACTIONS`
-    // says why, and what still asks). Hermes reads the list from the
-    // config of the profile whose turn it runs (`_permanent_set`).
-    y.push_str(&format!("command_allowlist: [{}]\n", desktop_grants().iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
     // only to the commands of this profile's turns. Its shell's start files are
@@ -926,13 +907,12 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
             "group_sessions_per_user: false",
             "disabled_toolsets: [\"cronjob\"]",
-            "mode: \"smart\"",
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
             "\nmodel_catalog:\n  enabled: false\n",
@@ -941,19 +921,21 @@ mod tests {
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
-        assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
         // `display`'s own lines: the model's text beside a tool call is no
         // message of its own, for every platform (none names `relay`)
         let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
         assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
         assert!(display.contains(&"  tool_preview_length: 140"), "a step's preview as long as the bridge keeps its arguments: {m}");
         assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
-        // a test's shorter approval, held within the bridge's bounds
-        assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);
-        assert_eq!(approval_timeout_s(Some("20")), 20);
-        assert_eq!(approval_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
-        assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
-        assert!(managed_config(&[], 20, crate::desktop::IDLE_STOP_MS).contains("timeout: 20\n"));
+        // a test's shorter card, held within the bridge's bounds: an
+        // approval's wait and a clarify's both
+        assert_eq!(card_timeout_s(None), CARD_TIMEOUT_S);
+        assert_eq!(CARD_TIMEOUT_S, 3600, "Hermes' own clarify wait, and the bridge's card");
+        assert_eq!(card_timeout_s(Some("20")), 20);
+        assert_eq!(card_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
+        assert_eq!(card_timeout_s(Some("not a number")), CARD_TIMEOUT_S);
+        let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
+        assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
         let p = profile_config(&agent(), &Tier::Medium.into(), "http://model.fragment.internal/", &[], creds);
@@ -1008,32 +990,27 @@ mod tests {
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper--k3x9"), PathBuf::from("/data/hermes/profiles/juniper--k3x9"));
     }
 
-    /// Goal (Paul on p5, 2026-10-09): an agent's own desktop never asks its
-    /// owner, and its terminal's dangerous commands still do. Method: every
-    /// profile's config, on every model, holds each desktop action granted
-    /// in each delivery mode, and nothing that would pass a terminal
-    /// command; the overlay keeps the smart guardian for those. (Run against
-    /// the real Hermes in the bridge's tests/docker.rs: a scroll and a focus
-    /// change with no card, and `rm -rf` still a card.)
+    /// Goal (Paul, 2026-10-14: "if hermes asks them a technical approval it
+    /// makes no sense to them"): nothing technical asks the agent's owner, on
+    /// any model. Method: the overlay, merged over every profile, turns
+    /// Hermes' approval gate off (its terminal's flagged commands, its
+    /// execute_code scripts, its desktop, an SSH config's writes) and its
+    /// protected files' writes, and tells every agent to ask its people only
+    /// about outcomes, in plain words, with its clarify tool's choices; no
+    /// profile says otherwise, nor holds a standing grant. (Run against the
+    /// real Hermes in the bridge's tests/docker.rs,
+    /// `nothing_technical_asks_its_owner`: each with no card.)
     #[test]
-    fn an_agents_own_desktop_never_asks() {
-        let grants = desktop_grants();
-        assert_eq!(grants.len(), DESKTOP_ACTIONS.len() * DELIVERY_MODES.len());
-        for action in ["scroll", "focus_app", "click", "type", "key", "bring_to_front"] {
-            for mode in ["background", "foreground"] {
-                assert!(grants.contains(&format!("cua:{action}:{mode}")), "{action} in {mode}: {grants:?}");
-            }
+    fn nothing_technical_asks_its_owner() {
+        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert!(m.contains("\napprovals:\n  mode: \"off\"\n  timeout: 3600\n  destructive_slash_confirm: false\n"), "{m}");
+        assert!(m.contains("\nsecurity:\n  allow_lazy_installs: false\n  protected_instruction_files: false\n"), "{m}");
+        assert!(!m.contains("smart") && !m.contains("yolo") && !m.contains("command_allowlist"), "{m}");
+        assert!(m.contains(&format!("\nplatform_hints:\n  relay:\n    append: {}\n", q(ASKING))), "every agent in our chats is told how to ask: {m}");
+        for said in ["not technical", "Never ask them to approve a command, a file, a path or code", "in plain words", "the clarify tool and its choices", "public", "someone new", "an email", "spend their money"] {
+            assert!(ASKING.contains(said), "{said}: {ASKING}");
         }
-        // only computer_use's keys: no terminal pattern's, no command, no glob
-        for g in &grants {
-            assert!(g.starts_with("cua:") && !g.contains(['*', '?', '[', ' ']), "{g}");
-        }
-        // the actions that read, never asked, are not granted
-        for read in ["capture", "wait", "list_apps", "list_windows"] {
-            assert!(!DESKTOP_ACTIONS.contains(&read), "{read}");
-        }
-        let line = format!("command_allowlist: [{}]\n", grants.iter().map(|g| format!("\"{g}\"")).collect::<Vec<_>>().join(", "));
-        assert!(line.starts_with("command_allowlist: [\"cua:click:background\", \"cua:click:foreground\", \"cua:double_click:background\""), "{line}");
+        assert!(!ASKING.contains(['`', '\n']) && ASKING.len() < 700, "one plain paragraph: {ASKING}");
         let creds = Path::new("/c.sh");
         let mut own = agent();
         own.credentials.push(fragment_bridge::runtime::Credential { model_base: Some("https://openrouter.ai/api/v1".into()), ..credential("openrouter", &[], "fcx_openrouter_a1") });
@@ -1041,15 +1018,13 @@ mod tests {
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
             let p = profile_config(&a, &main, "http://model.fragment.internal", &[], creds);
-            assert_eq!(p.matches("command_allowlist:").count(), 1, "{p}");
-            assert!(p.contains(&format!("\n{line}")), "a top-level key of the {} profile: {p}", main.name());
+            for overlaid in ["command_allowlist", "approvals:", "security:", "platform_hints:", "clarify_timeout"] {
+                assert!(!p.contains(overlaid), "the overlay's alone, never the {} profile's: {p}", main.name());
+            }
             let falls_back = matches!(main, MainModel::Tier(Tier::Cheap | Tier::Medium));
             assert_eq!(p.contains("fallback_providers:"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
         }
-        let m = managed_config(&[], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert!(m.contains("approvals:\n  mode: \"smart\"\n"), "a flagged command still goes to the guardian, then a person: {m}");
-        assert!(!m.contains("command_allowlist") && !m.contains("yolo") && !m.contains("mode: \"off\""), "nothing passes the terminal's commands: {m}");
-        assert!(!default_config("http://model.fragment.internal").contains("command_allowlist"), "the gateway's own profile runs no turns");
+        assert!(!default_config("http://model.fragment.internal").contains("approvals"), "the gateway's own profile runs no turns");
     }
 
     /// The image's Chromium starts Hermes' pinned one with the container's
@@ -1094,7 +1069,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), &Tier::Medium.into(), "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), &Tier::Medium.into(), "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");

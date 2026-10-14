@@ -21,7 +21,9 @@
 //!   `prompt_kind: "clarify"` (`❓ Which color?`: `c0` red, `c1` blue,
 //!   `other`); a choice is acked `✅ <choice>`, `other` asks `✏️ Type your
 //!   answer:`, and a message in the chat while it waits is its answer (its
-//!   clarify intercept); the reply ends `(chose: <it>)`;
+//!   clarify intercept); the reply ends `(chose: <it>)`. An interrupt
+//!   while it waits does not end it, as Hermes' does not: the turn stops
+//!   once an answer lets the clarify go;
 //! - `fail` fails as Hermes' handler does when it raises: `👀` off, `❌`
 //!   with nothing said, then its notice as a send answering nothing;
 //! - `narrate` says text beside a tool call as Hermes' stream consumer
@@ -115,6 +117,8 @@ pub struct Seen {
     pub closed: usize,
     /// The words of each `/steer` it took into a running turn.
     pub steered: Vec<String>,
+    /// What let each clarify go that an interrupt waited behind.
+    pub clarify_answers: Vec<String>,
 }
 
 pub struct Hermes {
@@ -506,7 +510,7 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         let prompt = format!("c1a.{:08x}", gw.next.fetch_add(1, Ordering::Relaxed));
         gw.clarifying.lock().unwrap().insert(chat.clone());
         gw.act(json!({ "op": "prompt", "chat_id": chat, "content": "❓ Which color?", "prompt_kind": "clarify", "prompt_id": prompt, "options": options, "reply_to": null, "metadata": {} })).await;
-        let mut chose = None;
+        let (mut chose, mut interrupted) = (None, false);
         // bounded: an answer, then at most its words
         while chose.is_none() {
             match rx.recv().await {
@@ -519,7 +523,13 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
                     chose = Some(label.to_string());
                 }
                 Some(Heard::Words(w)) => chose = Some(w),
-                Some(Heard::Interrupt) | None => {
+                // Hermes' clarify waits through an interrupt (v0.21.6: its
+                // wait never reads one): the turn ends once words let it go
+                Some(Heard::Interrupt) => {
+                    gw.seen.lock().unwrap().interrupted += 1;
+                    interrupted = true;
+                }
+                None => {
                     gw.clarifying.lock().unwrap().remove(&chat);
                     done();
                     gw.act(react("👀", true)).await;
@@ -528,6 +538,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
             }
         }
         gw.clarifying.lock().unwrap().remove(&chat);
+        if interrupted {
+            gw.seen.lock().unwrap().clarify_answers.push(chose.unwrap_or_default());
+            done();
+            gw.act(react("👀", true)).await;
+            return;
+        }
         reply = format!("{reply} (chose: {})", chose.unwrap_or_default());
     }
     if gw.seen.lock().unwrap().dead {

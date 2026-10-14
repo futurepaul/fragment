@@ -168,10 +168,10 @@ prebuilt bundle is in the debt ledger).
   run ends saying what it spent. `agent-smoke` runs only here, and only
   by name (`--only agent-smoke`): a real agent (our Hermes image on its
   real model, `Need::RealAgent`) and Chrome, through the flows a person
-  uses (a first reply, the CLI, an app, the desktop and its screen, an
-  approval, a sleep and a wake), for about half an hour and up to 50 paid
-  calls (crates/e2e/src/lanes/agent_smoke.rs). `agent-restart` runs only
-  here too, by name: its owner's Restart of a real Hermes computer awake
+  uses (a first reply, the CLI, an app, the desktop and its screen, a
+  command that asks no one, a sleep and a wake), for about half an hour
+  and up to 50 paid calls (crates/e2e/src/lanes/agent_smoke.rs).
+  `agent-restart` runs only here too, by name: its owner's Restart of a real Hermes computer awake
   after a reply (its newest save restored, fresh from the image, asked
   twice made once), then a reply after it; up to 10 paid calls (16 with
   a candidate) (crates/e2e/src/lanes/agent_restart.rs). `checkout` runs only here, by

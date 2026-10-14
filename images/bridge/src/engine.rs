@@ -1149,7 +1149,7 @@ impl Engine {
             return;
         }
         t.stop_requested = true;
-        // a Stop is its question's answer too (Relay says "Stop." to
+        // a Stop is its question's answer too (Relay says `skip` to
         // a clarify waiting on words): the next message is a turn
         t.asking = false;
         let open: Vec<String> = t.prompts.iter().filter(|p| !p.closed).map(|p| p.id.clone()).collect();

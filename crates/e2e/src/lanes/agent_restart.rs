@@ -37,7 +37,7 @@ use crate::{Need, Suite};
 pub const SECTION: &str = "agent-restart";
 
 /// The paid calls the run lends the section's person: two replies, each a
-/// model call or two, and Hermes' title and guardian.
+/// model call or two, and Hermes' title.
 const PAID_CALLS: u64 = 10;
 /// With a candidate: a third reply, its rollback's.
 const PAID_CALLS_ROUND: u64 = 16;

@@ -760,7 +760,7 @@ fn a_question_waits_as_long_as_a_prompt() {
     ev(&mut e, Event::Asked { turn: t2.clone() }, T0 + 3_600_003);
     let stop = said(&mut e, &a, &v, 3, "npub1paul", json!({ "kind": "stop" }), T0 + 3_600_004);
     assert_eq!(commands(&stop), vec![Command::Stop { turn: t2 }]);
-    // the Stop answered the question (Relay says "Stop." to it): the
+    // the Stop answered the question (Relay says `skip` to it): the
     // asker's next message is a turn of its own, queued behind it
     let after = said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "never mind" }), T0 + 3_600_005);
     assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");

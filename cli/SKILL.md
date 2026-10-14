@@ -64,6 +64,10 @@ A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
 the suffix to the label you create it with); a bare label names the one
 of yours with it (an agent's: its owner's).
 
+Who can open a fragment is the person's to decide: before you make one
+public or share it with someone new, ask them in plain words, unless
+they asked for exactly that, and then say what you did.
+
 Apps default to no header: no title bar, banner, hero, or page-title
 heading unless the person asks for one. The shell already frames the app
 with its title; start with useful content. Design for a narrow pane
