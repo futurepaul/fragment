@@ -179,7 +179,7 @@ prebuilt bundle is in the debt ledger).
   after a reply (its newest save restored, fresh from the image, asked
   twice made once), then a reply after it; up to 10 paid calls (16 with
   a candidate) (crates/e2e/src/lanes/agent_restart.rs). `checkout` runs only here, by
-  name and with `--operator-key-file`: a guest buys a $100 seat on
+  name and with `--operator-key-file`: a guest buys the $200 seat on
   Stripe's own sandbox Checkout in Chrome (card 4242…), comes back to it,
   and their first agent answers; about a minute, one paid call
   (crates/e2e/src/lanes/checkout.rs). `--candidate <image>` (one of the
