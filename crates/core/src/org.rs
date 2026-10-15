@@ -250,7 +250,7 @@ mod tests {
         assert!(!desired(held(SeatKind::SeatAlwaysOn, true, None, true)).always_on, "its holder let it sleep");
         assert!(!desired(held(SeatKind::SeatAlwaysOn, false, Some(Status::Canceled), false)).always_on, "lapsed");
         assert!(desired(held(SeatKind::SeatAlwaysOn, false, Some(Status::PastDue), false)).always_on, "past due is good");
-        assert!(!desired(held(SeatKind::Seat, true, None, false)).always_on, "a $100 seat's computer sleeps");
+        assert!(!desired(held(SeatKind::Seat, true, None, false)).always_on, "a comped `seat`'s computer sleeps");
         assert_eq!(desired(held(SeatKind::SeatAlwaysOn, true, None, false)).plan, Some(Plan::SeatAlwaysOn));
     }
 

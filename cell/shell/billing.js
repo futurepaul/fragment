@@ -1,10 +1,12 @@
 // The shell's Billing (docs/billing.md, "The shell"; docs/api.md, Seats
 // and orgs, Billing): a person's seat, their credit, and their org's.
-// A guest's seats and trial code are the welcome's (`seatOffer`, for
+// A guest's seat and trial code are the welcome's (`seatOffer`, for
 // shell.js `welcome`), which Billing links to; a seat's holder sees it,
-// lets a $200 seat's computer sleep, and buys credit; an org's admin adds,
-// changes and removes seats and admins, and opens Stripe's portal for card
-// and invoices. An org is shown once someone besides its admin is in it (a
+// lets a $200 seat's computer sleep, and buys credit; an org's admin adds
+// and removes seats and admins, and opens Stripe's portal for card and
+// invoices. One seat is sold, $200 a month and always on (Paul,
+// 2026-10-15); a `seat` is an operator's comp. An org is shown once
+// someone besides its admin is in it (a
 // seat, held or invited, or another admin): its admin alone, who pays for
 // themselves, sees only Payment and invoices, and asks for the org's seats
 // to add one for someone else. Stripe's Checkout and portal are Stripe's
@@ -12,12 +14,9 @@
 // (`/welcome?checkout=…`), a credit pack's here (`/settings?pack=…`,
 // `returning`). Every value is text, never markup.
 
-const KIND = { seat: "$100 seat", seat_always_on: "$200 always-on seat" };
-// The two seats (decision 25), as a guest chooses between them.
-const PLANS = [
-  ["seat", "$100 a month", "Your agents, the computer they run on (it sleeps when idle), apps of your own, and $50 of credit a month."],
-  ["seat_always_on", "$200 a month, always on", "The same on a computer that stays awake, and $100 of credit a month."],
-];
+const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "$200 always-on seat" };
+// The one seat sold (decision 25; docs/ledger.md, Plans), as a guest takes it.
+const PLAN = ["seat_always_on", "$200 a month, always on", "Your agents, on a computer of their own that stays awake (its time is not metered), apps of your own, and $100 of credit included each month."];
 
 /**
  * The shell's helpers this module uses: `{api, el}` for the welcome, and
@@ -48,17 +47,6 @@ function note(box, text) {
   box.append(h.el("p", "settings-warning billing-note", text));
 }
 
-function kindSelect(value = "seat") {
-  const s = h.el("select");
-  for (const [k, label] of Object.entries(KIND)) {
-    const o = h.el("option", null, label);
-    o.value = k;
-    s.append(o);
-  }
-  s.value = value;
-  return s;
-}
-
 async function goCheckout(body) {
   const v = await h.api("POST", "/api/billing/checkout", body);
   location.assign(v.url);
@@ -83,10 +71,10 @@ export async function returning(helpers) {
 }
 
 /**
- * The welcome's seats for a guest (`mine`: `GET /api/seat`'s), each to
- * Stripe's Checkout, and a trial code (`trial`: one a mailed link named);
- * what Checkout or a code refuses is said under them. Someone in an org
- * whose admins give its seats is told so instead.
+ * The welcome's seat for a guest (`mine`: `GET /api/seat`'s), to Stripe's
+ * Checkout, and a trial code (`trial`: one a mailed link named); what
+ * Checkout or a code refuses is said under them, then what more credit
+ * costs. Someone in an org whose admins give its seats is told so instead.
  */
 export function seatOffer(helpers, mine, trial) {
   h = helpers;
@@ -120,19 +108,23 @@ export function seatOffer(helpers, mine, trial) {
       for (const b of choices) b.disabled = false;
     }
   };
-  for (const [kind, title, what] of PLANS) {
-    const b = el("button", "plan");
-    b.type = "button";
-    b.dataset.plan = kind;
-    b.append(el("strong", null, title), el("span", null, what));
-    b.onclick = () => go({ kind });
-    plans.append(b);
-  }
+  const [kind, title, what] = PLAN;
+  const b = el("button", "plan");
+  b.type = "button";
+  b.dataset.plan = kind;
+  b.append(el("strong", null, title), el("span", null, what));
+  b.onclick = () => go({ kind });
+  plans.append(b);
   form.onsubmit = (e) => {
     e.preventDefault();
     go({ trialCode: code.value });
   };
-  return [plans, form, said, el("p", "muted", "Prices are monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel.")];
+  return [
+    plans,
+    form,
+    said,
+    el("p", "muted", "Monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel. With a seat, more credit is $25 a pack, kept until spent."),
+  ];
 }
 
 /** The Billing section, and an admin's Org section. */
@@ -154,7 +146,7 @@ export async function billingSections(helpers, ledger, back) {
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
-      if (seat.admin) billing.append(actionLine("Renewal", button("Pay again", () => goCheckout({ kind: seat.kind }))));
+      if (seat.admin) billing.append(actionLine("Renewal", button("Pay again", () => goCheckout({}))));
       else billing.append(el("p", "muted", "Ask your org's admin to pay for it again."));
     }
     if (seat.good && seat.kind === "seat_always_on") {
@@ -174,7 +166,7 @@ export async function billingSections(helpers, ledger, back) {
       billing.append(label);
     }
   } else if (!mine.org || mine.admin) {
-    billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat gives you agents of your own, the computer they run on, and apps of your own."));
+    billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat, $200 a month, gives you agents of your own, the always-on computer they run on, apps of your own, and $100 of credit a month."));
     // the seats and a trial code are the welcome's, as a new person's are
     const get = el("a", "quiet", "Get a seat");
     get.href = "/welcome";
@@ -222,17 +214,7 @@ function orgSection(org) {
     const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : ""].filter(Boolean).join(", "));
     const actions = el("td");
     if (m.seat && !m.comped) {
-      const kind = kindSelect(m.seat);
-      kind.onchange = async () => {
-        try {
-          await h.api("PATCH", `/api/org/seats/${encodeURIComponent(m.id)}`, { kind: kind.value });
-          await h.reopen();
-        } catch (e) {
-          kind.value = m.seat;
-          note(box, e.message);
-        }
-      };
-      actions.append(kind, button("Remove seat", async () => {
+      actions.append(button("Remove seat", async () => {
         if (!confirm(`Remove ${m.email}'s seat? Their agents stop.`)) return;
         await h.api("DELETE", `/api/org/seats/${encodeURIComponent(m.id)}`);
         await h.reopen();
@@ -253,14 +235,13 @@ function orgSection(org) {
   email.type = "email";
   email.placeholder = "email";
   email.required = true;
-  const kind = kindSelect();
   const go = el("button", "quiet", "Add a seat");
   go.type = "submit";
-  add.append(email, kind, go);
+  add.append(email, go);
   add.onsubmit = async (e) => {
     e.preventDefault();
     try {
-      await h.api("POST", "/api/org/seats", { email: email.value.trim(), kind: kind.value });
+      await h.api("POST", "/api/org/seats", { email: email.value.trim() });
       await h.reopen();
     } catch (err) {
       note(box, err.message);
@@ -285,6 +266,6 @@ function orgSection(org) {
   };
   const pay = el("div", "settings-actions");
   pay.append(portal());
-  box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", "A seat added bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices."), actionLine("Payment", pay));
+  box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", "A seat added, $200 a month and always on, bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices."), actionLine("Payment", pay));
   return box;
 }

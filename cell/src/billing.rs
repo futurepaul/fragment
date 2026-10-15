@@ -28,9 +28,9 @@ const CHECKOUT_TTL_S: i64 = 31 * 60;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Buy {
-    /// The seat's kind (a trial code's own when one is named).
-    #[serde(default)]
-    kind: Option<SeatKind>,
+    /// The seat's kind: the one sold when none is named; any other is 400.
+    #[serde(default = "SeatKind::sold")]
+    kind: SeatKind,
     #[serde(default)]
     trial_code: Option<String>,
 }
@@ -62,19 +62,20 @@ fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
 /// The seat's monthly price, found by its lookup key, as decision 25 has
 /// it: active, USD, monthly, at its amount. Anything else is a deployment
 /// whose Stripe is not set up as `xtask stripe check` wants it.
-async fn price(stripe: &Stripe, kind: SeatKind) -> CellResult<String> {
-    let key = core_stripe::lookup_key(kind);
+async fn price(stripe: &Stripe) -> CellResult<String> {
+    let key = core_stripe::SEAT_LOOKUP_KEY;
     let found: List<Price> = stripe.get(&format!("/v1/prices?lookup_keys[]={key}&active=true")).await?;
     let p = found.data.into_iter().next().ok_or_else(|| CellError::host(format!("Stripe has no active price {key}: run `cargo xtask stripe setup`")))?;
-    if p.unit_amount != Some(core_stripe::unit_amount(kind)) || p.currency.as_deref() != Some("usd") {
-        return Err(CellError::host(format!("Stripe's price {key} is not ${} a month in USD", core_stripe::unit_amount(kind) / 100)));
+    if p.unit_amount != Some(core_stripe::SEAT_CENTS) || p.currency.as_deref() != Some("usd") {
+        return Err(CellError::host(format!("Stripe's price {key} is not ${} a month in USD", core_stripe::SEAT_CENTS / 100)));
     }
     Ok(p.id)
 }
 
 /// `POST /api/billing/checkout {kind?, trialCode?}`: a Checkout for the
-/// asker's own seat, in their org (one made for them if they are in none);
-/// with a trial code, Stripe's trial of its days, a card taken first.
+/// asker's own seat (the one sold, `seat_always_on`), in their org (one
+/// made for them if they are in none); with a trial code, Stripe's trial of
+/// its days, a card taken first.
 async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Checkout> {
     let stripe_cfg = cfg.stripe()?;
     let expires_at_s = js::now_ms() / 1000 + CHECKOUT_TTL_S;
@@ -83,7 +84,7 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     let stripe = crate::stripe::client(env, cfg).await?;
     let deployment = cfg.stripe_deployment();
     let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
-    let price = price(&stripe, kind).await?;
+    let price = price(&stripe).await?;
     let platform = cfg.platform();
     // back to the shell's welcome, which applies it and makes their first
     // agent (or, with chats of their own, goes home)

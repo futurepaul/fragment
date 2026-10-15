@@ -2619,7 +2619,7 @@ function signIn() {
   firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go);
 }
 // A new person's welcome (docs/billing.md, "The shell"): what this is, the
-// two seats and a trial code, then Stripe's Checkout, whose return comes
+// one seat and a trial code, then Stripe's Checkout, whose return comes
 // back here (`?checkout=<session>`, or `?checkout=canceled`), as a mailed
 // trial's link does (`?trial=<code>`). A seat already held (bought, an
 // org's claimed at sign-in, or the deployment's plan) goes on to the first
@@ -2663,7 +2663,7 @@ async function welcome() {
   foot.append(out);
   firstRun(
     el("h1", null, PITCH),
-    el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Choose a seat to start."),
+    el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Take a seat, or start a trial, to begin."),
     ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
     ...seatOffer({ api, el }, mine, q.get("trial")),
     imports,
@@ -3011,7 +3011,7 @@ function guestHome() {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", "You see and edit what people share with you: it shows in the sidebar as they share it. A seat, from $100 a month, gives you agents of your own, the computer they run on, and apps of your own.", seat);
+  notice("You're a guest", "You see and edit what people share with you: it shows in the sidebar as they share it. A seat, $200 a month, gives you agents of your own, the always-on computer they run on, and apps of your own.", seat);
 }
 
 start().catch((e) => {

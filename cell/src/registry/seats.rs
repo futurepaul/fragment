@@ -1,13 +1,14 @@
 //! An org's admins and their paid seats (docs/billing.md; decisions 51 and
 //! 52): an admin adds a seat by email (held at once by its person, or
-//! waiting on the email), changes a seat's kind, removes one, and adds or
-//! removes admins. A paid seat bills from its invite: the org's
-//! subscription counts every paid seat, held or pending.
+//! waiting on the email), removes one, and adds or removes admins. A paid
+//! seat is the one sold, `seat_always_on` (Paul, 2026-10-15), and bills
+//! from its invite: the org's subscription counts every paid seat, held or
+//! pending.
 //!
-//! The seats are the registry's; Stripe's item quantities are a copy. A
+//! The seats are the registry's; Stripe's item quantity is a copy. A
 //! change queues the org in `quantity_syncs`, in the change's own turn, and
-//! the registry's alarm pushes the counts read fresh (`fragment_core::
-//! stripe::item_changes`), prorated onto the next invoice, then writes the
+//! the registry's alarm pushes the count read fresh (`fragment_core::
+//! stripe::quantity_form`), prorated onto the next invoice, then writes the
 //! subscription Stripe answers. Two changes at once never leave Stripe a
 //! seat short: the push after both reads both. A push that fails is tried
 //! again; a seat change is never undone for it.
@@ -16,7 +17,7 @@
 //! canceled in Stripe's portal (at the period's end).
 
 use fragment_core::org::{Status, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
-use fragment_core::stripe::{self as core_stripe, Counts, List, Price, Snapshot};
+use fragment_core::stripe::{self as core_stripe, Snapshot};
 use fragment_proto::org::{OrgMember, SeatKind};
 use serde::Serialize;
 
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS quantity_syncs (
   org TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL);
 ";
 
-/// `POST /orgs/seats/add`: an admin adds a paid seat for `email`.
+/// `POST /orgs/seats/add`: an admin adds a paid seat for `email`, of the
+/// kind sold (any other is refused).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AddSeat {
     pub by: By,
@@ -49,19 +51,6 @@ pub(crate) struct Added {
 impl Call for AddSeat {
     const PATH: &'static str = "/orgs/seats/add";
     type Answer = Added;
-}
-
-/// `POST /orgs/seats/kind`: an admin changes a paid seat's kind.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SeatKindChange {
-    pub by: By,
-    pub seat: String,
-    pub kind: SeatKind,
-}
-
-impl Call for SeatKindChange {
-    const PATH: &'static str = "/orgs/seats/kind";
-    type Answer = OrgMember;
 }
 
 /// `POST /orgs/seats/remove`: an admin removes a paid seat. An admin's
@@ -152,23 +141,9 @@ impl RegistryCell {
         Ok(())
     }
 
-    /// The org's paid seats by kind, held and pending.
-    fn paid_counts(&self, org: &str) -> CellResult<Counts> {
-        #[derive(Deserialize)]
-        struct Row {
-            seat: String,
-            n: u64,
-        }
-        let rows = self.rows::<Row>("SELECT seat, COUNT(*) AS n FROM org_members WHERE org = ? AND seat IS NOT NULL AND comped = 0 GROUP BY seat", vec![org.into()])?;
-        let mut c = Counts::default();
-        for r in rows {
-            match SeatKind::parse(&r.seat) {
-                Some(SeatKind::Seat) => c.seat = r.n,
-                Some(SeatKind::SeatAlwaysOn) => c.seat_always_on = r.n,
-                None => return Err(CellError::host(format!("org_members.seat {:?} in {org}", r.seat))),
-            }
-        }
-        Ok(c)
+    /// The org's paid seats, held and pending.
+    fn paid_seats(&self, org: &str) -> CellResult<u64> {
+        self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND seat IS NOT NULL AND comped = 0", vec![org.into()])
     }
 
     /// Queues `org`'s counts to be pushed to Stripe, in the caller's turn.
@@ -187,6 +162,7 @@ impl RegistryCell {
 
     fn add_seat(&self, b: AddSeat) -> CellResult<Added> {
         let (who, admin) = self.admin_of(&b.by)?;
+        core_stripe::for_sale(b.kind)?;
         let org_row = self.stored_org(&admin.org)?;
         self.paying(&org_row.id)?;
         let email = Self::email_arg(&b.email)?;
@@ -225,32 +201,19 @@ impl RegistryCell {
     }
 
     /// A paid seat of the org `by` admins.
-    fn paid_seat(&self, by: &By, seat: &str) -> CellResult<(MemberRow, SeatKind)> {
+    fn paid_seat(&self, by: &By, seat: &str) -> CellResult<MemberRow> {
         let (_, admin) = self.admin_of(by)?;
         let m = self.member_in(&admin.org, seat)?;
         match m.seat()? {
-            Some(k) if m.comped == 0 => Ok((m, k)),
+            Some(_) if m.comped == 0 => Ok(m),
             Some(_) => Err(CellError::invalid(format!("{seat} is comped: an operator changes it"))),
             None => Err(not_found(format!("no seat {seat}"))),
         }
     }
 
-    fn seat_kind(&self, b: SeatKindChange) -> CellResult<OrgMember> {
-        let (m, kind) = self.paid_seat(&b.by, &b.seat)?;
-        self.paying(&m.org)?;
-        if kind != b.kind {
-            self.exec("UPDATE org_members SET seat = ? WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
-            if let Some(p) = &m.person {
-                self.queue_sync(p)?;
-            }
-            self.queue_quantities(&m.org)?;
-        }
-        self.member(&m.id)?.wire(None)
-    }
-
     fn remove_seat(&self, b: RemoveSeat) -> CellResult<OrgMember> {
-        let (m, _) = self.paid_seat(&b.by, &b.seat)?;
-        if self.paid_counts(&m.org)?.total() <= 1 {
+        let m = self.paid_seat(&b.by, &b.seat)?;
+        if self.paid_seats(&m.org)? <= 1 {
             return Err(CellError::invalid("this is the org's last paid seat: cancel its subscription in Payment and invoices (it ends with the period)"));
         }
         if m.admin != 0 {
@@ -310,53 +273,45 @@ impl RegistryCell {
         m.wire(None)
     }
 
-    /// The org's subscription as the registry keeps it.
+    /// The org's subscription as the registry keeps it. A copy with no
+    /// item of the seat sold (one kept from a subscription of the $100
+    /// seat, no longer sold) is refused, as Stripe's own is.
     fn snapshot_of(&self, sub: &OrgSub) -> CellResult<Option<Snapshot>> {
         let (Some(id), Some(status), Some(items), Some(customer)) = (&sub.subscription, &sub.status, &sub.items, &sub.customer) else {
             return Ok(None);
         };
         let items: Vec<(SeatKind, String, u64)> = serde_json::from_str(items).map_err(|e| CellError::host(format!("orgs.items: {e}")))?;
+        let Some((_, item, seats)) = items.into_iter().find(|(k, _, _)| *k == SeatKind::SOLD) else {
+            return Err(CellError::host(format!("{id} has no item of the seat sold")));
+        };
         let status = Status::parse(status).ok_or_else(|| CellError::host(format!("orgs.status {status:?}")))?;
         Ok(Some(Snapshot {
             id: id.clone(),
             customer: customer.clone(),
             status,
-            items,
+            item,
+            seats,
             period_end: sub.period_end,
             trial_end: sub.trial_end,
             cancel_at_period_end: sub.cancel_at_end != 0,
         }))
     }
 
-    /// Pushes `org`'s paid seats' counts to its subscription, if they
-    /// differ from what Stripe has, and writes what Stripe answers. An
-    /// org that pays for nothing now has nothing to push: it buys again.
+    /// Pushes `org`'s paid seats' count to its subscription, if it differs
+    /// from what Stripe has, and writes what Stripe answers. An org that
+    /// pays for nothing now has nothing to push: it buys again.
     async fn push_quantities(&self, org: &str, key: &str) -> CellResult<()> {
         let sub = self.org_sub(org)?;
         let Some(snapshot) = self.snapshot_of(&sub)? else { return Ok(()) };
         if !snapshot.status.is_good() {
             return Ok(());
         }
-        let want = self.paid_counts(org)?;
-        if want.total() == 0 {
+        let want = self.paid_seats(org)?;
+        if want == 0 {
             return Ok(());
         }
-        let changes = core_stripe::item_changes(&snapshot, want);
-        if changes.is_empty() {
-            return Ok(());
-        }
+        let Some(form) = core_stripe::quantity_form(&snapshot, want) else { return Ok(()) };
         let stripe = crate::stripe::client(&self.env, self.cfg).await?;
-        let mut prices = vec![];
-        for kind in changes.iter().filter_map(|c| match c {
-            core_stripe::ItemChange::Add { kind, .. } => Some(*kind),
-            _ => None,
-        }) {
-            let lookup = core_stripe::lookup_key(kind);
-            let found: List<Price> = stripe.get(&format!("/v1/prices?lookup_keys[]={lookup}&active=true")).await?;
-            let p = found.data.into_iter().next().ok_or_else(|| CellError::host(format!("Stripe has no active price {lookup}")))?;
-            prices.push((kind, p.id));
-        }
-        let form = core_stripe::items_form(&changes, |k| prices.iter().find(|(kind, _)| *kind == k).map(|(_, id)| id.clone()).unwrap_or_default());
         let answered: core_stripe::Subscription = stripe.post(&format!("/v1/subscriptions/{}", snapshot.id), &form, key).await?;
         let copy: SubscriptionCopy = answered.snapshot().map_err(CellError::host)?.into();
         self.apply_subscription_copy(org, &copy, None)?;
@@ -401,19 +356,13 @@ impl RegistryCell {
         }
     }
 
-    /// A reconcile, or a webhook, that finds Stripe's counts other than the
-    /// seats queues a push (the seats are the truth).
+    /// A reconcile, or a webhook, that finds Stripe's count other than the
+    /// seats' queues a push (the seats are the truth).
     pub(super) fn queue_quantities_if_drifted(&self, org: &str, copy: &SubscriptionCopy) -> CellResult<()> {
         let status = Status::parse(&copy.status).is_some_and(Status::is_good);
-        let mut have = Counts::default();
-        for (kind, _, q) in &copy.items {
-            match kind {
-                SeatKind::Seat => have.seat += q,
-                SeatKind::SeatAlwaysOn => have.seat_always_on += q,
-            }
-        }
-        let want = self.paid_counts(org)?;
-        if status && want.total() > 0 && have != want {
+        let have: u64 = copy.items.iter().filter(|(k, _, _)| *k == SeatKind::SOLD).map(|(_, _, q)| q).sum();
+        let want = self.paid_seats(org)?;
+        if status && want > 0 && have != want {
             self.queue_quantities(org)?;
         }
         Ok(())
@@ -423,7 +372,6 @@ impl RegistryCell {
     pub(super) async fn seats_route(&self, path: &str, bytes: &[u8]) -> Option<CellResult<Response>> {
         Some(match path {
             AddSeat::PATH => reply::<AddSeat>(self.armed_seats(|| self.add_seat(body(bytes)?)).await),
-            SeatKindChange::PATH => reply::<SeatKindChange>(self.armed_seats(|| self.seat_kind(body(bytes)?)).await),
             RemoveSeat::PATH => reply::<RemoveSeat>(self.armed_seats(|| self.remove_seat(body(bytes)?)).await),
             AddAdmin::PATH => reply::<AddAdmin>(body(bytes).and_then(|b| self.add_admin(b))),
             RemoveAdmin::PATH => reply::<RemoveAdmin>(body(bytes).and_then(|b| self.remove_admin(b))),

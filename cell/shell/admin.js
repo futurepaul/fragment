@@ -46,10 +46,12 @@ function when(ms) {
   return ms ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") : "";
 }
 
+// A seat's kind, shortly: the one sold, or a comp's seat that sleeps.
+const KIND = { seat_always_on: "always-on", seat: "sleeping" };
+
 function seatText(s) {
   if (!s) return "";
-  const kind = s.kind === "seat_always_on" ? "$200" : "$100";
-  return `${kind} ${s.comped ? "comped" : "paid"}${s.good ? "" : " (lapsed)"}`;
+  return `${KIND[s.kind]} ${s.comped ? "comped" : "paid"}${s.good ? "" : " (lapsed)"}`;
 }
 
 function guard(fn) {
@@ -154,7 +156,7 @@ async function openOrg(id) {
   const table = el("table");
   const body = el("tbody");
   for (const m of v.members) {
-    body.append(row([m.email, m.person ? "" : "waiting", m.admin ? "admin" : "", m.seat ? `${m.seat === "seat_always_on" ? "$200" : "$100"} ${m.comped ? "comped" : "paid"}` : "", m.id]));
+    body.append(row([m.email, m.person ? "" : "waiting", m.admin ? "admin" : "", m.seat ? `${KIND[m.seat]} ${m.comped ? "comped" : "paid"}` : "", m.id]));
   }
   table.append(body);
   box.replaceChildren(el("h2", v.name), table);
@@ -191,7 +193,7 @@ async function trials() {
       say(`mailed ${to}`);
     }));
     actions.append(raise, toggle, send);
-    rows.append(row([el("code", t.code), t.name, `${t.days} days, ${t.kind === "seat_always_on" ? "$200" : "$100"}`, `${t.subscribed}/${t.capacity}`, String(t.open), t.active ? "on" : "off", actions]));
+    rows.append(row([el("code", t.code), t.name, `${t.days} days, ${KIND[t.kind]}`, `${t.subscribed}/${t.capacity}`, String(t.open), t.active ? "on" : "off", actions]));
   }
   say(`${v.codes.length} codes`);
 }
@@ -258,7 +260,8 @@ document.addEventListener("DOMContentLoaded", guard(async () => {
     e.preventDefault();
     // a form's own `name` shadows its field of that name: read them by `elements`
     const f = e.target.elements;
-    const body = { name: f.name.value.trim(), kind: f.kind.value, days: Number(f.days.value), capacity: Number(f.capacity.value) };
+    // of the one seat sold, the always-on: the platform's own default
+    const body = { name: f.name.value.trim(), days: Number(f.days.value), capacity: Number(f.capacity.value) };
     if (f.code.value.trim()) body.code = f.code.value.trim();
     const t = await api("POST", "/api/admin/trials", body);
     e.target.reset();

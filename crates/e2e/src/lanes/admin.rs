@@ -100,17 +100,18 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // ---- a trial mailed
-    let code = api.signed(&operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Admin's", "kind": "seat", "days": 14, "capacity": 5 })))?;
+    let code = api.signed(&operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Admin's", "days": 14, "capacity": 5 })))?;
     let code_id = code.body["id"].as_str().unwrap_or("").to_string();
     let to = format!("admin-trial-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let sent = api.signed(&operator, "POST", &format!("/api/admin/trials/{code_id}/send"), Some(&json!({ "email": to })))?;
     if !s.hosted() {
         let mail = s.mail.sent_to(&to);
         s.ok(
-            "an operator mails a trial: its days, its code, and where to start it, the welcome with its code",
+            "an operator mails a trial: its days of the always-on seat (the one sold, a code naming no kind), its code, and where to start it, the welcome with its code",
             sent.status == 200
+                && code.body["kind"] == "seat_always_on"
                 && mail.len() == 1
-                && mail[0].text.contains("14 days")
+                && mail[0].text.contains("14 days of a seat with an always-on computer")
                 && mail[0].text.contains(code.body["code"].as_str().unwrap_or("?"))
                 && mail[0].text.contains(&format!("/welcome?trial={}\n", code.body["code"].as_str().unwrap_or("?"))),
             format!("{sent} {mail:?}"),
@@ -155,6 +156,12 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
         "`fragment operator people --q` with the operator key's file finds them too",
         listed.as_ref().is_ok_and(|v| v["people"].as_array().is_some_and(|p| p.iter().any(|p| p["npub"] == ivy_id.as_str()))),
         format!("{listed:?}"),
+    );
+    let made = s.cli_json(api, &home, &["operator", "trials", "--name", "From the CLI", "--days", "30", "--capacity", "1", "--key-file", &path, "--json"]);
+    s.ok(
+        "`fragment operator trials --name` makes a code of the always-on seat, the one sold, up to 30 days",
+        made.as_ref().is_ok_and(|v| v["kind"] == "seat_always_on" && v["days"] == 30 && v["capacity"] == 1),
+        format!("{made:?}"),
     );
     if computers {
         let back = s.cli_json(api, &home, &["operator", "pin", &ivy_id, &first, "--key-file", &path, "--json"]);
@@ -214,8 +221,8 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
 
     b.click(&page, "#tabs button[data-tab=trials]")?;
     b.eval(&page, "(() => { const f = document.getElementById('trial-new'); f.elements.name.value = 'From the page'; f.elements.days.value = '9'; f.requestSubmit(); })()")?;
-    let made = b.until(&page, "document.getElementById('status').textContent.startsWith('made ') && [...document.querySelectorAll('#trial-rows tr')].some(r => r.textContent.includes('From the page'))", wait);
-    s.ok("it makes a trial code, and lists it", made, b.eval(&page, "document.getElementById('status').textContent")?);
+    let made = b.until(&page, "document.getElementById('status').textContent.startsWith('made ') && [...document.querySelectorAll('#trial-rows tr')].some(r => r.textContent.includes('From the page') && r.textContent.includes('9 days, always-on'))", wait);
+    s.ok("it makes a trial code of the always-on seat (no kind to choose), and lists it", made, b.eval(&page, "document.getElementById('status').textContent")?);
 
     b.click(&page, "#tabs button[data-tab=orgs]")?;
     let orgs = b.until(&page, &format!("[...document.querySelectorAll('#org-rows tr')].some(r => r.textContent.includes({email:?}))"), wait);

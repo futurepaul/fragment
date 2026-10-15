@@ -39,4 +39,12 @@ impl From<worker::Error> for CellError {
     }
 }
 
+/// A seat Stripe does not sell, asked for (a buyer's, an org admin's or an
+/// operator's trial code): 400.
+impl From<fragment_core::stripe::NotSold> for CellError {
+    fn from(e: fragment_core::stripe::NotSold) -> CellError {
+        CellError::invalid(e.message())
+    }
+}
+
 pub type CellResult<T> = Result<T, CellError>;

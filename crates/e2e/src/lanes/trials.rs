@@ -28,16 +28,17 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let operator = s.operator.clone();
     let admin = |method: &str, path: &str, body: Option<&Value>| api.signed(&operator, method, &format!("/api/admin{path}"), body);
 
-    // ---- an operator makes a code
-    let r = admin("POST", "/trials", Some(&json!({ "name": "Launch week", "kind": "seat_always_on", "days": 7, "capacity": 2 })))?;
+    // ---- an operator makes a code: a month of the one seat sold
+    let r = admin("POST", "/trials", Some(&json!({ "name": "Launch month", "kind": "seat_always_on", "days": 30, "capacity": 2 })))?;
     let id = r.body["id"].as_str().unwrap_or("").to_string();
     let code = r.body["code"].as_str().unwrap_or("").to_string();
     s.ok(
-        "an operator makes a trial code: 16 unambiguous characters in fours, its kind, days and places",
+        "an operator makes a trial code: 16 unambiguous characters in fours, its kind (the always-on seat), 30 days and its places",
         r.status == 200
             && code.len() == 19
             && fragment_core::org::trial_code(&code).is_some()
-            && r.body["days"] == 7
+            && r.body["kind"] == "seat_always_on"
+            && r.body["days"] == 30
             && r.body["capacity"] == 2
             && r.body["active"] == true
             && r.body["revision"] == 1
@@ -45,8 +46,15 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let stranger = api.person()?;
-    let r = api.signed(&stranger, "POST", "/api/admin/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 7, "capacity": 1 })))?;
+    let r = api.signed(&stranger, "POST", "/api/admin/trials", Some(&json!({ "name": "x", "days": 7, "capacity": 1 })))?;
     s.ok("someone who is no operator makes none (403)", r.status == 403, &r);
+    let hundred = admin("POST", "/trials", Some(&json!({ "name": "Old seat", "kind": "seat", "days": 30, "capacity": 1 })))?;
+    let listed = admin("GET", "/trials", None)?;
+    s.ok(
+        "a trial code of the $100 seat, no longer sold, is refused (400) and made nowhere",
+        hundred.status == 400 && hundred.message().contains("not sold") && listed.body["codes"].as_array().is_some_and(|c| c.iter().all(|c| c["name"] != "Old seat")),
+        &hundred,
+    );
 
     // ---- a person redeems it, as typed
     let kim = api.person()?;
@@ -56,13 +64,14 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a code as typed (any case, spaces) opens a Checkout: Stripe's 7-day trial of its kind, a card first, no discount on top, back to the welcome paid or canceled",
+        "a code as typed (any case, spaces) opens a Checkout: Stripe's 30-day trial of one always-on seat, a card first, no discount on top, back to the welcome paid or canceled",
         r.status == 200
             && f("success_url").ends_with("/welcome?checkout={CHECKOUT_SESSION_ID}")
             && f("cancel_url").ends_with("/welcome?checkout=canceled")
-            && f("subscription_data[trial_period_days]") == "7"
+            && f("subscription_data[trial_period_days]") == "30"
             && f("subscription_data[trial_settings][end_behavior][missing_payment_method]") == "cancel"
             && f("payment_method_collection") == "always"
+            && f("line_items[0][quantity]") == "1"
             && !asked.form.contains_key("allow_promotion_codes")
             && f("metadata[fragment_kind]") == "seat_always_on"
             && f("metadata[fragment_trial]") == id,
@@ -71,10 +80,15 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
     let trialing = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == true);
     let mine = seat(api, &kim);
+    let sub = s.stripe.requests().iter().rev().find_map(|a| a.path.strip_prefix("/v1/subscriptions/").map(str::to_string)).context("the trial's subscription")?;
+    let items = s.stripe.subscription(&sub).map(|x| x.items.iter().map(|(_, k, q)| (k.clone(), *q)).collect::<Vec<_>>()).unwrap_or_default();
     s.ok(
-        "paid with a card, they hold a good $200 seat in its trial, which says when it ends",
-        trialing && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["trialEnds"].as_i64().is_some_and(|t| t > crate::api::now_s() + 6 * 86_400),
-        &mine,
+        "paid with a card through the fake's Checkout, they hold a good $200 always-on seat in its 30-day trial, which says when it ends, on the always-on price alone",
+        trialing
+            && mine["seat"]["kind"] == "seat_always_on"
+            && mine["seat"]["trialEnds"].as_i64().is_some_and(|t| t > crate::api::now_s() + 29 * 86_400 && t <= crate::api::now_s() + 30 * 86_400)
+            && items == vec![("fragment_seat_always_on_month".to_string(), 1)],
+        json!({ "seat": mine, "items": format!("{items:?}") }),
     );
 
     // ---- its places: one bought, one held by an open Checkout, then none
@@ -107,39 +121,45 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- once a person; for those who never paid
     let mine_again = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     s.ok("someone with a seat redeems none (409)", mine_again.status == 409, &mine_again);
-    let sub = s.stripe.requests().iter().rev().find_map(|a| a.path.strip_prefix("/v1/subscriptions/").map(str::to_string)).context("the trial's subscription")?;
     s.stripe.set_status(&sub, "canceled").map_err(anyhow::Error::msg)?;
     let lapsed = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == false);
     let twice = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
-    let paid = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let hundred = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let paid = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({})))?;
     s.ok(
-        "a trial ended unpaid lapses its seat; a trial is once a person (409), but they may buy",
-        lapsed && twice.status == 409 && paid.status == 200,
-        json!([seat(api, &kim), twice.status, twice.message(), paid.status]),
+        "a trial ended unpaid lapses its seat; a trial is once a person (409), but they may buy the seat sold (not a $100 one: 400)",
+        lapsed && twice.status == 409 && hundred.status == 400 && hundred.message().contains("not sold") && paid.status == 200,
+        json!([seat(api, &kim), twice.status, twice.message(), hundred.status, paid.status]),
     );
 
     // ---- codes that refuse
-    let r = admin("POST", "/trials", Some(&json!({ "name": "Typed", "kind": "seat", "days": 30, "capacity": 5, "code": "fragment-launch" })))?;
+    let r = admin("POST", "/trials", Some(&json!({ "name": "Typed", "days": 30, "capacity": 5, "code": "fragment-launch" })))?;
     let typed_id = r.body["id"].as_str().unwrap_or("").to_string();
-    let dup = admin("POST", "/trials", Some(&json!({ "name": "Dup", "kind": "seat", "days": 3, "capacity": 5, "code": "FRAGMENT LAUNCH" })))?;
+    let dup = admin("POST", "/trials", Some(&json!({ "name": "Dup", "days": 3, "capacity": 5, "code": "FRAGMENT LAUNCH" })))?;
     s.ok("an operator types a code; the same one again (any case) is refused (409)", r.status == 200 && r.body["code"] == "FRAG-MENT-LAUN-CH" && dup.status == 409, json!([r.body["code"], dup.status]));
     let off = admin("PATCH", &format!("/trials/{typed_id}"), Some(&json!({ "revision": 1, "active": false })))?;
     let nia = api.person()?;
     let ended = api.signed(&nia, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": "fragment-launch" })))?;
     let unknown = api.signed(&nia, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": "ZZZZ-ZZZZ-ZZZZ-ZZZZ" })))?;
     let wrong_kind = api.signed(&nia, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code, "kind": "seat" })))?;
-    let neither = api.signed(&nia, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    let hundred = api.signed(&nia, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
     s.ok(
-        "an ended code (400), an unknown one (404), a kind the code is not (400), or neither kind nor code (400) is refused, and no org is made for it",
-        off.status == 200 && ended.status == 400 && unknown.status == 404 && wrong_kind.status == 400 && neither.status == 400 && seat(api, &nia)["org"].is_null(),
-        json!([ended.status, unknown.status, wrong_kind.status, neither.status, seat(api, &nia)]),
+        "an ended code (400), an unknown one (404), a code with the $100 seat (400), or the $100 seat alone (400, not sold) is refused, and no org is made for it",
+        off.status == 200
+            && ended.status == 400
+            && unknown.status == 404
+            && wrong_kind.status == 400
+            && hundred.status == 400
+            && hundred.message().contains("not sold")
+            && seat(api, &nia)["org"].is_null(),
+        json!([ended.status, unknown.status, wrong_kind.status, hundred.status, hundred.message(), seat(api, &nia)]),
     );
     let bad = [
-        admin("POST", "/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 31, "capacity": 1 })))?,
-        admin("POST", "/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 7, "capacity": 0 })))?,
-        admin("POST", "/trials", Some(&json!({ "name": "", "kind": "seat", "days": 7, "capacity": 1 })))?,
-        admin("POST", "/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 7, "capacity": 1, "expiresAt": 1 })))?,
-        admin("POST", "/trials", Some(&json!({ "name": "x", "kind": "seat", "days": 7, "capacity": 1, "code": "OOOO-IIII" })))?,
+        admin("POST", "/trials", Some(&json!({ "name": "x", "days": 31, "capacity": 1 })))?,
+        admin("POST", "/trials", Some(&json!({ "name": "x", "days": 7, "capacity": 0 })))?,
+        admin("POST", "/trials", Some(&json!({ "name": "", "days": 7, "capacity": 1 })))?,
+        admin("POST", "/trials", Some(&json!({ "name": "x", "days": 7, "capacity": 1, "expiresAt": 1 })))?,
+        admin("POST", "/trials", Some(&json!({ "name": "x", "days": 7, "capacity": 1, "code": "OOOO-IIII" })))?,
     ];
     s.ok(
         "a trial past 30 days, no places, no name, an expiry past, or a code outside the alphabet is refused (400)",

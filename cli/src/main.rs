@@ -459,12 +459,10 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// Trial codes: list them, or make one (--name …), or mail one (--send <id> --to <email>)
+    /// Trial codes: list them, or make one of the always-on seat (--name …), or mail one (--send <id> --to <email>)
     Trials {
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value = "seat")]
-        kind: String,
         #[arg(long, default_value = "7")]
         days: u32,
         #[arg(long, default_value = "10")]
@@ -1134,7 +1132,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("ended the comp of {}", v["email"].as_str().unwrap_or("?"));
             return Ok(());
         }
-        Cmd::Operator { sub: OperatorCmd::Trials { name, kind, days, capacity, send, to, key_file } } => {
+        Cmd::Operator { sub: OperatorCmd::Trials { name, days, capacity, send, to, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             if let Some(id) = send {
                 let to = to.ok_or_else(|| usage("--send <id> mails to --to <email>"))?;
@@ -1144,7 +1142,8 @@ fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             if let Some(name) = name {
-                let v = admin_answer(&c, c.post_json("/api/admin/trials", &json!({ "name": name, "kind": seat_kind(&kind)?, "days": days, "capacity": capacity }))?)?;
+                // of the one seat sold, the always-on (the platform's default)
+                let v = admin_answer(&c, c.post_json("/api/admin/trials", &json!({ "name": name, "days": days, "capacity": capacity }))?)?;
                 json_exit(j, &v);
                 println!("{}  {} ({} days of {}, {} places)  id {}", v["code"].as_str().unwrap_or("?"), v["name"].as_str().unwrap_or("?"), v["days"], v["kind"].as_str().unwrap_or("?"), v["capacity"], v["id"].as_str().unwrap_or("?"));
                 return Ok(());

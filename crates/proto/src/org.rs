@@ -11,13 +11,25 @@ use crate::ledger::Plan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeatKind {
-    /// $100 a month: a computer that sleeps when idle.
+    /// A computer that sleeps when idle, and $50 of credit a month: an
+    /// operator's comp (or a deployment's plan) only, no longer sold
+    /// (Paul, 2026-10-15).
     Seat,
-    /// $200 a month: a computer that stays awake, unless its owner lets it sleep.
+    /// $200 a month, the one seat sold: a computer that stays awake,
+    /// unless its owner lets it sleep, and $100 of credit a month.
     SeatAlwaysOn,
 }
 
 impl SeatKind {
+    /// The one kind Stripe sells (Paul, 2026-10-15: "the $200 plan and
+    /// the $25 credit pack"), and the kind a buyer who names none buys.
+    pub const SOLD: SeatKind = SeatKind::SeatAlwaysOn;
+
+    /// `SOLD`, as serde's default for a body's `kind`.
+    pub fn sold() -> SeatKind {
+        SeatKind::SOLD
+    }
+
     pub fn plan(self) -> Plan {
         match self {
             SeatKind::Seat => Plan::Seat,
@@ -192,11 +204,14 @@ pub struct TrialUse {
     pub status: Option<String>,
 }
 
-/// `POST /api/admin/trials`: a new code; `code` none, one is made.
+/// `POST /api/admin/trials`: a new code; `code` none, one is made. Its
+/// `kind` is the seat sold (`SeatKind::SOLD`) when none is named; the
+/// registry refuses any other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewTrialCode {
     pub name: String,
+    #[serde(default = "SeatKind::sold")]
     pub kind: SeatKind,
     pub days: u32,
     pub capacity: u64,
@@ -340,6 +355,14 @@ mod tests {
             assert_eq!(serde_json::to_value(k.plan()).unwrap(), serde_json::json!(k.as_str()));
         }
         assert_eq!(SeatKind::parse("guest"), None);
+    }
+
+    #[test]
+    fn a_trial_code_is_of_the_seat_sold_unless_it_names_another() {
+        let none: NewTrialCode = serde_json::from_value(serde_json::json!({ "name": "x", "days": 30, "capacity": 1 })).unwrap();
+        assert_eq!((none.kind, SeatKind::SOLD), (SeatKind::SeatAlwaysOn, SeatKind::SeatAlwaysOn));
+        let named: NewTrialCode = serde_json::from_value(serde_json::json!({ "name": "x", "kind": "seat", "days": 30, "capacity": 1 })).unwrap();
+        assert_eq!(named.kind, SeatKind::Seat, "read as named: the registry refuses it");
     }
 
     #[test]

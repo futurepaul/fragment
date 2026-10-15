@@ -24,7 +24,7 @@
   <section id="people">
     <form id="search"><input name="q" placeholder="email starts with…" autocomplete="off"> <button>Search</button></form>
     <form id="comp"><input name="email" type="email" placeholder="email" required>
-      <select name="kind"><option value="seat">$100 seat</option><option value="seat_always_on">$200 always-on seat</option></select>
+      <select name="kind"><option value="seat_always_on">always-on seat</option><option value="seat">seat that sleeps (comps only)</option></select>
       <button>Comp a seat</button></form>
     <table><thead><tr><th>Email</th><th>Seat</th><th>Org</th><th>Joined</th><th>Last sign-in</th></tr></thead><tbody id="people-rows"></tbody></table>
     <button id="people-more" hidden>More</button>
@@ -37,7 +37,7 @@
   </section>
   <section id="trials" hidden>
     <form id="trial-new"><input name="name" placeholder="name" required>
-      <select name="kind"><option value="seat">$100 seat</option><option value="seat_always_on">$200 always-on seat</option></select>
+      of the $200 always-on seat:
       <input name="days" type="number" min="1" max="30" value="7" title="days"> days
       <input name="capacity" type="number" min="1" max="10000" value="10" title="places"> places
       <input name="code" placeholder="code (else one is made)">

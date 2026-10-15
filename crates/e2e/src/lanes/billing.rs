@@ -90,7 +90,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("each event was answered 200", !delivered.is_empty() && delivered.iter().all(|(_, _, status)| *status == 200), format!("{delivered:?}"));
     let back = api.signed(&ann, "POST", &format!("/api/billing/sessions/{session}"), Some(&json!({})))?;
     s.ok("the Checkout's return again changes nothing, and answers their seat", back.status == 200 && back.body["seat"] == mine["seat"], &back);
-    let again = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let again = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({})))?;
     s.ok("someone who holds a seat buys none (409)", again.status == 409, &again);
     let sub = subscription_of(s, &org).context("the org's subscription was fetched")?;
 
@@ -140,17 +140,18 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // ---- buying again: a new subscription replaces the one that ended
-    let r = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let hundred = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let r = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({})))?;
     let session2 = r.body["session"].as_str().unwrap_or("").to_string();
     s.stripe.complete(&session2).map_err(anyhow::Error::msg)?;
     let restored = s.eventually(PUSHED, || {
         let v = ledger(api, &ann);
-        v["seat"] == "active" && v["plan"] == "seat"
+        v["seat"] == "active" && v["plan"] == "seat_always_on"
     });
     s.ok(
-        "their org's admin buys again, as a $100 seat: the new subscription replaces the ended one, and the seat is good",
-        r.status == 200 && restored && seat(api, &ann)["seat"]["kind"] == "seat" && seat(api, &ann)["org"]["id"] == org.as_str(),
-        json!([seat(api, &ann), ledger(api, &ann)]),
+        "their org's admin buys again, naming no kind (the seat sold; a $100 one is refused, 400): the new subscription replaces the ended one, and the seat is good",
+        hundred.status == 400 && hundred.message().contains("not sold") && r.status == 200 && restored && seat(api, &ann)["seat"]["kind"] == "seat_always_on" && seat(api, &ann)["org"]["id"] == org.as_str(),
+        json!([hundred.body, seat(api, &ann), ledger(api, &ann)]),
     );
     let old = s.stripe.subscription_json(&sub).context("the old subscription")?;
     let (b, sig) = s.stripe.signed_event("customer.subscription.updated", old, None);
@@ -160,13 +161,13 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a webhook lost: the Checkout's return carries it
     let bo = api.person()?;
-    let r = api.signed(&bo, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
+    let r = api.signed(&bo, "POST", "/api/billing/checkout", Some(&json!({})))?;
     let session3 = r.body["session"].as_str().unwrap_or("").to_string();
     s.stripe.hold_events(true);
     s.stripe.complete(&session3).map_err(anyhow::Error::msg)?;
     let none_yet = seat(api, &bo)["seat"].is_null();
     let back = api.signed(&bo, "POST", &format!("/api/billing/sessions/{session3}"), Some(&json!({})))?;
-    s.ok("with no webhook, the Checkout's return gives them their seat at once", none_yet && back.status == 200 && back.body["seat"]["kind"] == "seat", &back);
+    s.ok("with no webhook, the Checkout's return gives them their seat at once", none_yet && back.status == 200 && back.body["seat"]["kind"] == "seat_always_on", &back);
     s.stripe.release_events(false);
     std::thread::sleep(Duration::from_secs(1));
     s.ok("its events arriving late change nothing", seat(api, &bo)["seat"] == back.body["seat"], seat(api, &bo));
@@ -189,15 +190,24 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- an org's admin gives seats: each billed from its invite
     let sub2 = subscription_of(s, &org).context("the org's new subscription")?;
     let quantities = |s: &Suite| s.stripe.subscription(&sub2).map(|x| x.items.iter().map(|(_, k, q)| (k.clone(), *q)).collect::<Vec<_>>()).unwrap_or_default();
-    let seat_q = |q: u64| vec![("fragment_seat_month".to_string(), q)];
+    let seat_q = |q: u64| vec![("fragment_seat_always_on_month".to_string(), q)];
     let cy_email = format!("billing-cy-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
-    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat" })))?;
+    let hundred = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat" })))?;
+    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email })))?;
     let cy_seat = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
-    let replay = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat" })))?;
+    let replay = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat_always_on" })))?;
     s.ok(
-        "an org's admin adds a seat for an email: it waits on it, mailed, and again is the same seat",
-        r.status == 200 && r.body["created"] == true && r.body["seat"]["person"].is_null() && r.body["seat"]["comped"] == false && replay.body["created"] == false && replay.body["seat"]["id"] == cy_seat.as_str(),
-        json!([r.body, replay.body]),
+        "an org's admin adds a seat for an email, the always-on one sold (a $100 seat is refused, 400): it waits on it, mailed, and again is the same seat",
+        hundred.status == 400
+            && hundred.message().contains("not sold")
+            && r.status == 200
+            && r.body["created"] == true
+            && r.body["seat"]["person"].is_null()
+            && r.body["seat"]["seat"] == "seat_always_on"
+            && r.body["seat"]["comped"] == false
+            && replay.body["created"] == false
+            && replay.body["seat"]["id"] == cy_seat.as_str(),
+        json!([hundred.body, r.body, replay.body]),
     );
     if !s.hosted() {
         let sent = s.mail.sent_to(&cy_email);
@@ -208,30 +218,20 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let cy = Keys::generate();
     let cy_session = api.sign_in(&cy_email)?;
     api.approve(&cy_session, &cy)?;
-    let held = s.eventually(PUSHED, || ledger(api, &cy)["seat"] == "active" && ledger(api, &cy)["plan"] == "seat");
+    let held = s.eventually(PUSHED, || ledger(api, &cy)["seat"] == "active" && ledger(api, &cy)["plan"] == "seat_always_on");
     s.ok("whoever signs in with it holds it, paid, and their ledger follows", held && seat(api, &cy)["seat"]["id"] == cy_seat.as_str() && seat(api, &cy)["seat"]["admin"] == false, seat(api, &cy));
-    let r = api.signed(&ann, "PATCH", &format!("/api/org/seats/{cy_seat}"), Some(&json!({ "kind": "seat_always_on" })))?;
-    let moved = s.eventually(PUSHED, || {
-        let mut q = quantities(s);
-        q.sort();
-        q == vec![("fragment_seat_always_on_month".to_string(), 1), ("fragment_seat_month".to_string(), 1)]
-    });
-    let upgraded = s.eventually(PUSHED, || ledger(api, &cy)["plan"] == "seat_always_on");
-    s.ok("its admin upgrades it: an item of each kind, and the holder's plan follows", r.status == 200 && moved && upgraded, format!("{:?} {}", quantities(s), ledger(api, &cy)));
+    let r = api.signed(&ann, "PATCH", &format!("/api/org/seats/{cy_seat}"), Some(&json!({ "kind": "seat" })))?;
+    s.ok("a paid seat's kind changes nowhere: one seat is sold, so there is no route (404)", r.status == 404 && seat(api, &cy)["seat"]["kind"] == "seat_always_on", &r);
     let prorated = s.stripe.requests().iter().filter(|a| a.path == format!("/v1/subscriptions/{sub2}") && a.method == "POST").all(|a| a.form.get("proration_behavior").map(String::as_str) == Some("create_prorations"));
     s.ok("every change is prorated onto the next invoice", prorated, "");
 
-    // the seats are the truth: Stripe's counts changed behind them are pushed back
-    s.stripe.set_quantity(&sub2, "fragment_seat_month", 7).map_err(anyhow::Error::msg)?;
+    // the seats are the truth: Stripe's count changed behind them is pushed back
+    s.stripe.set_quantity(&sub2, "fragment_seat_always_on_month", 7).map_err(anyhow::Error::msg)?;
     s.stripe.set_status(&sub2, "active").map_err(anyhow::Error::msg)?;
-    let repaired = s.eventually(PUSHED, || {
-        let mut q = quantities(s);
-        q.sort();
-        q == vec![("fragment_seat_always_on_month".to_string(), 1), ("fragment_seat_month".to_string(), 1)]
-    });
+    let repaired = s.eventually(PUSHED, || quantities(s) == seat_q(2));
     s.ok("a quantity changed in Stripe's dashboard is pushed back to the seats' count", repaired, format!("{:?}", quantities(s)));
 
-    let not_admin = api.signed(&cy, "POST", "/api/org/seats", Some(&json!({ "email": "x@e2e.test", "kind": "seat" })))?;
+    let not_admin = api.signed(&cy, "POST", "/api/org/seats", Some(&json!({ "email": "x@e2e.test" })))?;
     let not_admin_view = api.signed(&cy, "GET", "/api/org", None)?;
     s.ok("a seat's holder who is no admin changes nothing, nor sees the org (403)", not_admin.status == 403 && not_admin_view.status == 403, json!([not_admin.status, not_admin_view.status]));
     let r = api.signed(&ann, "DELETE", &format!("/api/org/seats/{cy_seat}"), None)?;
@@ -275,7 +275,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_secs(1));
     s.ok("paid, $25 of credit is theirs, once (its return again adds nothing)", granted && back.status == 200 && purchased(&ann) == before + 25_000_000, ledger(api, &ann));
     let fay = api.person()?;
-    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&fay), "kind": "seat" })))?;
+    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&fay) })))?;
     let fay_row = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
     let fay_before = purchased(&fay);
     let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
@@ -289,9 +289,10 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- invalid
     let refused = [
+        ("the $100 seat, no longer sold (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?, 400),
         ("a kind that is no seat's (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "guest" })))?, 400),
-        ("a field it does not take (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat", "quantity": 3 })))?, 400),
-        ("unsigned (401)", api.unsigned("POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?, 401),
+        ("a field it does not take (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat_always_on", "quantity": 3 })))?, 400),
+        ("unsigned (401)", api.unsigned("POST", "/api/billing/checkout", Some(&json!({})))?, 401),
     ];
     for (what, r, status) in refused {
         s.ok(&format!("refused: {what}"), r.status == status, &r);
@@ -308,8 +309,8 @@ fn owned(api: &Api, keys: &Keys, kind: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The welcome is shown: its card, at its address, with its two seats.
-const WELCOMED: &str = "location.pathname === '/welcome' && !document.getElementById('first-run').hidden && document.querySelectorAll('#first-run-card [data-plan]').length === 2";
+/// The welcome is shown: its card, at its address, with its one seat.
+const WELCOMED: &str = "location.pathname === '/welcome' && !document.getElementById('first-run').hidden && document.querySelectorAll('#first-run-card [data-plan]').length === 1";
 
 /// What the first run's card shows: its address, its text, its seats and
 /// whether they can be pressed, its trial code, the import's place, what
@@ -405,7 +406,7 @@ fn page_of(b: &mut Lease, api: &Api, session: &str, path: &str) -> Result<Page> 
 
 /// A new person's first run, and Billing, in Chrome (cell/shell/shell.js
 /// `welcome`, billing.js): a new guest lands on the welcome, never
-/// settings: what this is, the two seats and a trial code. A guest's
+/// settings: what this is, the one seat and a trial code. A guest's
 /// Billing in settings links to it. Checkout left by its Back comes back
 /// to it, saying so; a trial code that is none is said there. Paid on
 /// Stripe's page (the fake's), Checkout's return comes back to it, applies
@@ -453,14 +454,23 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("1-welcome.png"));
     let seen = b.eval(&page, SEEN)?;
     s.ok(
-        "a new guest's first run is the welcome, never settings: what this is, the two seats and a trial code, the import's place kept hidden, and who is signed in",
+        "a new guest's first run is the welcome, never settings: what this is, the one seat sold ($200 a month, always on, $100 of credit), a trial code, what more credit costs, the import's place kept hidden, and who is signed in",
         welcomed
             && seen["layout"] == false
-            && seen["plans"] == json!(["seat", "seat_always_on"])
+            && seen["plans"] == json!(["seat_always_on"])
             && seen["trial"] == ""
             && seen["importing"] == "hidden"
             && seen["errors"] == json!([])
-            && seen["card"].as_str().is_some_and(|t| t.contains("Agents that work for you") && t.contains(&Api::email_of(&gus)) && t.contains("Sign out") && !t.contains("Not now")),
+            && seen["card"].as_str().is_some_and(|t| {
+                t.contains("Agents that work for you")
+                    && t.contains("$200 a month, always on")
+                    && t.contains("$100 of credit included each month")
+                    && t.contains("$25 a pack")
+                    && !t.contains("$100 a month")
+                    && t.contains(&Api::email_of(&gus))
+                    && t.contains("Sign out")
+                    && !t.contains("Not now")
+            }),
         &seen,
     );
     // settings' Billing manages a seat; a guest's links to the welcome
@@ -471,8 +481,9 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         "({ links: [...document.querySelectorAll('#settings-page a')].filter((a) => a.textContent === 'Get a seat').map((a) => a.getAttribute('href')), buys: [...document.querySelectorAll('#settings-page button, #settings-page input')].map((b) => b.textContent || b.placeholder).filter((t) => /seat|trial/i.test(t)), headings: [...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent), warned: [...document.querySelectorAll('.settings-warning')].map((w) => w.textContent) })",
     )?;
     s.ok(
-        "a guest's Billing in settings sells nothing itself: its Get a seat is the welcome's, and nothing a guest has no use for shows (a computer, agents, skills, connections)",
+        "a guest's Billing in settings sells nothing itself: it names the one seat's price, its Get a seat is the welcome's, and nothing a guest has no use for shows (a computer, agents, skills, connections)",
         billing
+            && text(&mut b, &page).contains("A seat, $200 a month")
             && offered["links"] == json!(["/welcome"])
             && offered["buys"] == json!([])
             && offered["warned"] == json!([])
@@ -485,7 +496,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let back = view(&mut b, &page, WELCOMED, wait);
 
     // ---- invalid: Checkout left by its Back; a trial code that is none
-    if !act(s, &mut b, &page, "the welcome's $100 seat", &click("#first-run-card [data-plan=seat]"))? {
+    if !act(s, &mut b, &page, "the welcome's seat", &click("#first-run-card [data-plan=seat_always_on]"))? {
         return Ok(());
     }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
@@ -495,7 +506,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let canceled = view(&mut b, &page, &format!("{WELCOMED} && location.search === '' && /Checkout was canceled: nothing was bought/.test(document.getElementById('first-run-card').innerText)"), wait);
     let _ = b.screenshot(&page, &shots.join("2-canceled.png"));
     s.ok(
-        "Get a seat there opens the welcome; its $100 seat goes to Stripe's Checkout, whose Back comes back to the welcome, saying nothing was bought, the seats offered again",
+        "Get a seat there opens the welcome; its seat goes to Stripe's Checkout, whose Back comes back to the welcome, saying nothing was bought, the seat offered again",
         back && at_stripe && canceled && seat(api, &gus)["seat"].is_null(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": seat(api, &gus) }),
     );
@@ -656,7 +667,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seat(api, &ida)["seat"].is_null(),
         &seen,
     );
-    if !act(s, &mut b, &page, "the welcome's $100 seat", &click("#first-run-card [data-plan=seat]"))? {
+    if !act(s, &mut b, &page, "the welcome's seat", &click("#first-run-card [data-plan=seat_always_on]"))? {
         return Ok(());
     }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
@@ -670,8 +681,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let api = &restarted?;
     let mine = seat(api, &ida);
     s.ok(
-        "the node restarted while they were at Checkout, and no webhook came: its return alone, after the restart, seats them (a $100 seat) and goes on to their first agent",
-        at_stripe && seated && held && mine["seat"]["kind"] == "seat" && mine["seat"]["good"] == true,
+        "the node restarted while they were at Checkout, and no webhook came: its return alone, after the restart, seats them (the always-on seat) and goes on to their first agent",
+        at_stripe && seated && held && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["good"] == true,
         json!({ "seen": b.eval(&page, SEEN)?, "seat": mine, "held": held }),
     );
     // a reload while its computer starts (the first run's longest wait)
@@ -704,7 +715,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a trial mailed: signed out, its link signs in and comes back with
     // its code, filled in; its trial's Checkout returns to the welcome too
-    let code = api.signed(&s.operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Page", "kind": "seat", "days": 5, "capacity": 5 })))?;
+    let code = api.signed(&s.operator, "POST", "/api/admin/trials", Some(&json!({ "name": "Page", "days": 30, "capacity": 5 })))?;
     let code = code.body["code"].as_str().unwrap_or("").to_string();
     let nobody = b.another_context()?;
     let out = b.open_in(&nobody, &format!("{}/welcome?trial={code}", api.base))?;
@@ -722,15 +733,15 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !act(s, &mut b, &page, "the welcome's Start a trial", started)? {
         return Ok(());
     }
-    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /5-day trial/.test(document.body.innerText)", s.stripe.url), wait);
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /30-day trial/.test(document.body.innerText)", s.stripe.url), wait);
     if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
         return Ok(());
     }
     let seated = view(&mut b, &page, SEATED, wait);
     let mine = seat(api, &jo);
     s.ok(
-        "signed in, the link's welcome has its code filled in; its trial takes a card on Stripe's page and comes back to the welcome, which seats them in their trial and goes on to their first agent",
-        filled && at_stripe && seated && mine["seat"]["good"] == true && mine["seat"]["trialEnds"].as_i64().is_some(),
+        "signed in, the link's welcome has its code filled in; its 30-day trial takes a card on Stripe's page and comes back to the welcome, which seats them in their trial of the always-on seat and goes on to their first agent",
+        filled && at_stripe && seated && mine["seat"]["good"] == true && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["trialEnds"].as_i64().is_some(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": mine }),
     );
     b.close(page)?;

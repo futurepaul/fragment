@@ -1,8 +1,9 @@
 //! Stripe as fragment uses it (docs/billing.md, "Stripe"), the parts with
-//! no network: a webhook's signature, the form bodies Stripe takes, what
-//! fragment reads of a subscription and a Checkout Session, and the item
-//! changes that bring a subscription's quantities to an org's seats. The
-//! cell's client is `cell/src/stripe.rs`; the fake is `crates/fakes`'.
+//! no network: what it sells (one seat, `seat_always_on`, and the credit
+//! pack), a webhook's signature, the form bodies Stripe takes, what
+//! fragment reads of a subscription and a Checkout Session, and the
+//! quantity that brings a subscription to an org's paid seats. The cell's
+//! client is `cell/src/stripe.rs`; the fake is `crates/fakes`'.
 //!
 //! The account is shared with finite-mono: everything fragment makes
 //! carries `fragment_deployment` in its metadata, and anything without
@@ -40,24 +41,29 @@ pub const META_KIND: &str = "fragment_kind";
 pub const META_BUYER: &str = "fragment_buyer";
 pub const META_PACK: &str = "fragment_pack";
 
-/// A seat's monthly price, found by its lookup key: a price change is a
-/// new Price with the key moved to it (`transfer_lookup_key`).
-pub fn lookup_key(kind: SeatKind) -> &'static str {
-    match kind {
-        SeatKind::Seat => "fragment_seat_month",
-        SeatKind::SeatAlwaysOn => "fragment_seat_always_on_month",
+/// The one seat Stripe sells (`SeatKind::SOLD`; Paul, 2026-10-15: "the
+/// $200 plan and the $25 credit pack"): its monthly price, found by its
+/// lookup key (a price change is a new Price with the key moved to it,
+/// `transfer_lookup_key`), and its amount in cents, as `xtask stripe
+/// check` expects it (decision 25). A `seat` is an operator's comp only.
+pub const SEAT_LOOKUP_KEY: &str = "fragment_seat_always_on_month";
+pub const SEAT_CENTS: i64 = 20_000;
+
+/// A seat of a kind Stripe does not sell, asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotSold(pub SeatKind);
+
+impl NotSold {
+    pub fn message(self) -> String {
+        format!("a {} seat is not sold: the one seat is seat_always_on, $200 a month, always on", self.0.as_str())
     }
 }
 
-pub fn kind_of_lookup_key(key: &str) -> Option<SeatKind> {
-    [SeatKind::Seat, SeatKind::SeatAlwaysOn].into_iter().find(|k| lookup_key(*k) == key)
-}
-
-/// Each seat's price in cents, as `xtask stripe check` expects it (decision 25).
-pub fn unit_amount(kind: SeatKind) -> i64 {
-    match kind {
-        SeatKind::Seat => 10_000,
-        SeatKind::SeatAlwaysOn => 20_000,
+/// `kind`, when it is the seat Stripe sells.
+pub fn for_sale(kind: SeatKind) -> Result<SeatKind, NotSold> {
+    match kind == SeatKind::SOLD {
+        true => Ok(kind),
+        false => Err(NotSold(kind)),
     }
 }
 
@@ -251,120 +257,64 @@ pub struct EventData {
     pub object: serde_json::Value,
 }
 
-/// Seats counted by kind.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Counts {
-    pub seat: u64,
-    pub seat_always_on: u64,
-}
-
-impl Counts {
-    pub fn get(&self, kind: SeatKind) -> u64 {
-        match kind {
-            SeatKind::Seat => self.seat,
-            SeatKind::SeatAlwaysOn => self.seat_always_on,
-        }
-    }
-
-    pub fn total(&self) -> u64 {
-        self.seat + self.seat_always_on
-    }
-}
-
-/// A subscription as the registry keeps it.
+/// A subscription as the registry keeps it: fragment's has one item, on
+/// the seat's price, its quantity the org's paid seats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub id: String,
     pub customer: String,
     pub status: Status,
-    /// Each kind's item, and its quantity.
-    pub items: Vec<(SeatKind, String, u64)>,
+    /// Its one item's id, and the seats it bills.
+    pub item: String,
+    pub seats: u64,
     /// When the paid period (or the trial) ends, in seconds.
     pub period_end: Option<i64>,
     pub trial_end: Option<i64>,
     pub cancel_at_period_end: bool,
 }
 
-impl Snapshot {
-    pub fn counts(&self) -> Counts {
-        let mut c = Counts::default();
-        for (kind, _, q) in &self.items {
-            match kind {
-                SeatKind::Seat => c.seat += q,
-                SeatKind::SeatAlwaysOn => c.seat_always_on += q,
-            }
-        }
-        c
-    }
-}
-
 impl Subscription {
     /// The subscription as the registry keeps it. A status Stripe does not
-    /// name, an item on a price that is no seat's, a kind twice, or more
-    /// items than a page are refused: not a subscription fragment made.
+    /// name, or anything but one item on the seat's price (`SEAT_LOOKUP_KEY`),
+    /// is refused: not a subscription fragment made.
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let status = Status::parse(&self.status).ok_or_else(|| format!("{} has a status fragment does not know: {:?}", self.id, self.status))?;
+        let [it] = self.items.data.as_slice() else {
+            return Err(format!("{} has {} items: fragment's has one, the seat's", self.id, self.items.data.len()));
+        };
         if self.items.has_more {
             return Err(format!("{} has more items than a page", self.id));
         }
-        let mut items: Vec<(SeatKind, String, u64)> = vec![];
-        for it in &self.items.data {
-            let key = it.price.lookup_key.as_deref().unwrap_or("");
-            let kind = kind_of_lookup_key(key).ok_or_else(|| format!("{}'s item {} is on a price that is no seat's ({key:?})", self.id, it.id))?;
-            if items.iter().any(|(k, _, _)| *k == kind) {
-                return Err(format!("{} has two items of {}", self.id, kind.as_str()));
-            }
-            items.push((kind, it.id.clone(), it.quantity.unwrap_or(0)));
+        let key = it.price.lookup_key.as_deref().unwrap_or("");
+        if key != SEAT_LOOKUP_KEY {
+            return Err(format!("{}'s item {} is on a price that is no seat's ({key:?})", self.id, it.id));
         }
         let period_end = match status {
             Status::Trialing => self.trial_end,
-            _ => self.items.data.iter().filter_map(|i| i.current_period_end).max(),
+            _ => it.current_period_end,
         };
-        Ok(Snapshot { id: self.id.clone(), customer: self.customer.clone(), status, items, period_end, trial_end: self.trial_end, cancel_at_period_end: self.cancel_at_period_end })
+        Ok(Snapshot {
+            id: self.id.clone(),
+            customer: self.customer.clone(),
+            status,
+            item: it.id.clone(),
+            seats: it.quantity.unwrap_or(0),
+            period_end,
+            trial_end: self.trial_end,
+            cancel_at_period_end: self.cancel_at_period_end,
+        })
     }
 }
 
-/// One change to a subscription's items.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ItemChange {
-    Set { item: String, quantity: u64 },
-    Delete { item: String },
-    /// A kind it has no item for yet: its price is found by lookup key.
-    Add { kind: SeatKind, quantity: u64 },
-}
-
-/// The changes that bring `snapshot`'s items to `want`, none when they
-/// match. An org's last paid seat is never taken here (its subscription is
-/// canceled in Stripe's portal), so `want` totals at least one.
-pub fn item_changes(snapshot: &Snapshot, want: Counts) -> Vec<ItemChange> {
-    assert!(want.total() >= 1, "a subscription keeps a seat: its last ends through the portal's cancel");
-    let mut changes = vec![];
-    for kind in [SeatKind::Seat, SeatKind::SeatAlwaysOn] {
-        let n = want.get(kind);
-        match (snapshot.items.iter().find(|(k, _, _)| *k == kind), n) {
-            (Some((_, _, q)), n) if *q == n => {}
-            (Some((_, id, _)), 0) => changes.push(ItemChange::Delete { item: id.clone() }),
-            (Some((_, id, _)), n) => changes.push(ItemChange::Set { item: id.clone(), quantity: n }),
-            (None, 0) => {}
-            (None, n) => changes.push(ItemChange::Add { kind, quantity: n }),
-        }
-    }
-    changes
-}
-
-/// The form for `POST /v1/subscriptions/<id>` that makes `changes`
-/// (`price_of` names an added kind's price), prorated onto the next
-/// invoice (decision 52).
-pub fn items_form(changes: &[ItemChange], price_of: impl Fn(SeatKind) -> String) -> Form {
-    let mut f = Form::new();
-    for (i, c) in changes.iter().enumerate() {
-        f = match c {
-            ItemChange::Set { item, quantity } => f.push(format!("items[{i}][id]"), item.clone()).push(format!("items[{i}][quantity]"), quantity.to_string()),
-            ItemChange::Delete { item } => f.push(format!("items[{i}][id]"), item.clone()).push(format!("items[{i}][deleted]"), "true"),
-            ItemChange::Add { kind, quantity } => f.push(format!("items[{i}][price]"), price_of(*kind)).push(format!("items[{i}][quantity]"), quantity.to_string()),
-        };
-    }
-    f.push("proration_behavior", "create_prorations")
+/// The form for `POST /v1/subscriptions/<id>` that brings its seat item to
+/// `want` seats, prorated onto the next invoice (decision 52); none when it
+/// bills them already. An org's last paid seat is never taken here (its
+/// subscription is canceled in Stripe's portal), so `want` is one at least.
+pub fn quantity_form(snapshot: &Snapshot, want: u64) -> Option<Form> {
+    assert!(want >= 1, "a subscription keeps a seat: its last ends through the portal's cancel");
+    (snapshot.seats != want).then(|| {
+        Form::new().push("items[0][id]", snapshot.item.clone()).push("items[0][quantity]", want.to_string()).push("proration_behavior", "create_prorations")
+    })
 }
 
 #[cfg(test)]
@@ -422,54 +372,50 @@ mod tests {
 
     #[test]
     fn a_subscription_reads_as_its_seats() {
-        let s = subscription("active", json!([item("si_a", "fragment_seat_month", 3, 10), item("si_b", "fragment_seat_always_on_month", 1, 20)]));
+        let s = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 3, 20)]));
         let snap = s.snapshot().unwrap();
         assert_eq!(snap.status, Status::Active);
-        assert_eq!(snap.counts(), Counts { seat: 3, seat_always_on: 1 });
-        assert_eq!(snap.period_end, Some(20), "the latest item's period end");
+        assert_eq!((snap.item.as_str(), snap.seats), ("si_a", 3));
+        assert_eq!(snap.period_end, Some(20), "its item's period end");
         assert!(ours(&s.metadata, "https://p.example"));
         assert!(!ours(&s.metadata, "https://q.example"), "another deployment's");
         assert!(!ours(&BTreeMap::new(), "https://p.example"), "finite-mono's: no deployment of ours");
-        let trialing = subscription("trialing", json!([item("si_a", "fragment_seat_month", 1, 10)])).snapshot().unwrap();
+        let trialing = subscription("trialing", json!([item("si_a", SEAT_LOOKUP_KEY, 1, 10)])).snapshot().unwrap();
         assert_eq!(trialing.period_end, Some(1_700_000_000), "a trial ends at its trial's end");
     }
 
     #[test]
     fn a_subscription_fragment_did_not_make_is_refused() {
         assert!(subscription("active", json!([item("si_a", "finite_standard", 1, 10)])).snapshot().unwrap_err().contains("no seat's"));
-        assert!(subscription("active", json!([item("si_a", "fragment_seat_month", 1, 10), item("si_b", "fragment_seat_month", 1, 10)])).snapshot().unwrap_err().contains("two items"));
+        // the $100 seat's price, no longer sold (Paul, 2026-10-15)
+        assert!(subscription("active", json!([item("si_a", "fragment_seat_month", 1, 10)])).snapshot().unwrap_err().contains("no seat's"));
+        let two = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 1, 10), item("si_b", SEAT_LOOKUP_KEY, 1, 10)]));
+        assert!(two.snapshot().unwrap_err().contains("2 items"));
+        assert!(subscription("active", json!([])).snapshot().unwrap_err().contains("0 items"));
         assert!(subscription("bogus", json!([])).snapshot().unwrap_err().contains("status"));
     }
 
     #[test]
-    fn item_changes_bring_quantities_to_the_seats() {
-        let snap = subscription("active", json!([item("si_a", "fragment_seat_month", 2, 10)])).snapshot().unwrap();
-        assert_eq!(item_changes(&snap, Counts { seat: 2, seat_always_on: 0 }), vec![], "matching: nothing to change");
-        assert_eq!(item_changes(&snap, Counts { seat: 3, seat_always_on: 0 }), vec![ItemChange::Set { item: "si_a".into(), quantity: 3 }]);
-        let up = item_changes(&snap, Counts { seat: 1, seat_always_on: 1 });
-        assert_eq!(up, vec![ItemChange::Set { item: "si_a".into(), quantity: 1 }, ItemChange::Add { kind: SeatKind::SeatAlwaysOn, quantity: 1 }], "an upgrade");
-        let moved = item_changes(&snap, Counts { seat: 0, seat_always_on: 2 });
-        assert_eq!(moved, vec![ItemChange::Delete { item: "si_a".into() }, ItemChange::Add { kind: SeatKind::SeatAlwaysOn, quantity: 2 }]);
-        let f = items_form(&moved, |k| format!("price_{}", lookup_key(k)));
-        assert_eq!(
-            f.pairs().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
-            ["items[0][id]=si_a", "items[0][deleted]=true", "items[1][price]=price_fragment_seat_always_on_month", "items[1][quantity]=2", "proration_behavior=create_prorations"]
-        );
+    fn a_quantity_form_brings_the_item_to_the_seats() {
+        let snap = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 2, 10)])).snapshot().unwrap();
+        assert_eq!(quantity_form(&snap, 2), None, "matching: nothing to change");
+        let f = quantity_form(&snap, 3).unwrap();
+        assert_eq!(f.pairs().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(), ["items[0][id]=si_a", "items[0][quantity]=3", "proration_behavior=create_prorations"]);
     }
 
     #[test]
     #[should_panic(expected = "keeps a seat")]
-    fn the_last_seat_never_goes_through_item_changes() {
-        let snap = subscription("active", json!([item("si_a", "fragment_seat_month", 1, 10)])).snapshot().unwrap();
-        item_changes(&snap, Counts::default());
+    fn the_last_seat_never_goes_through_a_quantity_form() {
+        let snap = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 1, 10)])).snapshot().unwrap();
+        quantity_form(&snap, 0);
     }
 
     #[test]
-    fn lookup_keys_name_kinds_and_events_are_four() {
-        for k in [SeatKind::Seat, SeatKind::SeatAlwaysOn] {
-            assert_eq!(kind_of_lookup_key(lookup_key(k)), Some(k));
-        }
-        assert_eq!(unit_amount(SeatKind::Seat) * 2, unit_amount(SeatKind::SeatAlwaysOn));
+    fn only_the_always_on_seat_is_for_sale_and_events_are_four() {
+        assert_eq!(for_sale(SeatKind::SeatAlwaysOn), Ok(SeatKind::SeatAlwaysOn));
+        assert_eq!(for_sale(SeatKind::Seat), Err(NotSold(SeatKind::Seat)));
+        assert!(NotSold(SeatKind::Seat).message().contains("$200"));
+        assert_eq!((SEAT_LOOKUP_KEY, SEAT_CENTS), ("fragment_seat_always_on_month", 20_000));
         assert_eq!(EVENTS.len(), 4);
     }
 }

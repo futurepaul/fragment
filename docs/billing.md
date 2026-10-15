@@ -7,6 +7,17 @@ docs/cloudflare-v1.md ("Decided", below, maps them). It stands on
 decisions 45 to 50 (people are npubs found by email). The build follows
 "Build order"; each slice updates its section here as it lands.
 
+**What is sold** (Paul, 2026-10-15: "for stripe, let's just do the $200
+plan and the $25 credit pack"): one seat, `seat_always_on` ($200 a
+month, an always-on computer, $100 of credit included), and the $25
+credit pack. The $100 seat is no longer sold: Checkout, an org admin's
+seats and trial codes take only `seat_always_on`, and refuse a `seat`
+(400, "not sold"); `xtask stripe setup` never makes its Product or Price,
+and `check` never asks for them. The `seat` plan stays, for what does
+not sell it: operators' comps, and a deployment's `default_plan` (dev and
+the e2e make their people seats with it). Decision 25's status records
+it. Below, a "kind" a buyer chooses is that one kind.
+
 Paul (2026-10-08): "before we go live, we'll need stripe billing.
 guests signups will be free, but to be able to have your own agents and
 fragments you need a paid seat. $100 for a sleeping agent without
@@ -106,8 +117,9 @@ the dashboard. Worth taking:
     finance person can be a guest admin).
   - An org keeps at least one admin.
   - A person is in at most one org, and holds at most one seat.
-- **A seat** has a kind (`seat` or `seat_always_on`), and either a
-  holder (an npub) or a pending email.
+- **A seat** has a kind, and either a holder (an npub) or a pending
+  email. A paid seat's kind is `seat_always_on`, the one sold; a comped
+  one may also be `seat` (a computer that sleeps).
   - A pending seat waits on the email as a share invite does
     (decision 48). Whoever signs in with that verified email takes it.
     The platform mails the link through Cloudflare Email Sending.
@@ -157,7 +169,7 @@ For docs/MODEL.md's truth map:
 |---|---|---|
 | An org, its admins, its seats (holder or pending email, kind, paid or comped) | the registry | org admins and operators, through the API |
 | A subscription's status, trial end and period end | Stripe; the registry keeps a copy | the webhook, the Checkout return and a daily reconcile, each by fetching it from Stripe |
-| How many paid seats of each kind | the registry's seats; Stripe's item quantities are a copy | every seat change pushes them; the reconcile repairs a drift |
+| How many paid seats | the registry's seats; Stripe's item quantity is a copy | every seat change pushes it; the reconcile repairs a drift |
 | A person's plan and seat standing | their ledger | the registry alone |
 | A computer's always-on | the computer | the registry, from its owner's plan and choice |
 | Trial codes and their uses | the registry | operators; redemptions |
@@ -176,15 +188,17 @@ the move if it ever outgrows that, not before.
   metadata: `fragment_org`, `fragment_deployment`. Customers are never
   looked up by email: finite-mono has its own customers with the same
   emails.
-- **Products and prices:** two Products ("Fragment seat" and "Fragment
-  always-on seat"), so an invoice's lines are clear. Their monthly USD
-  Prices are found by lookup key (`fragment_seat_month`,
-  `fragment_seat_always_on_month`), so a price change is a new Price
-  with the key moved, and no config edit. Tax as finite-mono's: code
+- **Products and prices:** two Products, the two things sold: "Fragment
+  always-on seat", its Price monthly at $200 by the lookup key
+  `fragment_seat_always_on_month`, and "Fragment credit, $25", its Price
+  once at $25 by `fragment_credit_pack`. A price change is a new Price
+  with the key moved, and no config edit. The $100 seat's
+  (`fragment_seat_month`) is not made, and a subscription with an item on
+  it is not fragment's (2026-10-15). Tax as finite-mono's: code
   `txcd_10103001`, tax-exclusive, automatic tax on (decision 54).
-- **Subscription:** one per org, with an item per seat kind in use.
-  Each item's quantity is that kind's paid seats, pending ones included.
-  Metadata as the customer's.
+- **Subscription:** one per org, with one item, the seat's. Its quantity
+  is the org's paid seats, pending ones included. Metadata as the
+  customer's.
 - **Checkout** makes the subscription (`mode: subscription`).
   - It carries `client_reference_id` (the org), the metadata, a card
     always, and `allow_promotion_codes` (discounts are Stripe's,
@@ -194,9 +208,9 @@ the move if it ever outgrows that, not before.
     to `/welcome?checkout=canceled` ("The shell", below). A credit
     pack's are `/settings?pack=…`.
   - After that, seats change through the API, not Checkout.
-- **Seat changes** call `POST /v1/subscriptions/<id>` with the items'
-  new quantities. That covers adding a seat, removing one, and moving
-  one between kinds (an upgrade or a downgrade).
+- **Seat changes** call `POST /v1/subscriptions/<id>` with the item's
+  new quantity. That covers adding a seat and removing one; with one
+  kind sold, there is no moving between kinds.
   - Changes are prorated (`create_prorations`) onto the next invoice.
   - Each carries an `Idempotency-Key` (the push's own).
   - The order is: the seat row first, then Stripe. A change queues its
@@ -275,7 +289,8 @@ Checked against finite-mono's code (2026-10-08):
 - **`crates/core/src/billing.rs`** (pure, host-tested):
   - the signature check;
   - status to standing;
-  - seat counts to item quantities;
+  - what is sold (`for_sale`: `seat_always_on` only, else `NotSold`);
+  - the seat count to the item's quantity;
   - trial capacity;
   - code normalization.
 - **`cell/src/stripe.rs`:** a small client on the Worker's fetch.
@@ -295,7 +310,8 @@ Checked against finite-mono's code (2026-10-08):
   e2e's other sections, and a self-hosted deployment.
 - **`cargo xtask stripe check --config <file>`** is finite-mono's
   readiness audit in Rust, read-only. It checks:
-  - both Prices by lookup key (amount, USD, monthly, tax behavior);
+  - the seat's and the pack's Prices by lookup key (amount, USD,
+    monthly or once, tax behavior), and no other;
   - the portal configuration's features and return URL;
   - this deployment's endpoint (enabled, exactly our events, our API
     version).
@@ -303,8 +319,9 @@ Checked against finite-mono's code (2026-10-08):
   `deploy` runs it first and refuses on a miss, as it does for a
   missing secret.
 - **`cargo xtask stripe setup --config <file>`** makes what is missing,
-  idempotently: Products, Prices, the portal configuration and the
-  endpoint. It runs on the sandbox for previews; Paul runs it for live.
+  idempotently: the always-on seat's Product and Price, the pack's
+  Product and Price, the portal configuration and the endpoint. It runs
+  on the sandbox for previews; Paul runs it for live.
 
 ### Tests
 
@@ -325,11 +342,11 @@ Checked against finite-mono's code (2026-10-08):
     - sending a foreign event (finite-mono's, or another
       deployment's).
 - **An e2e section, `billing`.** Each case below is a check:
-  - **Valid:** buy, add, upgrade, downgrade and remove a seat; a
-    pending seat claimed at sign-in; a trial; a pack; a comped seat.
+  - **Valid:** buy, add and remove a seat; a pending seat claimed at
+    sign-in; a 30-day trial; a pack; a comped seat.
   - **Invalid:** a forged or foreign event; a member changing seats; a
-    code used twice; a full code; a guest creating; a lapsed person
-    waking.
+    `seat` bought, added, or made a trial code's kind; a code used twice;
+    a full code; a guest creating; a lapsed person waking.
   - **Replay:** an event twice; events out of order.
   - **Restart:**
     - the node dies between Stripe's change and our row, and the
@@ -346,7 +363,9 @@ Checked against finite-mono's code (2026-10-08):
 
 - **Codes** are finite-mono's shape, kept in the registry:
   - `trial_codes (id, code, name, kind, days 1–30, capacity 1–10000,
-    expires_at, active, created_by)`;
+    expires_at, active, created_by)`, its kind `seat_always_on` (a code
+    of another is refused at its making; one made before 2026-10-15 is
+    refused as ended);
   - `trial_uses (code, person, session, expires_at, subscription)`.
 - **Redeeming** (a guest who never had a subscription):
   - **Where:** they type the code in the shell's welcome, or open the
@@ -356,9 +375,9 @@ Checked against finite-mono's code (2026-10-08):
     active and unexpired, that it has a place, and that the person never
     trialed. The places taken are uses with a subscription plus uses
     whose session has not yet expired. It then records the use.
-  - **Checkout:** one seat of the code's kind, `trial_period_days`, a
-    card always, no promotion codes. It expires in 30 minutes,
-    Stripe's least.
+  - **Checkout:** one always-on seat, `trial_period_days` (a month at
+    most: 30), a card always, no promotion codes. It expires in 30
+    minutes, Stripe's least.
   - **Freeing a place:** the use's own expiry frees it. This needs no
     `checkout.session.expired` handler, unlike finite-mono's.
 - **At the trial's end** Stripe charges the card. A decline is
@@ -391,8 +410,8 @@ Checked against finite-mono's code (2026-10-08):
   - **comp it:** a pending comped seat in a new org of one;
   - **trial it:** a mail with a trial link.
 - **Trial codes.**
-  - **Create:** name, kind, days, capacity and expiry, with the code
-    generated or typed.
+  - **Create:** name, days, capacity and expiry, with the code
+    generated or typed; its kind is the always-on seat's.
   - **List:** each code's uses (who, when, the subscription's status).
   - **Change:** raise the capacity, deactivate it, or edit the code.
     Each change is compare-and-set.
@@ -414,9 +433,12 @@ settings (Paul, 2026-10-13: "fixed onboarding (shouldn't go through the
 settings page)").
 
 - **Who sees it:** a guest with nothing shared with them, who lands
-  there from `/`. It holds a line of what this is, the two seats and a
-  trial-code field, then Checkout, and who is signed in, with Sign out:
-  one card on the landscape, as the launcher's panel is (Skyler's look).
+  there from `/`. It holds a line of what this is, the one seat ($200 a
+  month, always on, its time not metered, $100 of credit included each
+  month) and a trial-code field, then Checkout, a line on what more
+  credit costs once they hold a seat ($25 a pack, kept until spent), and
+  who is signed in, with Sign out: one card on the landscape, as the
+  launcher's panel is (Skyler's look).
 - **What comes back to it:** Checkout's return
   (`?checkout=<session>`), its Back (`?checkout=canceled`, said), and a
   mailed trial's link (`?trial=<code>`, filled in). Signed out, sign-in
@@ -449,15 +471,14 @@ settings page)").
 Settings gains **Billing**, which replaces the read-only Credit section,
 for a seat once someone holds one:
 
-- **A guest** sees what a seat gives, and "Get a seat", which opens the
-  welcome.
-- **A seat holder** sees their seat, its kind, who provides it, and
-  this month's usage and credit. On `seat_always_on` it adds "let it
-  sleep".
+- **A guest** sees what a seat gives and its price, and "Get a seat",
+  which opens the welcome.
+- **A seat holder** sees their seat, its kind, who provides it, this
+  month's usage and credit, and "Buy $25 of credit". On `seat_always_on`
+  it adds "let it sleep".
 - **An org admin** sees the seats table: email, kind, and pending or
   held. From it they:
-  - add a seat by email;
-  - change a seat's kind;
+  - add a seat by email (an always-on one);
   - remove a seat;
   - add an admin;
   - open "Payment and invoices" (Stripe's portal).
@@ -474,12 +495,12 @@ The shell offers a guest nothing to make.
 
 | Route | Who |
 |---|---|
-| `POST /api/billing/checkout {seats: {seat, seatAlwaysOn}, trialCode?}` | a guest, or an org admin with no subscription |
+| `POST /api/billing/checkout {kind?, trialCode?}` (`kind` only `seat_always_on`, the default) | a guest, or an org admin with no subscription |
 | `POST /api/billing/sessions/<id>` | the Checkout return |
 | `POST /api/billing/portal` | an org admin |
-| `POST /api/billing/packs {pack, for?}` | a seat holder, or an org admin for a member |
-| `GET /api/org`, `PATCH /api/org` | a member; an admin |
-| `POST /api/org/seats {email, kind}`, `PATCH /api/org/seats/<id> {kind}`, `DELETE /api/org/seats/<id>` | an org admin |
+| `POST /api/billing/packs {member?}` | a seat holder, or an org admin for a member |
+| `GET /api/org` | an admin |
+| `POST /api/org/seats {email, kind?}` (`kind` as Checkout's), `DELETE /api/org/seats/<id>` | an org admin |
 | `POST /api/org/admins {email}`, `DELETE /api/org/admins/<npub>` | an org admin |
 | `PUT /api/computers/<id>/sleep {allowed}` | the computer's owner on `seat_always_on` |
 | `POST /api/stripe/webhook` | Stripe, signed |
@@ -571,6 +592,7 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 | `past_due` | good standing; Stripe's retries are the grace | 53 |
 | Tax | Stripe automatic tax, prices before tax | 54 |
 | Packs | one $25 pack, kept until spent | 55 |
+| What is sold (Paul, 2026-10-15) | the $200 always-on seat and the $25 pack; no $100 seat | 25 (its status) |
 | Trials | our codes on Stripe's trial; time-held places | 56 |
 | A $200 computer | awake by default, "let it sleep" | 57 |
 | Previews | `xtask deploy --branch` registers its sandbox endpoint and uploads its signing secret | 58 |

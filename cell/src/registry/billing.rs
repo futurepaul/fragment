@@ -31,7 +31,8 @@ pub(crate) struct SubscriptionCopy {
     pub id: String,
     pub customer: String,
     pub status: String,
-    /// Each kind's item and quantity.
+    /// Its seat item and quantity, as `orgs.items` has kept them since
+    /// seats were sold of two kinds: `[(kind, item, quantity)]`.
     pub items: Vec<(SeatKind, String, u64)>,
     pub period_end: Option<i64>,
     pub trial_end: Option<i64>,
@@ -44,7 +45,7 @@ impl From<Snapshot> for SubscriptionCopy {
             id: s.id,
             customer: s.customer,
             status: s.status.as_str().to_string(),
-            items: s.items,
+            items: vec![(SeatKind::SOLD, s.item, s.seats)],
             period_end: s.period_end,
             trial_end: s.trial_end,
             cancel_at_end: s.cancel_at_period_end,
@@ -57,8 +58,8 @@ impl From<Snapshot> for SubscriptionCopy {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckoutBegin {
     pub by: By,
-    /// The seat's kind; a trial code's own when one is named.
-    pub kind: Option<SeatKind>,
+    /// The seat's kind, as asked: only the one sold is.
+    pub kind: SeatKind,
     /// A trial code, as typed.
     pub trial: Option<String>,
     /// Until when a trial's place is held: the Checkout's own expiry (ms).
@@ -208,6 +209,7 @@ impl RegistryCell {
     }
 
     fn checkout_begin(&self, b: CheckoutBegin) -> CellResult<CheckoutPlan> {
+        let kind = fragment_core::stripe::for_sale(b.kind)?;
         let who = self.person_by(&b.by)?;
         let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a seat is bought by someone who signs in, with their email"))?;
         // everything is checked before anything is written: a refusal leaves no org behind
@@ -227,13 +229,7 @@ impl RegistryCell {
             }
             None => None,
         };
-        let (kind, trial) = match &b.trial {
-            Some(raw) => {
-                let offer = self.trial_offer(&who.id, raw, b.kind, existing.as_ref().map(|o| o.id.as_str()))?;
-                (offer.kind, Some(offer))
-            }
-            None => (b.kind.ok_or_else(|| CellError::invalid("name the seat's kind, or a trial code"))?, None),
-        };
+        let trial = b.trial.as_deref().map(|raw| self.trial_offer(&who.id, raw, existing.as_ref().map(|o| o.id.as_str()))).transpose()?;
         let org = match existing {
             Some(o) => o,
             None => {
