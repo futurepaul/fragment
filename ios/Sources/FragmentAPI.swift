@@ -22,8 +22,11 @@ struct FragmentAPI: Sendable {
 
     func url(_ path: String) -> URL { baseURL.appending(path: path) }
 
-    func request<T: Decodable>(_ path: String, method: String = "GET", body: JSONValue? = nil) async throws -> T {
-        var request = URLRequest(url: url(path))
+    func request<T: Decodable>(_ path: String, method: String = "GET", body: JSONValue? = nil,
+                              query: [URLQueryItem] = []) async throws -> T {
+        var components = URLComponents(url: url(path), resolvingAgainstBaseURL: false)!
+        components.queryItems = query.isEmpty ? nil : query
+        var request = URLRequest(url: components.url!)
         request.httpMethod = method
         request.timeoutInterval = 30
         if let body {
@@ -43,7 +46,25 @@ struct FragmentAPI: Sendable {
     func fragments() async throws -> [FragmentSummary] {
         struct Response: Decodable { let fragments: [FragmentSummary] }
         let response: Response = try await request("api/fragments")
-        return response.fragments.filter { $0.archived != true }
+        return response.fragments
+    }
+
+    // Search is only a hint: the complete prompt, including words beyond the
+    // API's eight-word / 256-byte query limit, remains the new chat's message.
+    static func searchHint(_ text: String) -> String {
+        let words = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).prefix(8)
+        var hint = ""
+        for character in words.joined(separator: " ") {
+            guard hint.utf8.count + String(character).utf8.count <= 256 else { break }
+            hint.append(character)
+        }
+        return hint
+    }
+
+    func search(_ text: String) async throws -> SearchResults {
+        let hint = Self.searchHint(text)
+        guard !hint.isEmpty else { return SearchResults() }
+        return try await request("api/search", query: [URLQueryItem(name: "q", value: hint)])
     }
 
     func createChat() async throws -> FragmentSummary {

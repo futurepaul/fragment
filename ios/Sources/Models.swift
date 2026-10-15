@@ -12,6 +12,20 @@ struct FragmentSummary: Codable, Identifiable, Hashable, Sendable {
     var displayTitle: String { title ?? name }
 }
 
+struct SearchResults: Decodable, Sendable {
+    var fragments: [FragmentSummary] = []
+    var messages: [MessageHit] = []
+}
+
+struct MessageHit: Decodable, Identifiable, Sendable {
+    let fragment: String
+    let channel: String
+    let seq: Int64
+    let at: Int64
+    let snippet: String
+    var id: String { "\(fragment):\(channel):\(seq)" }
+}
+
 // Channels accept arbitrary JSON; unknown fields and record kinds must survive
 // decoding without making an older app unable to read a newer chat.
 enum JSONValue: Codable, Equatable, Sendable {

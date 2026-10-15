@@ -18,9 +18,9 @@ final class Library {
     var unfinishedChat: FragmentSummary?
 
     var chats: [FragmentSummary] {
-        fragments.filter { $0.kind == "chat" }.sorted { ($0.previewAt ?? 0) > ($1.previewAt ?? 0) }
+        fragments.filter { $0.kind == "chat" && $0.archived != true }.sorted { ($0.previewAt ?? 0) > ($1.previewAt ?? 0) }
     }
-    var apps: [FragmentSummary] { fragments.filter { $0.kind != "chat" && $0.kind != "agent" } }
+    var apps: [FragmentSummary] { fragments.filter { ($0.kind == "app" || $0.kind == "brain") && $0.archived != true } }
     var agent: FragmentSummary? { fragments.first { $0.kind == "agent" } }
 
     func load(_ api: FragmentAPI) async {
@@ -77,7 +77,10 @@ struct FragmentRoot: View {
 
     private func connectedShell(_ api: FragmentAPI) -> some View {
         NavigationStack(path: $path) {
-            HomeView(library: library, draft: $homeDraft, open: { path.append($0) }, start: { await start(api) },
+            HomeView(library: library, api: api, draft: $homeDraft, open: { fragment in
+                if fragment.kind == "chat" { path.append(fragment) }
+                else { sheet = .app(fragment) }
+            }, start: { await start(api) },
                 refresh: { await library.load(api) })
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {

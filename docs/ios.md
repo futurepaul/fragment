@@ -10,8 +10,12 @@ fixture is a separate Rust development server, not a mobile runtime.
 Make Fragment feel at home on iPhone: open your agent, resume a chat, send a
 message, see its reply stream, and open an ordinary app without leaving the
 conversation. Follow the later, simpler Finite iOS design and the existing
-Fragment mobile colours. Keep the client minimal: a focused home, three
-recents, chat/app picker, chat and settings. Native controls and typography;
+Fragment mobile colours. The signed-in home is a native fullscreen version
+of Fragment's Command-K launcher (Paul, 2026-10-14): one input searches chats,
+apps and message text; the first action and Return start a new chat with the
+complete input. Search hints alone are capped at eight words and 256 bytes;
+older search responses never replace newer results. Empty input stays quiet.
+Keep the client minimal: the launcher, chat/app picker, chat and settings. Native controls and typography;
 no custom drawer gesture, Rust FFI, embedded chat webpage, model key, or
 parallel agent chat protocol.
 
@@ -37,6 +41,7 @@ The live service uses these routes already (`docs/api.md` is authoritative):
 | Stream/catch-up | `GET /f/{chat}/__live`, subscribe to `chat` and `work` with `last` initially, `after` on reconnect; follow `subscribed.more` until caught up |
 | Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
 | List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed` |
+| Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
 | Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
 | App URL | `GET /api/f/{name}/status` → `urls.canonical` |
 

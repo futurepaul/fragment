@@ -14,6 +14,7 @@
 		4024A3397E46CADB1EC9D344 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = D48A78B0A3D4F8A90EEBD8DB /* Models.swift */; };
 		73EE483533F3A6306B65148C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261EC9048255D1B31FED623 /* HomeView.swift */; };
 		78F77F1984EC48618CA7801A /* FragmentUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E480260C706AE0F972CA37 /* FragmentUITests.swift */; };
+		7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */; };
 		9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */; };
 		9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */; };
 		A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0814CDF8824F8A8657129D /* MarkdownTests.swift */; };
@@ -45,6 +46,7 @@
 		214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
 		2C75B4172B10109A56753F7A /* TimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTests.swift; sourceTree = "<group>"; };
 		2F7C65701872682E560E008F /* FragmentAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentAPI.swift; sourceTree = "<group>"; };
+		3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchTests.swift; sourceTree = "<group>"; };
 		463D517A458071F0CD419B80 /* Fragment.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Fragment.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4AE675325F3A8ED7EAE13267 /* FragmentTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FragmentTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
@@ -110,6 +112,7 @@
 			isa = PBXGroup;
 			children = (
 				AB0814CDF8824F8A8657129D /* MarkdownTests.swift */,
+				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
 				2C75B4172B10109A56753F7A /* TimelineTests.swift */,
 				DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */,
 			);
@@ -224,6 +227,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */,
+				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
 				A8391B829C662A475899B98C /* TimelineTests.swift in Sources */,
 				9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */,
 			);

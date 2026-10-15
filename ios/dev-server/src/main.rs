@@ -92,6 +92,7 @@ async fn main() {
             get(|| async { Json(json!({"ok": true, "fixture": true})) }),
         )
         .route("/api/fragments", get(list).post(create))
+        .route("/api/search", get(search))
         .route("/api/f/{name}/status", get(status))
         .route("/api/f/{name}/members/{identity}", put(member))
         .route(
@@ -154,6 +155,79 @@ async fn list(State(state): State<Shared>) -> Json<Value> {
     let mut rows: Vec<_> = fixture.rooms.values().map(|r| r.summary.clone()).collect();
     rows.sort_by_key(|r| r["name"].as_str().unwrap_or_default().to_owned());
     Json(json!({"fragments": rows}))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+// This fixture uses literal word matching. Production search remains the
+// person's permission-filtered FTS projection, behind the same API shape.
+async fn search(
+    Query(query): Query<SearchQuery>,
+    State(state): State<Shared>,
+) -> Result<Json<Value>, Failure> {
+    let words: Vec<_> = query.q.split_whitespace().map(str::to_lowercase).collect();
+    if query.q.len() > 256 || words.len() > 8 {
+        return Err(failure(
+            StatusCode::BAD_REQUEST,
+            "Search accepts at most eight words and 256 bytes.",
+        ));
+    }
+    if words.is_empty() {
+        return Ok(Json(json!({"fragments": [], "messages": []})));
+    }
+    let fixture = state.lock().expect("fixture lock");
+    let matches = |text: &str| {
+        let lower = text.to_lowercase();
+        words.iter().all(|word| lower.contains(word))
+    };
+    let mut fragments: Vec<_> = fixture
+        .rooms
+        .values()
+        .filter(|room| {
+            matches(&format!(
+                "{} {}",
+                room.summary["name"].as_str().unwrap_or(""),
+                room.summary["title"].as_str().unwrap_or("")
+            ))
+        })
+        .map(|room| room.summary.clone())
+        .collect();
+    fragments.sort_by_key(|fragment| fragment["name"].as_str().unwrap_or("").to_owned());
+    fragments.truncate(20);
+    let mut messages = Vec::new();
+    for (name, room) in &fixture.rooms {
+        for record in &room.records {
+            if record["channel"] != "chat" {
+                continue;
+            }
+            let kind = record["body"]["kind"].as_str();
+            if kind.is_some() && kind != Some("message") {
+                continue;
+            }
+            let Some(text) = record["body"]["text"].as_str() else {
+                continue;
+            };
+            if !matches(text) {
+                continue;
+            }
+            let mut end = text.len().min(300);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            messages.push(json!({"fragment": name, "channel": "chat", "seq": record["seq"], "at": record["at"], "snippet": &text[..end]}));
+        }
+    }
+    messages.sort_by_key(|hit| {
+        std::cmp::Reverse((
+            hit["at"].as_u64().unwrap_or(0),
+            hit["seq"].as_u64().unwrap_or(0),
+        ))
+    });
+    messages.truncate(50);
+    Ok(Json(json!({"fragments": fragments, "messages": messages})))
 }
 async fn create(
     State(state): State<Shared>,

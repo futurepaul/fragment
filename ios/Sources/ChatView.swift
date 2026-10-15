@@ -55,6 +55,7 @@ struct ChatView: View {
                 .padding(.horizontal, 20).padding(.vertical, 24).frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("timeline")
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.top, for: .alignment)
             .onScrollGeometryChange(for: Bool.self) { geometry in

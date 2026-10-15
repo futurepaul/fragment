@@ -38,7 +38,10 @@ Set that same URL in the app's development settings. Loopback is the default.
 
 ## Scope
 
-- Focused home, three recent chats, one agent; searchable native chat/app picker.
+- Signed-in home is a native fullscreen Command-K launcher: search chats,
+  apps and message text through `GET /api/search`, with a new chat as the
+  first action. Return sends the complete input to your agent in a new chat.
+  Search is debounced; its eight-word / 256-byte hint never truncates the prompt.
 - Native message composer, interactive keyboard dismissal, selectable text,
   Markdown paragraphs, headings, lists, quotes, links and fenced code.
 - Real HTTP sends and live whole-text drafts, replaced by durable records.
@@ -97,6 +100,9 @@ and chat selection. Its original brief is the Mac Codex archive for
 `/Users/futurepaul/dev/finite/finite-mono`, session
 `019f9006-c9e6-7f90-831e-7c6ae6f3ace7`, source JSONL line **9**, July 23,
 2026 (shared Linux history archive; existing index, not refreshed).
+The signed-in home now follows Fragment's own fullscreen Command-K launcher
+(`cell/shell/shell.js`): search everything and default to starting a new chat,
+per Paul's direction on 2026-10-14, replacing the older three-recents home.
 
 [Enchanted](https://github.com/gluonfield/enchanted) supplies a native iOS
 chat reference for conversation history, Markdown and a configurable server.

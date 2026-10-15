@@ -2,74 +2,157 @@ import SwiftUI
 
 struct HomeView: View {
     let library: Library
+    let api: FragmentAPI
     @Binding var draft: String
     let open: (FragmentSummary) -> Void
     let start: () async -> Void
     let refresh: () async -> Void
+    @State private var results = SearchResults()
+    @State private var searching = false
+    @State private var searchError: String?
+    @FocusState private var focused: Bool
+
+    private var query: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canStart: Bool {
+        !query.isEmpty && query.utf8.count <= 32_768 && library.agent != nil && !library.creating
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 36) {
-                VStack(alignment: .leading, spacing: 20) {
-                    Circle().fill(FragmentStyle.lilac.gradient)
-                        .frame(width: 46, height: 46)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("A little space\nto think big.")
-                            .font(.system(.largeTitle, design: .serif).weight(.medium))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text("What would you like to work on?")
-                            .font(.body).foregroundStyle(.secondary)
-                    }
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Ask anything or search", text: $draft)
+                    .focused($focused).submitLabel(.go)
+                    .accessibilityIdentifier("launcherInput")
+                    .disabled(library.creating)
+                    .onSubmit(launch)
+                if !draft.isEmpty {
+                    Button("Clear search", systemImage: "xmark.circle.fill") { draft = "" }
+                        .labelStyle(.iconOnly).foregroundStyle(.secondary)
+                        .disabled(library.creating)
                 }
-                .padding(.top, 42)
-                if !library.chats.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("PICK UP WHERE YOU LEFT OFF")
-                            .font(.caption2.weight(.medium)).tracking(1.5).foregroundStyle(.secondary)
-                        VStack(spacing: 0) {
-                            ForEach(library.chats.prefix(3)) { chat in
-                                Button { open(chat) } label: { ChatSummaryRow(chat: chat) }
-                                    .buttonStyle(.plain)
-                                if chat.id != library.chats.prefix(3).last?.id { Divider().padding(.leading, 16) }
+                Button(action: launch) {
+                    Group {
+                        if library.creating { ProgressView() }
+                        else { Image(systemName: "arrow.turn.down.left") }
+                    }.frame(width: 44, height: 44)
+                }
+                .disabled(!canStart).accessibilityLabel("Start new chat")
+                .accessibilityIdentifier("startChat")
+            }
+            .padding(.leading, 16).padding(.trailing, 4)
+            .background(FragmentStyle.surface, in: RoundedRectangle(cornerRadius: 18))
+            .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(.primary.opacity(0.08)) }
+            .padding(.horizontal, 16).padding(.top, 12)
+
+            if query.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Search chats, apps, and messages.")
+                    Text("Or start a new chat with \(library.agent?.displayTitle ?? "your agent").")
+                }
+                .font(.subheadline).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).padding(32)
+                Spacer()
+            } else {
+                List {
+                    if library.agent != nil {
+                        Button(action: launch) {
+                            HStack(spacing: 14) {
+                                Image(systemName: "square.and.pencil").foregroundStyle(FragmentStyle.lilac)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Start a new chat with \(library.agent?.displayTitle ?? "your agent")")
+                                        .font(.body.weight(.medium))
+                                    Text(query).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer(minLength: 0)
+                            }.padding(.vertical, 6)
+                        }
+                        .disabled(!canStart).accessibilityIdentifier("newChatResult")
+                    }
+                    foundFragments("Chats", kinds: ["chat"])
+                    foundFragments("Apps", kinds: ["app", "brain"])
+                    if !results.messages.isEmpty {
+                        Section("Messages") {
+                            ForEach(results.messages) { hit in
+                                if let fragment = library.fragments.first(where: { $0.name == hit.fragment }) {
+                                    Button { focused = false; open(fragment) } label: {
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            Text(fragment.displayTitle).font(.body.weight(.medium))
+                                            Text(hit.snippet).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
+                                        }.padding(.vertical, 6)
+                                    }.accessibilityIdentifier("messageResult-\(hit.id)")
+                                }
                             }
                         }
-                        .background(FragmentStyle.surface, in: RoundedRectangle(cornerRadius: 20))
                     }
-                } else if library.loading { ProgressView("Connecting to Fragment…") }
-                if let error = library.error {
-                    Label(error, systemImage: "wifi.exclamationmark").font(.callout).foregroundStyle(.secondary)
+                    if searching { ProgressView("Searching…").listRowBackground(Color.clear) }
+                    if let searchError { Text(searchError).font(.footnote).foregroundStyle(.secondary) }
+                }
+                .scrollContentBackground(.hidden).scrollDismissesKeyboard(.interactively)
+            }
+            if let error = library.error {
+                VStack(spacing: 8) {
+                    Text(error).font(.footnote).foregroundStyle(.secondary)
                     Button("Try again") { Task { await refresh() } }
+                }.padding()
+            }
+        }
+        .frame(maxWidth: 700).frame(maxWidth: .infinity)
+        .background(FragmentStyle.background)
+        .navigationTitle("Fragment").navigationBarTitleDisplayMode(.inline)
+        .background {
+            Button("Search everything") { focused = true }
+                .keyboardShortcut("k", modifiers: .command).hidden().accessibilityHidden(true)
+        }
+        .task(id: query) {
+            results = SearchResults()
+            searchError = nil
+            searching = false
+            guard !query.isEmpty else { return }
+            let asked = query
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                searching = true
+                let found = try await api.search(asked)
+                try Task.checkCancellation()
+                guard asked == query else { return }
+                results = found
+                searching = false
+            } catch {
+                guard !Task.isCancelled, asked == query else { return }
+                searchError = error.localizedDescription
+                searching = false
+            }
+        }
+    }
+
+    @ViewBuilder private func foundFragments(_ heading: String, kinds: Set<String>) -> some View {
+        let found = results.fragments.filter { kinds.contains($0.kind) }
+        if !found.isEmpty {
+            Section(heading) {
+                ForEach(found) { fragment in
+                    Button { focused = false; open(fragment) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: fragment.kind == "chat" ? "bubble.left" : "square.grid.2x2")
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(fragment.displayTitle).foregroundStyle(.primary)
+                                if let preview = fragment.preview {
+                                    Text(preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            if fragment.archived == true { Text("Archived").font(.caption).foregroundStyle(.secondary) }
+                        }.padding(.vertical, 6)
+                    }.accessibilityIdentifier("fragmentResult-\(fragment.name)")
                 }
             }
-            .frame(maxWidth: 620, alignment: .leading)
-            .padding(.horizontal, 24).padding(.bottom, 32)
-            .frame(maxWidth: .infinity)
         }
-        .background(FragmentStyle.background)
-        .refreshable { await refresh() }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            ComposerView(text: $draft, working: false, enabled: library.agent != nil && !library.creating,
-                sending: library.creating, send: start, stop: {})
-        }
-        .navigationTitle("Fragment")
-        .navigationBarTitleDisplayMode(.inline)
     }
-}
 
-struct ChatSummaryRow: View {
-    let chat: FragmentSummary
-    var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(chat.displayTitle).font(.body.weight(.medium)).lineLimit(1)
-                Text(chat.preview ?? "Start a conversation").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-        }
-        .padding(16).contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
+    private func launch() {
+        guard canStart else { return }
+        focused = false
+        Task { await start() }
     }
 }
 
@@ -163,5 +246,5 @@ struct LibraryView: View {
 }
 
 #Preview("Home") {
-    NavigationStack { HomeView(library: Library(), draft: .constant(""), open: { _ in }, start: {}, refresh: {}) }
+    NavigationStack { HomeView(library: Library(), api: FragmentAPI(baseURL: URL(string: "http://localhost:8910")!), draft: .constant(""), open: { _ in }, start: {}, refresh: {}) }
 }
