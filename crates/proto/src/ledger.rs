@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Plan {
     Guest,
-    /// $100 a month, $50 of credit included, a computer that sleeps.
+    /// $50 of credit included, a computer that sleeps: an operator's comp,
+    /// or a deployment's default plan; not sold (Paul, 2026-10-15).
     Seat,
-    /// $200 a month, $100 of credit included, an always-on computer.
+    /// $200 a month, $100 of credit included, an always-on computer: the
+    /// one seat sold.
     SeatAlwaysOn,
 }
 

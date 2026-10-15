@@ -220,7 +220,7 @@ fn rows(f: &BTreeMap<String, String>, prefix: &str) -> Vec<BTreeMap<String, Stri
 }
 
 impl Stripe {
-    /// Serves on `port` (0: any) for one account's secret key, its seats'
+    /// Serves on `port` (0: any) for one account's secret key, its seat's
     /// and pack's prices made already (as `xtask stripe setup` makes them).
     pub fn start(port: u16, key: &str) -> std::io::Result<Stripe> {
         Stripe::start_with(port, key, true)
@@ -232,12 +232,10 @@ impl Stripe {
         let state: Arc<Mutex<State>> = Arc::default();
         if seeded {
             let mut s = state.lock().expect("stripe state");
-            for (key, amount) in [(stripe::lookup_key(fragment_proto::org::SeatKind::Seat), 10_000), (stripe::lookup_key(fragment_proto::org::SeatKind::SeatAlwaysOn), 20_000)] {
+            for (key, amount) in [(stripe::SEAT_LOOKUP_KEY, stripe::SEAT_CENTS), (stripe::PACK_LOOKUP_KEY, stripe::PACK_CENTS)] {
                 let id = s.next("price");
-                s.prices.insert(key.to_string(), (id, amount));
+                s.prices.insert(key.into(), (id, amount));
             }
-            let id = s.next("price");
-            s.prices.insert(stripe::PACK_LOOKUP_KEY.into(), (id, stripe::PACK_CENTS));
         }
         {
             // finite-mono's, on the same account

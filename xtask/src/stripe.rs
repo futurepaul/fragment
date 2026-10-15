@@ -2,8 +2,11 @@
 //! deployment's Stripe as docs/billing.md wants it (finite-mono's readiness
 //! audit, in Rust), on the account its config's `stripe.key_file` names:
 //!
-//! - its prices, by lookup key: the two seats monthly in USD at decision
-//!   25's amounts, the $25 pack once (decision 55), tax-exclusive;
+//! - its prices, by lookup key, tax-exclusive, and only the two fragment
+//!   sells (Paul, 2026-10-15: "the $200 plan and the $25 credit pack"):
+//!   the always-on seat, $200 monthly in USD (decision 25), and the $25
+//!   pack, once (decision 55). The $100 seat's is never made, nor asked
+//!   for;
 //! - its own portal configuration (`stripe.portal`, never the account's
 //!   default, which finite-mono's audit pins): card, invoices, billing
 //!   address, cancel at the period's end, no plan switching (seats are
@@ -22,8 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use fragment_core::stripe::{self as rules, Form, API_VERSION, EVENTS, PACK_CENTS, PACK_LOOKUP_KEY};
-use fragment_proto::org::SeatKind;
+use fragment_core::stripe::{self as rules, Form, API_VERSION, EVENTS, PACK_CENTS, PACK_LOOKUP_KEY, SEAT_CENTS, SEAT_LOOKUP_KEY};
 use serde_json::Value;
 
 /// A Stripe account, as xtask calls it.
@@ -87,10 +89,9 @@ struct Wanted {
     product: &'static str,
 }
 
-fn wanted() -> [Wanted; 3] {
+fn wanted() -> [Wanted; 2] {
     [
-        Wanted { key: rules::lookup_key(SeatKind::Seat), cents: rules::unit_amount(SeatKind::Seat), monthly: true, product: "Fragment seat" },
-        Wanted { key: rules::lookup_key(SeatKind::SeatAlwaysOn), cents: rules::unit_amount(SeatKind::SeatAlwaysOn), monthly: true, product: "Fragment always-on seat" },
+        Wanted { key: SEAT_LOOKUP_KEY, cents: SEAT_CENTS, monthly: true, product: "Fragment always-on seat" },
         Wanted { key: PACK_LOOKUP_KEY, cents: PACK_CENTS, monthly: false, product: "Fragment credit, $25" },
     ]
 }
@@ -271,13 +272,18 @@ mod tests {
         let fake = fragment_fakes::stripe::Stripe::start_with(0, KEY, false).unwrap();
         let s = Stripe::new(&fake.url, KEY).unwrap();
         let before = check(&s, PLATFORM, None).unwrap();
-        assert!(before.iter().any(|w| w.contains("no active price fragment_seat_month")), "{before:?}");
+        assert!(before.iter().any(|w| w.contains("no active price fragment_seat_always_on_month")), "{before:?}");
+        assert!(before.iter().any(|w| w.contains("no active price fragment_credit_pack")), "{before:?}");
+        assert!(!before.iter().any(|w| w.contains("fragment_seat_month")), "the $100 seat is not asked for: {before:?}");
         assert!(before.iter().any(|w| w.contains("no webhook endpoint")), "{before:?}");
         let dir = std::env::temp_dir().join(format!("xtask-stripe-{}", fragment_devstack::random_hex(4)));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("webhook-secret");
         let made = setup(&s, PLATFORM, None, Some(&file)).unwrap();
-        assert_eq!(made.prices.len(), 3);
+        assert_eq!(made.prices, ["fragment_seat_always_on_month", "fragment_credit_pack"], "the $200 seat's and the pack's, and no other");
+        assert!(s.price("fragment_seat_month").unwrap().is_none(), "the $100 seat's price is never made");
+        let products: Vec<String> = fake.requests().iter().filter(|r| r.path == "/v1/products").filter_map(|r| r.form.get("name").cloned()).collect();
+        assert_eq!(products, ["Fragment always-on seat", "Fragment credit, $25"]);
         let portal = made.portal.clone().expect("a portal configuration made");
         let secret = std::fs::read_to_string(&file).unwrap();
         assert!(secret.starts_with("whsec_"), "the secret is in its file");

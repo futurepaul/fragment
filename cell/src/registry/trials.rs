@@ -1,6 +1,7 @@
 //! Trials (docs/billing.md, "Trials"; decision 56): our codes on Stripe's
-//! trial. An operator makes a code that names a seat's kind, its days (1
-//! to 30), its places (1 to 10,000) and when it stops; a person who never
+//! trial. An operator makes a code of the seat sold (`seat_always_on`: any
+//! other kind is refused), its days (1 to 30), its places (1 to 10,000)
+//! and when it stops; a person who never
 //! paid redeems it through a Checkout that takes a card first, with
 //! Stripe's `trial_period_days`. One trial per person, ever.
 //!
@@ -194,6 +195,7 @@ impl RegistryCell {
 
     fn trial_new(&self, b: TrialNew) -> CellResult<TrialCode> {
         let n = b.code;
+        fragment_core::stripe::for_sale(n.kind)?;
         let name = n.name.trim();
         if name.is_empty() || name.len() > TRIAL_NAME_MAX_BYTES || name.chars().any(char::is_control) {
             return Err(CellError::invalid(format!("a trial code's name is 1-{TRIAL_NAME_MAX_BYTES} bytes on one line")));
@@ -276,17 +278,17 @@ impl RegistryCell {
     }
 
     /// What a code offers `person`, or why not: it is unknown, off, past
-    /// its expiry or full; they trialed already, or their org has paid.
-    /// Changes nothing (`hold_trial_place` does, once all is checked).
-    pub(super) fn trial_offer(&self, person: &str, raw: &str, kind: Option<SeatKind>, org: Option<&str>) -> CellResult<TrialOffer> {
+    /// its expiry, of a seat no longer sold, or full; they trialed already,
+    /// or their org has paid. Changes nothing (`hold_trial_place` does, once
+    /// all is checked).
+    pub(super) fn trial_offer(&self, person: &str, raw: &str, org: Option<&str>) -> CellResult<TrialOffer> {
         let code = org::trial_code(raw).ok_or_else(not_a_code)?;
         let r = self.row::<CodeRow>(&format!("SELECT {CODE_COLUMNS} FROM trial_codes WHERE code = ?"), vec![code.into()])?.ok_or_else(not_a_code)?;
         if r.active == 0 || r.expires_at.is_some_and(|at| at <= js::now_ms()) {
             return Err(CellError::invalid("this trial code has ended"));
         }
-        if kind.is_some_and(|k| k != r.kind().unwrap_or(k)) {
-            return Err(CellError::invalid(format!("this trial is of a {} seat", r.kind)));
-        }
+        // a code made before the $100 seat stopped being sold (2026-10-15)
+        fragment_core::stripe::for_sale(r.kind()?).map_err(|e| CellError::invalid(format!("this trial code has ended: it is of a {} seat, which is no longer sold", e.0.as_str())))?;
         let mine = self.row::<UseRow>("SELECT subscription FROM trial_uses WHERE person = ?", vec![person.into()])?;
         if mine.as_ref().is_some_and(|u| u.subscription.is_some()) {
             return Err(conflict("a trial is once a person: you had yours"));

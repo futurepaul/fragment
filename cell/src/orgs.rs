@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, OrgOf, Sleeps, SyncSeat};
-use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat, SeatKindChange};
+use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat};
 use crate::registry::admin;
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
 use crate::{acting_for, ask_registry, caller, json_answer, read_body, Caller};
@@ -51,12 +51,14 @@ pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url) -> CellResult<R
 }
 
 /// `/api/org…`, for the asker's org's admins: `GET` it; add a paid seat
-/// by email, change one's kind, remove one; add or remove an admin.
+/// by email (the one sold, `seat_always_on`), remove one; add or remove an
+/// admin.
 pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct NewSeat {
         email: String,
+        #[serde(default = "SeatKind::sold")]
         kind: SeatKind,
     }
     #[derive(serde::Deserialize)]
@@ -73,10 +75,6 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
             let added = ask_registry(env, &AddSeat { by, email: b.email, kind: b.kind }).await?;
             let mailed = added.created && cfg.mail_from.is_some() && mail_seat(env, cfg, &added.member, &added.org_name).await;
             json_answer(&serde_json::json!({ "seat": added.member, "created": added.created, "mailed": mailed }))
-        }
-        (Method::Patch, ["seats", seat]) => {
-            let set: SetSeatKind = body(&bytes)?;
-            json_answer(&ask_registry(env, &SeatKindChange { by, seat: seat.to_string(), kind: set.kind }).await?)
         }
         (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &RemoveSeat { by, seat: seat.to_string() }).await?),
         (Method::Post, ["admins"]) => {
@@ -180,12 +178,10 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             if !code.active || code.expires_at.is_some_and(|at| at <= crate::js::now_ms()) {
                 return Err(CellError::invalid("this trial code has ended: turn it on, or make another"));
             }
-            let kind = match code.kind {
-                SeatKind::SeatAlwaysOn => "a seat with an always-on computer",
-                SeatKind::Seat => "a seat",
-            };
+            // a code of the $100 seat, made before it stopped being sold, is refused
+            fragment_core::stripe::for_sale(code.kind)?;
             let text = format!(
-                "You are invited to try {PRODUCT}: {} days of {kind}, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/welcome?trial={}\n\nYour code: {}\n",
+                "You are invited to try {PRODUCT}: {} days of a seat with an always-on computer, free. A card is taken first, and charged once the trial ends unless you cancel.\n\nSign in with this email address, then start your trial: {}/welcome?trial={}\n\nYour code: {}\n",
                 code.days,
                 cfg.platform(),
                 code.code,

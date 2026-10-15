@@ -50,7 +50,10 @@
     "client_id": "fragment-workos-client-id",
     "api_key": "fragment-workos-api-key"
   },
-  // Seats sold through Stripe (docs/billing.md). Leave it out and seats are
+  // What Stripe sells (docs/billing.md): the $200 always-on seat and the
+  // $25 credit pack, their Prices found by lookup key
+  // (`fragment_seat_always_on_month`, `fragment_credit_pack`; `cargo xtask
+  // stripe setup` makes them). Leave it out and seats are
   // comped by operators only. The key is a restricted key of the account's
   // (Customers, Checkout Sessions, Subscriptions and portal sessions
   // written; Products and Prices read); the webhook secret is this

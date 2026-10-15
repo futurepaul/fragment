@@ -6,8 +6,9 @@
 //! (`cargo xtask e2e --hosted … --only checkout --operator-key-file …`).
 //!
 //! An e2e person signs in as a seat, so the deployment's operator makes
-//! them a guest. They land on the welcome; its $100 seat goes to Stripe's
-//! Checkout, paid with 4242 4242 4242 4242; Checkout's return comes back to
+//! them a guest. They land on the welcome; its $200 always-on seat (the
+//! one sold) goes to Stripe's Checkout, paid with 4242 4242 4242 4242;
+//! Checkout's return comes back to
 //! the welcome, which seats them and makes their first agent as the
 //! shell's first run does, never through settings; "hello" is answered,
 //! and the answer is in the chat the shell shows. Then its computer sleeps and
@@ -127,7 +128,7 @@ fn stripe_state(b: &mut Lease, page: &Page) -> Value {
 }
 
 pub fn checkout(s: &mut Suite, api: &Api) -> Result<()> {
-    let why = format!("it buys a $100 seat on Stripe's sandbox Checkout in Chrome and starts a real agent for it, and spends up to {PAID_CALLS} of the run's paid calls");
+    let why = format!("it buys a $200 always-on seat on Stripe's sandbox Checkout in Chrome and starts a real agent for it, and spends up to {PAID_CALLS} of the run's paid calls");
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Operator, Need::Chrome, Need::Computers, Need::Models, Need::RealAgent], &why) {
         return Ok(());
     }
@@ -150,14 +151,14 @@ pub fn checkout(s: &mut Suite, api: &Api) -> Result<()> {
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
-    let welcome = b.until(&page, "location.pathname === '/welcome' && !!document.querySelector('#first-run-card [data-plan=seat]')", PAGE);
+    let welcome = b.until(&page, "location.pathname === '/welcome' && !!document.querySelector('#first-run-card [data-plan=seat_always_on]')", PAGE);
     let _ = b.screenshot(&page, &shots.join("1-welcome.png"));
-    s.ok("a new guest lands on the welcome, its $100 seat offered", welcome, b.eval(&page, "document.getElementById('first-run-card')?.innerText ?? ''")?);
+    s.ok("a new guest lands on the welcome, its $200 always-on seat offered", welcome, b.eval(&page, "document.getElementById('first-run-card')?.innerText ?? ''")?);
 
     // ---- Stripe's own Checkout, paid with the test card
-    b.eval(&page, "(document.querySelector('#first-run-card [data-plan=seat]')?.click(), true)")?;
+    b.eval(&page, "(document.querySelector('#first-run-card [data-plan=seat_always_on]')?.click(), true)")?;
     let at_stripe = b.until(&page, &format!("location.href.startsWith({STRIPE:?})"), PAGE);
-    s.ok("its $100 seat goes to Stripe's hosted Checkout", at_stripe, b.eval(&page, "location.href")?);
+    s.ok("its $200 always-on seat goes to Stripe's hosted Checkout", at_stripe, b.eval(&page, "location.href")?);
     if !at_stripe {
         let _ = b.screenshot(&page, &shots.join("2-no-checkout.png"));
         return Ok(());
@@ -175,8 +176,8 @@ pub fn checkout(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (Pay pressed to their seat: {:.1?})", t_pay.elapsed());
     let seat = api.signed(&keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null);
     s.ok(
-        "paid with 4242 4242 4242 4242, Checkout's return comes back to the welcome, which seats them: a $100 seat, paid, in good standing",
-        back && seat["seat"]["kind"] == "seat" && seat["seat"]["comped"] == false && seat["seat"]["good"] == true,
+        "paid with 4242 4242 4242 4242, Checkout's return comes back to the welcome, which seats them: a $200 always-on seat, paid, in good standing",
+        back && seat["seat"]["kind"] == "seat_always_on" && seat["seat"]["comped"] == false && seat["seat"]["good"] == true,
         json!({ "paid": paid.as_ref().map_err(|e| format!("{e:#}")), "stripe": stripe, "seat": seat }),
     );
     if !back {

@@ -1832,9 +1832,12 @@ by nothing, so it may be sent again. Test fleets add `POST
 
 ### Seats and orgs (docs/billing.md)
 
-A seat is what lets a person create (decisions 49 and 51): `seat` ($100,
-a computer that sleeps) or `seat_always_on` ($200, a computer that stays
-awake unless its holder lets it sleep). Every seat is in an org, the one
+A seat is what lets a person create (decisions 49 and 51):
+`seat_always_on` ($200, a computer that stays awake unless its holder
+lets it sleep), the one seat sold, or `seat` (a computer that sleeps), an
+operator's comp only since 2026-10-15 (decision 25's status). A body
+that names a kind to buy (Checkout's, an org admin's seat, a trial code)
+takes `seat_always_on`, its default; `seat` is 400 (not sold). Every seat is in an org, the one
 who pays; a person is in at most one org and holds at most one seat. An
 org's members (`OrgMember`) are its admins, its seats' holders, or both,
 each a person (`person`, an npub) or an email a seat waits on until
@@ -1857,8 +1860,7 @@ later is told when it is made.
 | `GET /api/seat` | a person | → `MySeat {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}]}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
 | `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
-| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind}` → `{seat: OrgMember, created, mailed}`: a paid seat, held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's counts are pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`) |
-| `PATCH /api/org/seats/{id}` | the same | `{kind}` → `OrgMember`: a paid seat's new kind, pushed as above (a comped one is 400: an operator's) |
+| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`), held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
 | `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes (an admin's row stays, seatless), its holder's seat canceled, the count pushed. The org's last paid seat is 400: its subscription is canceled in the portal |
 | `POST /api/org/admins` | the same | `{email}` → `{admin: OrgMember, created}`: an admin too (a seat they hold stays), or waiting on the email; at most 10 |
 | `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes). The last admin is 400 |
@@ -1866,7 +1868,7 @@ later is told when it is made.
 | `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
 | `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
 | `GET /api/admin/orgs/{id}` | the same | → `OrgView` |
-| `POST /api/admin/trials` | the same | `NewTrialCode {name, kind, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
+| `POST /api/admin/trials` | the same | `NewTrialCode {name, kind?, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `kind` only `seat_always_on`, the default (`seat` is 400); `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
 | `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
 | `GET /api/admin/trials/{id}` | the same | → `TrialCode` with its `uses: [{person, email, at, status}]` |
 | `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
@@ -1879,22 +1881,24 @@ the person's rows, and an org it leaves empty.
 
 On a deployment that sells seats (its config's `stripe`; else these are
 400, and seats are comped only), a person buys their own through Stripe
-Checkout: a monthly subscription to one seat at its price's lookup key
-(`fragment_seat_month`, `fragment_seat_always_on_month`), a card always,
-Stripe's automatic tax unless the deployment turns it off, and promotion
-codes allowed. Their org is made, of one, if they are in none; its
-admin may buy again once its subscription has ended (their lapsed seat
-becomes the kind bought). An org has one Stripe customer and one
+Checkout: a monthly subscription to one always-on seat, $200, at its
+price's lookup key (`fragment_seat_always_on_month`; the only seat sold,
+Paul, 2026-10-15), a card always, Stripe's automatic tax unless the
+deployment turns it off, and promotion codes allowed. Their org is made,
+of one, if they are in none; its admin may buy again once its
+subscription has ended (their lapsed seat becomes the always-on one). A
+subscription with any other item is not fragment's. An org has one Stripe customer and one
 subscription; everything fragment makes carries `fragment_deployment`
 (the platform's origin) in its metadata, and nothing without this
 deployment's is touched (the account is finite-mono's too).
 
-An org's paid seats are the registry's, and the subscription's item
-quantities a copy of their count by kind, held and pending: each change
-queues the org, and the registry's alarm pushes the counts read fresh
+An org's paid seats are the registry's, and the subscription's one
+item's quantity a copy of their count, held and pending: each change
+queues the org, and the registry's alarm pushes the count read fresh
 (`POST /v1/subscriptions/{id}`, `create_prorations`), so two changes at
-once never leave Stripe a seat short; a subscription fetched with other
-counts (changed in Stripe's dashboard) is pushed back to the seats'.
+once never leave Stripe a seat short; a subscription fetched with
+another count (changed in Stripe's dashboard) is pushed back to the
+seats'.
 
 The registry writes an org's subscription only as fetched from Stripe:
 by the Checkout's return, by the webhook, and daily by the registry's
@@ -1906,7 +1910,7 @@ and orgs).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout, for 31 minutes. With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days for its kind (a `kind` other than the code's is 400), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, or past its expiry), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat, for 31 minutes. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
 | `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |

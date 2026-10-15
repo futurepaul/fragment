@@ -530,6 +530,15 @@ speaking Cloudflare's APIs) returns once this product works.
     and $100 of credit. More credit can be bought. Stripe sells them
     (decisions 51 to 58; docs/billing.md) through the ledger's two
     hooks: granting credit, and a seat's state.
+    Status, 2026-10-15 (Paul: "for stripe, let's just do the $200 plan
+    and the $25 credit pack"; branch `claude/one-seat-sold`): Stripe
+    sells two things, the $200 seat (`seat_always_on`) and the $25 credit
+    pack. The $100 seat is not sold: Checkout, an org admin's seats and
+    trial codes refuse a `seat` (400), and `xtask stripe setup` makes
+    neither its Product nor its Price. The `seat` plan stays for an
+    operator's comp and a deployment's `default_plan` (dev's and the
+    e2e's people are seats). Trials are a month at most, of the $200
+    seat, a card first (decision 56). SimpleX is still not built.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -864,7 +873,8 @@ recommendations"). Nothing below is built yet.
     themselves, and number at least one. Prices are monthly; there is
     no annual plan.
 52. **Seats are paid or comped, held or pending.** A seat is `seat`
-    ($100) or `seat_always_on` ($200), held by an npub or pending on an
+    ($100) or `seat_always_on` ($200; since 2026-10-15 the only one
+    sold, decision 25's status), held by an npub or pending on an
     email until someone signs in with it verified (as decision 48's
     invites). Paid seats are counted on the org's one subscription,
     pending ones included: a seat bills from its invite. Adding,
@@ -885,7 +895,8 @@ recommendations"). Nothing below is built yet.
     Checkout by a seat holder (or an org admin for a member), granted
     on the ledger by its payment's id. Usage never goes to Stripe.
 56. **Trials are our codes on Stripe's trial**, finite-mono's shape: a
-    code names a kind, days (1 to 30), a capacity and an expiry; a
+    code names a kind (since 2026-10-15, `seat_always_on` only), days
+    (1 to 30), a capacity and an expiry; a
     card is taken first; one trial per person ever, for a seat of one.
     A place is held by a Checkout that has not expired, and freed by
     its expiry. Discounts are Stripe promotion codes, made in Stripe's

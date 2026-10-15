@@ -25,10 +25,13 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   create fragments"; Paul, 2026-10-03): every create asks its maker's
   ledger first (`may_spend(create)`). A guest still edits the fragments
   shared with them, whose writes bill those fragments' owners.
-- **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
-  included, a computer that sleeps); `seat_always_on` ($200 a month,
-  $100 included, an always-on computer whose awake time is not metered).
-  Stripe charges the seat itself; the ledger only knows the credit.
+- **Plans** (decision 25): `guest`; `seat_always_on` ($200 a month, $100
+  of credit included, an always-on computer whose awake time is not
+  metered), the one seat sold; `seat` ($50 of credit included, a
+  computer that sleeps), which is no longer sold (Paul, 2026-10-15) and
+  comes only from an operator's comp or a deployment's `default_plan`.
+  Stripe charges the seat itself; the ledger only knows the credit. More
+  credit is the $25 pack (Where Stripe plugs in, below).
 - **Seat state** comes from a hook: `active`, `past_due`, `canceled`.
   - A seat gets its included credit only while `active`.
   - `past_due` keeps this month's credit. The next month's arrives when
