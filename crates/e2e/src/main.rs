@@ -60,9 +60,10 @@ enum Shape {
     /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,
     /// As `Plain`, its model route shaped as Finite's own deployment
-    /// (deploy/example.jsonc; decision 61): the tiers on Finite Private (the
-    /// model fake's OpenAI-compatible face, its key a test value), the
-    /// fallback and vision on Workers AI's GLM-5.3 Flash.
+    /// (deploy/example.jsonc; decision 61): `cheap` on Finite Private and
+    /// `medium` on OpenRouter (each the model fake's OpenAI-compatible face,
+    /// one key a test value), the fallback and vision on Workers AI's
+    /// GLM-5.3 Flash.
     FinitePrivate,
 }
 
@@ -71,11 +72,21 @@ enum Shape {
 pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
 
 /// `FRAGMENT_MODELS` on a node shaped as Finite's: deploy/example.jsonc's
-/// `models`, less its keys, Finite Private's base URL the model fake's.
+/// two alternatives at once, less their keys, each API's base URL the model
+/// fake's: `cheap` on Finite Private, `medium` on OpenRouter's GLM-5.3
+/// Flash with its provider routing (`openrouter_routing`), `fallback` and
+/// `vision` on Workers AI's GLM-5.3 Flash.
 pub fn finite_private_models(fake: &str) -> Value {
     let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
+    let routed = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing() });
     let flash = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH });
-    json!({ "cheap": private, "medium": private, "fallback": flash, "vision": flash })
+    json!({ "cheap": private, "medium": routed, "fallback": flash, "vision": flash })
+}
+
+/// The `body` of OpenRouter's slot on a node shaped as Finite's:
+/// deploy/example.jsonc's provider routing.
+pub fn openrouter_routing() -> Value {
+    json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
 }
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).

@@ -83,23 +83,49 @@
   // Hermes' computer_use screenshots). Each is a Workers AI model through
   // the gateway, `{"provider": "workers_ai", "model": <catalog id>}`, or a
   // model on an OpenAI-compatible API, `{"provider": "openai", "base_url",
-  // "key": <its secret's name in the store>, "model": <its id there>}`. A
-  // slot left out is on Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3,
-  // fallback DeepSeek V4 Flash, vision GLM-5.3 Flash. Every model is one
-  // the price book prices (fragment_core::price), or the deploy is
-  // refused. Finite's own (decision 61): its tiers on Finite Private,
-  // Finite's GLM-5.3 Flash on Tinfoil (its key, `fpk_live_…`, issued by
-  // finite.computer), and Workers AI's GLM-5.3 Flash behind them and for
-  // images. Leave `models` out (as a preview without the key does) and every
-  // tier runs on Workers AI.
+  // "key": <its secret's name in the store>, "model": <its id there>,
+  // "body"?: {…}}`. `body` is fields of that API's own that every call to it
+  // carries, over the agent's of the same names: at most 4 KiB of JSON,
+  // naming none of the fields the route writes (model, messages, stream,
+  // stream_options, tools, tool_choice, max_tokens, max_completion_tokens,
+  // reasoning_effort). A slot left out is on Workers AI: cheap GLM-5.3
+  // Flash, medium GLM-5.3, fallback DeepSeek V4 Flash, vision GLM-5.3 Flash.
+  // Every model is one the price book prices (fragment_core::price), or the
+  // deploy is refused. Leave `models` out (as a preview without a key does)
+  // and every tier runs on Workers AI.
+  //
+  // Finite's own (Paul, 2026-10-15; decision 61): its tiers on GLM-5.3 Flash
+  // through OpenRouter, on one platform key, routed by `body` (OpenRouter's
+  // provider routing, openrouter.ai/docs/guides/routing/provider-selection):
+  // only zero-data-retention endpoints, the fastest first, each taking every
+  // parameter the call sends, at fp8 or bf16, at most $0.15 a million
+  // tokens in and $0.50 out (the price book charges that ceiling: raise one
+  // and the other together); Workers AI's GLM-5.3 Flash behind them and for
+  // images.
   "models": {
-    "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
-    "medium": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-                "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+    "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
+               "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
+               "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
+                                       "quantizations": ["fp8", "bf16"],
+                                       "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
+    "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
+                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
+                "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
+                                        "quantizations": ["fp8", "bf16"],
+                                        "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
     "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
   },
+  // Or its tiers on Finite Private, Finite's GLM-5.3 Flash on Tinfoil (its
+  // key, `fpk_live_…`, issued by finite.computer; decision 61, 2026-10-14):
+  // "models": {
+  //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+  //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+  //   "medium": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+  //   "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
+  //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
   // Where a person whose computer will not start gets help: an https page
@@ -204,8 +230,8 @@
   // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
-  // (fragment_core::price::DEFAULT_BOOK_VERSION, 6 since the Clef family
-  // was priced): raise it past both with every change to a
+  // (fragment_core::price::DEFAULT_BOOK_VERSION, 7 since OpenRouter's
+  // GLM-5.3 Flash was priced): raise it past both with every change to a
   // key's price, or ledgers keep their book.
-  "price_book_version": 6
+  "price_book_version": 7
 }

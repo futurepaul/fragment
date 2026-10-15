@@ -35,6 +35,36 @@ fragment.club until cutover (decisions 34–35).
   with the same ownership and fresh-read guarantees; remove the plugin
   after that behavior passes the promotion test. Budget tuning is Paul's call.
 
+## OpenRouter's calls are charged at their ceiling, not their cost
+
+- **Observed:** 2026-10-15, moving Finite's tiers to GLM-5.3 Flash
+  through OpenRouter (decision 61). The ledger prices tokens from the
+  book; OpenRouter routes each call to one of several providers, each at
+  its own price under the slot's `max_price`, and reports what the call
+  cost in its usage (`usage.cost`, in credits).
+- **Shortcut:** the book's `z-ai/glm-5.3-flash` row is the routing's
+  ceiling ($0.15 in, $0.50 out per million), cached and written tokens
+  at the prompt's, with OpenRouter's 5.5% fee (fragment_core::price), so
+  no call is charged below what OpenRouter could bill. `usage.cost` is
+  not read.
+- **Risk:** cached input is overcharged most: a cached token is charged
+  at the prompt ceiling, $0.15 a million before fee and margin, where the
+  endpoints bill $0.012 to $0.03 for one (about five times Workers AI's
+  Flash's $0.03), and most of an agent's prompt is a cached prefix. A
+  call of 30,000 tokens in (25,000 cached) and 600 out is charged about
+  $0.0076, against $0.0028 on Workers AI's GLM-5.3 Flash; output is at
+  most the call's cost (Novita's endpoint bills $0.28 a million, under the
+  $0.50 charged). And the ceiling in the config and the row in the code
+  are two numbers that must move together (xtask's test checks the
+  example's against the book).
+- **First proof:** a person's month on the ledger against the platform's
+  OpenRouter activity for the same calls (its generation ids), or a
+  person asking why a turn costs more than it did on Workers AI.
+- **Delete when:** a call is settled from OpenRouter's reported cost
+  (a `Usage` of the vendor's cost in micro-dollars, the fee and margin
+  on it, the ceiling still its reservation): the first change after
+  launch (the coordinator for Paul, 2026-10-15).
+
 ## The cell's Wasm budget was raised for launch
 
 - **Observed:** 2026-10-14. The cell diet (#305) set the budget at

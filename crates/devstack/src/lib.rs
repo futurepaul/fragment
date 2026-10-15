@@ -286,7 +286,7 @@ pub struct Fleet {
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
     /// every one on Workers AI), and, when some run on an OpenAI-compatible
-    /// API, the value of the key they name (`store::FINITE_PRIVATE_KEY`,
+    /// API, the value of the key they name (`store::MODEL_KEY`,
     /// bound for each slot `model_key_slots` lists).
     pub models: Option<String>,
     pub model_key_slots: Vec<String>,
@@ -385,7 +385,7 @@ impl Fleet {
         }
         if !bound.model_keys.is_empty() {
             let value = self.model_key_value.as_deref().context("a fleet whose models run on an OpenAI-compatible API names its key's value")?;
-            values.push((store::FINITE_PRIVATE_KEY, value));
+            values.push((store::MODEL_KEY, value));
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));

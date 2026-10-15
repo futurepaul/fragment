@@ -89,10 +89,12 @@ struct Deployment {
     /// once more when its own fails before answering, `vision`: a runtime's
     /// calls about an image), each `{"provider": "workers_ai", "model":
     /// <catalog id>}` or `{"provider": "openai", "base_url", "key": <its
-    /// secret's name in the store>, "model"}`. Each slot unnamed is on
-    /// Workers AI as before (`fragment_core::models::Models::defaults`). A
-    /// slot, provider, URL or model the cell would refuse is refused before
-    /// a deploy, as is an OpenAI-compatible API without a key.
+    /// secret's name in the store>, "model", "body"?: <the API's own fields
+    /// every call carries>}`. Each slot unnamed is on Workers AI as before
+    /// (`fragment_core::models::Models::defaults`). A slot, provider, URL,
+    /// model or body the cell would refuse is refused before a deploy, as
+    /// is an OpenAI-compatible API without a key, and slots past a Workers
+    /// variable's 5 KB.
     models: Option<Value>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
@@ -253,9 +255,17 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
         cell.insert(slot.clone(), row);
     }
     let cell = Value::Object(cell);
-    fragment_core::models::Models::parse(Some(&cell.to_string()), &fragment_core::price::PriceBook::defaults(), false).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let text = cell.to_string();
+    fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), false).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if text.len() > WORKER_VAR_MAX_BYTES {
+        bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
+    }
     Ok((Some(cell), keys))
 }
+
+/// A Workers variable's largest value: 5 KB (developers.cloudflare.com/
+/// workers/platform/limits, Environment variables), taken as 5,000 bytes.
+const WORKER_VAR_MAX_BYTES: usize = 5_000;
 
 /// Fields a hard cut took out of the config, and what replaced each: a
 /// config naming one is refused, saying so.
@@ -1223,7 +1233,7 @@ mod tests {
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
-            // the example's tiers on Finite Private (decision 61); a preview's on Workers AI
+            // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
@@ -1480,11 +1490,13 @@ mod tests {
     }
 
     /// Finite's own deployment's `models` (deploy/example.jsonc; decision
-    /// 61): its tiers on Finite Private, each naming its key, which is bound
-    /// for each slot (one secret, two bindings) and is nowhere in the cell's
-    /// variable; its fallback and vision on Workers AI's GLM-5.3 Flash. A
-    /// preview's (deploy/e2e.jsonc) names none: its tiers are on Workers
-    /// AI, and it needs no Finite Private key to deploy.
+    /// 61): its tiers on GLM-5.3 Flash through OpenRouter, each naming its
+    /// key, which is bound for each slot (one secret, two bindings) and is
+    /// nowhere in the cell's variable, and its provider routing, which is,
+    /// under the ceiling the price book charges; its fallback and vision on
+    /// Workers AI's GLM-5.3 Flash. A preview's (deploy/e2e.jsonc) names
+    /// none: its tiers are on Workers AI, and it needs no OpenRouter key to
+    /// deploy.
     #[test]
     fn a_deployments_models_bind_their_keys_and_render_without_them() {
         let rendered = |file: &str| {
@@ -1494,23 +1506,30 @@ mod tests {
         };
         let (cell, b) = rendered("deploy/example.jsonc");
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
-        let private = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": "glm-5-3-flash" });
+        let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
+        let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
         let flash = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
-        assert_eq!(models, json!({ "cheap": private, "medium": private, "fallback": flash, "vision": flash }), "no key in the cell's variable");
+        assert_eq!(models, json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash }), "no key in the cell's variable, the routing in it");
         let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
-        assert_eq!(parsed.cheap.model(), "glm-5-3-flash");
+        assert_eq!(parsed.cheap.model(), fragment_core::models::OPENROUTER_FLASH);
+        // the ceiling OpenRouter routes under is the one the price book charges, with OpenRouter's fee
+        use fragment_core::price::{BP, CREDITS_FEE_BP_DEFAULT, OPENROUTER_FEE_BP};
+        let row = fragment_core::price::PriceBook::defaults().models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
+        let ceiling = |per_million: &Value| (per_million.as_f64().unwrap() * 1e6).round() as i64 * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP + CREDITS_FEE_BP_DEFAULT);
+        let max = &routing["provider"]["max_price"];
+        assert!(row.input >= ceiling(&max["prompt"]) && row.cached_input >= row.input && row.cache_write >= row.input && row.output >= ceiling(&max["completion"]), "{row:?}");
         let bindings: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
-        assert!(bindings.contains(&("MODEL_KEY_CHEAP", "fragment-finite-private-key")) && bindings.contains(&("MODEL_KEY_MEDIUM", "fragment-finite-private-key")), "{bindings:?}");
+        assert!(bindings.contains(&("MODEL_KEY_CHEAP", "fragment-openrouter-key")) && bindings.contains(&("MODEL_KEY_MEDIUM", "fragment-openrouter-key")), "{bindings:?}");
         assert!(!bindings.iter().any(|(binding, _)| *binding == "MODEL_KEY_FALLBACK" || *binding == "MODEL_KEY_VISION"), "Workers AI needs no key");
-        assert_eq!(b.model_keys, [("cheap".to_string(), "fragment-finite-private-key".to_string()), ("medium".into(), "fragment-finite-private-key".into())]);
+        assert_eq!(b.model_keys, [("cheap".to_string(), "fragment-openrouter-key".to_string()), ("medium".into(), "fragment-openrouter-key".into())]);
         // a deploy without the key is refused, naming it once, with both slots
         let named = named_secrets(&b);
-        assert_eq!(named.iter().filter(|(_, n)| *n == "fragment-finite-private-key").map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["models.cheap.key, models.medium.key"]);
-        let all: Vec<&str> = named.iter().map(|(_, n)| *n).filter(|n| *n != "fragment-finite-private-key").collect();
+        assert_eq!(named.iter().filter(|(_, n)| *n == "fragment-openrouter-key").map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["models.cheap.key, models.medium.key"]);
+        let all: Vec<&str> = named.iter().map(|(_, n)| *n).filter(|n| *n != "fragment-openrouter-key").collect();
         let listed: Vec<devstack::store::Listed> = all.iter().map(|n| devstack::store::Listed { name: n.to_string(), id: "0".into(), created: String::new(), modified: String::new() }).collect();
         let missing = devstack::store::missing(&named, &listed);
         let said = refusal(Path::new("/home/p/prod.jsonc"), Some(&devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() }), &missing);
-        assert!(said.contains("lacks 1 of the secrets") && said.contains("models.cheap.key, models.medium.key  cargo xtask secret set fragment-finite-private-key --config /home/p/prod.jsonc"), "{said}");
+        assert!(said.contains("lacks 1 of the secrets") && said.contains("models.cheap.key, models.medium.key  cargo xtask secret set fragment-openrouter-key --config /home/p/prod.jsonc"), "{said}");
 
         // the preview's: every tier on Workers AI, no key named or bound
         let (cell, b) = rendered("deploy/e2e.jsonc");
@@ -1555,6 +1574,13 @@ mod tests {
         refused(row(json!({ "model": "glm-6" })), "models.cheap: the model \"glm-6\" is not in the price book");
         refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
         refused(json!([]), "models is an object");
+        // a body: the API's own fields, rendered as named; one the cell refuses, refused here
+        refused(row(json!({ "body": "zdr" })), "body is a JSON object of the fields every call to this API carries");
+        refused(row(json!({ "body": { "max_tokens": 64 } })), "models.cheap: body names max_tokens, which the route writes itself");
+        refused(row(json!({ "body": { "x": "a".repeat(4096) } })), "models.cheap: body is 4104 bytes of JSON, past 4096");
+        let big = row(json!({ "body": { "x": "a".repeat(2500) } }))["cheap"].clone();
+        refused(json!({ "cheap": big, "medium": big }), "past a Workers variable's 5000: shorten the slots' bodies");
+        assert_eq!(with(row(json!({ "body": { "provider": { "zdr": true } } }))), "", "a body within its bounds");
         // a slot alone: rendered as named, the rest the cell's
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();

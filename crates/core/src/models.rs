@@ -16,22 +16,28 @@
 //! config's `models`): a Workers AI model through its AI Gateway, or a
 //! model on an OpenAI-compatible API, its key a Secrets Store secret
 //! (`Upstream`). Unnamed, each is today's Workers AI model; Finite's own
-//! deployment runs its tiers on Finite Private (Paul, 2026-10-14; decision
-//! 61). What the platform sends is the client's OpenAI-shaped chat
-//! completion with only these changes (`bound`): no `model` (the tier's is
-//! the call's), `max_tokens` at most the tier's cap, `reasoning_effort`
-//! clamped to `low` or `high` (GLM takes a missing or unknown one as `max`,
-//! the dearest; DeepSeek V4 Flash takes both, as does Finite Private's
-//! limiter, which fills in `high` only when none is sent), and usage asked
-//! for when it streams. Nothing else of the client's reaches the vendor: no
+//! deployment runs its tiers on GLM-5.3 Flash through OpenRouter (Paul,
+//! 2026-10-15; decision 61), or, by config, on Finite Private. What the
+//! platform sends is the client's OpenAI-shaped chat completion with only
+//! these changes (`bound`): no `model` (the tier's is the call's),
+//! `max_tokens` at most the tier's cap, `reasoning_effort` clamped to `low`
+//! or `high` (GLM takes a missing or unknown one as `max`, the dearest;
+//! DeepSeek V4 Flash takes both, as does Finite Private's limiter, which
+//! fills in `high` only when none is sent), and usage asked for when it
+//! streams. On an OpenAI-compatible API, only the client's chat completion
+//! fields of `CLIENT_KEYS` go (`plugins`, `provider` and the like are
+//! dropped), and the deployment's own fields for it over them
+//! (`Upstream::Openai`'s `body`: OpenRouter's provider routing;
+//! `openai_request`). Nothing else of the client's reaches the vendor: no
 //! header, no key.
 //!
 //! A call that its model fails before answering anything (it is not
-//! reached, or it answers 429 or a 5xx) is made once more, the same, on the
-//! deployment's fallback model (`Tries`; Paul, 2026-10-08: "we def need
-//! fallback models"). Not a race: the second call is made only after the
-//! first has failed. An answer that began is final, and the fallback's
-//! failure is the call's.
+//! reached, or it answers 429 or a 5xx; on an OpenAI-compatible API, whose
+//! key is the platform's, also 401, 402, 403 or 404) is made once more, the
+//! same, on the deployment's fallback model (`Tries`, `falls_back`; Paul,
+//! 2026-10-08: "we def need fallback models"). Not a race: the second call
+//! is made only after the first has failed. An answer that began is final,
+//! and the fallback's failure is the call's.
 //!
 //! What a call may cost is reserved before it is made (`worst`); what it
 //! cost is read from its answer's usage (`usage_of`), priced as the model
@@ -53,7 +59,7 @@
 
 use fragment_proto::{valid_channel_name, valid_op_id, Tier, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::price::{PriceBook, Usage};
 use crate::steps::AiText;
@@ -70,6 +76,14 @@ pub const DEEPSEEK_FLASH: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 /// tools and streams; its images are not qualified (decision 61). Also its
 /// row in the price book.
 pub const FINITE_PRIVATE_FLASH: &str = "glm-5-3-flash";
+/// GLM-5.3 Flash as OpenRouter names it (`https://openrouter.ai/api/v1`):
+/// Finite's tiers' since 2026-10-15 (decision 61), on the providers its
+/// slot's `body` lets OpenRouter route to (zero data retention, the
+/// highest throughput under a price ceiling). 34 provider endpoints on
+/// 2026-10-15 (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`), each taking
+/// tools, `reasoning_effort` and `max_tokens`. Also its row in the price
+/// book.
+pub const OPENROUTER_FLASH: &str = "z-ai/glm-5.3-flash";
 /// The tiers' models unless a deployment names others (decision 23). The
 /// cheap tier, every agent's default, is GLM-5.3 Flash, DeepSeek V4 Flash
 /// its fallback (`FALLBACK_MODEL_DEFAULT`; Paul, 2026-10-09: "GLM default,
@@ -156,11 +170,66 @@ pub enum Upstream {
     /// Gateway (the Worker's AI binding; dev and the e2e, the fake at
     /// `FRAGMENT_AI_URL`).
     WorkersAi { model: String },
-    /// A model on an OpenAI-compatible API (Finite Private's):
-    /// `POST <base_url>/chat/completions`, its `model` the id there, with
-    /// the key the deployment binds for the slot naming it
-    /// (`secrets_store::model_key`) as a bearer token.
-    Openai { base_url: String, model: String },
+    /// A model on an OpenAI-compatible API (OpenRouter's, Finite
+    /// Private's): `POST <base_url>/chat/completions`, its `model` the id
+    /// there, with the key the deployment binds for the slot naming it
+    /// (`secrets_store::model_key`) as a bearer token. `body`, when named,
+    /// is fields of the API's own that every call to it carries, over any
+    /// of the client's of the same name (`openai_request`): OpenRouter's
+    /// `provider` routing, say. It names none of the keys the route writes
+    /// (`ROUTE_KEYS`), in at most `UPSTREAM_BODY_MAX_BYTES` (`check`).
+    Openai {
+        base_url: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "fields")]
+        body: Option<Map<String, Value>>,
+    },
+}
+
+/// A slot's `body`: a JSON object, or refused saying so.
+fn fields<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Map<String, Value>>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Object(o) => Ok(Some(o)),
+        other => Err(serde::de::Error::custom(format!("body is a JSON object of the fields every call to this API carries, not {other}"))),
+    }
+}
+
+/// The keys the route itself writes into a call's body (`bound`,
+/// `text_body`, `openai_request`): a slot's `body` names none of them, so
+/// the tier's model, its cap, its effort, the stream and its usage, and
+/// the messages and tools stay the route's.
+pub const ROUTE_KEYS: [&str; 9] = ["model", "messages", "stream", "stream_options", "tools", "tool_choice", "max_tokens", "max_completion_tokens", "reasoning_effort"];
+/// A slot's `body`, as JSON: an API's own fields (OpenRouter's provider
+/// routing is about 150 bytes), never a prompt. Two slots this large
+/// would not fit FRAGMENT_MODELS, a Workers variable of at most 5 KB: the
+/// deploy checks the whole variable (xtask/src/deploy.rs).
+pub const UPSTREAM_BODY_MAX_BYTES: usize = 4 * 1024;
+
+/// The client's fields an OpenAI-compatible API is sent (`openai_request`):
+/// OpenAI's chat completion fields that the route, our jobs and Hermes use
+/// (Hermes v0.21.6 sends a custom provider `messages`, `tools`,
+/// `temperature`, `max_tokens` or `max_completion_tokens`, `stream` and
+/// `stream_options`: its `agent/transports/chat_completions.py`). Any other
+/// (`plugins`, `web_search_options`, `transforms`, `provider`, `models`,
+/// `n`, `user`, …) is dropped: a vendor's paid extra the book does not
+/// price, a route to another model, or a parameter its endpoints may not
+/// take (under OpenRouter's `require_parameters`, one would leave none).
+pub const CLIENT_KEYS: [&str; 14] = [
+    "messages", "tools", "tool_choice", "temperature", "top_p", "max_tokens", "max_completion_tokens", "stop", "response_format", "seed", "reasoning_effort", "parallel_tool_calls", "stream", "stream_options",
+];
+
+/// The body a call to an OpenAI-compatible API sends: the bounded `input`'s
+/// fields of `CLIENT_KEYS` and no other, the slot's `body` fields over them,
+/// and the model's `id`.
+pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
+    let input = input.as_object().expect("a bounded input is an object");
+    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (k, v) in body.into_iter().flatten() {
+        assert!(!ROUTE_KEYS.contains(&k.as_str()), "a slot's body names none of the route's keys (`check`)");
+        request.insert(k.clone(), v.clone());
+    }
+    request.insert("model".into(), json!(id));
+    Value::Object(request)
 }
 
 impl Upstream {
@@ -209,9 +278,11 @@ impl Models {
     /// Refused, saying why: a slot that is none of `SLOTS` (`high` among
     /// them: decision 23), a provider that is neither, a model the price
     /// book does not price (a ledger would refuse every call's
-    /// reservation), and an OpenAI-compatible API's `base_url` that is not
+    /// reservation), an OpenAI-compatible API's `base_url` that is not
     /// https on a host name (`loopback`: or a local fleet's fake at
-    /// `http://127.0.0.1:<port>`), or names a query or a trailing `/`.
+    /// `http://127.0.0.1:<port>`), or names a query or a trailing `/`, and
+    /// its `body` when it is no object, is past `UPSTREAM_BODY_MAX_BYTES`,
+    /// or names a key the route writes (`ROUTE_KEYS`).
     pub fn parse(named: Option<&str>, book: &PriceBook, loopback: bool) -> Result<Models, String> {
         let mut models = Models::defaults();
         if let Some(text) = named {
@@ -264,13 +335,23 @@ fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), St
         let priced: Vec<&str> = book.models.iter().map(|m| m.model.as_str()).collect();
         return Err(format!("the model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price) or name one of those", priced.join(", ")));
     }
-    if let Upstream::Openai { base_url, model } = upstream {
+    if let Upstream::Openai { base_url, model, body } = upstream {
         crate::catalog::row_url(base_url, loopback).map_err(|e| format!("base_url: {e}"))?;
         if base_url.ends_with('/') || base_url.contains('?') {
             return Err("base_url is named without a query or a trailing /: the route adds /chat/completions".into());
         }
         if !crate::catalog::valid_model_id(model) {
             return Err(format!("{model:?} is no model id (1-{} of letters, digits and . _ - : / @)", crate::catalog::MODEL_ID_MAX_BYTES));
+        }
+        if let Some(body) = body {
+            let bytes = serde_json::to_vec(body).expect("a JSON object serializes").len();
+            if bytes > UPSTREAM_BODY_MAX_BYTES {
+                return Err(format!("body is {bytes} bytes of JSON, past {UPSTREAM_BODY_MAX_BYTES}: an API's own fields, not a prompt"));
+            }
+            let named: Vec<&str> = body.keys().map(String::as_str).filter(|k| ROUTE_KEYS.contains(k)).collect();
+            if !named.is_empty() {
+                return Err(format!("body names {}, which the route writes itself ({}): name only the API's own fields", named.join(", "), ROUTE_KEYS.join(", ")));
+            }
         }
     }
     Ok(())
@@ -555,17 +636,39 @@ pub fn route_named(name: Option<&str>) -> Result<Named, Refusal> {
     }
 }
 
-/// Whether an answer's status, before any of its body, sends the call on
-/// to the fallback model: the vendor's rate limit (429: Finite Private's
-/// limiter answers it when its key's window is spent), or its own failure
-/// (5xx: tonight's Workers AI answered 502 "could not route request to AI
-/// model", then 500, for five minutes; Finite Private's limiter answers 502
-/// when its model fails and 503 when finite.computer, which admits each
-/// call, does not answer). A refusal of the request itself (another 4xx)
-/// would be the fallback's too, and a 200 has begun the answer, which is
-/// final.
-pub fn falls_back(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
+/// Whether an answer's status from `upstream`, before any of its body,
+/// sends the call on to the fallback model: the vendor's rate limit (429:
+/// Finite Private's limiter answers it when its key's window is spent), or
+/// its own failure (5xx: tonight's Workers AI answered 502 "could not route
+/// request to AI model", then 500, for five minutes; Finite Private's
+/// limiter answers 502 when its model fails and 503 when finite.computer,
+/// which admits each call, does not answer). On an OpenAI-compatible API,
+/// whose key is the platform's, also the platform's own trouble there: its
+/// key refused (401) or denied (403), its account out of credit (402), or
+/// no endpoint left by its slot's routing (OpenRouter's 404): a call is
+/// not the caller's to fail for the platform's account (decision 61, as
+/// decided 2026-10-15). A refusal of the request itself (400 and any other
+/// 4xx) would be the fallback's too, and a 200 has begun the answer, which
+/// is final.
+pub fn falls_back(upstream: &Upstream, status: u16) -> bool {
+    let platforms = matches!(upstream, Upstream::Openai { .. }) && PLATFORM_KEY_REFUSALS.contains(&status);
+    status == 429 || (500..=599).contains(&status) || platforms
+}
+
+/// The statuses an OpenAI-compatible API answers about the platform's own
+/// key and account there (`falls_back`): refused, out of credit, denied,
+/// and nothing left to route to.
+pub const PLATFORM_KEY_REFUSALS: [u16; 4] = [401, 402, 403, 404];
+
+/// Why a try that answered `status` from `upstream` says the platform's own
+/// key there wants someone (its log line, loud: every call falls back
+/// until it is fixed): refused (401) or out of credit (402).
+pub fn key_alarm(upstream: &Upstream, status: u16) -> Option<&'static str> {
+    match (upstream, status) {
+        (Upstream::Openai { .. }, 401) => Some("the platform's key for this API is refused: every call falls back until it is set again (cargo xtask secret set)"),
+        (Upstream::Openai { .. }, 402) => Some("the platform's account at this API is out of credit: every call falls back until it is topped up"),
+        _ => None,
+    }
 }
 
 /// What one try of a call came to, before any of its answer's body.
@@ -616,7 +719,7 @@ impl<'a> Tries<'a> {
     pub fn after(&mut self, tried: Tried) -> Option<Model<'a>> {
         let failed = match tried {
             Tried::Unreached => true,
-            Tried::Answered(status) => falls_back(status),
+            Tried::Answered(status) => falls_back(self.model().upstream, status),
         };
         let next = match (self.done, failed, self.fell, self.fallback) {
             (false, true, false, Some(next)) => next,
@@ -777,10 +880,18 @@ pub fn usage_of(model: &str, usage: &Value) -> Option<Usage> {
 /// semantics (usage dropped from chunks with choices, and that last line as
 /// a chunk with none), and only the last cumulative usage is metered. A
 /// provider that sends OpenAI's own last chunk (`choices: []` with usage)
-/// is metered from that, when no line of Workers AI's follows.
+/// is metered from that, when no line of Workers AI's follows. An
+/// OpenAI-compatible API's usage is the whole call's wherever it comes
+/// (`on`): OpenRouter's comes on a last chunk that keeps one choice, a
+/// content-free delta repeating the finish reason (its "accounting frame",
+/// openrouter.ai/docs/api-reference/streaming, read 2026-10-15), which the
+/// client gets as that chunk without it and then OpenAI's last chunk.
 #[derive(Debug, Default)]
 pub struct Stream {
     line: Vec<u8>,
+    /// Each usage the stream carries is the whole call's: an
+    /// OpenAI-compatible API's (`on`), never Workers AI's per-chunk deltas.
+    whole: bool,
     /// The usage of the last line with no `choices` (Workers AI's whole call).
     cumulative: Option<Value>,
     /// The usage of the last chunk with an empty `choices` (OpenAI's last).
@@ -808,6 +919,12 @@ impl Stream {
     /// well as its usage.
     pub fn answering() -> Stream {
         Stream { answer: Some(Answer::default()), ..Stream::default() }
+    }
+
+    /// The stream, read as `upstream` streams: an OpenAI-compatible API's
+    /// usage is the whole call's on whichever chunk carries it.
+    pub fn on(self, upstream: &Upstream) -> Stream {
+        Stream { whole: matches!(upstream, Upstream::Openai { .. }), ..self }
     }
 
     /// The answer so far (`answering`'s; `None` for a stream only metered).
@@ -903,12 +1020,20 @@ impl Stream {
             let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).unwrap_or("");
             self.thought += reasoning.chars().count() as u64;
         }
+        let newline = ending;
         let ending = if text.ends_with('\n') { ending } else { "" };
         match (chunk.get("choices"), chunk.get("usage").cloned()) {
             (_, None) => None,
             (Some(Value::Array(choices)), Some(usage)) if choices.is_empty() => {
                 self.trailing = Some(usage);
                 None
+            }
+            (Some(_), Some(usage)) if self.whole && !usage.is_null() => {
+                // OpenRouter's accounting frame: its choice, then OpenAI's last chunk
+                chunk.remove("usage");
+                let last = json!({ "id": self.id, "object": "chat.completion.chunk", "choices": [], "usage": usage });
+                self.trailing = Some(usage);
+                Some(format!("data: {}{newline}{newline}data: {last}{ending}", Value::Object(chunk)).into_bytes())
             }
             (Some(_), Some(_)) => {
                 chunk.remove("usage");
@@ -948,7 +1073,22 @@ mod tests {
     }
 
     fn openai(base_url: &str, model: &str) -> Upstream {
-        Upstream::Openai { base_url: base_url.into(), model: model.into() }
+        Upstream::Openai { base_url: base_url.into(), model: model.into(), body: None }
+    }
+
+    /// OpenRouter's provider routing, as Finite's slots name it
+    /// (deploy/example.jsonc; decision 61).
+    fn routing() -> Value {
+        json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
+    }
+
+    /// Finite's own deployment's models since 2026-10-15 (deploy/example.jsonc):
+    /// its tiers on GLM-5.3 Flash through OpenRouter, routed by its `body`.
+    fn openrouter() -> Models {
+        let tier = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing() });
+        let flash = json!({ "provider": "workers_ai", "model": GLM_FLASH });
+        let text = json!({ "cheap": tier, "medium": tier, "fallback": flash, "vision": flash }).to_string();
+        Models::parse(Some(&text), &PriceBook::defaults(), false).unwrap()
     }
 
     /// Goal: the route's `vision` runs the deployment's vision model, at
@@ -1027,6 +1167,12 @@ mod tests {
         // its wire form is the config's, less the key (the deploy's)
         assert_eq!(serde_json::to_value(&private).unwrap(), json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": "glm-5-3-flash" }));
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
+        // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
+        let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned() };
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH) });
+        assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
+        let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
+        assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: Some(Map::new()) }, "an empty body adds nothing");
     }
 
     /// Goal: a deployment's `models` that the route could not serve is
@@ -1062,6 +1208,21 @@ mod tests {
             refused(&slot(json!({ "provider": "openai", "base_url": bad, "model": "glm-5-3-flash" })), "without a query or a trailing /");
         }
         refused("[]", "models:");
+        // a body: an object of the API's own fields, within its bound, naming none of the route's
+        let with_body = |body: Value| slot(json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": body }));
+        for bad in [json!("zdr"), json!([routing()]), json!(null), json!(7)] {
+            refused(&with_body(bad.clone()), "models: body is a JSON object of the fields every call to this API carries");
+        }
+        for key in ROUTE_KEYS {
+            refused(&with_body(json!({ key: 1, "provider": { "zdr": true } })), &format!("models.cheap: body names {key}, which the route writes itself"));
+        }
+        let two = parse(&with_body(json!({ "model": "anthropic/claude-opus-5.5", "messages": [] })), false).unwrap_err();
+        assert!(two.contains("messages") && two.contains("model,") && two.contains("which the route writes itself"), "{two}");
+        let pad = |n: usize| json!({ "x": "a".repeat(n) });
+        let at = UPSTREAM_BODY_MAX_BYTES - serde_json::to_vec(&pad(0)).unwrap().len();
+        assert!(parse(&with_body(pad(at)), false).is_ok(), "{UPSTREAM_BODY_MAX_BYTES} bytes of JSON at most");
+        refused(&with_body(pad(at + 1)), &format!("models.cheap: body is {} bytes of JSON, past {UPSTREAM_BODY_MAX_BYTES}", UPSTREAM_BODY_MAX_BYTES + 1));
+        refused(&slot(json!({ "provider": "workers_ai", "model": GLM_FLASH, "body": routing() })), "unknown field `body`");
         // a local fleet's fake, where its egress may reach local addresses
         let local = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:4810/v1", "model": "glm-5-3-flash" }));
         assert_eq!(parse(&local, true).unwrap().cheap, openai("http://127.0.0.1:4810/v1", FINITE_PRIVATE_FLASH));
@@ -1506,17 +1667,34 @@ mod tests {
     }
 
     /// Goal: what falls back is the vendor failing before it answered
-    /// anything: its rate limit (429) or its own failure (5xx). A refusal
-    /// of the request (any other 4xx) would be the fallback's too, and an
-    /// answer that began (2xx) is final. Method: every class of status.
+    /// anything: its rate limit (429) or its own failure (5xx), and, on an
+    /// OpenAI-compatible API, the platform's own key and account there
+    /// (401, 402, 403, 404), each of which a 401 and a 402 also say aloud.
+    /// A refusal of the request (400, any other 4xx) would be the
+    /// fallback's too, and an answer that began (2xx) is final. Method:
+    /// every class of status, on each kind of upstream.
     #[test]
     fn a_rate_limit_or_a_failure_falls_back() {
-        for status in [429, 500, 502, 503, 504, 520, 599] {
-            assert!(falls_back(status), "{status}");
+        let routed = openrouter().cheap;
+        let flash = workers_ai(GLM_FLASH);
+        for upstream in [&flash, &routed] {
+            for status in [429, 500, 502, 503, 504, 520, 599] {
+                assert!(falls_back(upstream, status), "{status}");
+            }
+            for status in [100, 200, 204, 301, 400, 408, 413, 422, 428, 430, 499, 600, 0] {
+                assert!(!falls_back(upstream, status), "{status}");
+            }
         }
-        for status in [100, 200, 204, 301, 400, 401, 402, 403, 404, 408, 413, 422, 428, 430, 499, 600, 0] {
-            assert!(!falls_back(status), "{status}");
+        for status in PLATFORM_KEY_REFUSALS {
+            assert!(falls_back(&routed, status), "the platform's key or account: {status}");
+            assert!(!falls_back(&flash, status), "Workers AI's binding has no key of ours: {status}");
         }
+        assert_eq!(PLATFORM_KEY_REFUSALS, [401, 402, 403, 404]);
+        assert!(key_alarm(&routed, 401).is_some_and(|w| w.contains("refused")) && key_alarm(&routed, 402).is_some_and(|w| w.contains("out of credit")));
+        for status in [403, 404, 429, 502] {
+            assert_eq!(key_alarm(&routed, status), None, "{status}");
+        }
+        assert_eq!(key_alarm(&flash, 401), None);
     }
 
     /// Goal: a call is tried on its model, then, when that one failed
@@ -1528,8 +1706,8 @@ mod tests {
     /// each again (a replay decides the same).
     #[test]
     fn a_failed_call_falls_back_once() {
-        let finite = finite();
-        for models in [&*DEFAULTS, &finite] {
+        let (finite, routed) = (finite(), openrouter());
+        for models in [&*DEFAULTS, &finite, &routed] {
             let cheap = models.route(Named::Tier(Tier::Cheap)).unwrap();
             let medium = models.route(Named::Tier(Tier::Medium)).unwrap();
             let fallback = models.fallback();
@@ -1561,6 +1739,13 @@ mod tests {
                 assert_eq!(t.after(Tried::Answered(400)), None);
                 assert_eq!(t.after(Tried::Answered(502)), None, "the tries are over");
                 assert_eq!(t.model(), cheap);
+                // the platform's key refused, or its credit spent: the call's on Workers AI, a fallback on an OpenAI-compatible API
+                for status in [401, 402, 403, 404] {
+                    let mut t = Tries::new(cheap, Some(fallback));
+                    let on_openai = matches!(cheap.upstream, Upstream::Openai { .. });
+                    assert_eq!(t.after(Tried::Answered(status)), on_openai.then_some(fallback), "{status}");
+                    assert_eq!(t.after(Tried::Answered(status)), None, "the fallback's {status} is the call's");
+                }
                 // no fallback, or one that runs where the call's own model does: the failure is the call's
                 let same = Model { named: Named::Fallback, upstream: cheap.upstream };
                 for fallback in [None, Some(same)] {
@@ -1630,8 +1815,9 @@ mod tests {
             "data: {\"id\":\"fp1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":21,\"total_tokens\":921}}\n\n",
             "data: [DONE]\n\n",
         );
+        let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
         for piece in [1, 9, sglang.len()] {
-            let mut s = Stream::default();
+            let mut s = Stream::default().on(&private);
             let mut out = Vec::new();
             for chunk in sglang.as_bytes().chunks(piece) {
                 s.push(chunk, Some(&mut out));
@@ -1644,5 +1830,96 @@ mod tests {
             assert_eq!(lines[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "terminal", "a tool call's delta as it came");
             assert_eq!(lines[3], json!({ "id": "fp1", "object": "chat.completion.chunk", "choices": [], "usage": { "prompt_tokens": 900, "completion_tokens": 21, "total_tokens": 921 } }), "the last chunk as it came");
         }
+    }
+
+    /// Goal: a call to an OpenAI-compatible API carries the client's chat
+    /// completion fields of `CLIENT_KEYS` and no other (a paid extra, a
+    /// route to another model, a client's own `provider` dropped), its
+    /// slot's `body` over them, the route's bounded fields as they were,
+    /// and its model's id; a slot without a body sends the same fields; a
+    /// job's text step the same. Method: an agent's call with every field
+    /// it may send and many it may not, bounded on OpenRouter's tier, with
+    /// its body and without, and a step's.
+    #[test]
+    fn a_call_carries_the_clients_chat_fields_and_the_slots_body() {
+        let models = openrouter();
+        let tier = models.capped(Named::Tier(Tier::Cheap)).unwrap();
+        let Upstream::Openai { model, body, .. } = tier.model.upstream else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
+        let tools = json!([{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object" } } }]);
+        let kept = json!({
+            "messages": [{ "role": "user", "content": "hi" }], "tools": tools, "tool_choice": "auto", "temperature": 0.2, "top_p": 0.9,
+            "stop": ["\n\n"], "response_format": { "type": "text" }, "seed": 7, "parallel_tool_calls": false,
+        });
+        let dropped = json!({
+            "provider": { "zdr": false, "order": ["somewhere-dear"] }, "plugins": [{ "id": "web" }], "web_search_options": { "search_context_size": "high" },
+            "transforms": ["middle-out"], "models": ["anthropic/claude-opus-5.5"], "route": "fallback", "n": 4, "user": "paul@example.com",
+            "reasoning": { "effort": "high" }, "prompt_cache_key": "k", "metadata": { "a": "b" }, "service_tier": "priority", "logprobs": true,
+        });
+        let mut asked = json!({ "model": "cheap", "max_tokens": 99, "max_completion_tokens": 120, "reasoning_effort": "max" });
+        for part in [&kept, &dropped] {
+            asked.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+        }
+        let b = bound(tier, asked, true).unwrap();
+        let sent = openai_request(&b.input, model, body.as_ref());
+        let mut want = kept.as_object().cloned().unwrap();
+        want.extend([("max_tokens".into(), json!(99)), ("reasoning_effort".into(), json!("low")), ("stream".into(), json!(true)), ("stream_options".into(), json!({ "include_usage": true }))]);
+        want.insert("provider".into(), routing()["provider"].clone());
+        want.insert("model".into(), json!(OPENROUTER_FLASH));
+        assert_eq!(sent, Value::Object(want.clone()), "the client's chat fields, the route's bounds, the deployment's routing");
+        assert_eq!(sent["provider"]["max_price"], json!({ "prompt": 0.15, "completion": 0.5 }));
+        // no body: the same fields, no routing, and still none of the client's extras
+        let plain = openai_request(&b.input, FINITE_PRIVATE_FLASH, None);
+        want.remove("provider");
+        want.insert("model".into(), json!(FINITE_PRIVATE_FLASH));
+        assert_eq!(plain, Value::Object(want));
+        for key in dropped.as_object().unwrap().keys() {
+            assert!(b.input.get(key).is_some() && sent.get(key).is_none_or(|_| key == "provider") && plain.get(key).is_none(), "{key}: dropped");
+        }
+        // what the route writes is among what the client may send (its model the route's own)
+        assert!(ROUTE_KEYS.iter().all(|k| *k == "model" || CLIENT_KEYS.contains(k)));
+        // a job's text step, through the same bound and request
+        let t: AiText = serde_json::from_value(json!({ "prompt": "the notes", "tier": "medium" })).unwrap();
+        let step = bound(models.capped(Named::Tier(Tier::Medium)).unwrap(), text_body(&t).unwrap(), true).unwrap();
+        let sent = openai_request(&step.input, OPENROUTER_FLASH, body.as_ref());
+        assert_eq!((sent["provider"].clone(), sent["messages"][0]["content"].clone(), sent["model"].clone()), (routing()["provider"].clone(), json!("the notes"), json!(OPENROUTER_FLASH)));
+        assert_eq!(sent.as_object().unwrap().len(), step.input.as_object().unwrap().len() + 2, "a step sends nothing the allowlist drops");
+    }
+
+    /// Goal: OpenRouter's stream meters as any OpenAI-compatible API's: its
+    /// usage comes on a last chunk that keeps a content-free choice (its
+    /// accounting frame), which is metered, and which the client gets as
+    /// that chunk without usage and then OpenAI's last chunk; Workers AI's
+    /// per-chunk deltas on chunks with choices are never metered. Method:
+    /// OpenRouter's documented stream (a comment line, a tool call, its
+    /// frame, `[DONE]`), fed whole and in pieces, read on OpenRouter's
+    /// upstream and on Workers AI's.
+    #[test]
+    fn openrouters_accounting_frame_is_metered() {
+        let routed = &openrouter().cheap;
+        let usage = json!({ "prompt_tokens": 1_000, "completion_tokens": 30, "total_tokens": 1_030, "cost": 0.0001, "prompt_tokens_details": { "cached_tokens": 600 }, "completion_tokens_details": { "reasoning_tokens": 10 } });
+        let frame = json!({ "id": "gen-1", "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "content": "", "role": "assistant" }, "finish_reason": "tool_calls", "native_finish_reason": "tool_calls" }], "usage": usage });
+        let call = json!({ "id": "gen-1", "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": "{}" } }] }, "finish_reason": "tool_calls" }] });
+        let text = format!(": OPENROUTER PROCESSING\n\ndata: {call}\n\ndata: {frame}\n\ndata: [DONE]\n\n");
+        for piece in [1, 7, text.len()] {
+            let mut s = Stream::answering().on(routed);
+            let mut out = Vec::new();
+            for chunk in text.as_bytes().chunks(piece) {
+                s.push(chunk, Some(&mut out));
+            }
+            s.finish(Some(&mut out));
+            assert!(s.done(), "pieces of {piece}");
+            assert_eq!(s.usage().and_then(|u| usage_of(OPENROUTER_FLASH, u)), Some(Usage::Tokens { model: OPENROUTER_FLASH.into(), input: 400, cached_input: 600, cache_write: 0, output: 30 }), "pieces of {piece}");
+            let mut bare = frame.clone();
+            bare.as_object_mut().unwrap().remove("usage");
+            assert_eq!(data_lines(&out), [call.clone(), bare, json!({ "id": "gen-1", "object": "chat.completion.chunk", "choices": [], "usage": usage })], "pieces of {piece}");
+            let answer = s.answer().unwrap();
+            assert_eq!((answer.tool_calls[0].name.as_str(), answer.finish_reason.as_deref()), ("terminal", Some("tool_calls")));
+            let sent = String::from_utf8(out).unwrap();
+            assert!(sent.starts_with(": OPENROUTER PROCESSING\n\n") && sent.ends_with("data: [DONE]\n\n") && sent.matches("\n\ndata: ").count() == 4, "{sent:?}");
+        }
+        // on Workers AI, a chunk with choices carries a delta: never the call's
+        let mut s = Stream::default().on(&workers_ai(GLM_FLASH));
+        s.push(text.as_bytes(), None);
+        assert_eq!(s.usage(), None, "metered at its reservation");
     }
 }

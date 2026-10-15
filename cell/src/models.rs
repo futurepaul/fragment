@@ -17,10 +17,12 @@
 //! `calls`).
 //!
 //! A tier's call whose model fails before answering anything (not reached,
-//! 429, or a 5xx) is made once more, the same, on the deployment's fallback
+//! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
+//! platform's, also 401, 402, 403 or 404: `fragment_core::models::falls_back`,
+//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the same, on the deployment's fallback
 //! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
-//! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind Finite
-//! Private on Finite's own; `fragment_core::models::Tries`), logged as
+//! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
+//! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
 //! `model.fallback`, under the same hold, and settled as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
@@ -37,11 +39,14 @@
 //!   at the vendor boundary (crates/fakes, `workers_ai`), never product
 //!   proof. A job's image step and a transcription call their models here
 //!   (`run`).
-//! - An OpenAI-compatible API (`openai`, Finite Private's): the same input
-//!   and its model's id, POSTed to `<base_url>/chat/completions` with the
-//!   key bound for the call's slot (keys.rs) as its bearer token, and no
-//!   metadata (its limit is its key's). Its answers are OpenAI's shape
-//!   already. The e2e's is the same fake's OpenAI-compatible face.
+//! - An OpenAI-compatible API (`openai`, OpenRouter's or Finite
+//!   Private's): the same input, the slot's own fields over the client's
+//!   (its config's `body`: OpenRouter's provider routing) and its model's
+//!   id, POSTed to `<base_url>/chat/completions` with the key bound for the
+//!   call's slot (keys.rs) as its bearer token, and no metadata (its limit
+//!   is its key's). Its answers are OpenAI's shape already, its usage the
+//!   whole call's wherever a chunk carries it (`Stream::on`). The e2e's is
+//!   the same fake's OpenAI-compatible face.
 //!
 //! A job's text step makes a tier's call the same way, streamed, falling
 //! back the same, unmetered here (`streamed`: ai.rs meters it).
@@ -251,6 +256,8 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     held.model = model.id();
     held.calls = calls;
+    // its stream is read as the API that answered streams
+    let api = model.upstream;
     let model = model.id();
     let mut upstream = match answer {
         Ok(r) => r,
@@ -295,7 +302,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     // how a tee's branches part is the runtime's.
     let (client, meter) = js::tee(source)?;
     after.later(Box::pin(async move {
-        let mut stream = Stream::default();
+        let mut stream = Stream::default().on(api);
         let mut bytes = ByteStream::from(meter);
         let mut broke = false;
         let mut settled = false;
@@ -323,7 +330,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             held.settle(usage, log_id).await;
         }
     }));
-    let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default(), done: false };
+    let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default().on(api), done: false };
     let mut resp = Response::from_stream(normalized)?;
     resp.headers_mut().set("content-type", "text/event-stream")?;
     resp.headers_mut().set("cache-control", "no-cache")?;
@@ -340,6 +347,9 @@ pub(crate) struct Streamed {
     pub log_id: Option<String>,
     /// The model whose answer it is: its caller meters it as that model's.
     pub model: &'static str,
+    /// Where that model runs: its stream is read as that API streams
+    /// (`Stream::on`).
+    pub upstream: &'static Upstream,
     /// Its tries (a second when the first fell back).
     pub calls: u32,
 }
@@ -352,7 +362,7 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;
-    Ok(Streamed { answer, log_id, model: model.id(), calls })
+    Ok(Streamed { answer, log_id, model: model.id(), upstream: model.upstream, calls })
 }
 
 /// A bounded call made on its model, then, when that one fails before
@@ -375,6 +385,10 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
             Err(e) => e.message,
         };
+        // the platform's own key refused or its credit spent: every call falls back until someone fixes it
+        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
+            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm, "why": why }));
+        }
         console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
     }
 }
@@ -444,19 +458,18 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id } => openai(env, model.named, base_url, id, input).await,
+        Upstream::Openai { base_url, model: id, body } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 
-/// Makes a bounded call on an OpenAI-compatible API: `input` and the
-/// model's `id`, POSTed to `<base_url>/chat/completions` with the key bound
-/// for the call's slot (`keys::model_key`) as its bearer token, and nothing
-/// of the client's or of the payer's. A key the deployment does not bind is
-/// a model not reached (its call falls back), said in the log without it.
-async fn openai(env: &Env, named: Named, base_url: &str, id: &str, input: &Value) -> CellResult<Response> {
+/// Makes a bounded call on an OpenAI-compatible API: `body` (the input, the
+/// slot's own fields and the model's id: `openai_request`), POSTed to
+/// `<base_url>/chat/completions` with the key bound for the call's slot
+/// (`keys::model_key`) as its bearer token, and nothing of the client's
+/// or of the payer's. A key the deployment does not bind is a model not
+/// reached (its call falls back), said in the log without it.
+async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> CellResult<Response> {
     let key = crate::keys::model_key(env, named.as_str()).await?;
-    let mut body = input.clone();
-    body["model"] = json!(id);
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;

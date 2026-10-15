@@ -446,7 +446,8 @@ speaking Cloudflare's APIs) returns once this product works.
     are unchanged.)
 
     Status, 2026-10-14: Finite's own deployment runs its tiers on Finite
-    Private, Workers AI behind them (decision 61); every model below is
+    Private (since 2026-10-15 on GLM-5.3 Flash through OpenRouter),
+    Workers AI behind them (decision 61); every model below is
     now named in the config's `models`, which replaced `vision_model` and
     `fallback_model`, and is Workers AI's as below when unnamed.
 
@@ -471,7 +472,9 @@ speaking Cloudflare's APIs) returns once this product works.
     Flash from one agent with 502 "could not route request to AI model",
     then 500, for five minutes, and the agent's turn gave up). A tier's
     call whose model fails before answering anything (not reached, 429, or
-    a 5xx) is made once more, the same, on the deployment's fallback model
+    a 5xx; since 2026-10-15, on an OpenAI-compatible API, where the key is
+    the platform's, also 401, 402, 403 or 404: decision 61) is made once
+    more, the same, on the deployment's fallback model
     (`fallback_model` in its config, `FRAGMENT_FALLBACK_MODEL`; one the
     price book prices): DeepSeek V4 Flash unless named, behind the cheap
     tier's GLM-5.3 Flash (for a few hours on 2026-10-09 the two were the
@@ -980,13 +983,74 @@ connect them from settings ideally."
         through the `claude` CLI.
       - Neither is for a hosted product.
 
-### Finite Private (Paul, 2026-10-14)
+### Finite Private (Paul, 2026-10-14), then OpenRouter (2026-10-15)
 
 Paul: fbfc's main model is **Finite Private**. Workers AI allows 20 to 50
 calls a minute per model per account, which a launch with real users
 passes.
 
-61. **The tiers run on Finite Private; Workers AI is behind them.**
+Paul, 2026-10-15: for launch, production's main model is **GLM-5.3 Flash
+through one platform OpenRouter key**, zero data retention on and its
+providers chosen for throughput, instead of Finite Private. Finite
+Private stays possible by config.
+
+61. **The tiers run on GLM-5.3 Flash through OpenRouter (Finite Private
+    by config); Workers AI is behind them.**
+    - **OpenRouter, for launch (2026-10-15).** `cheap` and `medium` on
+      `z-ai/glm-5.3-flash` at `https://openrouter.ai/api/v1`, on the
+      platform's own OpenRouter account and one key
+      (`fragment-openrouter-key`: docs/secrets.md); `fallback` and
+      `vision` on Workers AI's GLM-5.3 Flash as below. Each tier's slot
+      names a `body`, fields of the API's own that every call to it
+      carries over the agent's (docs/computers.md, Models): OpenRouter's
+      provider routing, `{"provider": {"zdr": true, "sort": "throughput",
+      "require_parameters": true, "quantizations": ["fp8", "bf16"],
+      "max_price": {"prompt": 0.15, "completion": 0.5}}}`: only
+      zero-data-retention endpoints, the fastest first, each taking every
+      parameter sent, fp8 or bf16, at most $0.15 a million tokens in and
+      $0.50 out (6 of GLM-5.3 Flash's 34 endpoints on 2026-10-15). The
+      body is generic (any OpenAI-compatible API's own fields, never one
+      the route writes, 4 KiB at most), and nothing in the cell is
+      OpenRouter's: an OpenAI-compatible API's stream is metered from its
+      usage on whichever chunk carries it (OpenRouter's last keeps a
+      choice).
+    - **Its price** (a decision for Paul): the ceiling above, not what a
+      call's provider billed: a cached or written token at the prompt
+      ceiling too (none of OpenRouter's cache prices is bounded by
+      `max_price`), and OpenRouter's 5.5% fee on credits in place of AI
+      Gateway's 5%, then the margin (docs/ledger.md, "OpenRouter's
+      price"). Price book 7. Settling from OpenRouter's reported
+      `usage.cost` instead is a follow-up (docs/technical-debt-ledger.md).
+    - **The platform's trouble falls back** (the coordinator for Paul,
+      2026-10-15): on an OpenAI-compatible API, whose key is the
+      platform's, a key refused (401) or denied (403), an account out of
+      credit (402), or no endpoint left by the routing (its "No endpoints
+      found", a 404) answered before any data is made once more on the
+      tier's fallback model, as a 429 or a 5xx is: it is the platform's
+      account, not the caller's, and must not take agents down. A 401 or
+      a 402 is also logged aloud (`model.platform-key`, an error line
+      naming the model, its status and what to do). A 400 is the call's,
+      as any refusal of the request.
+    - **What it is sent.** Only the agent's chat completion fields
+      (`fragment_core::models::CLIENT_KEYS`: messages, tools, tool_choice,
+      temperature, top_p, max_tokens, max_completion_tokens, stop,
+      response_format, seed, reasoning_effort, parallel_tool_calls,
+      stream, stream_options; Hermes v0.21.6 sends no other), then the
+      slot's `body`: OpenRouter's paid extras (`plugins`,
+      `web_search_options`), its routing fields (`provider`, `models`,
+      `route`, `transforms`) and anything else are dropped, so no call
+      buys what the book does not price, and none rules out every
+      endpoint under `require_parameters`.
+    - **Going live** (Paul's): make the key in the platform's OpenRouter
+      account (credit on it, a credit limit as a backstop, ZDR also on in
+      its privacy settings); `cargo xtask secret set
+      fragment-openrouter-key --config <production's config>`; put
+      example.jsonc's `models` in that config; deploy. `model.settled`
+      names `z-ai/glm-5.3-flash` for the tiers' calls.
+
+    What follows is Finite Private's, the config's other alternative
+    (deploy/example.jsonc, commented), as decided on 2026-10-14.
+
     Finite Private is Finite's own GLM-5.3 Flash (`zai-org/GLM-5.3-Flash`
     on SGLang, 393,216 tokens of context) on Tinfoil, behind finite-mono's
     `finite-private-limiter`, which admits each call by its key
@@ -1003,9 +1067,10 @@ passes.
       so a preview without the key deploys and runs as it did. The config
       replaced `vision_model` and `fallback_model` (a hard cut: a deploy
       naming either is refused, saying what replaced it).
-    - **Finite's own** (deploy/example.jsonc): `cheap` and `medium` on
-      Finite Private's `glm-5-3-flash`; `fallback` and `vision` on Workers
-      AI's GLM-5.3 Flash. Vision stays there: finite.computer declares
+    - **Finite's own on Finite Private** (deploy/example.jsonc's
+      alternative): `cheap` and `medium` on Finite Private's
+      `glm-5-3-flash`; `fallback` and `vision` on Workers AI's GLM-5.3
+      Flash. Vision stays there: finite.computer declares
       Finite Private vision-capable, but nothing tests it, and its limiter
       takes 2 MiB a request (a screenshot call is up to 6 MiB).
     - **The rule for falling back is decision 23's**: a call Finite
@@ -1020,10 +1085,9 @@ passes.
       prompts uncached until Finite Private reports its cached tokens.
       Price book 5.
     - **Decisions for Paul.** (a) The price above. (b) A key Finite
-      Private refuses (401: revoked, or never set) and a denial (403) are
-      the call's, as any refusal of a request is: falling back on them
-      too would keep agents up through a revoked key, on Workers AI's
-      limit. (c) A text call past 2 MiB is the limiter's 413, passed
+      Private refuses (401: revoked, or never set) and a denial (403) were
+      the call's; since 2026-10-15 they fall back, as OpenRouter's do
+      (above), keeping agents up on Workers AI's limit. (c) A text call past 2 MiB is the limiter's 413, passed
       through (Workers AI takes 6 MiB): an agent's context near its
       393,216 tokens is about that size.
 
