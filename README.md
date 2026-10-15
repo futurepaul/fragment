@@ -22,6 +22,9 @@ This repo holds:
   fragment's app in its own loaded worker, and runs jobs as Workflows.
 - **the `fragment` CLI** (`cli/`): the whole control surface, built for
   agents. `fragment guide` prints the agent guide.
+- **the native iOS preview** ([ios/](ios/README.md)): a minimal SwiftUI
+  client against a local HTTP/WebSocket fixture; production QR pairing is
+  planned in [docs/ios.md](docs/ios.md).
 - **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
   code.storage, Workers AI, WorkOS, and a push service, and the e2e suite
   that drives the real cell, CLI, and a browser.
