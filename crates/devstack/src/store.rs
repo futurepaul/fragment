@@ -415,18 +415,19 @@ pub struct Bound {
     pub operator_keys: Vec<(String, String)>,
     /// Each slot of the model route that runs on an OpenAI-compatible API
     /// (`fragment_core::models::SLOTS`), and its key's secret's name (two
-    /// slots may name one: Finite's tiers name Finite Private's key).
+    /// slots may name one: Finite's tiers name the platform's OpenRouter key).
     pub model_keys: Vec<(String, String)>,
 }
 
-/// Finite Private's key's name in the store (deploy/example.jsonc), which
-/// dev and the e2e bind in wrangler's local store for each slot they run
-/// there.
-pub const FINITE_PRIVATE_KEY: &str = "fragment-finite-private-key";
+/// The model key's name in the store that deploy/example.jsonc's tiers
+/// name (the platform's OpenRouter key), which dev and the e2e bind in
+/// wrangler's local store for each slot they run on an OpenAI-compatible
+/// API.
+pub const MODEL_KEY: &str = "fragment-openrouter-key";
 
 impl Bound {
     /// The names `deploy/example.jsonc` uses, which dev and the e2e bind in
-    /// wrangler's local store: `model_slots` each on Finite Private's key.
+    /// wrangler's local store: `model_slots` each on the model key.
     pub fn conventional(workos: bool, stripe: bool, operator_keys: &[&str], model_slots: &[&str]) -> Bound {
         Bound {
             host_secret: "fragment-host-secret".into(),
@@ -435,7 +436,7 @@ impl Bound {
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
             stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
-            model_keys: model_slots.iter().map(|s| (s.to_string(), FINITE_PRIVATE_KEY.to_string())).collect(),
+            model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
         }
     }
 
@@ -643,14 +644,14 @@ mod tests {
                 ("CODESTORAGE_KEY", "fragment-codestorage-private-key"),
                 ("WORKOS_CLIENT", "fragment-workos-client-id"),
                 ("WORKOS_KEY", "fragment-workos-api-key"),
-                ("MODEL_KEY_CHEAP", "fragment-finite-private-key"),
-                ("MODEL_KEY_MEDIUM", "fragment-finite-private-key"),
+                ("MODEL_KEY_CHEAP", "fragment-openrouter-key"),
+                ("MODEL_KEY_MEDIUM", "fragment-openrouter-key"),
                 ("OPERATOR_KEY_PERPLEXITY", "fragment-perplexity-api-key"),
                 ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
             ]
         );
         // two slots on one key: two bindings, one secret
-        assert_eq!(bound.secrets().iter().filter(|n| **n == FINITE_PRIVATE_KEY).count(), 1);
+        assert_eq!(bound.secrets().iter().filter(|n| **n == MODEL_KEY).count(), 1);
         assert_eq!(bound.secrets().len(), cell.len() - 1);
         let doubled = vec![("HOST_SECRET".to_string(), "a"), ("HOST_SECRET".to_string(), "b")];
         assert!(std::panic::catch_unwind(|| bindings_json("0f0e", &doubled)).is_err());
@@ -660,7 +661,7 @@ mod tests {
         let gone: Vec<&str> = gone.iter().map(|(_, n)| *n).collect();
         assert_eq!(
             gone,
-            ["fragment-host-secret-2025", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-finite-private-key", "fragment-finite-private-key", "fragment-perplexity-api-key", "fragment-google-places-api-key"]
+            ["fragment-host-secret-2025", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-openrouter-key", "fragment-openrouter-key", "fragment-perplexity-api-key", "fragment-google-places-api-key"]
         );
     }
 }

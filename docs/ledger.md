@@ -87,7 +87,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
-| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`, Finite's tiers') the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 Flash through OpenRouter (`z-ai/glm-5.3-flash`, Finite's tiers') at its routing's ceiling, $0.15 / $0.15 / $0.15 / $1.00, grossed up to $0.150715 / $0.150715 / $0.150715 / $1.004762 for OpenRouter's 5.5% fee; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); OpenRouter's is the `max_price` its slots route under (deploy/example.jsonc; its endpoints, `/api/v1/models/z-ai/glm-5.3-flash/endpoints`, and its fee, openrouter.ai/docs/faq, read 2026-10-15), "OpenRouter's price" below, a decision for Paul; Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
 | `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
@@ -104,10 +104,32 @@ calls. The defaults are consts in `price.rs`, each with its source. The
 operator's book comes from the deploy's configuration and is versioned:
 a ledger takes only a newer version, and a hold keeps the price it was
 held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 6 since
-the Clef family was priced on 2026-10-14, after 5 for Finite Private's
-GLM-5.3 Flash, 4 for Hermes' tool keys and 3 for DeepSeek V4 Flash), so a change
+`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 7 since
+OpenRouter's GLM-5.3 Flash was priced on 2026-10-15, after 6 for the
+Clef family, 5 for Finite Private's GLM-5.3 Flash, 4 for Hermes' tool
+keys and 3 for DeepSeek V4 Flash), so a change
 to the defaults reaches every ledger at its next call.
+
+**OpenRouter's price** (decision 61; a decision for Paul): Finite's
+tiers run on GLM-5.3 Flash through OpenRouter, which routes each call to
+one of its providers under the slot's `max_price` ($0.15 a million
+tokens in, $1.00 out) and bills that provider's price, marked up by
+nothing, from credits bought with a 5.5% fee (5% in crypto). The book
+charges the ceiling, never less than OpenRouter could bill:
+- **Every input token at $0.15**, cached and written ones too: the
+  endpoints' cache reads ($0.0087 to $0.099 on 2026-10-15) are no part of
+  `max_price`, so none bounds them.
+- **OpenRouter's fee, not AI Gateway's.** The book's credits fee is one
+  rate for all AI (5%), so the row's list is the ceiling × 1.055 / 1.05,
+  rounded up once (`fragment_core::price::OPENROUTER_FEE_BP`): its cost
+  basis is the ceiling plus 5.5%, and the margin goes on that. A million
+  tokens in charge $0.237377, a million out $1.582501.
+- **What it costs a person.** About twice Workers AI's Flash for output
+  and five times for a cached prefix: a call of 30,000 tokens in (25,000
+  of them cached) and 600 out charges $0.008071, against $0.002835 on
+  Workers AI's Flash. Settling from OpenRouter's own `usage.cost` would
+  charge what each call cost; it is in the debt ledger, as is the ceiling
+  and the row being two numbers that move together.
 
 **Finite Private's price** (decision 61; a decision for Paul): its list
 price is Workers AI's GLM-5.3 Flash's, and its rows take the credits fee
@@ -130,8 +152,9 @@ prices) covers a fallback call of an agent's usual size; DeepSeek V4
 Flash, the default fallback, is dearer than the cheap tier's GLM-5.3
 Flash, so a fallback call near its worst case is charged in full past
 its hold, as any usage that happened is. On Finite's own deployment the
-tiers' Finite Private and the fallback, Workers AI's GLM-5.3 Flash, are
-at one price: the hold always covers it.
+fallback, Workers AI's GLM-5.3 Flash, is cheaper than the tiers'
+OpenRouter row (and at one price with Finite Private's): the hold always
+covers it.
 
 ## The state machine
 
@@ -280,9 +303,13 @@ mark sends the same batch again, which answers as before.
   is released. A call whose
   stream broke settles without usage, at its worst case. A Workers AI
   call's gateway log id rides along for reconciliation; the gateway's
-  per-user spend rule is only a backstop. A Finite Private call has
-  neither: finite-mono meters the deployment's one key against its
-  window, and this ledger alone meters each person. The payer is the
+  per-user spend rule is only a backstop. An OpenRouter or Finite
+  Private call has neither: OpenRouter bills the platform's one key from
+  its credit (its own credit limit the backstop), finite-mono meters its
+  key against its window, and this ledger alone meters each person. An
+  OpenRouter stream's usage comes on its last chunk, which keeps a
+  choice: an OpenAI-compatible API's usage is read wherever it comes
+  (`fragment_core::models::Stream::on`). The payer is the
   agent's owner; the fragment is the agent's. An agent's decision
   (`/v1/decide`) is reserved and settled as a decision step is (below),
   under its own call id.

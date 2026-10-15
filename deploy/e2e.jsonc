@@ -27,8 +27,8 @@
   },
   // Models through this gateway: the cheap tier's GLM-5.3 Flash, its
   // fallback DeepSeek V4 Flash, and GLM-5.3 Flash for vision, each the cell's
-  // default. No `models` here: a preview holds no Finite Private key
-  // (`fragment-finite-private-key`), so its tiers run on Workers AI, and it
+  // default. No `models` here: a preview holds no OpenRouter key
+  // (`fragment-openrouter-key`), so its tiers run on Workers AI, and it
   // deploys without one. A preview that should run Finite's own tiers adds
   // deploy/example.jsonc's `models` once the key is in its store.
   "ai_gateway": "fragment-dev",
@@ -103,6 +103,6 @@
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",
-  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 6
-  "price_book_version": 6
+  // the code's own (fragment_core::price::DEFAULT_BOOK_VERSION) is 7
+  "price_book_version": 7
 }

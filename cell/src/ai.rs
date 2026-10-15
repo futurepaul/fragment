@@ -463,14 +463,14 @@ impl FragmentCell {
         if let Some(d) = d {
             self.put_draft(d, Some(""), Some(0));
         }
-        let crate::models::Streamed { mut answer, log_id, model, calls } = crate::models::streamed(&self.env, bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+        let crate::models::Streamed { mut answer, log_id, model, upstream, calls } = crate::models::streamed(&self.env, bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
         let status = answer.status_code();
         if status != 200 {
             let body = crate::models::read_whole(&mut answer).await.unwrap_or_default();
             return Err(self.unpaid(p, model_failure(status, &body)).await);
         }
         let mut bytes = answer.stream().map_err(|e| retry(e.into()))?;
-        let mut stream = Stream::answering();
+        let mut stream = Stream::answering().on(upstream);
         let mut first_ms = None;
         // the text drafted so far, and when the last draft of any kind went
         let (mut sent, mut drafted_at) = (0usize, t0);

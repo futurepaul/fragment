@@ -1359,8 +1359,9 @@ deployment's AI Gateway), metered in neurons at Workers AI's price for
 it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`);
 decisions are the Clef family on that Workers AI transport, metered in
 input tokens (Decisions, below). No app holds a key: the binding is
-pre-authenticated, and a text step on an OpenAI-compatible API (Finite
-Private) carries the deployment's key, which the platform adds.
+pre-authenticated, and a text step on an OpenAI-compatible API
+(OpenRouter, or Finite Private) carries the deployment's key, which the
+platform adds.
 
 Each paid step reserves its worst case on the owner's ledger before its
 call (text: its request's bytes as tokens in and its tier's capped
@@ -1660,13 +1661,16 @@ a Workers AI model through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
 payer's and the agent's identities), or a model on an OpenAI-compatible
 API with the deployment's key for it and nothing else of the call's
-(Finite Private, on Finite's own deployment). Unnamed, `cheap` is GLM-5.3
-Flash (`@cf/zai-org/glm-5.3-flash`), `medium` GLM-5.3
+but the deployment's own fields for that API (its slot's `body`, over
+the agent's of the same names: OpenRouter's provider routing). Unnamed,
+`cheap` is GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`), `medium` GLM-5.3
 (`@cf/zai-org/glm-5.3`), `vision` GLM-5.3 Flash and the fallback DeepSeek
 V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`), all on Workers AI;
-Finite's own runs `cheap` and `medium` on Finite Private's GLM-5.3 Flash
-(`glm-5-3-flash`) and `vision` and the fallback on Workers AI's GLM-5.3
-Flash. Each is a model the price book prices.
+Finite's own runs `cheap` and `medium` on GLM-5.3 Flash through
+OpenRouter (`z-ai/glm-5.3-flash`, zero data retention, the fastest
+provider under a price ceiling; Paul, 2026-10-15), or by config on
+Finite Private's (`glm-5-3-flash`), and `vision` and the fallback on
+Workers AI's GLM-5.3 Flash. Each is a model the price book prices.
 
 A tier's call whose model fails before answering anything (not reached,
 429, or a 5xx) is made once more, the same, on the deployment's fallback

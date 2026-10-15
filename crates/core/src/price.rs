@@ -265,16 +265,34 @@ pub struct PriceBook {
 /// whichever of the two answers it (decision for Paul). Its SGLang reports
 /// no cached tokens, so its prompts are all priced uncached.
 ///
+/// GLM-5.3 Flash through OpenRouter (`z-ai/glm-5.3-flash`, Finite's tiers'
+/// since 2026-10-15; decision 61) is at the ceiling its slot's `body` sets
+/// OpenRouter's routing to (`provider.max_price`, dollars per million
+/// tokens: deploy/example.jsonc), never at what one call's provider
+/// happened to bill, so a call is never charged below what OpenRouter could
+/// bill for it (decision for Paul). Its 34 endpoints listed $0.036 to $0.25
+/// in and $0.145 to $1.60 out on 2026-10-15
+/// (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`), their cache reads $0.0087
+/// to $0.099, each under the prompt ceiling but none bounded by it: cached
+/// and written tokens are at the prompt ceiling too. OpenRouter passes its
+/// providers' prices through and takes its fee on the credits that pay for
+/// them (`OPENROUTER_FEE_BP`), not AI Gateway's: the row is grossed up so
+/// its cost basis, after the book's fee, is the ceiling plus OpenRouter's
+/// (`openrouter`).
+///
 /// The Clef family's (decisions: crate::decide) from Workers AI's pricing
 /// page and each model's own (developers.cloudflare.com/workers-ai/models/
 /// clef-flash, clef and clef-omni, read 2026-10-14): input tokens only,
 /// media counted as input, no output charge and no cache, so a cached or
 /// written token is an input token's price.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 8] = [
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 9] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
-    // Finite Private's (Finite's tiers'), at Workers AI's GLM-5.3 Flash's
+    // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
     ("glm-5-3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
+    // OpenRouter's (Finite's tiers'): its ceiling, $0.15 in (cached and
+    // written too) and $1.00 out, with OpenRouter's 5.5% for the book's 5%
+    (crate::models::OPENROUTER_FLASH, TokenPrices { input: openrouter(150_000), cached_input: openrouter(150_000), cache_write: openrouter(150_000), output: openrouter(1_000_000) }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
@@ -287,6 +305,21 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 8] = [
     clef(Model::ClefOmni),
 ];
 
+/// OpenRouter's fee on the credits that pay for its calls: 5.5% of a card
+/// purchase, at least $0.80 (5% in crypto); it marks up no provider's
+/// price (openrouter.ai/docs/faq, read 2026-10-15).
+pub const OPENROUTER_FEE_BP: u32 = 550;
+
+/// A price OpenRouter bills at `list` as a row of the book: grossed up so
+/// that the row with the book's credits fee (AI Gateway's) is at least
+/// `list` with OpenRouter's, rounded up once.
+const fn openrouter(list: i64) -> i64 {
+    let n = list as i128 * (BP + OPENROUTER_FEE_BP) as i128;
+    let d = (BP + CREDITS_FEE_BP_DEFAULT) as i128;
+    ((n + d - 1) / d) as i64
+}
+const _: () = assert!(OPENROUTER_FEE_BP >= CREDITS_FEE_BP_DEFAULT, "a gross-up never lowers a price");
+
 /// A Clef model's row: its input price for every input token, none out.
 const fn clef(m: Model) -> (&'static str, TokenPrices) {
     let input = m.input_price();
@@ -294,13 +327,14 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 }
 /// The default book's version. A ledger takes a book only when its version
 /// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 6 for the Clef family (2026-10-14), after 5
+/// to the defaults raises it: 7 for OpenRouter's GLM-5.3 Flash
+/// (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
 /// keys (2026-10-09) and 3 for
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 6;
+pub const DEFAULT_BOOK_VERSION: u32 = 7;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -641,8 +675,8 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 6);
-        assert_eq!(book.models.len(), 8);
+        assert_eq!(book.version, 7);
+        assert_eq!(book.models.len(), 9);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 
@@ -657,6 +691,33 @@ mod tests {
         let turn = |model: &str| book.price(&tokens(model, 26_000, 0, 0, 200)).unwrap();
         assert_eq!(turn(PRIVATE), Priced { list: 4_000, cost: 4_200, charge: 6_300 });
         assert_eq!(turn(PRIVATE), turn(FLASH));
+    }
+
+    /// Goal: OpenRouter's GLM-5.3 Flash is priced at the ceiling its slot
+    /// routes under ($0.15 in, $1.00 out per million: deploy/example.jsonc),
+    /// a cached or written token at the prompt's, and its cost basis covers
+    /// that ceiling with OpenRouter's 5.5% fee, not AI Gateway's 5% (a
+    /// decision for Paul). Method: its row; a million of each class, whose
+    /// cost basis is at least the ceiling × 1.055 and within a micro-dollar
+    /// of it; S3's turn on it and on Workers AI's Flash.
+    #[test]
+    fn openrouters_flash_is_priced_at_its_ceiling_and_fee() {
+        let book = PriceBook::defaults();
+        let row = book.models.iter().find(|m| m.model == crate::models::OPENROUTER_FLASH).unwrap().price;
+        assert_eq!(row, TokenPrices { input: 150_715, cached_input: 150_715, cache_write: 150_715, output: 1_004_762 });
+        let million = |input, cached_input, cache_write, output| book.price(&tokens(crate::models::OPENROUTER_FLASH, input, cached_input, cache_write, output)).unwrap();
+        let m = 1_000_000;
+        for (p, ceiling) in [(million(m, 0, 0, 0), 150_000), (million(0, m, 0, 0), 150_000), (million(0, 0, m, 0), 150_000), (million(0, 0, 0, m), 1_000_000)] {
+            let with_fee = ceiling * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP);
+            assert!((with_fee..=with_fee + 1).contains(&p.cost), "{p:?}: OpenRouter bills at most {with_fee} µ$ with its fee");
+            assert!(p.charge >= p.cost * 3 / 2, "{p:?}: the margin on top");
+        }
+        assert_eq!(million(m, 0, 0, 0), Priced { list: 150_715, cost: 158_251, charge: 237_377 });
+        assert_eq!(million(0, 0, 0, m), Priced { list: 1_004_762, cost: 1_055_001, charge: 1_582_501 });
+        assert_eq!(book.price(&tokens(crate::models::OPENROUTER_FLASH, 26_000, 0, 0, 200)).unwrap(), Priced { list: 4_120, cost: 4_326, charge: 6_489 });
+        // an agent's call, most of its prompt cached: dearer than on Workers AI, which prices a cached token at a fifth
+        let call = |model: &str| book.price(&tokens(model, 5_000, 25_000, 0, 600)).unwrap().charge;
+        assert_eq!((call(crate::models::OPENROUTER_FLASH), call(FLASH)), (8_071, 2_835));
     }
 
     /// Goal: decision 24's formula on S3's simple turn. Method: a Flash

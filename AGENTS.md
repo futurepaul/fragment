@@ -103,8 +103,9 @@ prebuilt bundle is in the debt ledger).
   billing-page, trials, admin, admin-page, shell, computers, chat,
   shell-ui, wipe, hermes, agent-smoke, sync, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
-  shaped as Finite's deployment (its tiers on Finite Private, the model
-  fake's OpenAI-compatible face; decision 61), then the plain one again.
+  shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
+  OpenRouter with its provider routing, both the model fake's
+  OpenAI-compatible face; decision 61), then the plain one again.
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
   file `--operator-key-file <file>` names (its npub in the config's

@@ -740,10 +740,61 @@ expires within 30 days. The container application is the deployment's
 
   | Name | Finite's own deployment (deploy/example.jsonc) | Unnamed (a preview's) |
   |---|---|---|
-  | `cheap`, every agent's default | Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) | GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`) |
-  | `medium` | Finite Private's GLM-5.3 Flash | GLM-5.3 (`@cf/zai-org/glm-5.3`) |
+  | `cheap`, every agent's default | GLM-5.3 Flash through OpenRouter (`z-ai/glm-5.3-flash`), or by config Finite Private's (`glm-5-3-flash`) | GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`) |
+  | `medium` | the same as `cheap` | GLM-5.3 (`@cf/zai-org/glm-5.3`) |
   | `fallback` | Workers AI's GLM-5.3 Flash | DeepSeek V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`) |
   | `vision` | Workers AI's GLM-5.3 Flash | GLM-5.3 Flash |
+
+  **A slot's `body`.** A slot on an OpenAI-compatible API may name `body`:
+  fields of that API's own that every call to it carries (an agent's and
+  a job's `ai.text` alike), each over the agent's own field of that name,
+  so an agent cannot loosen them. It is a JSON object of at most 4 KiB
+  naming none of the fields the route writes itself (`model`, `messages`,
+  `stream`, `stream_options`, `tools`, `tool_choice`, `max_tokens`,
+  `max_completion_tokens`, `reasoning_effort`); the deploy refuses
+  anything else, and the cell at its first request (`fragment_core::
+  models::Models::parse`). It is in the cell's `FRAGMENT_MODELS`, which
+  is a Workers variable (5 KB in all), never a secret.
+
+  OpenRouter (Paul, 2026-10-15; decision 61) is the platform's own
+  OpenRouter account at `https://openrouter.ai/api/v1`, one key
+  (`fragment-openrouter-key`), and its slots' `body` is OpenRouter's
+  provider routing (openrouter.ai/docs/guides/routing/provider-selection,
+  read 2026-10-15):
+
+  ```json
+  "body": {"provider": {"zdr": true, "sort": "throughput", "require_parameters": true,
+                        "quantizations": ["fp8", "bf16"],
+                        "max_price": {"prompt": 0.15, "completion": 1.0}}}
+  ```
+
+  - `zdr: true`: only endpoints with a zero-data-retention policy (it
+    can only add to the account's own ZDR setting, never lift it).
+  - `sort: "throughput"`: the fastest endpoint first, no load balancing
+    by price.
+  - `require_parameters: true`: only endpoints that take every parameter
+    the call sends (`tools`, `tool_choice`, `max_tokens`,
+    `reasoning_effort`, and whatever else the agent sends: one an
+    endpoint does not list rules it out, and none left is OpenRouter's
+    refusal, which is the call's).
+  - `quantizations`: fp8 or bf16 weights (an endpoint that lists none is
+    `unknown`, and out).
+  - `max_price`: dollars per million tokens, prompt and completion; an
+    endpoint dearer than either is out, and a call none fits is refused.
+    The price book charges this ceiling (docs/ledger.md, "OpenRouter's
+    price"): raise it and the book together.
+
+  On 2026-10-15 GLM-5.3 Flash had 34 endpoints on OpenRouter, each taking
+  tools and `reasoning_effort` (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`);
+  30 were ZDR (`/api/v1/endpoints/zdr`), 8 of those fp8 (none bf16), all
+  8 under the ceiling: BaseTen's two, Inceptron, Morph, Near AI, Novita,
+  SiliconFlow and Z.AI. The routing leaves those 8; the fp4 and nvfp4
+  endpoints and those whose quantization is `unknown` (Fireworks,
+  Together among them) are out. OpenRouter's stream carries its usage on a last chunk that
+  keeps one content-free choice (its "accounting frame"): the route
+  meters it there, and the agent gets OpenAI's last chunk, usage with no
+  choices. Its answers name the provider that served each call; its
+  `usage.cost` is not read (the book prices the ceiling).
 
   Finite Private is Finite's own GLM-5.3 Flash (`zai-org/GLM-5.3-Flash`
   on SGLang, 393,216 tokens of context) on Tinfoil, behind finite-mono's
@@ -783,7 +834,7 @@ expires within 30 days. The container application is the deployment's
   switches to its `fallback_providers`: the route's `fallback` (the
   deployment's fallback model, its key `agent:<name>` naming the agent;
   Workers AI's GLM-5.3 Flash on Finite's own deployment, so a stall on
-  Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
+  OpenRouter or Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
   again (Hermes' `restore_primary_runtime`). An owner's own model and the
   high tier have none. The Docker lane stalls the scripted model to prove
   it (images/bridge/tests/docker.rs).

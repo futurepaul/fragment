@@ -86,6 +86,16 @@
 //!   `usage_limit`), and a model that is down answers its 502
 //!   `upstream_unavailable`. It takes no images (they are not qualified
 //!   there: the route sends them to Workers AI).
+//!
+//! It also serves GLM-5.3 Flash by OpenRouter's id (`OPENROUTER_FLASH`, a
+//! Finite deployment's tiers since 2026-10-15), answered as OpenRouter
+//! answers: its usage tells cached tokens and a `cost`, and a stream's
+//! comes on OpenRouter's accounting frame, a last chunk that keeps one
+//! content-free choice repeating the finish reason
+//! (openrouter.ai/docs/api-reference/streaming, read 2026-10-15). It keeps
+//! every request's body as it came (`calls`), the fields a slot's `body`
+//! adds among them, and acts on none of them (OpenRouter's provider
+//! routing is OpenRouter's).
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -118,8 +128,9 @@ pub const NO_WORDS: &str = "(no words)";
 /// images are not qualified (decision 61).
 pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
 /// The models the OpenAI-compatible face serves: Finite Private's GLM-5.3
-/// Flash, by the id its limiter takes (its aliases are not the route's).
-pub const OPENAI_MODELS: [&str; 1] = [fragment_core::models::FINITE_PRIVATE_FLASH];
+/// Flash, by the id its limiter takes (its aliases are not the route's),
+/// and OpenRouter's.
+pub const OPENAI_MODELS: [&str; 2] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH];
 /// The largest request the OpenAI-compatible face takes: Finite Private's
 /// limiter's (axum's default body limit, 2 MiB).
 pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -424,9 +435,17 @@ fn delta_usage(prompt: u64, completion: u64) -> Value {
     json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion, "prompt_tokens_details": { "cached_tokens": 0 } })
 }
 
-/// A call's usage as SGLang reports it behind Finite Private's limiter: no
-/// cached tokens told (a test's `cached` is counted as prompt).
-fn openai_usage(u: Used) -> Value {
+/// A call's usage on the OpenAI-compatible face: as SGLang reports it
+/// behind Finite Private's limiter, no cached tokens told (a test's
+/// `cached` is counted as prompt); as OpenRouter reports it, its cached
+/// tokens and what it cost in credits.
+fn openai_usage(model: &str, u: Used) -> Value {
+    if model == fragment_core::models::OPENROUTER_FLASH {
+        return json!({
+            "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion,
+            "cost": 0.0, "prompt_tokens_details": { "cached_tokens": u.cached, "cache_write_tokens": 0 },
+        });
+    }
     json!({ "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion, "prompt_tokens_details": null })
 }
 
@@ -451,9 +470,10 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
 
 /// A reply streamed as Workers AI streams it (S4's shapes), or, on the
 /// OpenAI-compatible face, as OpenAI does (each chunk's usage null, the
-/// whole call's on a last chunk with no choices), after `thinking` deltas
-/// of reasoning; `broken` ends it before the usage and `[DONE]`, as a
-/// dropped stream does.
+/// whole call's on a last chunk with no choices; OpenRouter's on its
+/// accounting frame, which keeps a choice), after `thinking` deltas of
+/// reasoning; `broken` ends it before the usage and `[DONE]`, as a dropped
+/// stream does.
 #[allow(clippy::too_many_arguments)]
 fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize, thinking: usize) -> String {
     *ids += 1;
@@ -523,9 +543,13 @@ fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut
     }
     let finish = if cut { "length" } else { finish };
     out += &chunk(&id, model, json!({}), Some(finish), delta(0, 0));
+    if face == Face::OpenAi && model == fragment_core::models::OPENROUTER_FLASH {
+        out += &chunk(&id, model, json!({ "role": "assistant", "content": "" }), Some(finish), openai_usage(model, used));
+        return out + "data: [DONE]\n\n";
+    }
     let last = match face {
         Face::WorkersAi => delta_usage(0, 0),
-        Face::OpenAi => openai_usage(used),
+        Face::OpenAi => openai_usage(model, used),
     };
     out += &format!("data: {}\n\n", json!({ "id": id, "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": last }));
     if face == Face::WorkersAi {
@@ -872,7 +896,7 @@ fn chat_answer(s: &mut State, face: Face, model: &str, body: &Value) -> Response
     let used = usage_of(used, body, written);
     let usage = match face {
         Face::WorkersAi => usage_json(used),
-        Face::OpenAi => openai_usage(used),
+        Face::OpenAi => openai_usage(model, used),
     };
     let answer = json!({
         "id": format!("fake{:08x}", s.answers), "object": "chat.completion", "created": 0, "model": model,
@@ -1346,6 +1370,38 @@ mod tests {
         let r = answer(&mut s, &flash);
         assert!(r.status == 200 && r.headers.iter().any(|(k, _)| k == "cf-aig-log-id") && json_of(&r)["usage"]["neurons"].is_number());
         assert_eq!(s.calls.last().map(|c| c.face), Some(Face::WorkersAi));
+    }
+
+    /// Goal: the OpenAI-compatible face answers OpenRouter's GLM-5.3 Flash
+    /// as OpenRouter does: its usage tells cached tokens and a cost, and a
+    /// stream's comes on its accounting frame (a last chunk that keeps a
+    /// content-free choice), which the route's meter reads on an
+    /// OpenAI-compatible API, and Workers AI's never; the request's body is
+    /// kept whole, its provider routing included. Method: a call each way.
+    #[test]
+    fn the_openai_face_answers_openrouters_model_as_openrouter_does() {
+        let mut s = State { key: Some("sk-or-test".into()), ..State::default() };
+        let model = fragment_core::models::OPENROUTER_FLASH;
+        let chat = |stream: bool| json!({ "model": model, "stream": stream, "messages": [{ "role": "user", "content": "hello" }], "provider": { "zdr": true } });
+        let ask = |body: &Value| Request::new("POST", OPENAI_PATH, &[("authorization", "Bearer sk-or-test")], body.to_string().as_bytes());
+        s.usage.push_back(Used { prompt: 50, cached: 30, completion: 7 });
+        let r = answer(&mut s, &ask(&chat(false)));
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!((r.status, v["usage"]["prompt_tokens_details"]["cached_tokens"].clone(), v["usage"]["cost"].is_number()), (200, json!(30), true), "{v}");
+        assert_eq!(s.calls.last().unwrap().body["provider"], json!({ "zdr": true }), "the body as it came");
+        s.usage.push_back(Used { prompt: 50, cached: 30, completion: 7 });
+        let r = answer(&mut s, &ask(&chat(true)));
+        let lines = events(&r.body);
+        let frame = lines.last().unwrap();
+        assert_eq!((frame["choices"][0]["delta"]["content"].clone(), frame["choices"][0]["finish_reason"].clone(), frame["usage"]["completion_tokens"].clone()), (json!(""), json!("stop"), json!(7)));
+        assert!(lines[..lines.len() - 1].iter().all(|l| l["usage"].is_null()), "usage on the frame alone");
+        let routed: fragment_core::models::Upstream = serde_json::from_value(json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": model })).unwrap();
+        let mut metered = fragment_core::models::Stream::default().on(&routed);
+        metered.push(&r.body, None);
+        assert_eq!(metered.usage().and_then(|u| fragment_core::models::usage_of(model, u)), Some(fragment_core::price::Usage::Tokens { model: model.into(), input: 20, cached_input: 30, cache_write: 0, output: 7 }));
+        let mut deltas = fragment_core::models::Stream::default().on(&fragment_core::models::Models::defaults().cheap);
+        deltas.push(&r.body, None);
+        assert_eq!(deltas.usage(), None, "on Workers AI, a chunk with a choice carries a delta");
     }
 
     /// Goal: what a model says of an image tells which image it was:
