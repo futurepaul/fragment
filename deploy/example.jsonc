@@ -99,7 +99,7 @@
   // provider routing, openrouter.ai/docs/guides/routing/provider-selection):
   // only zero-data-retention endpoints, the fastest first, each taking every
   // parameter the call sends, at fp8 or bf16, at most $0.15 a million
-  // tokens in and $1.00 out (the price book charges that ceiling: raise one
+  // tokens in and $0.50 out (the price book charges that ceiling: raise one
   // and the other together); Workers AI's GLM-5.3 Flash behind them and for
   // images.
   "models": {
@@ -107,12 +107,12 @@
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
                "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
                                        "quantizations": ["fp8", "bf16"],
-                                       "max_price": { "prompt": 0.15, "completion": 1.0 } } } },
+                                       "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                 "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
                 "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
                                         "quantizations": ["fp8", "bf16"],
-                                        "max_price": { "prompt": 0.15, "completion": 1.0 } } } },
+                                        "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
     "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
   },

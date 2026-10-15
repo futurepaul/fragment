@@ -17,8 +17,11 @@
 //! agent's own, and its stream is settled from its accounting frame, not
 //! its reservation; one Finite Private fails before answering (its spent
 //! window's 429, a 5xx, its model down) is made once more on Workers AI and
-//! settled as Workers AI's; a refusal of the request, and a key it refuses,
-//! are the call's; the route's `fallback` (Hermes' own switch) and `vision`
+//! settled as Workers AI's; the platform's own trouble on either API (a
+//! key refused, its credit spent, no endpoint left) falls back too, a 401
+//! or 402 logged aloud; a refusal of the request is the call's; the agent's
+//! fields past the chat completion's never reach OpenRouter; the route's
+//! `fallback` (Hermes' own switch) and `vision`
 //! run on Workers AI; a call that hangs is the caller's to give up on (the
 //! route never tries again on its own); and a job's `ai.text` runs there
 //! too, falling back the same, a tool loop among its steps.
@@ -59,6 +62,12 @@ fn tokens(model: &str, input: u64, output: u64) -> Usage {
 
 fn cached(model: &str, input: u64, cached_input: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input, cache_write: 0, output }
+}
+
+/// How many of the node's log lines so far are `event`'s.
+fn logged(s: &Suite, event: &str) -> usize {
+    let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+    log.matches(&format!("\"event\":\"{event}\"")).count()
 }
 
 fn charge(usage: &Usage) -> i64 {
@@ -140,15 +149,24 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let mut asked = chat("medium", false);
     asked["provider"] = json!({ "zdr": false, "order": ["somewhere-dear"] });
     asked["temperature"] = json!(0.3);
+    asked["plugins"] = json!([{ "id": "web" }]);
+    asked["web_search_options"] = json!({ "search_context_size": "high" });
+    asked["models"] = json!(["anthropic/claude-opus-5.5"]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&asked))?;
     let call = s.ai.calls().get(calls).cloned();
     let priced = charge(&cached(ROUTED, 30, 40, 20));
     let settled = s.eventually(wait, || settled_as(before, ROUTED, priced));
     s.ok(
-        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature as it sent it, and is settled at OpenRouter's price, its cached tokens told",
+        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature as it sent it and none of its extras (plugins, web search, other models), and is settled at OpenRouter's price, its cached tokens told",
         r.status == 200
             && tried(s, calls) == routed(1)
-            && call.as_ref().is_some_and(|c| c.body["provider"] == routing["provider"] && c.body["temperature"] == 0.3 && c.body["model"] == ROUTED && c.authorization.as_deref() == Some(platform_key.as_str()))
+            && call.as_ref().is_some_and(|c| {
+                c.body["provider"] == routing["provider"]
+                    && c.body["temperature"] == 0.3
+                    && ["plugins", "web_search_options", "models"].iter().all(|k| c.body.get(*k).is_none())
+                    && c.body["model"] == ROUTED
+                    && c.authorization.as_deref() == Some(platform_key.as_str())
+            })
             && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "body": call.map(|c| c.body), "entries": aig().len() - before }),
     );
@@ -251,15 +269,42 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[400]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     s.ok("a refusal of the request (400) is the call's: Workers AI is not asked", r.status == 400 && tried(s, calls) == private(1), format!("{} {:?}", r.status, tried(s, calls)));
+    // the platform's own trouble on an OpenAI-compatible API: not the caller's to fail for
+    let alarms = logged(s, "model.platform-key");
     s.ai.accept_key("fpk_live_another");
     let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     s.ai.accept_key(FINITE_PRIVATE_KEY);
+    let loud = s.eventually(wait, || logged(s, "model.platform-key") > alarms);
     s.ok(
-        "a key Finite Private refuses is its 401, passed through, and not fallen back from (a decision for Paul)",
-        r.status == 401 && r.text.contains("invalid_api_key") && tried(s, calls) == private(1),
-        format!("{} {:?} {}", r.status, tried(s, calls), r.text),
+        "a platform key Finite Private refuses (its 401) falls back to Workers AI, which answers, and is logged aloud",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell() && loud,
+        format!("{} {:?} {} loud={loud}", r.status, tried(s, calls), r.text),
     );
+    let (calls, before, alarms) = (s.ai.calls().len(), aig().len(), logged(s, "model.platform-key"));
+    s.ai.fail_next(&[402]);
+    s.ai.set_usage(&[Used { prompt: 20, cached: 0, completion: 9 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", true)))?;
+    let priced = charge(&tokens(FLASH, 20, 9));
+    let settled = s.eventually(wait, || settled_as(before, FLASH, priced));
+    let loud = s.eventually(wait, || logged(s, "model.platform-key") > alarms);
+    s.ok(
+        "OpenRouter's 402 (the platform's credit spent) falls back to Workers AI, streamed, settled as Workers AI's, and is logged aloud",
+        r.status == 200 && lines(&r.text).last().is_some_and(|l| l["usage"]["completion_tokens"] == 9) && tried(s, calls) == fell_from_routed() && settled && loud,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "loud": loud, "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.fail_next(&[404]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
+    s.ok(
+        "OpenRouter's 404 (no endpoint left by its routing) falls back to Workers AI, under one hold",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell_from_routed() && aig().len() == before + 1,
+        format!("{} {:?}", r.status, tried(s, calls)),
+    );
+    let calls = s.ai.calls().len();
+    s.ai.fail_next(&[400]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
+    s.ok("OpenRouter's refusal of the request (400) is the call's too", r.status == 400 && tried(s, calls) == routed(1), format!("{} {:?}", r.status, tried(s, calls)));
 
     // ---- the route's other names: on Workers AI
     let (calls, before) = (s.ai.calls().len(), aig().len());

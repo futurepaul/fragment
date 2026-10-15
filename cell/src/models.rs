@@ -17,7 +17,9 @@
 //! `calls`).
 //!
 //! A tier's call whose model fails before answering anything (not reached,
-//! 429, or a 5xx) is made once more, the same, on the deployment's fallback
+//! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
+//! platform's, also 401, 402, 403 or 404: `fragment_core::models::falls_back`,
+//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the same, on the deployment's fallback
 //! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
 //! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
 //! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
@@ -383,6 +385,10 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
             Err(e) => e.message,
         };
+        // the platform's own key refused or its credit spent: every call falls back until someone fixes it
+        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
+            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm, "why": why }));
+        }
         console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
     }
 }

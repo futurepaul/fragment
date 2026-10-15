@@ -43,24 +43,27 @@ fragment.club until cutover (decisions 34–35).
   its own price under the slot's `max_price`, and reports what the call
   cost in its usage (`usage.cost`, in credits).
 - **Shortcut:** the book's `z-ai/glm-5.3-flash` row is the routing's
-  ceiling ($0.15 in, $1.00 out per million), cached and written tokens
+  ceiling ($0.15 in, $0.50 out per million), cached and written tokens
   at the prompt's, with OpenRouter's 5.5% fee (fragment_core::price), so
   no call is charged below what OpenRouter could bill. `usage.cost` is
   not read.
-- **Risk:** a person pays up to twice the output and five times the
-  cached input that the call cost (most of an agent's prompt is a cached
-  prefix): about $0.0081 for a call of 30,000 tokens in (25,000 cached)
-  and 600 out, against $0.0028 on Workers AI's GLM-5.3 Flash. And the
-  ceiling in the config and the row in the code are two numbers that
-  must move together (xtask's test checks the example's against the
-  book).
+- **Risk:** cached input is overcharged most: a cached token is charged
+  at the prompt ceiling, $0.15 a million before fee and margin, where the
+  endpoints bill $0.012 to $0.03 for one (about five times Workers AI's
+  Flash's $0.03), and most of an agent's prompt is a cached prefix. A
+  call of 30,000 tokens in (25,000 cached) and 600 out is charged about
+  $0.0076, against $0.0028 on Workers AI's GLM-5.3 Flash; output is at
+  most the call's cost (Novita's endpoint bills $0.28 a million, under the
+  $0.50 charged). And the ceiling in the config and the row in the code
+  are two numbers that must move together (xtask's test checks the
+  example's against the book).
 - **First proof:** a person's month on the ledger against the platform's
   OpenRouter activity for the same calls (its generation ids), or a
   person asking why a turn costs more than it did on Workers AI.
 - **Delete when:** a call is settled from OpenRouter's reported cost
   (a `Usage` of the vendor's cost in micro-dollars, the fee and margin
-  on it, the ceiling still its reservation), or the ceiling is lowered
-  to what its endpoints charge.
+  on it, the ceiling still its reservation): the first change after
+  launch (the coordinator for Paul, 2026-10-15).
 
 ## The cell's Wasm budget was raised for launch
 

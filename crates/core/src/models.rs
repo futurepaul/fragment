@@ -24,17 +24,20 @@
 //! or `high` (GLM takes a missing or unknown one as `max`, the dearest;
 //! DeepSeek V4 Flash takes both, as does Finite Private's limiter, which
 //! fills in `high` only when none is sent), and usage asked for when it
-//! streams; and, on an OpenAI-compatible API, the deployment's own fields
-//! for it (`Upstream::Openai`'s `body`: OpenRouter's provider routing) over
-//! the client's (`openai_request`). Nothing else of the client's reaches
-//! the vendor: no header, no key.
+//! streams. On an OpenAI-compatible API, only the client's chat completion
+//! fields of `CLIENT_KEYS` go (`plugins`, `provider` and the like are
+//! dropped), and the deployment's own fields for it over them
+//! (`Upstream::Openai`'s `body`: OpenRouter's provider routing;
+//! `openai_request`). Nothing else of the client's reaches the vendor: no
+//! header, no key.
 //!
 //! A call that its model fails before answering anything (it is not
-//! reached, or it answers 429 or a 5xx) is made once more, the same, on the
-//! deployment's fallback model (`Tries`; Paul, 2026-10-08: "we def need
-//! fallback models"). Not a race: the second call is made only after the
-//! first has failed. An answer that began is final, and the fallback's
-//! failure is the call's.
+//! reached, or it answers 429 or a 5xx; on an OpenAI-compatible API, whose
+//! key is the platform's, also 401, 402, 403 or 404) is made once more, the
+//! same, on the deployment's fallback model (`Tries`, `falls_back`; Paul,
+//! 2026-10-08: "we def need fallback models"). Not a race: the second call
+//! is made only after the first has failed. An answer that began is final,
+//! and the fallback's failure is the call's.
 //!
 //! What a call may cost is reserved before it is made (`worst`); what it
 //! cost is read from its answer's usage (`usage_of`), priced as the model
@@ -202,11 +205,25 @@ pub const ROUTE_KEYS: [&str; 9] = ["model", "messages", "stream", "stream_option
 /// deploy checks the whole variable (xtask/src/deploy.rs).
 pub const UPSTREAM_BODY_MAX_BYTES: usize = 4 * 1024;
 
-/// The body a call to an OpenAI-compatible API sends: the bounded `input`,
-/// the slot's `body` fields over the client's (a client's own `provider`
-/// never reaches OpenRouter past the deployment's), and the model's `id`.
+/// The client's fields an OpenAI-compatible API is sent (`openai_request`):
+/// OpenAI's chat completion fields that the route, our jobs and Hermes use
+/// (Hermes v0.21.6 sends a custom provider `messages`, `tools`,
+/// `temperature`, `max_tokens` or `max_completion_tokens`, `stream` and
+/// `stream_options`: its `agent/transports/chat_completions.py`). Any other
+/// (`plugins`, `web_search_options`, `transforms`, `provider`, `models`,
+/// `n`, `user`, …) is dropped: a vendor's paid extra the book does not
+/// price, a route to another model, or a parameter its endpoints may not
+/// take (under OpenRouter's `require_parameters`, one would leave none).
+pub const CLIENT_KEYS: [&str; 14] = [
+    "messages", "tools", "tool_choice", "temperature", "top_p", "max_tokens", "max_completion_tokens", "stop", "response_format", "seed", "reasoning_effort", "parallel_tool_calls", "stream", "stream_options",
+];
+
+/// The body a call to an OpenAI-compatible API sends: the bounded `input`'s
+/// fields of `CLIENT_KEYS` and no other, the slot's `body` fields over them,
+/// and the model's `id`.
 pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
-    let mut request = input.as_object().cloned().expect("a bounded input is an object");
+    let input = input.as_object().expect("a bounded input is an object");
+    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     for (k, v) in body.into_iter().flatten() {
         assert!(!ROUTE_KEYS.contains(&k.as_str()), "a slot's body names none of the route's keys (`check`)");
         request.insert(k.clone(), v.clone());
@@ -619,17 +636,39 @@ pub fn route_named(name: Option<&str>) -> Result<Named, Refusal> {
     }
 }
 
-/// Whether an answer's status, before any of its body, sends the call on
-/// to the fallback model: the vendor's rate limit (429: Finite Private's
-/// limiter answers it when its key's window is spent), or its own failure
-/// (5xx: tonight's Workers AI answered 502 "could not route request to AI
-/// model", then 500, for five minutes; Finite Private's limiter answers 502
-/// when its model fails and 503 when finite.computer, which admits each
-/// call, does not answer). A refusal of the request itself (another 4xx)
-/// would be the fallback's too, and a 200 has begun the answer, which is
-/// final.
-pub fn falls_back(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
+/// Whether an answer's status from `upstream`, before any of its body,
+/// sends the call on to the fallback model: the vendor's rate limit (429:
+/// Finite Private's limiter answers it when its key's window is spent), or
+/// its own failure (5xx: tonight's Workers AI answered 502 "could not route
+/// request to AI model", then 500, for five minutes; Finite Private's
+/// limiter answers 502 when its model fails and 503 when finite.computer,
+/// which admits each call, does not answer). On an OpenAI-compatible API,
+/// whose key is the platform's, also the platform's own trouble there: its
+/// key refused (401) or denied (403), its account out of credit (402), or
+/// no endpoint left by its slot's routing (OpenRouter's 404): a call is
+/// not the caller's to fail for the platform's account (decision 61, as
+/// decided 2026-10-15). A refusal of the request itself (400 and any other
+/// 4xx) would be the fallback's too, and a 200 has begun the answer, which
+/// is final.
+pub fn falls_back(upstream: &Upstream, status: u16) -> bool {
+    let platforms = matches!(upstream, Upstream::Openai { .. }) && PLATFORM_KEY_REFUSALS.contains(&status);
+    status == 429 || (500..=599).contains(&status) || platforms
+}
+
+/// The statuses an OpenAI-compatible API answers about the platform's own
+/// key and account there (`falls_back`): refused, out of credit, denied,
+/// and nothing left to route to.
+pub const PLATFORM_KEY_REFUSALS: [u16; 4] = [401, 402, 403, 404];
+
+/// Why a try that answered `status` from `upstream` says the platform's own
+/// key there wants someone (its log line, loud: every call falls back
+/// until it is fixed): refused (401) or out of credit (402).
+pub fn key_alarm(upstream: &Upstream, status: u16) -> Option<&'static str> {
+    match (upstream, status) {
+        (Upstream::Openai { .. }, 401) => Some("the platform's key for this API is refused: every call falls back until it is set again (cargo xtask secret set)"),
+        (Upstream::Openai { .. }, 402) => Some("the platform's account at this API is out of credit: every call falls back until it is topped up"),
+        _ => None,
+    }
 }
 
 /// What one try of a call came to, before any of its answer's body.
@@ -680,7 +719,7 @@ impl<'a> Tries<'a> {
     pub fn after(&mut self, tried: Tried) -> Option<Model<'a>> {
         let failed = match tried {
             Tried::Unreached => true,
-            Tried::Answered(status) => falls_back(status),
+            Tried::Answered(status) => falls_back(self.model().upstream, status),
         };
         let next = match (self.done, failed, self.fell, self.fallback) {
             (false, true, false, Some(next)) => next,
@@ -1040,7 +1079,7 @@ mod tests {
     /// OpenRouter's provider routing, as Finite's slots name it
     /// (deploy/example.jsonc; decision 61).
     fn routing() -> Value {
-        json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 1.0 } } })
+        json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
     }
 
     /// Finite's own deployment's models since 2026-10-15 (deploy/example.jsonc):
@@ -1628,17 +1667,34 @@ mod tests {
     }
 
     /// Goal: what falls back is the vendor failing before it answered
-    /// anything: its rate limit (429) or its own failure (5xx). A refusal
-    /// of the request (any other 4xx) would be the fallback's too, and an
-    /// answer that began (2xx) is final. Method: every class of status.
+    /// anything: its rate limit (429) or its own failure (5xx), and, on an
+    /// OpenAI-compatible API, the platform's own key and account there
+    /// (401, 402, 403, 404), each of which a 401 and a 402 also say aloud.
+    /// A refusal of the request (400, any other 4xx) would be the
+    /// fallback's too, and an answer that began (2xx) is final. Method:
+    /// every class of status, on each kind of upstream.
     #[test]
     fn a_rate_limit_or_a_failure_falls_back() {
-        for status in [429, 500, 502, 503, 504, 520, 599] {
-            assert!(falls_back(status), "{status}");
+        let routed = openrouter().cheap;
+        let flash = workers_ai(GLM_FLASH);
+        for upstream in [&flash, &routed] {
+            for status in [429, 500, 502, 503, 504, 520, 599] {
+                assert!(falls_back(upstream, status), "{status}");
+            }
+            for status in [100, 200, 204, 301, 400, 408, 413, 422, 428, 430, 499, 600, 0] {
+                assert!(!falls_back(upstream, status), "{status}");
+            }
         }
-        for status in [100, 200, 204, 301, 400, 401, 402, 403, 404, 408, 413, 422, 428, 430, 499, 600, 0] {
-            assert!(!falls_back(status), "{status}");
+        for status in PLATFORM_KEY_REFUSALS {
+            assert!(falls_back(&routed, status), "the platform's key or account: {status}");
+            assert!(!falls_back(&flash, status), "Workers AI's binding has no key of ours: {status}");
         }
+        assert_eq!(PLATFORM_KEY_REFUSALS, [401, 402, 403, 404]);
+        assert!(key_alarm(&routed, 401).is_some_and(|w| w.contains("refused")) && key_alarm(&routed, 402).is_some_and(|w| w.contains("out of credit")));
+        for status in [403, 404, 429, 502] {
+            assert_eq!(key_alarm(&routed, status), None, "{status}");
+        }
+        assert_eq!(key_alarm(&flash, 401), None);
     }
 
     /// Goal: a call is tried on its model, then, when that one failed
@@ -1650,8 +1706,8 @@ mod tests {
     /// each again (a replay decides the same).
     #[test]
     fn a_failed_call_falls_back_once() {
-        let finite = finite();
-        for models in [&*DEFAULTS, &finite] {
+        let (finite, routed) = (finite(), openrouter());
+        for models in [&*DEFAULTS, &finite, &routed] {
             let cheap = models.route(Named::Tier(Tier::Cheap)).unwrap();
             let medium = models.route(Named::Tier(Tier::Medium)).unwrap();
             let fallback = models.fallback();
@@ -1683,6 +1739,13 @@ mod tests {
                 assert_eq!(t.after(Tried::Answered(400)), None);
                 assert_eq!(t.after(Tried::Answered(502)), None, "the tries are over");
                 assert_eq!(t.model(), cheap);
+                // the platform's key refused, or its credit spent: the call's on Workers AI, a fallback on an OpenAI-compatible API
+                for status in [401, 402, 403, 404] {
+                    let mut t = Tries::new(cheap, Some(fallback));
+                    let on_openai = matches!(cheap.upstream, Upstream::Openai { .. });
+                    assert_eq!(t.after(Tried::Answered(status)), on_openai.then_some(fallback), "{status}");
+                    assert_eq!(t.after(Tried::Answered(status)), None, "the fallback's {status} is the call's");
+                }
                 // no fallback, or one that runs where the call's own model does: the failure is the call's
                 let same = Model { named: Named::Fallback, upstream: cheap.upstream };
                 for fallback in [None, Some(same)] {
@@ -1769,36 +1832,57 @@ mod tests {
         }
     }
 
-    /// Goal: a call to an OpenAI-compatible API carries its slot's `body`
-    /// over the client's own fields of the same names (a client's
-    /// `provider` never loosens the deployment's routing), the route's
-    /// bounded fields as they were, and its model's id; a slot without one
-    /// sends the input as it was; a job's text step the same. Method: an
-    /// agent's call with its own `provider` and `temperature`, bounded on
-    /// OpenRouter's tier, with its body and without, and a step's.
+    /// Goal: a call to an OpenAI-compatible API carries the client's chat
+    /// completion fields of `CLIENT_KEYS` and no other (a paid extra, a
+    /// route to another model, a client's own `provider` dropped), its
+    /// slot's `body` over them, the route's bounded fields as they were,
+    /// and its model's id; a slot without a body sends the same fields; a
+    /// job's text step the same. Method: an agent's call with every field
+    /// it may send and many it may not, bounded on OpenRouter's tier, with
+    /// its body and without, and a step's.
     #[test]
-    fn a_slots_body_is_carried_over_the_clients() {
+    fn a_call_carries_the_clients_chat_fields_and_the_slots_body() {
         let models = openrouter();
         let tier = models.capped(Named::Tier(Tier::Cheap)).unwrap();
         let Upstream::Openai { model, body, .. } = tier.model.upstream else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
-        let asked = json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "temperature": 0.2, "provider": { "zdr": false, "order": ["somewhere-dear"] }, "max_tokens": 99, "reasoning_effort": "max" });
+        let tools = json!([{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object" } } }]);
+        let kept = json!({
+            "messages": [{ "role": "user", "content": "hi" }], "tools": tools, "tool_choice": "auto", "temperature": 0.2, "top_p": 0.9,
+            "stop": ["\n\n"], "response_format": { "type": "text" }, "seed": 7, "parallel_tool_calls": false,
+        });
+        let dropped = json!({
+            "provider": { "zdr": false, "order": ["somewhere-dear"] }, "plugins": [{ "id": "web" }], "web_search_options": { "search_context_size": "high" },
+            "transforms": ["middle-out"], "models": ["anthropic/claude-opus-5.5"], "route": "fallback", "n": 4, "user": "paul@example.com",
+            "reasoning": { "effort": "high" }, "prompt_cache_key": "k", "metadata": { "a": "b" }, "service_tier": "priority", "logprobs": true,
+        });
+        let mut asked = json!({ "model": "cheap", "max_tokens": 99, "max_completion_tokens": 120, "reasoning_effort": "max" });
+        for part in [&kept, &dropped] {
+            asked.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+        }
         let b = bound(tier, asked, true).unwrap();
         let sent = openai_request(&b.input, model, body.as_ref());
-        let mut want = b.input.as_object().cloned().unwrap();
+        let mut want = kept.as_object().cloned().unwrap();
+        want.extend([("max_tokens".into(), json!(99)), ("reasoning_effort".into(), json!("low")), ("stream".into(), json!(true)), ("stream_options".into(), json!({ "include_usage": true }))]);
         want.insert("provider".into(), routing()["provider"].clone());
         want.insert("model".into(), json!(OPENROUTER_FLASH));
-        assert_eq!(sent, Value::Object(want), "the deployment's provider routing, the client's temperature, the route's bounds");
-        assert_eq!((sent["max_tokens"].clone(), sent["reasoning_effort"].clone(), sent["stream_options"].clone()), (json!(99), json!("low"), json!({ "include_usage": true })));
-        assert_eq!(sent["provider"]["max_price"], json!({ "prompt": 0.15, "completion": 1.0 }));
-        // no body: the input and the model's id
+        assert_eq!(sent, Value::Object(want.clone()), "the client's chat fields, the route's bounds, the deployment's routing");
+        assert_eq!(sent["provider"]["max_price"], json!({ "prompt": 0.15, "completion": 0.5 }));
+        // no body: the same fields, no routing, and still none of the client's extras
         let plain = openai_request(&b.input, FINITE_PRIVATE_FLASH, None);
-        assert_eq!(plain["provider"], json!({ "zdr": false, "order": ["somewhere-dear"] }), "the client's, as before a slot named one");
-        assert_eq!(plain.as_object().unwrap().len(), b.input.as_object().unwrap().len() + 1);
+        want.remove("provider");
+        want.insert("model".into(), json!(FINITE_PRIVATE_FLASH));
+        assert_eq!(plain, Value::Object(want));
+        for key in dropped.as_object().unwrap().keys() {
+            assert!(b.input.get(key).is_some() && sent.get(key).is_none_or(|_| key == "provider") && plain.get(key).is_none(), "{key}: dropped");
+        }
+        // what the route writes is among what the client may send (its model the route's own)
+        assert!(ROUTE_KEYS.iter().all(|k| *k == "model" || CLIENT_KEYS.contains(k)));
         // a job's text step, through the same bound and request
         let t: AiText = serde_json::from_value(json!({ "prompt": "the notes", "tier": "medium" })).unwrap();
         let step = bound(models.capped(Named::Tier(Tier::Medium)).unwrap(), text_body(&t).unwrap(), true).unwrap();
         let sent = openai_request(&step.input, OPENROUTER_FLASH, body.as_ref());
         assert_eq!((sent["provider"].clone(), sent["messages"][0]["content"].clone(), sent["model"].clone()), (routing()["provider"].clone(), json!("the notes"), json!(OPENROUTER_FLASH)));
+        assert_eq!(sent.as_object().unwrap().len(), step.input.as_object().unwrap().len() + 2, "a step sends nothing the allowlist drops");
     }
 
     /// Goal: OpenRouter's stream meters as any OpenAI-compatible API's: its

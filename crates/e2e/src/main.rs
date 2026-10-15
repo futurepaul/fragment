@@ -86,7 +86,7 @@ pub fn finite_private_models(fake: &str) -> Value {
 /// The `body` of OpenRouter's slot on a node shaped as Finite's:
 /// deploy/example.jsonc's provider routing.
 pub fn openrouter_routing() -> Value {
-    json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 1.0 } } })
+    json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
 }
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).

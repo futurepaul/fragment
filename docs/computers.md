@@ -727,9 +727,10 @@ expires within 30 days. The container application is the deployment's
   stream's end, which the gateway has held open ~150 s past it), its
   timing on its `model.settled` line (docs/api.md, Models). A call whose
   model fails before
-  answering (not reached, 429, or a 5xx) is made once more on the
-  deployment's fallback model (docs/api.md, Models): the guest sees only
-  the answer.
+  answering (not reached, 429, or a 5xx; on an OpenAI-compatible API,
+  where the key is the platform's, also 401, 402, 403 or 404) is made once
+  more on the deployment's fallback model (docs/api.md, Models): the guest
+  sees only the answer.
 - **Where each model runs** is the deployment's config's `models`
   (`FRAGMENT_MODELS`; `fragment_core::models::Models`; decision 61): each
   of the route's names (`cheap`, `medium`, `fallback`, `vision`) on a
@@ -744,6 +745,16 @@ expires within 30 days. The container application is the deployment's
   | `medium` | the same as `cheap` | GLM-5.3 (`@cf/zai-org/glm-5.3`) |
   | `fallback` | Workers AI's GLM-5.3 Flash | DeepSeek V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`) |
   | `vision` | Workers AI's GLM-5.3 Flash | GLM-5.3 Flash |
+
+  **What an OpenAI-compatible API is sent.** The agent's chat completion
+  fields the route, our jobs and Hermes use (`CLIENT_KEYS`: `messages`,
+  `tools`, `tool_choice`, `temperature`, `top_p`, `max_tokens`,
+  `max_completion_tokens`, `stop`, `response_format`, `seed`,
+  `reasoning_effort`, `parallel_tool_calls`, `stream`, `stream_options`),
+  bounded as above, and no other: `plugins`, `web_search_options`,
+  `transforms`, `provider`, `models`, `n`, `user` and the rest are dropped
+  (a paid extra the book does not price, another model, or a field its
+  endpoints may not take). Workers AI's calls are as before.
 
   **A slot's `body`.** A slot on an OpenAI-compatible API may name `body`:
   fields of that API's own that every call to it carries (an agent's and
@@ -765,7 +776,7 @@ expires within 30 days. The container application is the deployment's
   ```json
   "body": {"provider": {"zdr": true, "sort": "throughput", "require_parameters": true,
                         "quantizations": ["fp8", "bf16"],
-                        "max_price": {"prompt": 0.15, "completion": 1.0}}}
+                        "max_price": {"prompt": 0.15, "completion": 0.5}}}
   ```
 
   - `zdr: true`: only endpoints with a zero-data-retention policy (it
@@ -774,9 +785,10 @@ expires within 30 days. The container application is the deployment's
     by price.
   - `require_parameters: true`: only endpoints that take every parameter
     the call sends (`tools`, `tool_choice`, `max_tokens`,
-    `reasoning_effort`, and whatever else the agent sends: one an
-    endpoint does not list rules it out, and none left is OpenRouter's
-    refusal, which is the call's).
+    `reasoning_effort`, and the agent's other chat completion fields: the
+    route sends only those of `fragment_core::models::CLIENT_KEYS`, so a
+    field no endpoint lists never reaches OpenRouter; none left would be
+    its 404, which falls back).
   - `quantizations`: fp8 or bf16 weights (an endpoint that lists none is
     `unknown`, and out).
   - `max_price`: dollars per million tokens, prompt and completion; an
@@ -786,11 +798,11 @@ expires within 30 days. The container application is the deployment's
 
   On 2026-10-15 GLM-5.3 Flash had 34 endpoints on OpenRouter, each taking
   tools and `reasoning_effort` (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`);
-  30 were ZDR (`/api/v1/endpoints/zdr`), 8 of those fp8 (none bf16), all
-  8 under the ceiling: BaseTen's two, Inceptron, Morph, Near AI, Novita,
-  SiliconFlow and Z.AI. The routing leaves those 8; the fp4 and nvfp4
-  endpoints and those whose quantization is `unknown` (Fireworks,
-  Together among them) are out. OpenRouter's stream carries its usage on a last chunk that
+  30 were ZDR (`/api/v1/endpoints/zdr`), 8 of those fp8 (none bf16), and
+  6 of those under the ceiling: BaseTen's two, Near AI, Novita, SiliconFlow
+  and Z.AI (Inceptron's $0.55 out and Morph's $1.00 are past it). The
+  routing leaves those 6; the fp4 and nvfp4 endpoints and those whose
+  quantization is `unknown` (Fireworks, Together among them) are out. OpenRouter's stream carries its usage on a last chunk that
   keeps one content-free choice (its "accounting frame"): the route
   meters it there, and the agent gets OpenAI's last chunk, usage with no
   choices. Its answers name the provider that served each call; its
@@ -814,10 +826,11 @@ expires within 30 days. The container application is the deployment's
     declares it vision-capable, but nothing tests it and its limiter takes
     at most 2 MiB a request, so `vision` stays on Workers AI. It reports
     no cached tokens.
-  - **Its refusals.** Past 2 MiB, 413; a key missing, unknown or revoked,
-    401; a model it does not serve, 400; each the call's. Its key's window
-    spent, 429; finite.computer (which admits each call) not answering,
-    503; its model failing, 502: each falls back to Workers AI. Its own
+  - **Its refusals.** Past 2 MiB, 413; a model it does not serve, 400;
+    each the call's. A key missing, unknown or revoked, 401 (the
+    platform's key: logged aloud); its key's window spent, 429;
+    finite.computer (which admits each call) not answering, 503; its model
+    failing, 502: each falls back to Workers AI. Its own
     deadlines: 120 s to a first byte, 600 s of a stream's silence.
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
     window, no rate in calls, shared by every call the deployment makes

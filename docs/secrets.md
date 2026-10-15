@@ -194,8 +194,9 @@ models, paid by their account).
   bearer token there and nowhere else; a deploy whose config names it
   refuses to go on while the store lacks it; `secret set` again rotates
   it within a minute, then revoke the old one at OpenRouter. A key
-  OpenRouter refuses (401), or an account out of credit (its 402), is the
-  call's: neither falls back.
+  OpenRouter refuses (401), or an account out of credit (its 402), falls
+  back to Workers AI, every call until it is fixed, each logged aloud as
+  `model.platform-key` (the coordinator for Paul, 2026-10-15).
 - **Its routing** is the slots' `body`, not a secret: it is in the cell's
   `FRAGMENT_MODELS` (docs/computers.md, Models).
 
@@ -221,8 +222,9 @@ runs there (`models.cheap.key`, `models.medium.key`), bound as
 - **Rotating it**: finite-mono issues a new key (its admin's rotate),
   `secret set` it again; warm isolates use it within a minute, with no
   deploy; then finite-mono revokes the old one. Until a value is set, or
-  if it is revoked, a call answers the limiter's 401 (the call's: it does
-  not fall back; a decision for Paul).
+  if it is revoked, a call's 401 from the limiter falls back to Workers
+  AI and is logged aloud (`model.platform-key`; 2026-10-15, superseding
+  the 2026-10-14 rule that it was the call's).
 - **A preview** names no `models` (deploy/e2e.jsonc), so it needs no
   key, and its tiers run on Workers AI. The local e2e's
   `finite-private` section binds a test value in its local store (one

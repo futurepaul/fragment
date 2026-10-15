@@ -1661,8 +1661,9 @@ a Workers AI model through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
 payer's and the agent's identities), or a model on an OpenAI-compatible
 API with the deployment's key for it and nothing else of the call's
-but the deployment's own fields for that API (its slot's `body`, over
-the agent's of the same names: OpenRouter's provider routing). Unnamed,
+but its chat completion fields (`CLIENT_KEYS`: the agent's `plugins`,
+`provider` and the like are dropped) and the deployment's own fields for
+that API (its slot's `body`: OpenRouter's provider routing). Unnamed,
 `cheap` is GLM-5.3 Flash (`@cf/zai-org/glm-5.3-flash`), `medium` GLM-5.3
 (`@cf/zai-org/glm-5.3`), `vision` GLM-5.3 Flash and the fallback DeepSeek
 V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`), all on Workers AI;
@@ -1673,10 +1674,14 @@ Finite Private's (`glm-5-3-flash`), and `vision` and the fallback on
 Workers AI's GLM-5.3 Flash. Each is a model the price book prices.
 
 A tier's call whose model fails before answering anything (not reached,
-429, or a 5xx) is made once more, the same, on the deployment's fallback
-model, and its answer is the call's: settled from its usage at
-its prices, under the call's one hold. An answer that began is final; a
-refusal of the request (another 4xx) is the call's; when the fallback
+429, or a 5xx; on an OpenAI-compatible API, where the key is the
+platform's, also 401, 402, 403 or 404: its key refused, its credit spent,
+or no endpoint left by its routing, none of them the caller's to fail
+for) is made once more, the same, on the deployment's fallback model,
+and its answer is the call's: settled from its usage at its prices,
+under the call's one hold; a 401 or 402 is also logged aloud
+(`model.platform-key`). An answer that began is final; a refusal of the
+request (400, another 4xx) is the call's; when the fallback
 fails too, its failure is the call's, released, after two tries in all.
 `vision` and transcriptions have no fallback. A job's text step falls
 back the same, and its output's `model` names the model that answered.

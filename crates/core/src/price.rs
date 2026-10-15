@@ -267,6 +267,7 @@ pub struct PriceBook {
 ///
 /// GLM-5.3 Flash through OpenRouter (`z-ai/glm-5.3-flash`, Finite's tiers'
 /// since 2026-10-15; decision 61) is at the ceiling its slot's `body` sets
+/// ($0.15 in, $0.50 out per million; the coordinator for Paul, 2026-10-15)
 /// OpenRouter's routing to (`provider.max_price`, dollars per million
 /// tokens: deploy/example.jsonc), never at what one call's provider
 /// happened to bill, so a call is never charged below what OpenRouter could
@@ -291,8 +292,8 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 9] = [
     // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
     ("glm-5-3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // OpenRouter's (Finite's tiers'): its ceiling, $0.15 in (cached and
-    // written too) and $1.00 out, with OpenRouter's 5.5% for the book's 5%
-    (crate::models::OPENROUTER_FLASH, TokenPrices { input: openrouter(150_000), cached_input: openrouter(150_000), cache_write: openrouter(150_000), output: openrouter(1_000_000) }),
+    // written too) and $0.50 out, with OpenRouter's 5.5% for the book's 5%
+    (crate::models::OPENROUTER_FLASH, TokenPrices { input: openrouter(150_000), cached_input: openrouter(150_000), cache_write: openrouter(150_000), output: openrouter(500_000) }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
@@ -694,7 +695,7 @@ mod tests {
     }
 
     /// Goal: OpenRouter's GLM-5.3 Flash is priced at the ceiling its slot
-    /// routes under ($0.15 in, $1.00 out per million: deploy/example.jsonc),
+    /// routes under ($0.15 in, $0.50 out per million: deploy/example.jsonc),
     /// a cached or written token at the prompt's, and its cost basis covers
     /// that ceiling with OpenRouter's 5.5% fee, not AI Gateway's 5% (a
     /// decision for Paul). Method: its row; a million of each class, whose
@@ -704,20 +705,20 @@ mod tests {
     fn openrouters_flash_is_priced_at_its_ceiling_and_fee() {
         let book = PriceBook::defaults();
         let row = book.models.iter().find(|m| m.model == crate::models::OPENROUTER_FLASH).unwrap().price;
-        assert_eq!(row, TokenPrices { input: 150_715, cached_input: 150_715, cache_write: 150_715, output: 1_004_762 });
+        assert_eq!(row, TokenPrices { input: 150_715, cached_input: 150_715, cache_write: 150_715, output: 502_381 });
         let million = |input, cached_input, cache_write, output| book.price(&tokens(crate::models::OPENROUTER_FLASH, input, cached_input, cache_write, output)).unwrap();
         let m = 1_000_000;
-        for (p, ceiling) in [(million(m, 0, 0, 0), 150_000), (million(0, m, 0, 0), 150_000), (million(0, 0, m, 0), 150_000), (million(0, 0, 0, m), 1_000_000)] {
+        for (p, ceiling) in [(million(m, 0, 0, 0), 150_000), (million(0, m, 0, 0), 150_000), (million(0, 0, m, 0), 150_000), (million(0, 0, 0, m), 500_000)] {
             let with_fee = ceiling * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP);
             assert!((with_fee..=with_fee + 1).contains(&p.cost), "{p:?}: OpenRouter bills at most {with_fee} µ$ with its fee");
             assert!(p.charge >= p.cost * 3 / 2, "{p:?}: the margin on top");
         }
         assert_eq!(million(m, 0, 0, 0), Priced { list: 150_715, cost: 158_251, charge: 237_377 });
-        assert_eq!(million(0, 0, 0, m), Priced { list: 1_004_762, cost: 1_055_001, charge: 1_582_501 });
-        assert_eq!(book.price(&tokens(crate::models::OPENROUTER_FLASH, 26_000, 0, 0, 200)).unwrap(), Priced { list: 4_120, cost: 4_326, charge: 6_489 });
+        assert_eq!(million(0, 0, 0, m), Priced { list: 502_381, cost: 527_501, charge: 791_251 });
+        assert_eq!(book.price(&tokens(crate::models::OPENROUTER_FLASH, 26_000, 0, 0, 200)).unwrap(), Priced { list: 4_020, cost: 4_221, charge: 6_331 });
         // an agent's call, most of its prompt cached: dearer than on Workers AI, which prices a cached token at a fifth
         let call = |model: &str| book.price(&tokens(model, 5_000, 25_000, 0, 600)).unwrap().charge;
-        assert_eq!((call(crate::models::OPENROUTER_FLASH), call(FLASH)), (8_071, 2_835));
+        assert_eq!((call(crate::models::OPENROUTER_FLASH), call(FLASH)), (7_597, 2_835));
     }
 
     /// Goal: decision 24's formula on S3's simple turn. Method: a Flash

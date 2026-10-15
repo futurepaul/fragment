@@ -472,7 +472,9 @@ speaking Cloudflare's APIs) returns once this product works.
     Flash from one agent with 502 "could not route request to AI model",
     then 500, for five minutes, and the agent's turn gave up). A tier's
     call whose model fails before answering anything (not reached, 429, or
-    a 5xx) is made once more, the same, on the deployment's fallback model
+    a 5xx; since 2026-10-15, on an OpenAI-compatible API, where the key is
+    the platform's, also 401, 402, 403 or 404: decision 61) is made once
+    more, the same, on the deployment's fallback model
     (`fallback_model` in its config, `FRAGMENT_FALLBACK_MODEL`; one the
     price book prices): DeepSeek V4 Flash unless named, behind the cheap
     tier's GLM-5.3 Flash (for a few hours on 2026-10-09 the two were the
@@ -1003,10 +1005,10 @@ Private stays possible by config.
       carries over the agent's (docs/computers.md, Models): OpenRouter's
       provider routing, `{"provider": {"zdr": true, "sort": "throughput",
       "require_parameters": true, "quantizations": ["fp8", "bf16"],
-      "max_price": {"prompt": 0.15, "completion": 1.0}}}`: only
+      "max_price": {"prompt": 0.15, "completion": 0.5}}}`: only
       zero-data-retention endpoints, the fastest first, each taking every
       parameter sent, fp8 or bf16, at most $0.15 a million tokens in and
-      $1.00 out (8 of GLM-5.3 Flash's 34 endpoints on 2026-10-15). The
+      $0.50 out (6 of GLM-5.3 Flash's 34 endpoints on 2026-10-15). The
       body is generic (any OpenAI-compatible API's own fields, never one
       the route writes, 4 KiB at most), and nothing in the cell is
       OpenRouter's: an OpenAI-compatible API's stream is metered from its
@@ -1019,10 +1021,26 @@ Private stays possible by config.
       Gateway's 5%, then the margin (docs/ledger.md, "OpenRouter's
       price"). Price book 7. Settling from OpenRouter's reported
       `usage.cost` instead is a follow-up (docs/technical-debt-ledger.md).
-    - **Its refusals** are the call's, as any request's (decision 23's
-      rule): a key it refuses (401), an account out of credit (402), and
-      no endpoint left by the routing (its "No endpoints found", a 404);
-      a 429 or 5xx falls back to Workers AI.
+    - **The platform's trouble falls back** (the coordinator for Paul,
+      2026-10-15): on an OpenAI-compatible API, whose key is the
+      platform's, a key refused (401) or denied (403), an account out of
+      credit (402), or no endpoint left by the routing (its "No endpoints
+      found", a 404) answered before any data is made once more on the
+      tier's fallback model, as a 429 or a 5xx is: it is the platform's
+      account, not the caller's, and must not take agents down. A 401 or
+      a 402 is also logged aloud (`model.platform-key`, an error line
+      naming the model, its status and what to do). A 400 is the call's,
+      as any refusal of the request.
+    - **What it is sent.** Only the agent's chat completion fields
+      (`fragment_core::models::CLIENT_KEYS`: messages, tools, tool_choice,
+      temperature, top_p, max_tokens, max_completion_tokens, stop,
+      response_format, seed, reasoning_effort, parallel_tool_calls,
+      stream, stream_options; Hermes v0.21.6 sends no other), then the
+      slot's `body`: OpenRouter's paid extras (`plugins`,
+      `web_search_options`), its routing fields (`provider`, `models`,
+      `route`, `transforms`) and anything else are dropped, so no call
+      buys what the book does not price, and none rules out every
+      endpoint under `require_parameters`.
     - **Going live** (Paul's): make the key in the platform's OpenRouter
       account (credit on it, a credit limit as a backstop, ZDR also on in
       its privacy settings); `cargo xtask secret set
@@ -1067,10 +1085,9 @@ Private stays possible by config.
       prompts uncached until Finite Private reports its cached tokens.
       Price book 5.
     - **Decisions for Paul.** (a) The price above. (b) A key Finite
-      Private refuses (401: revoked, or never set) and a denial (403) are
-      the call's, as any refusal of a request is: falling back on them
-      too would keep agents up through a revoked key, on Workers AI's
-      limit. (c) A text call past 2 MiB is the limiter's 413, passed
+      Private refuses (401: revoked, or never set) and a denial (403) were
+      the call's; since 2026-10-15 they fall back, as OpenRouter's do
+      (above), keeping agents up on Workers AI's limit. (c) A text call past 2 MiB is the limiter's 413, passed
       through (Workers AI takes 6 MiB): an agent's context near its
       393,216 tokens is about that size.
 

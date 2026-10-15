@@ -1506,7 +1506,7 @@ mod tests {
         };
         let (cell, b) = rendered("deploy/example.jsonc");
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
-        let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 1.0 } } });
+        let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
         let flash = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
         assert_eq!(models, json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash }), "no key in the cell's variable, the routing in it");
