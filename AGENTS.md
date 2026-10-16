@@ -311,13 +311,18 @@ prebuilt bundle is in the debt ledger).
   no deletion): his push, or the pull request he merges into it, is the
   approval of a production deploy. Each deploys from a GitHub
   environment, `preview` or `production`, that only its branch may use,
-  holding the variables `DEPLOY_CONFIG` (the whole deploy config: names
-  and paths, no secret) and `DEPLOY_HOST` (its platform's host, whose
-  `/healthz` must then answer the commit), and the secrets
-  `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token) and the
-  preview's `PREVIEW_TEST_SECRET`; the job writes those two where a CI
-  config names them, `~/.config/fragment/secrets/cloudflare-api-token`
-  and `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
+  holding the variable `DEPLOY_HOST` (its platform's host, whose
+  `/healthz` must then answer the commit) and the secrets `DEPLOY_CONFIG`
+  (the whole deploy config, names and paths: a secret so the public
+  repo's logs never show it, set from a file kept beside the config a
+  deploy by hand takes, as a secret is never read back),
+  `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's
+  `PREVIEW_TEST_SECRET`, and, optional but recommended,
+  `CLOUDFLARE_ACCOUNT_ID`, named only so the job's logs mask the account
+  wherever wrangler or xtask print it. The job writes the token and the
+  test secret where a CI config names them,
+  `~/.config/fragment/secrets/cloudflare-api-token` and
+  `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
   config names is pinned by digest: a canary is built by a deploy by
   hand, where Docker runs, and its digest then pinned in the preview's
   `DEPLOY_CONFIG` (docs/computers.md, "One round"). Other branches'

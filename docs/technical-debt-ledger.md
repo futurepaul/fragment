@@ -123,12 +123,14 @@ fragment.club until cutover (decisions 34–35).
 - **Shortcut:** CI deploys with `--pinned-only` (xtask/src/deploy.rs),
   which refuses a config with an image built from the tree. The canary,
   and production's next stable, are built by a deploy by hand where
-  Docker runs, and the digest that deploy names is copied into the
-  environment's `DEPLOY_CONFIG` variable.
-- **Risk:** the variable and the config a deploy by hand takes drift: a
-  canary built by hand and not pinned in the variable is put back at the
-  variable's digest by master's next deploy, telling the canary group of
-  an update no round made; and a round waits on a person with Docker.
+  Docker runs, and the digest that deploy names is copied into the CI
+  config's file and the environment's `DEPLOY_CONFIG` secret set again
+  from it.
+- **Risk:** the secret (never read back) and the config a deploy by hand
+  takes drift: a canary built by hand and not pinned in the secret is
+  put back at the secret's digest by master's next deploy, telling the
+  canary group of an update no round made; and a round waits on a person
+  with Docker.
 - **First proof:** a canary computer told an update is ready after a
   master deploy that no round built.
 - **Delete when:** a workflow run by hand builds an image on a builder

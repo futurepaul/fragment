@@ -78,8 +78,9 @@ speaking Cloudflare's APIs) returns once this product works.
    production. Only Paul updates `production`: his push, or the pull
    request he merges into it, is a production deploy's approval. Each
    deploys from a GitHub environment (`preview`, `production`) that only
-   its branch may use, holding its config whole (the variable
-   `DEPLOY_CONFIG`: names and paths, as a stranger's file is) and its
+   its branch may use, holding its config whole (the secret
+   `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out
+   of the public repo's logs) and its
    Cloudflare token; its images are pinned by digest (`xtask deploy
    --pinned-only`), and one is built by a deploy by hand
    (docs/computers.md, "Stable and canary").

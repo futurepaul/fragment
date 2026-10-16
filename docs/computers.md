@@ -296,12 +296,12 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   image tells it an update is ready, as any deploy that changes an image
   tells (above).
 - **CI's deploys build no image** (`--pinned-only`; ci.yml's `deploy`):
-  every image of the config it deploys from (its environment's
-  `DEPLOY_CONFIG`) is kept at a digest, the canary's too, as a runner,
-  with no layer cache, would make a new digest at every deploy (below).
-  So a canary built by hand is pinned there next, at the digest that
-  deploy names, or master's next deploy puts the canary back where the
-  variable has it.
+  every image of the config it deploys from (its environment's secret
+  `DEPLOY_CONFIG`, set from a file, as a secret is never read back) is
+  kept at a digest, the canary's too, as a runner, with no layer cache,
+  would make a new digest at every deploy (below). So a canary built by
+  hand is pinned there next, at the digest that deploy names, or
+  master's next deploy puts the canary back where the secret has it.
 - **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
   frontend, that don't change the hermes image shouldn't require a hermes
   image rollout"). The image's inputs are what it runs, and no more:

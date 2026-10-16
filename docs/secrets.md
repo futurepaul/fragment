@@ -147,9 +147,16 @@ environment (`preview` or `production`) holds the secrets
 also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
 DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
 `~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
-job alone; the config it deploys from (the variable `DEPLOY_CONFIG`)
-names those two paths, and no `stripe.key_file`, which a runner lacks.
-Paul sets them in the repository's settings.
+job alone. The config it deploys from is the secret `DEPLOY_CONFIG`, though
+it holds names and paths alone: the repo is public, and a variable is
+shown in its job's log. It names those two paths, and no
+`stripe.key_file`, which a runner lacks; a secret is never read back, so
+it is set from a file kept beside the config a deploy by hand takes.
+`CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
+masked: the runner masks each secret its job names wherever it appears
+in the job's logs, so the account id in wrangler's and xtask's output
+(registry paths, URLs) is `***`. The job runs without it. Paul sets them
+in the repository's settings.
 
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 

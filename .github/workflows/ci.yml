@@ -195,12 +195,13 @@ jobs:
   # `production` (a protected branch): his push, or the pull request he
   # merges into it, is the approval. Each deploys from a GitHub environment
   # of its name, `preview` or `production`, which the repo's settings let
-  # only its branch use, and which holds the variables DEPLOY_CONFIG (the
-  # whole deploy config, JSONC: names and paths, no secret) and DEPLOY_HOST
-  # (its platform's host), the secret CLOUDFLARE_API_TOKEN (wrangler's,
-  # and the DNS token), and, the preview's, PREVIEW_TEST_SECRET. Every
-  # computer image is pinned by digest (`--pinned-only`): a runner builds
-  # none (xtask/src/deploy.rs, `pinned_only`, says why).
+  # only its branch use, and which holds the variable DEPLOY_HOST (its
+  # platform's host) and the secrets DEPLOY_CONFIG (the whole deploy
+  # config, JSONC: names and paths, a secret only so the public repo's
+  # logs never show it), CLOUDFLARE_API_TOKEN (wrangler's, and the DNS token),
+  # the preview's PREVIEW_TEST_SECRET, and, optional, CLOUDFLARE_ACCOUNT_ID
+  # (below). Every computer image is pinned by digest (`--pinned-only`): a
+  # runner builds none (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
     needs: [check, e2e]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
@@ -253,12 +254,16 @@ jobs:
       # config names (deploy/example.jsonc): the token, its DNS token too,
       # and the preview's test secret, each 0600. printf is the shell's
       # own, so no value is ever a process's argument, and nothing here
-      # echoes one. The config, a variable, is in the log as it is.
+      # echoes one. CLOUDFLARE_ACCOUNT_ID is named only to be masked: the
+      # runner masks every secret a job names, wherever it appears in the
+      # job's logs (wrangler's and xtask's registry paths and URLs); unset,
+      # it is empty and masks nothing.
       - env:
-          DEPLOY_CONFIG: ${{ vars.DEPLOY_CONFIG }}
+          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PREVIEW_TEST_SECRET: ${{ secrets.PREVIEW_TEST_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID_MASKED: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           umask 077
           for v in DEPLOY_CONFIG DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
