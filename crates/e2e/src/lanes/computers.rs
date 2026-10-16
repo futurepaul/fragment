@@ -262,6 +262,100 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     Ok(8)
 }
 
+/// The bound checks (r4, r6: a sick container after a wake, and a sleep
+/// that never ended; #362: a start from a snapshot that came up dead), each
+/// skipped off the stub and the fakes.
+const BOUND_CHECKS: [&str; 4] = [
+    "a start that waits for its guest, as one from a snapshot does, is up once its guest reads its view",
+    "one whose guest never reads it came up dead: the same wake starts it again from its save (#362)",
+    "a sleep whose backups never answer (a sick container's) fails at their bound, and keeps its container, saying why",
+    "its backups answering again, its owner's sleep saves it, and it sleeps",
+];
+
+/// A start that waits for its guest, as a start from a snapshot does (local
+/// workerd takes no snapshots: the lever's `alive-check` makes a start from
+/// the save wait so, and with `freeze` stops its guest so it never reads its
+/// view), and a sleep whose backups never answer (the lever's
+/// `hang-backups`: the container's `sandbox-shim` never answers, and its
+/// saves' backups are bounded by the lever's few seconds). Starts and ends
+/// asleep.
+fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let asleep = api.signed(c.owner, "GET", &path(""), None)?.body;
+    let g = asleep["generation"].as_u64().unwrap_or(0);
+    // waited for, and heard: up at once, the start it made
+    let save = newest_save(api, c.id);
+    let check = lever_with(api, c.id, json!({ "op": "alive-check", "ms": 30_000 }))?;
+    let r = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    s.ok(
+        BOUND_CHECKS[0],
+        asleep["phase"] == "asleep" && check.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && r.body["restored"]["from"] == "backup" && r.body["restored"]["save"] == save["id"],
+        format!("{check} / {r}"),
+    );
+    // its guest frozen as it starts: never heard, the start is dead, and the
+    // same wake starts the image and the save again, nothing gone back
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let save = newest_save(api, c.id);
+    let wait = Duration::from_secs(5);
+    let check = lever_with(api, c.id, json!({ "op": "alive-check", "ms": wait.as_millis() as u64, "freeze": true }))?;
+    let t0 = std::time::Instant::now();
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let took = t0.elapsed();
+    let restored = &woke.body["restored"];
+    s.ok(
+        BOUND_CHECKS[1],
+        slept.body["phase"] == "asleep"
+            && check.status == 200
+            && woke.body["phase"] == "awake"
+            && woke.body["generation"].as_u64() == Some(g + 3)
+            && restored["generation"].as_u64() == Some(g + 3)
+            && restored["from"] == "backup"
+            && restored["save"] == save["id"]
+            && restored["rollback"] == false
+            && notice(&woke.body, "wont_wake").is_null()
+            && took >= wait,
+        format!("woken in {took:.1?}; {woke}"),
+    );
+    // a sick container's backups: they never answer, and its owner's sleep
+    // fails at their bound (the lever's), awake, its container kept
+    std::thread::sleep(QUEUE_DRAIN);
+    let generation = woke.body["generation"].clone();
+    let before = newest_save(api, c.id);
+    let bound = Duration::from_secs(5);
+    let hang = lever_with(api, c.id, json!({ "op": "hang-backups", "ms": bound.as_millis() as u64 }))?;
+    let t0 = std::time::Instant::now();
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let took = t0.elapsed();
+    let kept = lever(api, c.id, "saves")?;
+    let why = r.body["why"].as_str().unwrap_or("");
+    // the hold (the stub answers at once) and the unhold are seconds more
+    s.ok(
+        BOUND_CHECKS[2],
+        hang.status == 200
+            && r.body["phase"] == "awake"
+            && r.body["generation"] == generation
+            && why.contains("could not save")
+            && why.contains(&format!("no answer within {} ms", bound.as_millis()))
+            && newest_save(api, c.id) == before
+            && kept.body["unsavedSince"].is_i64()
+            && kept.body["hangBackups"].as_u64() == Some(bound.as_millis() as u64)
+            && took >= bound
+            && took < bound + Duration::from_secs(30),
+        format!("answered in {took:.1?}; {r} / {kept}"),
+    );
+    // the shim back: the next sleep saves, and it sleeps
+    let unhang = lever_with(api, c.id, json!({ "op": "hang-backups", "ms": 0 }))?;
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let newest = newest_save(api, c.id);
+    s.ok(
+        BOUND_CHECKS[3],
+        unhang.status == 200 && r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != before["id"],
+        format!("{r} / {newest}"),
+    );
+    Ok(())
+}
+
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
 /// it (docs/explorations/pi-durable.md, P1): until then a crash's restore
@@ -1114,10 +1208,11 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if fakes && scripted {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
         replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        bound_checks(s, api, &crashing)?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }

@@ -160,6 +160,18 @@ file is the newer word, and decision 18 points here.
   the journal (docs/bridge.md, "What a rollback forgot").
   docs/computers.md, "What its owner is told", has every way a computer
   stops and what its person sees.
+- **A sleep ends, and a dead wake starts again (2026-10-16).** On the
+  preview's canary rounds r4 and r6 a wake from a snapshot came up dead
+  (#362: the DO's execs answered for a second, then nothing, and its
+  guest never egressed), so its sleep's backup never returned: the
+  Sandbox SDK times out nothing, and a save past its deadline was asked
+  for again, for good, so the computer stayed sleeping, held and owed, and
+  its owner's sleep never answered. Now every container step of the DO is
+  bounded (docs/computers.md, "Bounds"), a save past its bound or its
+  deadline fails as any does (so I5's bound ends a sick one), and a start
+  from a snapshot is up only once its guest reads its view: one unheard
+  in 45 s is answered as a snapshot that would not start, from the image
+  and the save in the same wake.
 - **An update is told, never forced (2026-10-09).** Paul: every deploy
   needed him to restart his computer, which a person would not know to
   do. A computer awake on another image than its next start runs (the

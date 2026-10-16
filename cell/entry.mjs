@@ -142,6 +142,46 @@ async function tail(stream, keep) {
   return new TextDecoder().decode(last);
 }
 
+// A container step that answered nothing within its bound: its name
+// (`step`) and the bound (`ms`) say which, in its message too, so the
+// Rust side's failure (a save's, a start's, a stop's) says it.
+class Overdue extends Error {
+  constructor(step, ms) {
+    super(`${step}: no answer within ${ms} ms`);
+    this.name = "Overdue";
+    this.step = step;
+    this.ms = ms;
+  }
+}
+
+// `run(signal)`, a step the Computer DO bounds (computer.rs names each
+// bound and why): past `ms` its signal aborts and the step fails as
+// `Overdue`, whether or not `run` heeds the abort. The Sandbox SDK's calls
+// heed it and clean up after it (an upload aborted, the shim's stdin
+// closed), but "never time out anything" themselves, and neither the
+// runtime's snapshot nor its destroy takes a signal; a sick container
+// answers none of them (r4, r6). A late answer, or a late failure, is no
+// one's to hear.
+async function bounded(step, ms, run) {
+  if (!(ms > 0)) throw new Error(`${step}: a step is bounded`);
+  const abort = new AbortController();
+  const running = Promise.resolve().then(() => run(abort.signal));
+  running.catch(() => {});
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const overdue = new Overdue(step, ms);
+      abort.abort(overdue);
+      reject(overdue);
+    }, ms);
+  });
+  try {
+    return await Promise.race([running, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // A computer's container (docs/computers.md), for the Rust `ComputerCell`
 // (computer.rs), which reaches it as `ctx.computerHost`. Each method is one
 // runtime call and its plumbing. Every call that touches the container
@@ -310,20 +350,22 @@ class ContainerHost {
   }
 
   // Saves `dir`, leaving out what `exclude` names (gitignore patterns,
-  // relative to `dir`): its record.
-  async backup(generation, dir, exclude) {
+  // relative to `dir`): its record, within `ms` (`Overdue` past it).
+  async backup(generation, dir, exclude, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    return this.#backups.backup({ dir, name: `generation ${generation}`, exclude: exclude || [] });
+    const options = { dir, name: `generation ${generation}`, exclude: exclude || [] };
+    return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
   }
 
-  // Restores `record` into its directory: null once it is in place, or
-  // `{unusable}` when the save itself will never restore (its archive gone
-  // or altered: the SDK's BACKUP_NOT_FOUND and BACKUP_INTEGRITY), which the
-  // Rust side tells from a failure that may pass (it throws).
-  async restore(generation, record) {
+  // Restores `record` into its directory within `ms` (`Overdue` past it):
+  // null once it is in place, or `{unusable}` when the save itself will
+  // never restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND
+  // and BACKUP_INTEGRITY), which the Rust side tells from a failure that
+  // may pass (it throws).
+  async restore(generation, record, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     try {
-      await this.#backups.restore(record);
+      await bounded(`the restore of ${record.dir}`, ms, (signal) => this.#backups.restore(record, { signal }));
       return null;
     } catch (e) {
       if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
@@ -333,13 +375,15 @@ class ContainerHost {
     }
   }
 
-  async forget(record) {
-    await this.#backups.delete(record);
+  // Deletes `record`'s archive within `ms` (`Overdue` past it).
+  async forget(record, ms) {
+    await bounded(`the delete of record ${record.id}`, ms, (signal) => this.#backups.delete(record, { signal }));
   }
 
-  async snapshot(generation, name) {
+  // A snapshot of the container within `ms` (`Overdue` past it): its id.
+  async snapshot(generation, name, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    const s = await this.#c.snapshotContainer({ name });
+    const s = await bounded("the snapshot", ms, () => this.#c.snapshotContainer({ name }));
     return s.id;
   }
 
@@ -353,11 +397,14 @@ class ContainerHost {
 
   // Destroys the container if it is still this generation's (`0`: whatever
   // runs, an earlier start's or one an earlier isolate left), and waits for
-  // it to be gone (lesson 6: never start before `running` is false).
-  async destroy(generation, reason) {
+  // it to be gone (lesson 6: never start before `running` is false), all
+  // within `ms`: whether it is gone by then is the answer.
+  async destroy(generation, reason, ms) {
     if (generation !== 0 && generation !== this.#generation) return false;
-    if (this.#c.running) await this.#c.destroy(reason).catch(() => {});
-    for (let i = 0; i < 100 && this.#c.running; i++) await new Promise((r) => setTimeout(r, 100));
+    if (!(ms > 0)) throw new Error("a destroy is bounded");
+    const t0 = Date.now();
+    if (this.#c.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
+    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
     return !this.#c.running;
   }
 

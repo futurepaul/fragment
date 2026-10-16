@@ -74,6 +74,12 @@ container starts until someone asks again).
   itself); after `computers.unsaved_max_ms` (30 minutes, Paul's,
   2026-10-08) of failed tries it sleeps unsaved, says so, and its next
   wake is a rollback. An idle stop by the runtime is only the safety net.
+  Each of its steps is bounded (below, "Bounds"): a save whose backups
+  never answer (a sick container's, r4 and r6) fails at its bound as one
+  that says so does, so it too is kept, tried again and ended by the
+  bound; and a save that never reports (its isolate gone with it) failed
+  at the lifecycle's deadline for it (`SAVE_DEADLINE_MS`, 10 minutes).
+  A try under way as the bound passes ends within its own bounds first.
 - **Restart** (its owner's: below, "What its owner is told"): running,
   its sleep (the hold, the save, the stop) then a start at once; a save
   that fails keeps no container, since its owner asked. Asleep or won't
@@ -86,7 +92,17 @@ container starts until someone asks again).
   "temporarily unavailable" is retried with backoff. A start from the
   snapshot that fails (or whose container stops before it comes up)
   forgets the snapshot, and the computer starts again from the image and
-  the save in the same wake, with no strike against it. A start whose
+  the save in the same wake, with no strike against it. So does one that
+  comes up dead (#362): a container Cloudflare restores from a snapshot
+  can take the DO's execs for a second and then answer nothing, its guest
+  never heard from, while its start looked fine. A start from a snapshot
+  is up only once its guest has read its own view (`GET /api/computer`,
+  which an image reads as it starts: below, "The guest's contract")
+  within 45 s (`ALIVE_MS`: a healthy guest reads it within 2 s; one whose
+  first tries came before its intercepts were set waits out its backoff);
+  one unheard by then is dead, its snapshot forgotten and its container
+  destroyed, logged as `{snapshot: "dead"}`, and the same wake starts the
+  image and the save. A start from the image is not waited for so. A start whose
   save will never restore (its archive is gone or altered: the SDK's
   `BACKUP_NOT_FOUND` or `BACKUP_INTEGRITY`) marks that save unusable and
   starts again at once from the save before it, no strike either; with
@@ -123,6 +139,8 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
 | **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
 | **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
+| **A wake from a snapshot that comes up dead** (#362: started, then no exec answered and its guest never read its view) | unheard 45 s after its start; the image and the same save, in the same wake | it was awake and answered no one: messages unanswered, and its sleep's save hung for good (r4, r6) | nothing: nothing is lost, its wake 45 s slower |
+| **A sleep whose backups never answer** (a sick container's) | its save fails at its bound (8 minutes), as one that fails | it stayed `sleeping`, held, answering no one, and owed as awake, for good; its owner's sleep never answered (r4, r6) | as a sleep whose save fails: kept, the `unsaved` notice, tried again, and the bound ends it |
 | **Won't wake**: three failed starts in a row, three crashes, or no save left to fall back to | `Phase::Failed` | Settings' "State: wont wake" and the platform's words / messages go unanswered, nothing said; and the shell's own presence wake (an owner's) silently tried it again every minute the person was there | a `wont_wake` notice in plain words, the platform's beside them, and Restart; the shell no longer wakes it on presence; after a restart that fails again, "still won't start", and the deployment's support link, or the details to give whoever runs it |
 | **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
 | **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
@@ -258,7 +276,10 @@ meters at most two intervals, before it and after it), so nothing is
 charged and nothing refunded. The window ends early when a save works,
 its owner restarts it, or its container goes; what comes after it, and
 whatever holds it past the bound (its person using it), is metered as
-any.
+any. A save that hangs fails only at its bound (below, "Bounds"), so the
+time its first failing try took, at most the hold's and the save's
+bounds (about 10 minutes), comes before the window and is metered, as a
+last try's past the bound is.
 
 **The agent.** A turn a restart cut ends as lost, and the agent's next
 turn there is told what was cut (docs/bridge.md, "The turn after a cut one
@@ -452,6 +473,14 @@ cell's `containers_pid_namespace` compatibility flag, so `wrangler dev`
 matches Containers). PIDs repeat from one start to the next: a lock
 that names a PID from before a sleep can name a live process after it.
 
+As its entrypoint starts, an image reads its own view (`GET
+/api/computer`, below, "The fragment API"), as our bridge and our Hermes
+image's boot do, retrying at least every 30 s until it answers: that read
+is how the DO knows a start from a snapshot came up alive (above,
+Lifecycle, #362). An image that never reads it wakes as a dead one does:
+45 s later, from the image and its save. A snapshot keeps the files, not
+the processes: a start from one runs the entrypoint again.
+
 ### What every image carries
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
@@ -609,6 +638,40 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   the save its life's sleep took is none. Its owner is told of the newest
   until they say they saw it (`went_back`: "What its owner is told").
   Nothing's correctness depends on the guest reading either.
+
+### Bounds
+
+Every step the Computer DO takes in a container ends within its bound,
+and one past it fails, saying which and what bound (entry.mjs's
+`Overdue`: "the backup of /data: no answer within 480000 ms"): the
+Sandbox SDK "never times out anything", and neither the runtime's
+snapshot nor its destroy takes a signal. On r4 and r6 (2026-10-16) a
+container that stopped answering after a wake held its sleep's backup,
+and its owner's sleep with it, for good. Each bound is a const beside the
+DO's others (cell/src/computer.rs), with why it is what it is:
+
+| Step | Bound | Why |
+|---|---|---|
+| a marker's exec (the hold, the restore gate, letting go) | 30 s | `MARK_EXEC_MS`, as before |
+| the hold's wait for `held`; the read of `unheld` | 20 s; 5 s | as before (above, "The hold") |
+| a save's backups, its records together | 8 minutes | spike S3 moved 52 MB in 3.3 s, so a few GiB fit |
+| a pass of deletes of records let go of | 30 s | an R2 delete takes well under a second; what a pass leaves is the next save's |
+| a sleep's snapshot | 30 s | one takes 5–6 s (spike S3b); past it the sleep goes on without one |
+| the guest's exit after SIGTERM | 5 s | its contract (below) |
+| a destroy, and the wait for it to take | 15 s | the wait was 10 s, after a destroy awaited for good |
+| a word to a container that outlived its destroy | 5 s | one that took no destroy is likely sick |
+| a start's restores, its records together | 3 minutes | the start's own deadline |
+| a start from a snapshot's wait for its guest | 45 s | above, Lifecycle, "Wake from a snapshot" (#362) |
+
+So a hold ends within 55 s, a save within 9 minutes and a sleep's stop
+within 55 s, each before the lifecycle's deadline for it (90 s, 10
+minutes, 60 s: `fragment_core::computer`; checked as the cell compiles),
+which then only catches a report its isolate lost: a hold or a stop past
+it is asked for again, and a save past it failed. An owner's sleep
+answers within the three together, 10 minutes 50 s (docs/api.md), with
+the calls it makes to the platform's own Durable Objects (its owner's
+ledger and open pages); a wake that came as it slept starts it again in
+the same call, within the start's bounds.
 
 ### Exported for its owner
 
@@ -2105,13 +2168,28 @@ for a host) and finds the same `HOME`, `~` and modes.
   and that no meter falls in a free window. The free window: nothing
   metered from a sleep's failed save to its bound, before and after it as
   any, a late report or an alarm again metering nothing twice, the same
-  across a restart of the DO.
+  across a restart of the DO. A save that never reports failed at its
+  deadline (`a_save_that_never_answers_fails_at_its_deadline`): a
+  sleep's kept, tried again, each try hung, and ended unsaved by the
+  bound, its window free; awake, counted and told from the second; its
+  late answer nothing, the same across a restart of the DO. A start from a
+  snapshot up once its guest is heard, dead unheard past its wait, an
+  earlier container's read not its, and a dead one started again from the
+  save in the same wake, no strike (#362).
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker. A crash is the
   lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
   the guest's PID 1, so the real exit is reported), and wakes from the
   save its last turn's end took; a failed save is the lever's
-  (`fail-saves`), and so is an always-on plan (`always-on`). A check of
+  (`fail-saves`), and so is an always-on plan (`always-on`). A sick
+  container's backups are the lever's too (`hang-backups`: its
+  `sandbox-shim` never answers, and its saves' backups get the lever's
+  few seconds): its owner's sleep answers at their bound, awake and kept,
+  saying why, and once they answer again its sleep saves. Local workerd
+  takes no snapshots, so the lever's `alive-check` makes a start from the
+  save wait for its guest as one from a snapshot does: heard, it is up;
+  with `freeze` (SIGSTOP to its PID 1) never heard, it is dead, and the
+  same wake starts it again from the save (#362). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays. The
   e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`

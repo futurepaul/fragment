@@ -49,7 +49,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
-use fragment_core::computer::{image_running, notices, valid_version, version_running, Action, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
+use fragment_core::computer::{
+    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS,
+};
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
@@ -178,9 +181,70 @@ const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
+/// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
+/// backups run, swapped for one that never answers, as a sick container's
+/// (r4, r6), the real one kept beside it; and put back.
+const SHIM_HANG: &str = "cd /usr/local/bin && { test -e sandbox-shim.real || cp sandbox-shim sandbox-shim.real; } && printf '#!/bin/sh\\nexec sleep 3600\\n' > sandbox-shim.hang && chmod +x sandbox-shim.hang && mv sandbox-shim.hang sandbox-shim";
+const SHIM_UNHANG: &str = "cd /usr/local/bin && { test ! -e sandbox-shim.real || mv sandbox-shim.real sandbox-shim; }";
+/// SIGSTOP: the lever's `alive-check` with `freeze` stops the guest's PID 1
+/// once its container is up, so it never reads its view, as a dead one's
+/// guest never does (#362).
+const SIGSTOP: f64 = 19.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
+/// A save's backups, its records one after the other, answer within this
+/// together, or the save fails (entry.mjs's `Overdue`), as one that says so
+/// does: spike S3 moved 52 MB in 3.3 s, so a few GiB fit, and the rest of
+/// the save still reports before the lifecycle's `SAVE_DEADLINE_MS`. The
+/// Sandbox SDK "never times out anything" (r4, r6: a sick container's
+/// backup never returned, so its sleep never ended).
+const BACKUPS_MS: i64 = 8 * 60_000;
+/// A start's restores, its save's records together, answer within this, or
+/// the start failed (tried again, on the same save): past the start's own
+/// deadline the lifecycle has failed it already.
+const RESTORE_MS: i64 = START_DEADLINE_MS;
+/// A pass of deletes of the records let go of (`forget`) ends within this:
+/// an R2 delete answers in well under a second, and what a pass leaves is
+/// the next save's, as a delete that failed is.
+const FORGET_PASS_MS: i64 = 30_000;
+/// A sleep's snapshot answers within this, or its sleep goes on without
+/// one (its wake then restores the save): one takes 5–6 s (spike S3b).
+const SNAPSHOT_MS: i64 = 30_000;
+/// A destroy, and the wait for `running` to fall after it, end within
+/// this: the wait was 10 s, after a destroy whose own answer was awaited
+/// for good.
+const DESTROY_MS: i64 = 15_000;
+/// A sleep's word to a container that outlived its destroy (its hold let
+/// go) answers within this: one that took no destroy is likely sick, and
+/// the stop is not held for it.
+const UNMARK_EXEC_MS: i64 = 5_000;
+/// A hold's steps (its mark, the wait for the guest's answer, the read of
+/// its word) end within this, before the lifecycle's deadline for it.
+const HOLD_STEPS_MS: i64 = MARK_EXEC_MS + HOLD_WAIT_MS + UNHELD_EXEC_MS;
+/// A save's: the read of the held guest's answer, its backups, a pass of
+/// deletes.
+const SAVE_STEPS_MS: i64 = MARK_EXEC_MS + BACKUPS_MS + FORGET_PASS_MS;
+/// A sleep's end: its snapshot, five seconds for the guest, its destroy, a
+/// word to a container that outlived it; or, its save failed, its hold let
+/// go.
+const STOP_STEPS_MS: i64 = {
+    let stop = SNAPSHOT_MS + EXIT_WAIT_MS + DESTROY_MS + UNMARK_EXEC_MS;
+    if stop > MARK_EXEC_MS {
+        stop
+    } else {
+        MARK_EXEC_MS
+    }
+};
+/// An owner's sleep (`POST /api/computers/{id}/sleep`, `computer/sleep`)
+/// answers within the sum of its steps' bounds (docs/api.md), beside the
+/// Durable Objects it tells (its owner's ledger, their open pages).
+const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
+const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before its deadline");
+const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
+const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
+const _: () = assert!(RESTORE_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -211,6 +275,12 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
+    /// The test lever's bound on its saves' backups while its shim hangs
+    /// (`hang-backups`), in ms.
+    HangBackups,
+    /// The test lever's check of its next start (`alive-check`): `{ms,
+    /// freeze}`, taken by that start.
+    AliveCheck,
     /// The owner's WorkOS user, once the registry named it
     /// (`workos_user`): `{owner, issuer, subject}`.
     WorkosUser,
@@ -232,6 +302,8 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
+            MetaKey::HangBackups => "hang_backups",
+            MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
         }
@@ -246,6 +318,11 @@ struct Planned {
     reference: Option<String>,
     /// The save it restores (its records), when there is one.
     save: Option<Save>,
+    /// How long it waits for its guest to read its view before it is up: a
+    /// start from a snapshot's (`ALIVE_MS`, #362), or the lever's.
+    alive_ms: Option<i64>,
+    /// The lever's `alive-check` with `freeze`: its guest stopped as it starts.
+    freeze: bool,
 }
 
 /// Why a start did not come up.
@@ -254,6 +331,10 @@ enum Unstarted {
     Failed(CellError),
     /// The save it restored never will (its archive is gone or altered).
     Unusable(String),
+    /// It came up, and its guest never read its view within its wait: a
+    /// container Cloudflare restored from a snapshot dead (#362), answered
+    /// as a snapshot that would not start.
+    Dead(String),
 }
 
 impl From<CellError> for Unstarted {
@@ -278,6 +359,13 @@ pub struct ComputerCell {
     /// Its owner was wiped (`wiped`'s row, read as it starts, or set by
     /// the wipe): no write lands, and it answers as no computer.
     wiped: std::cell::Cell<bool>,
+    /// When its guest last read its own view (`computer/guest`): what a
+    /// start that waits for its guest waits for (`alive`). In memory only:
+    /// a start and its guest's reads are one isolate's.
+    heard_ms: std::cell::Cell<Option<i64>>,
+    /// The start this isolate judged dead and destroys: its exit is that
+    /// start's own failure, which it reports (`exit_of`).
+    dead: std::cell::Cell<Option<u64>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -290,7 +378,17 @@ impl DurableObject for ComputerCell {
         let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
         let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default(), wiped: std::cell::Cell::new(wiped) }
+        ComputerCell {
+            state,
+            raw,
+            cfg,
+            env,
+            adopted: std::cell::Cell::new(false),
+            states: RefCell::default(),
+            wiped: std::cell::Cell::new(wiped),
+            heard_ms: std::cell::Cell::new(None),
+            dead: std::cell::Cell::new(None),
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -503,7 +601,8 @@ struct Exited {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s.
+/// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
+/// and `alive-check`'s, `freeze` is `alive-check`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -512,6 +611,12 @@ struct TestLever {
     times: Option<u32>,
     #[serde(default)]
     on: Option<bool>,
+    /// `hang-backups`' bound, and `alive-check`'s.
+    #[serde(default)]
+    ms: Option<u32>,
+    /// `alive-check`'s: its start's guest stopped as it starts.
+    #[serde(default)]
+    freeze: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -942,7 +1047,7 @@ impl ComputerCell {
                 let id = save_id.expect("only a start from a save finds it unusable");
                 let older = self.update_saves(|s| s.unusable(&id)).unwrap_or(false);
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "unusable", "id": id, "generation": generation, "why": why, "older": older }));
-                let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "its save would not restore".into()]).await;
+                let _ = self.destroy(generation, "its save would not restore").await;
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
@@ -951,11 +1056,23 @@ impl ComputerCell {
                 // restores the save
                 let forgot = self.update_saves(|s| s.snapshot_failed());
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "failed", "generation": generation, "why": e.message, "forgot": forgot.ok().flatten() }));
-                let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the snapshot did not start".into()]).await;
+                let _ = self.destroy(generation, "the snapshot did not start").await;
                 Event::SnapshotFailed { generation, why: e.message }
             }
+            Err(Unstarted::Dead(why)) => {
+                // as a snapshot that would not start (F7): its snapshot
+                // forgotten and its container destroyed, whose exit is this
+                // report's to make (`exit_of`), and the same wake starts the
+                // image and the save, no strike. Its own line, so the logs
+                // count how often a snapshot's restore comes up dead (#362).
+                self.dead.set(Some(generation));
+                let forgot = self.update_saves(|s| s.snapshot_failed());
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "dead", "generation": generation, "from": from, "why": why, "forgot": forgot.ok().flatten() }));
+                let _ = self.destroy(generation, "it came up dead").await;
+                Event::SnapshotFailed { generation, why }
+            }
             Err(Unstarted::Failed(e)) => {
-                let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the start failed".into()]).await;
+                let _ = self.destroy(generation, "the start failed").await;
                 Event::StartFailed { generation, why: e.message }
             }
         }
@@ -975,7 +1092,26 @@ impl ComputerCell {
             (plan, save)
         })?;
         assert_eq!(plan == Restore::Nothing, save.is_none(), "a start restores the save there is");
-        Ok(Planned { plan, image, reference, save })
+        // a start from a snapshot waits for its guest (#362); the lever's
+        // `alive-check` makes its next start wait so, whatever it restores
+        let lever = self.take_alive_check()?;
+        let alive_ms = match (&plan, lever) {
+            (_, Some((ms, _))) => Some(ms),
+            (Restore::Snapshot { .. }, None) => Some(ALIVE_MS),
+            (Restore::Backup | Restore::Nothing, None) => None,
+        };
+        let freeze = lever.is_some_and(|(_, freeze)| freeze);
+        Ok(Planned { plan, image, reference, save, alive_ms, freeze })
+    }
+
+    /// The lever's `alive-check` for the start that takes it, once: `(ms,
+    /// freeze)`.
+    fn take_alive_check(&self) -> CellResult<Option<(i64, bool)>> {
+        let Some(text) = self.meta(MetaKey::AliveCheck)? else { return Ok(None) };
+        self.delete_meta(MetaKey::AliveCheck)?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the alive-check lever's record: {e}")))?;
+        let ms = v["ms"].as_i64().filter(|ms| *ms > 0 && *ms <= ALIVE_MS).ok_or_else(|| CellError::host("the alive-check lever's record names no ms"))?;
+        Ok(Some((ms, v["freeze"] == true)))
     }
 
     async fn try_start(&self, generation: u64, planned: &Planned) -> Result<(), Unstarted> {
@@ -984,8 +1120,8 @@ impl ComputerCell {
         // lesson 6: a container a new isolate found running is never ours to
         // reuse half-known, nor is an earlier start's that is not gone yet:
         // it goes before this one starts (`0`: whatever runs)
-        if js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) {
-            self.call("destroy", &[JsValue::from_f64(0.0), "a new start".into()]).await?;
+        if js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) && !self.destroy(0, "a new start").await? {
+            return Err(CellError::host(format!("an earlier container still runs {}s after its destroy", DESTROY_MS / 1000)).into());
         }
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
@@ -1000,18 +1136,30 @@ impl ComputerCell {
         if self.wiped.get() {
             return Err(wiped_computer().into());
         }
+        let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
+        if planned.freeze {
+            // the lever's dead start: its guest stopped once its container is
+            // up, before a restore's gate opens, so it never reads its view
+            self.exec_ready(&g).await?;
+            if self.call("signal", &[g.clone(), JsValue::from_f64(SIGSTOP)]).await?.as_bool() != Some(true) {
+                return Err(CellError::host(format!("start {generation}'s guest could not be stopped (the lever's freeze)")).into());
+            }
+        }
         match &planned.plan {
             Restore::Backup => {
                 self.exec_ready(&g).await?;
                 let save = planned.save.as_ref().expect("a start from the save has its records");
-                // a directory's record before any inside it, as it was taken
+                // a directory's record before any inside it, as it was taken;
+                // together within `RESTORE_MS`, each given what is left
+                let until = js::now_ms() + RESTORE_MS;
                 for record in &save.records {
-                    let answer = js::from_js(&self.call("restore", &[g.clone(), js::to_js(record)]).await?).map_err(CellError::host)?;
+                    let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+                    let answer = js::from_js(&self.call("restore", &[g.clone(), js::to_js(record), left]).await?).map_err(CellError::host)?;
                     if let Some(why) = answer["unusable"].as_str() {
                         return Err(Unstarted::Unusable(format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"))));
                     }
@@ -1025,17 +1173,39 @@ impl ComputerCell {
                     Some(CHECK_UNUSABLE) => return Err(Unstarted::Unusable(format!("save {}'s check: {said}", save.number))),
                     code => return Err(CellError::host(format!("the image's check of save {} exited {code:?}: {said}", save.number)).into()),
                 }
-                self.mark(&g, RESTORED_MARK).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
+                self.mark(&g, RESTORED_MARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
             }
             Restore::Snapshot { .. } => {
                 // its sleep held the guest before it took the snapshot: a
                 // container started from it must not wake held
                 self.exec_ready(&g).await?;
-                self.mark(&g, HOLD_UNMARK).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
             }
             Restore::Nothing => {}
         }
+        if let Some(bound) = planned.alive_ms {
+            let waited = self.heard_from(started_ms, bound).await?;
+            console_log!("{}", json!({ "computer": id, "alive": generation, "heardInMs": waited }));
+        }
         Ok(())
+    }
+
+    /// Waits, at most `bound_ms`, for the guest of the start made at
+    /// `started_ms` to read its own view (`fragment_core::computer::alive`):
+    /// a container Cloudflare restores from a snapshot can come up dead,
+    /// taking the DO's execs for a moment and then nothing, its guest never
+    /// heard from (#362). Answers how long it waited.
+    async fn heard_from(&self, started_ms: i64, bound_ms: i64) -> Result<i64, Unstarted> {
+        let waiting = js::now_ms();
+        // bounded: `alive` answers `Dead` once `bound_ms` pass
+        loop {
+            let now = js::now_ms();
+            match alive(self.heard_ms.get(), started_ms, waiting, now, bound_ms) {
+                Alive::Heard => return Ok(now - waiting),
+                Alive::Dead => return Err(Unstarted::Dead(format!("its guest did not read its view within {} s of its start", bound_ms / 1000))),
+                Alive::Waiting => Delay::from(std::time::Duration::from_millis(100)).await,
+            }
+        }
     }
 
     /// Waits for the container of start `g` to take an exec.
@@ -1048,10 +1218,10 @@ impl ComputerCell {
     }
 
     /// Runs one of the DO's markers (`script`, through `sh -c`) in the
-    /// container of start `g`.
-    async fn mark(&self, g: &JsValue, script: &str) -> CellResult<()> {
+    /// container of start `g`, within `ms`.
+    async fn mark(&self, g: &JsValue, script: &str, ms: i64) -> CellResult<()> {
         let argv = js::to_js(&json!(["sh", "-c", script]));
-        let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+        let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(ms as f64)]).await?).map_err(CellError::host)?;
         if out["exitCode"] != 0 {
             return Err(CellError::host(format!("`{script}` answered {}: {}", out["exitCode"], out["output"])));
         }
@@ -1060,20 +1230,33 @@ impl ComputerCell {
 
     /// An exit of start `generation`'s container, as the lifecycle should
     /// hear it: one from the snapshot that stopped before it came up is the
-    /// start's own failure (the snapshot is forgotten), never a strike.
-    fn exit_of(&self, generation: u64) -> CellResult<Event> {
+    /// start's own failure (the snapshot is forgotten), never a strike; one
+    /// its start judged dead and destroys is that start's to report (as a
+    /// snapshot that would not start), so its wake goes on in one place:
+    /// nothing here.
+    fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
         let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
+        if starting && self.dead.get() == Some(generation) {
+            return Ok(None);
+        }
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
             let forgot = self.update_saves(|s| s.snapshot_failed())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "snapshot": "stopped", "generation": generation, "forgot": forgot }));
-            return Ok(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() });
+            return Ok(Some(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() }));
         }
-        Ok(Event::Exited { generation })
+        Ok(Some(Event::Exited { generation }))
     }
 
     /// Whether a container runs here now.
     async fn container_running(&self) -> bool {
         self.call("running", &[]).await.is_ok_and(|r| r.as_bool() == Some(true))
+    }
+
+    /// Destroys the container of start `generation` (0: whatever runs) and
+    /// waits for it to be gone, within `DESTROY_MS`: whether it is.
+    async fn destroy(&self, generation: u64, reason: &str) -> CellResult<bool> {
+        let gone = self.call("destroy", &[JsValue::from_f64(generation as f64), reason.into(), JsValue::from_f64(DESTROY_MS as f64)]).await?;
+        Ok(gone.as_bool() == Some(true))
     }
 
     /// A save's hold (docs/computers.md, "The hold"): the DO touches
@@ -1087,13 +1270,13 @@ impl ComputerCell {
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if !self.container_running().await {
             if sleeping {
-                let _ = self.call("destroy", &[g, "asleep".into()]).await;
+                let _ = self.destroy(generation, "asleep").await;
                 return Event::Asleep { generation };
             }
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
         let t0 = js::now_ms();
-        if let Err(e) = self.mark(&g, HOLD_MARK).await {
+        if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
             // a guest the DO cannot mark is saved as it is
             console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             return Event::Held { generation, held: false };
@@ -1142,6 +1325,10 @@ impl ComputerCell {
         // what a held guest copied to names the save keeps, it leaves out
         let left_out = if held { self.left_out(&g).await } else { vec![] };
         let mut records: Vec<Value> = Vec::with_capacity(SAVED_DIRS.len());
+        // its backups together within `BACKUPS_MS` (the lever's
+        // `hang-backups`: its own), each given what is left
+        let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
+        let until = js::now_ms() + budget;
         for dir in SAVED_DIRS {
             // the guest's own state leaves its work out (a record of its
             // own) and what it copied; its work is saved as it is
@@ -1150,7 +1337,8 @@ impl ComputerCell {
                 _ => vec![],
             };
             let exclude = js::to_js(&json!(exclude));
-            match self.call("backup", &[g.clone(), dir.into(), exclude]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
+            let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+            match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => records.push(record),
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
@@ -1216,18 +1404,25 @@ impl ComputerCell {
 
     /// Deletes each record let go of (`Saves::forgetting`), and forgets it
     /// once its delete worked: one that failed stays, for the next save's
-    /// pass (a delete of what is gone already works). `lost`: records
-    /// pushed out unforgotten, whose archives stay in R2, logged.
+    /// pass (a delete of what is gone already works), as one the pass had
+    /// no time left for is (`FORGET_PASS_MS`). `lost`: records pushed out
+    /// unforgotten, whose archives stay in R2, logged.
     async fn forget(&self, lost: Vec<Value>) {
         let id = self.meta(MetaKey::Id).ok().flatten();
         for record in &lost {
             console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
         }
         let pending = self.saves().map(|s| s.forgetting().to_vec()).unwrap_or_default();
-        // bounded: at most FORGETTING_MAX
-        for record in pending {
+        let until = js::now_ms() + FORGET_PASS_MS;
+        // bounded: at most FORGETTING_MAX, within FORGET_PASS_MS
+        for (i, record) in pending.iter().enumerate() {
+            let left = until - js::now_ms();
+            if left <= 0 {
+                console_log!("{}", json!({ "computer": id, "forget": "deferred", "records": pending.len() - i, "why": format!("the pass's {} s ran out: the next save's pass deletes them", FORGET_PASS_MS / 1000) }));
+                break;
+            }
             let rid = record["id"].as_str().unwrap_or_default().to_string();
-            let done = match self.call("forget", &[js::to_js(&record)]).await {
+            let done = match self.call("forget", &[js::to_js(record), JsValue::from_f64(left as f64)]).await {
                 Ok(_) => self.update_saves(|s| s.forgot(&rid)),
                 Err(e) => Err(e),
             };
@@ -1244,19 +1439,21 @@ impl ComputerCell {
             return;
         }
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
 
     /// A sleep's end (docs/computers.md): its snapshot (only after its save
     /// worked, since a snapshot is only ever a cache of a save, and only of
-    /// that save), the signal, five seconds for the guest, the destroy. A
-    /// snapshot that fails forgets nothing: the one kept is still its own
-    /// save's.
+    /// that save), the signal, five seconds for the guest, the destroy, each
+    /// within its bound (`STOP_STEPS_MS` together). A snapshot that fails
+    /// forgets nothing: the one kept is still its own save's.
     async fn stop(&self, generation: u64, saved: bool) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+        let t0 = js::now_ms();
+        let mut exited = None;
         if self.container_running().await {
             let saves = self.saves().ok();
             let newest = saves.as_ref().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
@@ -1266,18 +1463,21 @@ impl ComputerCell {
                 self.snapshot(generation, &save.id).await;
             }
             let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
-            let _ = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await;
+            exited = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await.ok().and_then(|r| r.as_bool());
         }
-        let gone = self.call("destroy", &[g.clone(), "asleep".into()]).await.is_ok_and(|r| r.as_bool() == Some(true));
+        let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
         // still this sleep's: no exit of it has been heard, nor a start after it
         let ours = matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { generation: s, .. }) if s == generation);
         if !gone && ours && self.container_running().await {
             // a container that outlives its sleep would claim no turn again:
             // the hold is the sleep's alone
-            if let Err(e) = self.mark(&g, HOLD_UNMARK).await {
+            if let Err(e) = self.mark(&g, HOLD_UNMARK, UNMARK_EXEC_MS).await {
                 console_error!("{}", json!({ "computer": id, "unhold": "failed", "generation": generation, "error": e.message }));
             }
         }
+        // one line per stop (lesson 14): whether its guest went on its
+        // signal, whether the destroy took, and how long the stop took
+        console_log!("{}", json!({ "computer": id, "stopped": generation, "saved": saved, "exited": exited, "gone": gone, "ms": js::now_ms() - t0 }));
         Event::Asleep { generation }
     }
 
@@ -1288,7 +1488,7 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let name = format!("{}-{generation}", id.replace(':', "-"));
-        let taken = self.call("snapshot", &[g, name.into()]).await.map(|s| s.as_string());
+        let taken = self.call("snapshot", &[g, name.into(), JsValue::from_f64(SNAPSHOT_MS as f64)]).await.map(|s| s.as_string());
         let reference = self.saves().ok().and_then(|s| s.image_of(generation).map(str::to_string));
         match (taken, reference) {
             (Ok(Some(snapshot)), Some(reference)) => match self.update_saves(|s| s.snapshotted(save, &snapshot, &reference)) {
@@ -1588,14 +1788,16 @@ impl ComputerCell {
         }
         self.state.storage().delete_alarm().await?;
         // whatever start runs it (`0`), and waited out
-        let destroyed = self.call("destroy", &[JsValue::from_f64(0.0), "its owner was wiped".into()]).await?.as_bool() == Some(true);
+        let destroyed = self.destroy(0, "its owner was wiped").await?;
         if !destroyed {
             return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
         }
         let records = self.saves()?.every_record();
-        // bounded: a computer's records are (Saves::every_record)
+        // bounded: a computer's records are (Saves::every_record), each
+        // delete within a pass's bound; one that passes it fails this call,
+        // and the next call deletes it
         for record in &records {
-            self.call("forget", &[js::to_js(record)]).await?;
+            self.call("forget", &[js::to_js(record), JsValue::from_f64(FORGET_PASS_MS as f64)]).await?;
         }
         let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
         if !more {
@@ -1664,8 +1866,13 @@ impl ComputerCell {
     /// container exits as a crash does and its real exit is reported;
     /// `saves` answers what it keeps of its saves and what its last start
     /// restored; `fail-saves {times}` fails its next saves (0: none more);
-    /// `always-on {on}` is its owner's plan changing (the plan itself does
-    /// not reach a computer yet).
+    /// `hang-backups {ms}` makes its container's backups never answer, as a
+    /// sick one's (r4, r6), and bounds its saves' backups by `ms` (0: its
+    /// shim back); `alive-check {ms, freeze}` makes its next start wait
+    /// `ms` for its guest to read its view, as a start from a snapshot does,
+    /// with `freeze` its guest stopped so it never does (#362); `always-on
+    /// {on}` is its owner's plan changing (the plan itself does not reach a
+    /// computer yet).
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         let id = self.must(MetaKey::Id)?;
@@ -1679,6 +1886,36 @@ impl ComputerCell {
                 }
                 console_log!("{}", json!({ "computer": id, "lever": "fail-saves", "times": times }));
                 Ok(json!({ "computer": id, "failSaves": times }))
+            }
+            "hang-backups" => {
+                // a sick container's backups (r4, r6): its shim never answers,
+                // and its saves' backups are given `ms` (0: the shim back)
+                let ms = b.ms.map(i64::from).filter(|ms| *ms <= BACKUPS_MS).ok_or_else(|| CellError::invalid(format!("hang-backups names its ms, 0 to {BACKUPS_MS}")))?;
+                let generation = match self.lifecycle()?.phase {
+                    Phase::Awake { generation, .. } => Some(generation),
+                    _ => None,
+                };
+                let script = if ms > 0 { SHIM_HANG } else { SHIM_UNHANG };
+                match generation {
+                    Some(g) => self.mark(&JsValue::from_f64(g as f64), script, MARK_EXEC_MS).await?,
+                    None if ms > 0 => return Err(CellError::invalid("it is not awake: wake it first")),
+                    None => {}
+                }
+                match ms {
+                    0 => self.delete_meta(MetaKey::HangBackups)?,
+                    ms => self.set_meta(MetaKey::HangBackups, &ms.to_string())?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "hang-backups", "ms": ms, "generation": generation }));
+                Ok(json!({ "computer": id, "hangBackups": ms }))
+            }
+            "alive-check" => {
+                // its next start waits for its guest as one from a snapshot
+                // does; frozen, its guest never reads its view (#362)
+                let ms = b.ms.map(i64::from).filter(|ms| (1..=ALIVE_MS).contains(ms)).ok_or_else(|| CellError::invalid(format!("alive-check names its ms, 1 to {ALIVE_MS}")))?;
+                let freeze = b.freeze.unwrap_or(false);
+                self.set_meta(MetaKey::AliveCheck, &json!({ "ms": ms, "freeze": freeze }).to_string())?;
+                console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
+                Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
@@ -1710,9 +1947,10 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["keepalives"] = json!(life.keepalives());
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
+                v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check or always-on"))),
         }
     }
 
@@ -1990,11 +2228,16 @@ impl ComputerCell {
                 self.trim("sessions", SESSIONS_MAX)?;
                 json_response(&json!({ "session": session, "port": t["port"], "maxAgeS": SESSION_TTL_MS / 1000 }))
             }
-            "computer/guest" => json_response(&self.guest_view().await?),
+            "computer/guest" => {
+                // its guest is alive: what a start that waits for it waits for
+                self.heard_ms.set(Some(js::now_ms()));
+                json_response(&self.guest_view().await?)
+            }
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
-                let event = self.exit_of(b.generation)?;
-                self.drive(event).await?;
+                if let Some(event) = self.exit_of(b.generation)? {
+                    self.drive(event).await?;
+                }
                 json_response(&json!({ "ok": true }))
             }
             "computer/test" if self.cfg.test_hooks => {
