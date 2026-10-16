@@ -352,17 +352,20 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   the rule: a change to what the guest relies on (this contract, the
   bridge's routes, the CLI's) is additive, and what it replaces goes only
   once stable has moved past it.
-- **A Hermes release is forward only** (Paul, 2026-10-13). Launch-week
-  rounds change only our layers (the bridge, hermes-boot, the CLI and the
-  image's own files) on Hermes v0.21.6's base, so a computer pinned back
-  runs the older image on a `/data` the newer wrote, files our code reads
-  either way. A new Hermes release may move its databases' schema
-  forward, and a computer keeps three saves, each turn's end replacing the
-  oldest, so within a day no save from before the canary is left (decision
-  19's point-in-time restore has none to go back to): pinned back, an
-  older Hermes would start on a newer schema. So a bad Hermes release is
-  fixed by the next one, until a computer keeps the save an image change
-  started from (docs/technical-debt-ledger.md).
+- **A Hermes release is forward only** (Paul, 2026-10-13). A round that
+  changes only our layers (the bridge, hermes-boot, the CLI and the
+  image's own files) on the same Hermes base can be pinned back: the
+  older image runs on a `/data` the newer wrote, files our code reads
+  either way. A round that moves the base to a new Hermes release (v0.21.6
+  to v0.21.7 is the first) cannot: a new release may move its databases'
+  schema forward, and a computer keeps three saves, each turn's end
+  replacing the oldest, so within a day no save from before the canary is
+  left (decision 19's point-in-time restore has none to go back to):
+  pinned back, an older Hermes would start on a newer schema. So a bad
+  Hermes release is fixed by the next one, until a computer keeps the save
+  an image change started from (docs/technical-debt-ledger.md). v0.21.7
+  happens to move none (`state.db` is schema 31 and the config version 50
+  in both), but the rule does not read each release's schema.
 - **Production** keeps its images in its own account's registry, which
   holds none of the preview's digests (the deploy refuses another
   account's). Its first deploy builds `hermes` from the release commit;
@@ -754,7 +757,12 @@ expires within 30 days. The container application is the deployment's
   bounded as above, and no other: `plugins`, `web_search_options`,
   `transforms`, `provider`, `models`, `n`, `user` and the rest are dropped
   (a paid extra the book does not price, another model, or a field its
-  endpoints may not take). Workers AI's calls are as before.
+  endpoints may not take). Workers AI's calls are as before. Either way a
+  message's own fields pass as the agent wrote them: since Hermes v0.21.7
+  a session's earlier assistant messages carry the model's reasoning back
+  (`reasoning_content` and `reasoning`, which v0.21.6 dropped for a
+  `custom` provider; its `message_sanitization`), and a 4xx naming one of
+  those fields has Hermes drop it for that model from then on.
 
   **A slot's `body`.** A slot on an OpenAI-compatible API may name `body`:
   fields of that API's own that every call to it carries (an agent's and
@@ -1229,12 +1237,13 @@ settings and state):
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes v0.21.6's desktop image, `hermes-boot`, the
+- `images/hermes`: Hermes v0.21.7's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. The base is pinned by
-  digest to the build upstream's `stable-desktop` named on 2026-10-08
-  (its versioned tag `rc.4-v0.21.6-desktop`; its install stamp says
-  0.21.6, commit `818c13be`); the tag named `v0.21.6-desktop` is an
-  earlier attempt's build, not that release. Hermes there is Python
+  digest to v0.21.7's release build (its versioned tag
+  `rc.15-v0.21.7-desktop`, 2026-10-12; its install stamp says 0.21.7,
+  commit `71d34bad`); upstream tags no `v0.21.7-desktop`, and a bare
+  version tag is not always the release (`v0.21.6-desktop` was an
+  earlier attempt's build). Hermes there is Python
   3.14.7 in a venv its own package manager (PM) builds, its tools (its
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
@@ -1503,7 +1512,7 @@ the agent acts on the platform with at most its owner's role (R17), so a
 command reaches no further than those. finite-mono ran Hermes the same
 way (`approvals.mode: off`). What asks is `hermes-boot`'s to set, with
 Hermes' own settings (images/hermes/boot/src/hermes.rs, `managed_config`,
-the overlay over every profile), against Hermes v0.21.6. A card that
+the overlay over every profile), against Hermes v0.21.7. A card that
 still comes is its owner's alone to answer (docs/bridge.md; decision 42).
 
 Every ask Hermes has, with what the owner saw before 2026-10-14 (each a
@@ -1767,8 +1776,11 @@ and how a runtime finds them, is the image's.
   corresponding bundled copy; removing it restores the image's skill.
   Hermes' standalone `google-workspace` is omitted: its OAuth setup and
   token files conflict with the platform's connected-account placeholders,
-  so `google-workspace-finite` owns that workflow. A managed skill a session
-  has not yet seen appears at its next session.
+  so `google-workspace-finite` owns that workflow. A managed skill
+  installed or removed during a session reaches it at its next turn: since
+  v0.21.7 Hermes compares the skills its prompt lists with the ones it
+  finds now and says the difference once, in that turn's note
+  (`agent/skills_index_delta.py`), with no prompt rebuild.
 - **Documents:** Hermes' `pdf`, `docx`, `powerpoint` and `xlsx` skills and
   their helpers are visible to every agent. Their Python dependencies are
   baked into the image at versions and SHA-256s pinned in

@@ -24,8 +24,10 @@ fragment.club until cutover (decisions 34–35).
   external package to the active profile's writable `skills/` before writes,
   preserving fresh-read guards and normal validation. Managed releases do
   not overwrite local forks. No upstream source patch is needed.
-- **Risk:** the plugin relies on v0.21.6 skill resolver/read-mark internals;
-  an upgrade needs its Docker promotion test. External batches must fork
+- **Risk:** the plugin relies on Hermes' skill resolver/read-mark internals
+  (`_find_skill`, `_resolve_supporting_file`, the background review's read
+  marks: v0.21.6's, unchanged in v0.21.7); an upgrade needs its Docker
+  promotion test. External batches must fork
   via a single write first. A failed patch can leave an unchanged local fork.
   Reviews still consume model calls under the shared 50 calls/min limit.
 - **First proof:** the Docker lane scripts a background patch through the
@@ -92,10 +94,11 @@ fragment.club until cutover (decisions 34–35).
   (`fragment_core::computer::Saves`), so after a few turns none is from
   before its image changed: decision 19's "point-in-time restore when the
   new image moved its data's schema" has nothing to restore.
-- **Shortcut:** launch-week rounds change only our layers on Hermes
-  v0.21.6's base, whose files our code reads either way, so a pin back is
-  a rollback; a Hermes release is forward only (Paul, 2026-10-13): a bad
-  one is fixed by the next release, never pinned back.
+- **Shortcut:** a round that changes only our layers on the same Hermes
+  base, whose files our code reads either way, can be pinned back: that is
+  a rollback. A Hermes release is forward only (Paul, 2026-10-13): a bad
+  one is fixed by the next release, never pinned back. The first such
+  round is v0.21.6 to v0.21.7 (2026-10-16).
 - **Risk:** a Hermes release that breaks on real computers stays broken
   for the canary group until a fix is built; pinned back anyway, an older
   Hermes opens databases a newer one migrated, which it may refuse or

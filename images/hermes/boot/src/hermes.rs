@@ -427,8 +427,8 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     y
 }
 
-/// Hermes v0.21.6's `_HERMES_PROVIDER_ENV_BLOCKLIST`, read from the pinned
-/// image's `tools/environments/local_env_policy.py`, plus its dynamic
+/// Hermes v0.21.7's `_HERMES_PROVIDER_ENV_BLOCKLIST` (v0.21.6's alike), read
+/// from the pinned image's `tools/environments/local_env_policy.py`, plus its dynamic
 /// `_is_hermes_internal_secret` rule (GHSA-rhgp-j443-p4rf). The Docker lane
 /// checks the snapshot against the image, so a new pin cannot silently
 /// change the policy. Only sandbox registration is filtered: native tools

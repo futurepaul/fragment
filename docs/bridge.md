@@ -389,7 +389,7 @@ by the `computers` lane's recovery checks, where the stub echoes it.
 
 ## Hermes' Relay, as the bridge speaks it
 
-Hermes v0.21.6 (tag `v0.21.6`, 2026-10-08; read first from v0.21.5,
+Hermes v0.21.7 (tag `v0.21.7`, 2026-10-12; read first from v0.21.5,
 whose wire it keeps; `gateway/relay/`), contract version 1. The bridge serves
 `ws://127.0.0.1:8650/relay` and `/relay/media` and checks Hermes'
 token; the descriptor names platform `relay` with draft streaming and
