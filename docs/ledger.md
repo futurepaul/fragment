@@ -344,8 +344,6 @@ mark sends the same batch again, which answers as before.
   a reservation holds 1,471 (Clef-flash's 24,576 tokens), 24,773
   (Clef's 65,536) or 15,120 (Clef-omni's 64,000), releasing what was
   unused on settlement.
-- **The in-fragment agent's turns**: as model calls, the fragment's owner
-  paying.
 - **Operator keys** (decision 37): reserved and settled the same way as
   model calls. Before the call, the intercept reserves one `key` call at
   its price (`key:<computer>:<12 hex>`, as the agent, on its owner's
@@ -373,8 +371,12 @@ mark sends the same batch again, which answers as before.
   own SQLite and its blobs, and meters `bytes × hours since the last
   sample` (`store:<fragment>@<incarnation>:<class>:<at>`) to the
   fragment's owner. Its app facet's database and its git repository are
-  not sampled (the debt ledger). A computer's backups bill the computer's
-  owner.
+  not sampled (the debt ledger). Nor are a computer's saves of `/data`
+  in R2 (its newest three, `fragment_core::computer::SAVES_KEPT`;
+  docs/computers.md, "Saves and what a wake restores"): the Computer DO
+  meters only awake time and operator keys (`Usage::Awake`, `Usage::Key`
+  in cell/src/computer.rs), so they are the platform's for now (the debt
+  ledger, "A computer's saves are not metered").
 - **Requests** (the Fragment DO, which sees each one the router hands
   it): a row per minute (`req:<fragment>@<incarnation>:<minute>`) to the
   fragment's owner, closed once the minute has passed.

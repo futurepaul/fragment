@@ -34,7 +34,7 @@ change"; finite v2 is the warning).
 fragment is a personal-agent product (in the space of Muse, Grok Bot and
 Dot) with the magic of fragments: multiplayer apps, edited together in
 git, that your agents build for you. You sign in to the shell at
-`fragment.club/chat`. Your agents are fragments run by a computer of
+`finite.chat` (decision 5). Your agents are fragments run by a computer of
 your own (today, Hermes profiles). You chat with them in chat fragments.
 They use your connected accounts, drive their own screen, and publish
 apps, sites and brains as fragments that you share with other people.
@@ -70,7 +70,7 @@ speaking Cloudflare's APIs) returns once this product works.
    account. Production gets its own account before cutover. CI deploys
    from a clean configuration, the way a stranger would. WorkOS'
    staging environment serves dev and previews; its production
-   environment serves fragment.club.
+   environment serves production (`finite.chat`, decision 5).
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
@@ -88,6 +88,17 @@ speaking Cloudflare's APIs) returns once this product works.
    `<name>.fragment.boats`, a name being a label and a random suffix
    (decision 47). Both zones move to Cloudflare.
    A self-deployer may use one zone for both, at weaker isolation.
+
+   *Status (Paul, 2026-10-16).* Production is the platform on
+   `finite.chat` (the CLI's default host since 0.14.0: `DEFAULT_HOST`,
+   cli/src/main.rs) and fragments on `<name>.finite.place`: a deployment
+   of its own (`platform_host`, `fragment_suffix`: deploy/example.jsonc),
+   each host's route in its own zone. `finite.place` was the dev zone
+   while Paul proved things in his own account; he moves it to Finite's
+   production account that day (decision 3), so it is no longer the dev
+   zone (decision 20's status). fragment.club and
+   fragment.boats stay the celld fleet's until cutover, and nothing on
+   them migrates (decisions 33 to 35).
 
 ### What a person sees
 
@@ -193,7 +204,10 @@ speaking Cloudflare's APIs) returns once this product works.
     - its page (the agent's settings);
     - its usage cap.
 
-    The fragment names the computer that runs it.
+    The platform records which computer runs it: the fragment's own
+    cell meta (`MetaKey::Computer`, set when its owner assigns it to
+    their computer and cleared when they move it: cell/src/runs_on.rs),
+    not its repo or `fragment.json`.
 15. **Today an agent runs as a Hermes profile.** The Hermes image's
     boot script checks out the agent fragments assigned to its computer
     into profiles, and commits Hermes' changes back. One Hermes gateway
@@ -352,12 +366,20 @@ speaking Cloudflare's APIs) returns once this product works.
     zone `finite.place` (Paul's, 2026-10-02), with one proxied wildcard
     DNS record that Universal SSL covers:
     - the shell for branch `b` is `b.finite.place`;
-    - its fragments are `<label>--<user>--b.finite.place`, routed by
-      `*--b.finite.place/*`;
+    - its fragments are `<name>--b.finite.place` (`todo--k3x9--b`:
+      decision 47), routed by `*--b.finite.place/*`;
     - the long-lived dev deployment is the branch `dev`. The hosted e2e runs against it,
     including real Hermes on the candidate image. A teardown command
     removes a branch's copy, since an account holds at most 500 DO
     classes (about 80 branches).
+
+    *Status (2026-10-16).* `finite.place` is production's now (decision
+    5's status). The master preview is the branch `preview` on the zone
+    `finite.build`: `preview.finite.build`, its fragments
+    `<name>--preview.finite.build`, master deployed continuously
+    (docs/computers.md, "One round"). The phases' evidence below, from
+    `p5.finite.place` and `e2e.finite.place`, is from before the move,
+    and deploy/e2e.jsonc still names that zone.
 
     Cloudflare's Worker Previews can't be this. Spike S1 (2026-10-02)
     found that a Preview's Workflows, Queue consumers and service bindings
@@ -559,7 +581,7 @@ speaking Cloudflare's APIs) returns once this product works.
 29. **All of today's fragment model is ported**, core first.
     - Core: operations over the app's SQLite (Loader and Facets), live
       updates, members and invites, files in git and deploys, and
-      isolation on fragment.boats.
+      isolation on a domain of the fragments' own (decision 5).
     - Then: jobs and cron (Workflows); deliveries, webhooks and push
       (Queues); blobs (R2); secrets and outbound fetch; and AI steps.
 
@@ -795,7 +817,7 @@ runaround".
     create (`todo--k3x9`; `--`, which no label holds, so no label reads
     as a name: `reader-chat` would, with one dash). It is unique in the
     fleet and fixed for the fragment's life, and served at
-    `todo--k3x9.fragment.boats` (`todo--k3x9--<branch>.<zone>` on a
+    `todo--k3x9.finite.place` (`todo--k3x9--<branch>.<zone>` on a
     branch copy). The suffix makes names unique without a namespace to
     claim: nobody squats a label, and nothing in a URL ties one person's
     fragments together. The API names a fragment in full; in the CLI a
@@ -865,7 +887,9 @@ Paul: "before we go live, we'll need stripe billing", with trials as
 finite-mono has them, organizations with central billing, and an admin
 dashboard; the Stripe account is finite-mono's. docs/billing.md is the
 design; Paul took its recommendations whole ("I agree with your
-recommendations"). Nothing below is built yet.
+recommendations"). Built on 2026-10-08 (docs/billing.md, "Build order",
+slices 4 to 9: cell/src/billing.rs, stripe.rs, orgs.rs); going live is
+Paul's (its slice 10).
 
 51. **Anyone may buy a seat, and an org is who pays.** A guest buys a
     seat through Stripe Checkout; no invite is needed (payment is the
@@ -1271,7 +1295,7 @@ over. Each lesson names the smallest change it makes here:
 ## Architecture
 
 ```
-browser ── fragment.club (the shell) ─┐      ┌── <label>--<user>.fragment.boats
+browser ── finite.chat (the shell) ───┐      ┌── <label>--<suffix>.finite.place
                                       ▼      ▼
                           router Worker (the cell, Rust + JS shims)
    ┌──────────────┬──────────────┬────────────────┬───────────────┐

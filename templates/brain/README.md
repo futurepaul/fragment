@@ -8,9 +8,15 @@ the platform's release serves the rest, so every brain runs the same code
 and one deploy updates them all. The platform knows nothing of brains:
 everything here is this template's app code and files.
 
-Make one from the shell (Add an app, Brain) or the API:
+Make one with the CLI (yours, or your agent's) or the API; the shell
+makes none (its Add suggests what to ask an agent for: `APP_PROMPTS` in
+cell/shell/shell.js):
 
-    POST /api/fragments {"name": "garden", "template": "brain", "title": "Garden"}
+    fragment create garden --template brain --title Garden
+    POST /api/fragments {"label": "garden", "template": "brain", "title": "Garden"}
+
+A create names a label, and the platform adds its suffix (`garden--k3x9`;
+a `name` must be one in full: docs/api.md, Names).
 
 ## The files
 
