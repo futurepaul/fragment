@@ -28,7 +28,7 @@ key's placeholder (it names you), the helper sends it to `api.x.com` as a
 bearer token, and the computer swaps in the real one, metered to your
 owner. Unset, this deployment does not offer the `x` key: say so rather
 than hunting for one. This is separate from `XAI_API_KEY`, which powers
-Grok's native `x_search` and the `x-search` skill.
+the native `x_search` (xAI's Grok).
 
 Use the local helper directly:
 

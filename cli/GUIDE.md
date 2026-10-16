@@ -168,13 +168,9 @@ fragment init my-thing                    # scaffold (todo) + create + deploy �
 fragment init my-inbox --template inbox   # or: todo | notes | calories | doc | blank
 ```
 
-`fragment create <name> --template T` makes one on the platform with no
-folder: a blessed template (`chat`, `agent`, `skills`, …) runs the
-platform's current release and names it in `fragment.json`; any other is
-copied in as its first commit. Either way `--title` gives it its own
-title, its `fragment.json`'s `meta.title`, over the template's.
-`fragment new <dir> --template T` scaffolds without creating;
-`fragment new --list` lists the templates:
+`fragment new <dir> --template T` scaffolds a folder without creating
+it; `fragment init` scaffolds, creates and deploys. `fragment new --list`
+lists their templates:
 
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
@@ -183,6 +179,15 @@ title, its `fragment.json`'s `meta.title`, over the template's.
 - `doc`: a page of writing its readers leave notes on, paragraph by
   paragraph, in the margin (Notes on a page, below).
 - `blank`: one page, to build on.
+
+`fragment create <name> --template T` makes one on the platform with no
+folder, from the platform's own templates: one of `blank`, `todo`,
+`inbox`, `calories`, `doc` is copied in as its first commit (`notes` is
+`new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
+`skills`, runs the platform's current release and is named in its
+`fragment.json`. Either way `--title` gives it its own title, its
+`fragment.json`'s `meta.title`, over the template's. Any other is
+refused, naming them.
 
 `fragment status my-thing` shows the URLs, the view token (the share
 link's `?view=`: its owner's alone), and the inbox token. `fragment open my-thing` prints
@@ -205,8 +210,8 @@ Making one for someone, go in this order:
 
 ```
 fragment.json      # operations, channels, triggers, meta
-app.mjs            # class App: one method per operation
-applib/            # modules app.mjs imports (at most 64 modules, 4 MiB)
+app.mjs            # class App: one method per operation (at most 1 MiB)
+applib/            # modules app.mjs imports (at most 64 modules, 4 MiB with app.mjs)
 site/              # static files, served from live
 everything else    # files: notes, data, media; synced and versioned
 ```
@@ -370,7 +375,7 @@ export class App extends DurableObject {
   the same id gets the stored result; the same id with another input is
   409. In a mutation, `call.publish(channel, body)`, `call.files.write(
   path, content)` / `remove(path)`, and `call.push(who, payload)` all
-  happen once, after it commits.
+  happen once, after it commits: at most 64 of them in all.
 - **Jobs** re-run from the top at every step with the results so far, so
   reach steps in the same order every time and change nothing except
   through steps. The steps: `job.call(op, input)`, `job.fetch(url,
@@ -806,34 +811,53 @@ header at the way out. Never write secret values into files.
 ## Command reference
 
 ```
-fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON|@file|-] [--id ID]
-fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
+fragment login [--force] [--no-wait] [--no-browser]
+fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W]
-fragment export [--out FILE]
-fragment cap <name> <usd>|default
+fragment ledger [grant <who> <usd> --why W [--id ID]]
+fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
+fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
-fragment inbox <name> --token T --payload JSON
+fragment inbox <name> --token T --payload JSON [--source S]
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
-fragment open <name>                     fragment members list|add|rm|leave ...
+fragment open <name>                     fragment members list|rm|leave ...
 fragment events <name> [--since N | --tail N]
+fragment members add <name> <email|npub> [--role viewer|editor]
+fragment members role <name> <email|npub> viewer|editor
 fragment manifest <name>                 fragment invite list|revoke ...
 fragment access                          # who can open what you own
-fragment sync <name> [--dir D] [--watch] [--mode M | --live]
+fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
+fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
-fragment rm <name>                       fragment guide | skill
+fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
+fragment operator key <file>
+fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
+fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator person <npub> [--key-file F]
+fragment operator pin <npub> <image> [--key-file F]
+fragment operator orgs [--after A] [--key-file F]
+fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
+fragment operator uncomp <seat> [--key-file F]
+fragment operator trials [--name N [--days D] [--capacity C] | --send <id> --to <email>] [--key-file F]
+fragment operator health [--key-file F]
+fragment operator log [--before N] [--key-file F]
 ```
+
+`fragment operator …` is the deployment's operators' alone: each signs
+with the operator key's file, `--key-file F` (else
+`FRAGMENT_OPERATOR_KEY_FILE`, else this machine's key), which
+`fragment operator key <file>` makes.
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`; else the host
 `fragment login` or `fragment host <url>` saved), `--json`, `-v`. With `--json` (or

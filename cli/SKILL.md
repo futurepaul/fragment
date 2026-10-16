@@ -69,7 +69,7 @@ fragment call my-app add --input '{"text":"hi"}' # one of its operations
 fragment visibility my-app link                  # public | link (anyone with the share link) | members
 fragment members add my-app bea@example.com --role editor   # by email; viewer | editor
 fragment list                                    # your person's fragments
-fragment create <label> --template todo          # one with no folder (`fragment new --list`: the templates)
+fragment create <label> --template todo          # one with no folder: blank|todo|inbox|calories|doc
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools

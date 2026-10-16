@@ -407,8 +407,12 @@ fn check() -> Result<()> {
 const RELEASES: &str = "https://github.com/finitecomputer/fragment/releases/latest/download/";
 /// Each target the release builds, and its asset's name: the `uname -s` and
 /// `uname -m` of the machines it runs on, which the install command names.
-const RELEASE_ASSETS: [(&str, &str); 3] =
-    [("aarch64-apple-darwin", "Darwin-arm64"), ("x86_64-apple-darwin", "Darwin-x86_64"), ("x86_64-unknown-linux-musl", "Linux-x86_64")];
+const RELEASE_ASSETS: [(&str, &str); 4] = [
+    ("aarch64-apple-darwin", "Darwin-arm64"),
+    ("x86_64-apple-darwin", "Darwin-x86_64"),
+    ("x86_64-unknown-linux-musl", "Linux-x86_64"),
+    ("aarch64-unknown-linux-musl", "Linux-aarch64"),
+];
 
 /// cli/SKILL.md (`fragment skill`) is a skill, and its one-line install,
 /// which the shell's settings, GUIDE.md, and the README copy, fetches

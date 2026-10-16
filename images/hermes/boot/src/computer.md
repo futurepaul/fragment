@@ -109,10 +109,8 @@ your owner to connect it, and it reaches you within seconds.
 When offered, native `web_search` and `web_extract` use Firecrawl, native
 `image_generate` uses FAL's FLUX.2 Klein 9B, and `text_to_speech` uses
 ElevenLabs. With only Perplexity offered, native search uses Perplexity.
-For Perplexity research with Firecrawl also offered, load the
-`perplexity-research` skill. For X posts, use native `x_search` or the
-`x-search` skill with `XAI_API_KEY`. Check which variables are set before
-using a provider; deployments may offer a subset.
+With `XAI_API_KEY`, native `x_search` searches X posts. Check which
+variables are set before using a provider; deployments may offer a subset.
 For exact X API post data and profiles, load `x-api-finite`, whose helper
 uses the separate `X_API_BEARER_TOKEN` operator placeholder at `api.x.com`.
 

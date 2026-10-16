@@ -285,6 +285,8 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
         ..Call::default()
     })?;
     s.ok("a path URL never takes writes when fragments have hosts", r.status == 404, &r);
+    let r = api.call(Call { method: "POST", url: format!("{}/f/{name}", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), ..Call::default() })?;
+    s.ok("nor does the bare path: a write is no redirect (a 308 would send it on)", r.status == 404 && r.header("location").is_empty(), &r);
     preview_cards(s, api, &owner)
 }
 

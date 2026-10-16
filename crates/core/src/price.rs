@@ -437,12 +437,12 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 8] = [
     // estimated as a 5-minute session, excluding proxy traffic, rounded
     // up to a micro-dollar; create and stop are separate metered calls.
     ("browser-use", 20_000, 12),
-    // Perplexity's Search API (`POST /search`, the perplexity-research
-    // skill's search and Hermes' own web search): $5.00 per 1,000
-    // requests. Source: docs.perplexity.ai/getting-started/pricing. A Sonar
-    // Pro brief (`/v1/sonar`) also bills tokens ($3 in, $15 out per
-    // million) and a request fee of $6 to $14 per 1,000: it is metered at
-    // the search's price, under what it costs (docs/technical-debt-ledger.md).
+    // Perplexity's Search API (`POST /search`, Hermes' own web search):
+    // $5.00 per 1,000 requests. Source:
+    // docs.perplexity.ai/getting-started/pricing. A Sonar Pro brief
+    // (`/v1/sonar`) also bills tokens ($3 in, $15 out per million) and a
+    // request fee of $6 to $14 per 1,000: it is metered at the search's
+    // price, under what it costs (docs/technical-debt-ledger.md).
     ("perplexity", 5_000_000, 1_000),
     // Google Places API (New), Text Search Enterprise: $35.00 per 1,000
     // calls (0 to 100,000 a month). The goplaces skill's field masks name
@@ -452,7 +452,7 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 8] = [
     // developers.google.com/maps/billing-and-pricing/pricing (last updated
     // 2026-09-28), the free monthly caps not counted.
     ("google-places", 35_000_000, 1_000),
-    // xAI's X Search (the x-search skill: `/v1/responses` with the
+    // xAI's X Search (Hermes' native `x_search`: `/v1/responses` with the
     // `x_search` tool): $5 per 1,000 posts fetched and $10 per 1,000 user
     // profiles, plus tokens. Source: docs.x.ai/developers/tools/x-search
     // (prices in effect since 2026-09-21) and docs.x.ai/docs/models

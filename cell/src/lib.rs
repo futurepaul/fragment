@@ -256,13 +256,17 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     }
 }
 
+/// Where `for` is honored (`signer_for`: docs/api.md, Principals and
+/// access), as a refusal elsewhere says it.
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments and the model routes (/api/models/…) only";
+
 /// The signer of a request that must be signed, resolved, with the body
-/// the router read. It acts as itself: `for` is honored on a fragment's
-/// routes only (`signer_for`).
+/// the router read. It acts as itself: a `for` is refused here
+/// (`FOR_HONORED`), and the routes that honor one call `signer_for`.
 pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     let who = signer_of(env, req, url, Payload::Read(body)).await?;
     if who.acting_for.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(FOR_HONORED));
     }
     Ok(who)
 }
@@ -693,7 +697,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// before cannot act.
 async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
     if acting_for(url)?.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(FOR_HONORED));
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let method = req.method();
@@ -1204,11 +1208,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let routed = Routed { name, url: url.clone(), signed: principal, credential: None };
             forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await
         }
-        (_, ["f", name]) => {
-            check_name(name)?;
-            let to = Url::parse(&cfg.canonical(&url, name)).map_err(|e| CellError::host(e.to_string()))?;
-            Ok(Response::redirect_with_status(to, 308)?)
-        }
+        // `/f/<name>` too: its root
         (method, ["f", name, rest @ ..]) => {
             check_name(name)?;
             let rest = rest.join("/");

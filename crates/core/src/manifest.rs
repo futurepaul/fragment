@@ -286,7 +286,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(meta @ Value::Object(_)) => {
             m.meta = Some(Meta {
-                title: text(meta, "title", 120)?,
+                title: text(meta, "title", limits::TITLE_MAX_CHARS)?,
                 description: text(meta, "description", 400)?,
                 image: text(meta, "image", 500)?,
             })

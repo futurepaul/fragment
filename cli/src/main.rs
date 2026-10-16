@@ -54,9 +54,6 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// A file `fragment write` sends: the files API's own cap (docs/api.md).
-const WRITE_MAX_BYTES: usize = 256 * 1024;
-
 #[derive(Subcommand)]
 enum Cmd {
     /// Make a nostr key (or use the one you have) and add it to you: sign
@@ -91,9 +88,10 @@ enum Cmd {
         /// public | link (default) | members
         #[arg(long)]
         visibility: Option<String>,
-        /// Start from one of the platform's templates: a blessed one (chat,
-        /// agent, skills, brain, …) runs the platform's current release, any
-        /// other is copied in as its first commit
+        /// Start from one of the platform's templates (the host refuses any
+        /// other, naming them; `fragment guide` says what each is): a blessed
+        /// one runs the platform's current release, the others are copied in
+        /// as its first commit
         #[arg(long)]
         template: Option<String>,
         /// Its title, over its template's
@@ -1418,8 +1416,10 @@ fn run(cli: Cli) -> Result<()> {
                 (None, Some(t)) => t,
                 _ => return Err(usage("name the file's text: --text TEXT, or --from FILE (- for stdin)")),
             };
-            if text.len() > WRITE_MAX_BYTES {
-                return Err(usage(format!("a file written this way is at most {} KiB; sync a folder for larger ones", WRITE_MAX_BYTES / 1024)));
+            // the files API's own cap (docs/api.md), refused before it is sent
+            let max = fragment_proto::limits::API_FILES_WRITE_MAX_BYTES;
+            if text.len() > max {
+                return Err(usage(format!("a file written this way is at most {} KiB; sync a folder for larger ones", max / 1024)));
             }
             let msg = message.unwrap_or_else(|| format!("write {path}"));
             let r = c.post_json(&format!("/api/f/{name}/files"), &json!({ "files": [{ "path": path, "text": text }], "message": msg }))?;
@@ -2046,8 +2046,8 @@ fn refused_live(c: &api::Client, name: &str, live_tip: &str) -> Result<FragmentS
 fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<&Path>, no_picture: bool) -> Result<Vec<Value>> {
     let mut files = vec![];
     if let Some(name) = name.map(str::trim) {
-        if name.is_empty() || name.chars().count() > 120 {
-            return Err(usage("a name is 1 to 120 characters"));
+        if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
+            return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
         }
         let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
         anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");
@@ -2326,6 +2326,58 @@ mod tests {
         for text in [agent_doc(SKILL, &host), agent_doc(GUIDE, &host)] {
             assert!(text.contains("fragment login --host http://127.0.0.1:8790") && text.contains(fragment_templates::ANY_FRAGMENT), "{text}");
             assert!(!text.contains(fragment_templates::PLATFORM_BLANK) && !text.contains(fragment_templates::FRAGMENT_BLANK));
+        }
+    }
+
+    /// GUIDE.md's command reference: each `fragment …` entry of its block,
+    /// its comment cut, as the commands it names (the first word, split on
+    /// `|`) and every word of it (split on spaces and `[]<>|`).
+    fn reference_entries() -> Vec<(Vec<String>, Vec<String>)> {
+        let block = GUIDE.split_once("## Command reference\n\n```\n").and_then(|(_, rest)| rest.split_once("\n```")).expect("GUIDE.md has a command reference block").0;
+        let mut entries = vec![];
+        for line in block.lines() {
+            let line = line.split_once(" # ").map_or(line, |(entry, _)| entry);
+            for entry in line.split("fragment ").map(str::trim).filter(|e| !e.is_empty()) {
+                let names = entry.split(' ').next().expect("an entry names a command").split('|').map(str::to_string).collect();
+                let words = entry.split(|c: char| c.is_whitespace() || "[]<>|".contains(c)).filter(|w| !w.is_empty()).map(str::to_string).collect();
+                entries.push((names, words));
+            }
+        }
+        entries
+    }
+
+    /// Goal: GUIDE.md's command reference is the CLI's, not a copy that
+    /// drifts from it. Method: walk clap's tree; every command and
+    /// subcommand that is not hidden has an entry in the reference that
+    /// names it (its parents first, it among the entry's words), and each
+    /// long flag of its own is in one of its entries (`--host`, `--json`
+    /// and `-v`, global, are listed under the block). Invalid: an entry
+    /// for no command.
+    #[test]
+    fn the_guide_lists_every_command_and_flag() {
+        use clap::CommandFactory;
+        let entries = reference_entries();
+        let mut missing = vec![];
+        let mut stack: Vec<(Vec<String>, &clap::Command)> = vec![];
+        let cli = Cli::command();
+        stack.extend(cli.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| (vec![c.get_name().to_string()], c)));
+        while let Some((path, cmd)) = stack.pop() {
+            let its: Vec<&Vec<String>> = entries.iter().filter(|(names, words)| names.contains(&path[0]) && path[1..].iter().all(|p| words.contains(p))).map(|(_, words)| words).collect();
+            if its.is_empty() {
+                missing.push(format!("fragment {}", path.join(" ")));
+            }
+            for flag in cmd.get_arguments().filter(|a| !a.is_hide_set() && !a.is_global_set()).filter_map(|a| a.get_long()).map(|l| format!("--{l}")) {
+                if !its.iter().any(|words| words.contains(&flag)) {
+                    missing.push(format!("fragment {} {flag}", path.join(" ")));
+                }
+            }
+            stack.extend(cmd.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| ([path.clone(), vec![c.get_name().to_string()]].concat(), c)));
+        }
+        missing.sort();
+        assert!(missing.is_empty(), "GUIDE.md's command reference lacks:\n{}", missing.join("\n"));
+        let commands: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
+        for (names, _) in &entries {
+            assert!(names.iter().all(|n| commands.contains(&n.as_str())), "GUIDE.md's reference names {names:?}, no command");
         }
     }
 

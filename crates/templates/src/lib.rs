@@ -295,6 +295,41 @@ pub(crate) mod tests {
         assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories", "doc"]);
     }
 
+    /// A doc's text with each run of whitespace one space, so a list it
+    /// wraps reads as one line.
+    fn flat(path: &str) -> String {
+        std::fs::read_to_string(repo().join(path)).unwrap().split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Goal: the docs name the templates `fragment create` takes as the
+    /// cell takes them: the catalog, copied in, and the blessed ones, not
+    /// the CLI's own set (`fragment new --list`, with `notes`). Method:
+    /// each doc's list, as it writes it, made from `CATALOG` and
+    /// `BLESSED`. Invalid: a template added to either and to no doc.
+    #[test]
+    fn the_docs_name_the_templates_create_takes() {
+        let ticked = |names: &[&str]| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let catalog = CATALOG.map(|t| t.name);
+        let (guide, skill, api) = (flat("cli/GUIDE.md"), flat("cli/SKILL.md"), flat("docs/api.md"));
+        assert!(guide.contains(&format!("one of {} is copied in", ticked(&catalog))), "cli/GUIDE.md names the catalog");
+        assert!(guide.contains(&format!("a blessed one, {}, runs", ticked(&blessed::BLESSED))), "cli/GUIDE.md names the blessed templates");
+        assert!(skill.contains(&format!("one with no folder: {}", catalog.join("|"))), "cli/SKILL.md names the catalog");
+        assert!(api.contains(&format!("With `template` ({}; any other is 400", ticked(&catalog))), "docs/api.md names the catalog");
+        assert!(api.contains(&format!("{} are blessed", ticked(&blessed::BLESSED))), "docs/api.md names the blessed templates");
+        assert!(!catalog.contains(&"notes") && NOTES.name == "notes", "notes is the CLI's alone");
+    }
+
+    /// Goal: the chat template's README names every file of its page.
+    /// Method: each file under `site/` is in it, in backticks.
+    #[test]
+    fn the_chat_readme_names_its_pages_files() {
+        let readme = flat("templates/chat/README.md");
+        let chat = blessed::template("chat").expect("chat is blessed");
+        for f in chat.files.iter().filter_map(|f| f.path.strip_prefix("site/")) {
+            assert!(readme.contains(&format!("`{f}`")), "templates/chat/README.md does not name site/{f}");
+        }
+    }
+
     /// Goal: the assets directory a build writes is the release's files by
     /// hash, alone, and writing it again is safe. Method: a stale file and a
     /// directory in it are removed; every file is there under its hash with

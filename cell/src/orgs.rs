@@ -27,7 +27,7 @@ fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
 /// Who asks, for the registry to resolve in the same turn as what it asks.
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     if acting_for(url)?.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(crate::FOR_HONORED));
     }
     Ok(match caller(env, req, url, Payload::Read(bytes))? {
         Caller::Key(k) => By::Key(k),
@@ -96,7 +96,7 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
 /// for the log and a grant's `by`.
 pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<String> {
     if acting_for(url)?.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(crate::FOR_HONORED));
     }
     let refused = || CellError::new(ErrorCode::Forbidden, "only the deployment's operators do this");
     match caller(env, req, url, Payload::Read(bytes))? {

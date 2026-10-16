@@ -176,10 +176,13 @@ body, sent without one, is 401. A blob upload's bytes stream past the
 router, so its signature binds its URL, which names the bytes' hash (the
 cell checks the bytes as they arrive): a `payload` tag may name that same
 hash, or be absent, and one naming any other hash is 401. Every other
-body the router reads
-is at most 2 MiB, measured as it arrives: a longer declared
-`content-length`, or a chunked body that runs past it, is 413 before
-anything is authenticated.
+body the router reads is at most 2 MiB (`limits::BODY_MAX_BYTES`), but a
+model call's (`/api/models/v1/chat/completions`, `/api/models/v1/decide`), at
+most 6 MiB (`MODEL_BODY_MAX_BYTES`: an image's 5 MiB data URL and 1 MiB
+more), and a transcription's, at most 10 MiB of audio and 64 KiB more
+(`transcribe::BODY_MAX_BYTES`); each is measured as it arrives: a
+longer declared `content-length`, or a chunked body that runs past it,
+is 413 before anything is authenticated.
 
 Roles, weakest first: `public`, `viewer`, `editor`, `owner`. A member's
 role is their membership. Otherwise visibility decides: on a `public`
@@ -208,9 +211,10 @@ role, so an agent never reaches further than its owner could. The
 principal is still the agent (records, runs, and the ledger name it),
 but an operation it calls `for` someone tells the app so: `call.principal`
 is them and `call.agent` the agent, so what it does for them is theirs.
-`for` is honored on a fragment's routes (`/api/f/{name}/…`) and on `GET`
+`for` is honored on a fragment's routes (`/api/f/{name}/…`), on `GET`
 and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
-403: what an agent makes is its owner's); on any other route it is 400.
+403: what an agent makes is its owner's), and on the model routes
+(`/api/models/v1/…`: Models, below); on any other route it is 400.
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. A site request's query is its app's: `for`
@@ -1001,8 +1005,8 @@ title opening its share sheet.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person, not a guest; an agent for its owner (the fragment is the owner's, billed to them, with its maker an editor)
- | `{label | name, visibility?, template?, title?}`: a label, which the platform names with a random suffix, or a name in full (Names, above) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (its name, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`, but to `members` for a chat or an agent (its SOUL and memories: Paul, 2026-10-13; `Visibility::made_from`). The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name, and `title`, if given, as its `meta.title`) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}`, and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). A `title` (1 to 120 characters) needs a `template` (400 without one): a fragment made bare says its title in its own `fragment.json`. |
-| `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
+ | `{label | name, visibility?, template?, title?}`: a label, which the platform names with a random suffix, or a name in full (Names, above) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (its name, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`, but to `members` for a chat or an agent (its SOUL and memories: Paul, 2026-10-13; `Visibility::made_from`). The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name, and `title`, if given, as its `meta.title`) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `agent`, `chat`, `brain`, `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}`, and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). A `title` (1 to 120 characters) needs a `template` (400 without one): a fragment made bare says its title in its own `fragment.json`. |
+| `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names nothing (404: a fragment is named in full); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns |
@@ -1051,7 +1055,8 @@ title opening its share sheet.
 ## Apps
 
 Code comes from git: when `live` moves, the cell reads `fragment.json`
-and `app.mjs` (with `applib/**.mjs|js`, at most 64 modules and 4 MiB in
+and `app.mjs` (at most 1 MiB, `limits::SOURCE_MAX_BYTES`; with
+`applib/**.mjs|js`, at most 64 modules besides it and 4 MiB with it in
 all) from the live commit. A live commit with an invalid `fragment.json`
 keeps the last good code and says why in `status.code.error`.
 
@@ -1137,8 +1142,10 @@ operation, each called `(input, call)`: `call.principal` (an identity,
 agent's call `for` someone, them, with the agent in `call.agent`, else
 null) and `call.role`. A mutation is synchronous over the app's own
 SQLite; `call.publish(channel, body, kind = "message")` appends a record
-(body at most 64 KiB, 64 per mutation) once the mutation commits, and an
-exception rolls back its writes and its records (422). The ledger keys a
+(body at most 64 KiB) once the mutation commits, and an exception rolls
+back its writes and its records (422). A mutation's records, file writes
+and pushes are its effects, at most 64 of them in all
+(`limits::EFFECTS_MAX`). The ledger keys a
 mutation by (principal, id) for seven days: a retry with the same id
 returns the stored result and applies nothing again; the same id with
 another input is 409; after seven days the same id runs again, as a new
@@ -1202,7 +1209,8 @@ makes, and move the pin at once.
   serves it. An absent file reads as `null`.
 - In a mutation, `call.files.write(path, content)` / `remove(path)`
   (content a string, `Uint8Array`, or `ArrayBuffer`; at most 16 files and
-  256 KiB; a path of at most 300 bytes; never a blob pointer's text):
+  256 KiB, each write one of the mutation's 64 effects; a path of at most
+  300 bytes; never a blob pointer's text):
   applied once the mutation commits, as one commit, once (a replay
   commits nothing). Last writer wins.
 - In a job, `job.files.read / list / stat / write / remove` are steps.
