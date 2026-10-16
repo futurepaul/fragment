@@ -230,7 +230,9 @@ whose bridge turns the records of the channels it follows into turns
 docs/chat-records.md). It acts on fragments through the platform's API
 as their member, for whoever asked: every call names them (`for`), and
 acts with the lower of their role and the agent's cap
-(docs/cloudflare-v1.md, R17). The in-fragment goose agent (a loop in a Durable Object of its own,
+(docs/cloudflare-v1.md, R17). Acting for its owner it also starts and
+stops its owner's other agents on their computer, so a person's default
+agent keeps the rest (decision 62, proposed). The in-fragment goose agent (a loop in a Durable Object of its own,
 a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
 #156): one runtime, with one set of turn semantics.
 

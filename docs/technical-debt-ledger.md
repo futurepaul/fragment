@@ -1024,9 +1024,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+- **Risk:** an agent made another way (the API by hand) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
   person with two chats of that label (one made by hand) may get either.
+  `fragment agent --new`, which a person's default agent uses to make
+  their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
   its own chat (no `botmode.titled` event for it, or no
   `botmode.chat_found`).
@@ -1283,3 +1285,52 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## Which of an agent's teammates is trusted is read from its agent.json
+
+- **Observed:** 2026-10-16, a person's default agent keeping the rest
+  (docs/cloudflare-v1.md, decision 62, proposed). The default agent keeps
+  the person's private things from a teammate whose model is outside the
+  platform. Nothing on the platform says which models are trusted: the
+  agents-finite skill and `fragment agent --json` (`runsOn`) read the
+  teammate's `agent.json`, a `model` (a provider its owner connected:
+  OpenRouter's catalog) untrusted and the platform's tiers trusted.
+- **Shortcut:** every tier the deployment runs counts as trusted, the
+  default agent's own included, whatever runs it (Finite's tiers run on
+  GLM-5.3 Flash through the platform's OpenRouter key since 2026-10-15,
+  Finite Private by config: decision 61). A `model` counts as untrusted
+  while it is named, even when its computer runs the agent on its tier
+  (its owner disconnected the provider).
+- **Risk:** a tier that runs outside what the person would call private
+  is trusted all the same; the cell never reads `agent.json`, so a
+  teammate the skill calls trusted may be on a model no one checked.
+- **First proof:** a deployment whose `models` put a tier on a provider
+  its operator does not call private, and a default agent handing that
+  tier's teammate what the skill says to keep from others.
+- **Delete when:** trust is the deployment's own fact (its `models`
+  config names which slots and providers are trusted, decision 61's
+  config), told to every agent with its teammates (`GET /api/computer`),
+  and the skill reads that.
+
+## The default agent's care for its owner's private things is a prompt
+
+- **Observed:** 2026-10-16, decision 62 (proposed). The agents-finite
+  skill tells a person's default agent what never to hand a teammate on
+  another provider; decision 44 keeps a person's agents unfenced on their
+  one computer (one Linux user, root through sudo, every profile's files
+  readable, the egress signing as whichever agent a request names, and
+  each agent acting for its owner reaching all their fragments).
+- **Shortcut:** the care is the default agent's, in its skill and its
+  job; nothing on the platform stops a teammate on another provider from
+  reading what the default agent kept from it.
+- **Risk:** a teammate on another provider, misled by a page it reads,
+  reads the default agent's transcripts, memories or its owner's chats,
+  and its provider has them.
+- **First proof:** a hosted run in which a teammate on an own-provider
+  model, asked to, reads another profile's `state.db` or a chat it is not
+  in, acting for its owner.
+- **Delete when:** a teammate on another provider runs where its owner's
+  data is not (a computer of its own, as an identity outside its owner's
+  umbrella that reaches only what it is handed: the "contractor" shape,
+  which reopens decisions 13 and 44, Paul's), or the person is told
+  plainly that this care is all there is and accepts it.

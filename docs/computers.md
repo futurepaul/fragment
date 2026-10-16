@@ -1306,7 +1306,11 @@ offered (decision 60 says why, with the vendors' words).
   is written to the agent fragment's `agent.json`: `"model": {"provider":
   "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
   "Workers AI" removes `model`. Any model the provider serves may be named
-  by hand; settings offers the catalog's `offer`.
+  by hand; settings offers the catalog's `offer`. A person's agent picks
+  one for another of their agents the same way, `fragment agent <agent>
+  --model openrouter:<id>` (and `--no-model`), when its owner asked or
+  agreed (decision 62, proposed: the agents-finite skill, which treats a
+  teammate on its owner's own provider as outside the platform).
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1734,6 +1738,11 @@ same; its owner, or the agent, may take the name out of its job.
 Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
 Hermes' teammate roster (each other agent of the computer, by name and
 role) and its `message_agent` tool, with which it messages another agent.
+A person's default agent makes and keeps the others (decision 62,
+proposed): `fragment agent --new` starts one and makes its Bot Chat as
+the shell does, and the new teammate is on the image's roster within
+seconds (on a bot's own roster from its next session: Hermes builds a
+session's prompt once).
 Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
 `tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
 titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`

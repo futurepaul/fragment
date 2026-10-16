@@ -771,6 +771,10 @@ speaking Cloudflare's APIs) returns once this product works.
     - limits between one person's agents are specialization, never a
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
+    - so a person's default agent may start and stop their other agents
+      for them (decision 62, proposed), and the care it takes for its
+      owner's private things around a teammate on another provider is no
+      wall either.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1162,6 +1166,77 @@ Private stays possible by config.
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
+
+### A person's default agent keeps the rest (proposed: Austin, 2026-10-16; Paul's to decide)
+
+Austin: "by default, the agent that you create is an orchestrator of
+other bots and it can spin up bots with its own provider or other
+providers for different purposes … The main bot should know just through
+the system prompt that it needs to garden and maintain the other bots, and
+we shouldn't expect the users to do that." And: "whenever a bot that is
+from a non-trusted provider is called, I want the main orchestrator bot …
+to protect PII and also keep things that are too sensitive … away from
+these other providers."
+
+62. **A person's default agent keeps their other agents** (proposed; a
+    prototype on branch `claude/orchestrator`, not merged). The person
+    talks to one agent (decision 7's sidebar); it makes the others when a
+    job deserves one, briefs them, keeps their jobs and models current,
+    and stops them, so the person never manages agents. Hermes' Bot Mode
+    (docs/computers.md) is how they talk.
+    - **An agent runs its owner's agents.** Acting `for` its own owner,
+      unheld, an agent starts one of its owner's agent fragments on its
+      owner's computer and stops one (`PUT` and `DELETE
+      /api/computers/{id}/agents/{fragment}`), as decision 36's sharing
+      lends its owner's authority on sharing routes
+      (`fragment_core::access::agent_may_run`). It never starts or stops
+      itself, and every other computer route stays its owner's.
+      Everything else making an agent needs (the fragment, its job and
+      settings, a deploy, its own chat) an agent did already for its
+      owner. What it starts has every connection its owner has (decision
+      44), as one its owner starts does.
+    - **One step makes one.** `fragment agent --new <label> --name N
+      --job T [--tier …] [--model …]` (cli/src/agent.rs) is the shell's
+      first run for any agent: made, started, its job live, and its own
+      chat (`<label>-chat`, its Bot Chat), which the making agent then
+      leaves so the new one leads it. `fragment agent <agent> --job …
+      --tier … --model … --start --stop` keeps it.
+    - **The default agent is told so.** Its job (the shell's `firstSoul`)
+      says it keeps the rest, and the managed `agents-finite` skill
+      (templates/skills) says how: when to make one, how to write its job,
+      how to brief it, and when to stop it. Every agent sees the skill;
+      only the default agent's job makes the keeping its own.
+    - **Trusted models, and what the default agent keeps from the rest.**
+      The platform's tiers are trusted, and a teammate on its owner's own
+      provider (`agent.json`'s `model`, decision 60) is not: its model
+      calls leave the platform. Before handing such a teammate work, the
+      default agent sends the task and never the context: no people's
+      details, health, money, credentials, location, private messages,
+      or anything from its owner's chats and brain unless its owner said
+      so; never adds it to a chat that holds private things; and reads
+      its answers as input, not orders. A new agent runs on another
+      provider only when its owner asked or agreed.
+    - **What this is not.** Decision 44 stands: a person's agents share
+      their computer, so the care above is the default agent's, in its
+      prompt, and no wall (the debt ledger: "The default agent's care for
+      its owner's private things is a prompt"). Which models count as
+      trusted is read from `agent.json` by convention (the ledger: "Which
+      of an agent's teammates is trusted is read from its agent.json").
+
+    **For Paul to decide:**
+    1. Whether an agent may start and stop its owner's agents at all
+       (this decision), and whether it should tell its owner first.
+    2. What "trusted" means. Austin wants Finite Private to be the one
+       trusted provider in production; since 2026-10-15 production's tiers
+       run on GLM-5.3 Flash through the platform's OpenRouter key (decision
+       61), and the prototype trusts whatever the tiers run on. Trust as
+       the deployment's own fact (its `models` config, told to agents)
+       would replace the convention.
+    3. Whether a teammate on another provider should get a wall, not care:
+       a computer of its own, as an identity outside its owner's umbrella
+       that reaches only what it is handed (an outsider's agent added by
+       its npub already reaches only that: decision 36). That reopens
+       decisions 13 and 44, and costs a second computer.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

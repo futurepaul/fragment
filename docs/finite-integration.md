@@ -16,7 +16,7 @@ matters: an agreed direction is not a finished interface.
 
 | Issue | What | Status on 2026-09-24 |
 |---|---|---|
-| FIN-10 | Core platform contracts: accounts, orgs, billing (Stripe in Core), agent lifecycle, Google credentials | accepted by Alex 2026-09-07; wider review pending |
+| FIN-10 | Core platform contracts: accounts, orgs, billing (Stripe in Core), agent lifecycle, Google credentials | accepted by Alex 2026-09-07; wider review pending. Agent lifecycle: a person's agent may start and stop their other agents (docs/cloudflare-v1.md, decision 62, proposed), which Core's contract would carry |
 | FIN-11 | BANKS: identity and public-key registry, shared WorkOS login, designated owners | canceled 2026-10-05 with V3; fragment's own version is docs/cloudflare-v1.md, decisions 45 to 50 (2026-10-08) |
 | FIN-13 | Finite Private authorization and usage accounting | Austin's; not designed yet |
 | FIN-14 | Add-on access and entitlements (Sites, Brain, connections) | not designed yet |

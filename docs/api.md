@@ -233,8 +233,10 @@ but an operation it calls `for` someone tells the app so: `call.principal`
 is them and `call.agent` the agent, so what it does for them is theirs.
 `for` is honored on a fragment's routes (`/api/f/{name}/…`), on `GET`
 and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
-403: what an agent makes is its owner's), and on the model routes
-(`/api/models/v1/…`: Models, below); on any other route it is 400.
+403: what an agent makes is its owner's), on the model routes
+(`/api/models/v1/…`: Models, below), and on starting and stopping an
+agent (`PUT` and `DELETE /api/computers/{id}/agents/{fragment}`: below);
+on any other route it is 400.
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. A site request's query is its app's: `for`
@@ -257,6 +259,21 @@ the agent, and each change's event (`member.set`, `member.removed`,
 carries `by` (who made it) and, for an agent, `for` (its owner), and its
 summary says "(an agent, for …)", so the owner sees what their agent
 shared.
+
+An agent runs its owner's agents (decision 62, proposed: a person's
+default agent keeps the rest; `fragment_core::access::agent_may_run`).
+An agent acting `for` its own owner, and not held below them, starts one
+of its owner's agent fragments on its owner's computer and stops one
+(`PUT` and `DELETE /api/computers/{id}/agents/{fragment}`), as its owner
+would. It never starts or stops itself (403), and every other computer
+route stays its owner's own (403, `for` or not): making the computer,
+waking, restarting, its image, an agent's connections, ports, its uses.
+One acting as itself or for anyone else, and one its owner holds (at any
+hold), is 403, saying why. The agent fragment's `computer.assigned` and
+`computer.unassigned` events carry `by` (the agent) and say "(started
+by …, an agent, for its owner)", so the owner sees it did. What it starts
+runs with every connection its owner has (decision 44), as one its owner
+starts does.
 
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
@@ -2697,7 +2714,10 @@ chat's page has no way to be told one yet.
 A person's computer runs an image (pinned per computer) and the agent
 fragments assigned to it; the Computer Durable Object (`cell/src/computer.rs`)
 is the only thing that talks to its container. What a guest may rely on
-is docs/computers.md; the routes here are its owner's.
+is docs/computers.md; the routes here are its owner's, but for starting
+and stopping an agent, which their agent also does for them (Principals
+and access, above: decision 62, proposed). Any other route an agent asks
+is 403.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -2710,8 +2730,8 @@ is docs/computers.md; the routes here are its owner's.
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view: its owner saw the `went_back` notice of the start `life` lost, which is told no more (nor any loss before it); again, the same. A `life` past the newest loss told, or 0, is 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view: its owner put off the update to `version` (an `update` notice's, the view's `latest`), which is told no more; a version other than it is told again. Again, the same. A version its next start does not run, or that is no version (12 hex digits), is 400 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; awake on another, its owner is told an update is ready (`update`); an image the deployment lacks is 400 |
-| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
-| `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both, or their agent for them (not the fragment's own agent) | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
+| `DELETE /api/computers/{id}/agents/{fragment}` | the same (an agent never stops itself) | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
