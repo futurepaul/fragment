@@ -4,8 +4,11 @@
 //! registry pushes each seat's plan to its holder's ledger (a comped seat is
 //! active whatever its org pays; one that ends is canceled, the plan kept).
 //! A seat's holder reads it and lets their always-on computer sleep; an
-//! org's admins see it. Valid, invalid and replay. A seat's computer
-//! staying awake is the computers section's (it has one).
+//! org's admins see it. The registry is the seat's one writer: a ledger an
+//! operator's old `seat` command left ahead of its order takes its pushes
+//! all the same. Valid, invalid and replay. A seat's computer staying
+//! awake, and one made while its seat's push could not be asked for, are
+//! the computers section's (it has one).
 
 use std::time::Duration;
 
@@ -180,6 +183,32 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         v["seat"] == "active" && v["plan"] == "seat"
     });
     s.ok("a seatless admin comped again takes the seat in their own org, active again", r.status == 200 && r.body["seat"]["id"] == bob_seat.as_str() && pushed, ledger(api, &bob));
+
+    // ---- the registry is the seat's one writer: a ledger an operator's
+    // `seat` command (gone 2026-10-16) left at an order an hour ahead of
+    // the registry's refuses its next push as stale, naming its own, and
+    // the registry orders past it: the push lands, and so do later ones
+    const PAST: &str = "a ledger whose seat an old operator's command left canceled an hour ahead of the registry's order takes the registry's next push all the same: its seat active, its plan the comp's new kind";
+    const LATER: &str = "and the registry's later pushes land too";
+    if !s.runs("orgs", &[Need::Levers]) {
+        s.skip(PAST, "it needs the ledger's levers");
+        s.skip(LATER, "it needs the ledger's levers");
+    } else {
+        let ahead = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64 + 3_600_000;
+        let frozen = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": bob_id, "op": "legacy-seat", "seat": "canceled", "seq": ahead })))?;
+        let canceled = frozen.status == 200 && ledger(api, &bob)["seat"] == "canceled";
+        let r = api.signed(&operator, "PATCH", &format!("/api/admin/seats/{bob_seat}"), Some(&json!({ "kind": "seat_always_on" })))?;
+        let pushed = s.eventually(PUSHED, || {
+            let v = ledger(api, &bob);
+            v["seat"] == "active" && v["plan"] == "seat_always_on" && v["standing"]["standing"] == "ok"
+        });
+        s.ok(PAST, canceled && r.status == 200 && pushed, json!({ "frozen": frozen.body, "kind": r.body, "ledger": ledger(api, &bob) }));
+        let r = api.signed(&operator, "PATCH", &format!("/api/admin/seats/{bob_seat}"), Some(&json!({ "kind": "seat" })))?;
+        let pushed = s.eventually(PUSHED, || ledger(api, &bob)["plan"] == "seat");
+        let health = api.signed(&operator, "GET", "/api/admin/health", None)?;
+        let stuck = health.body["failing"].as_array().is_none_or(|f| f.iter().any(|f| f["target"] == bob_id.as_str()));
+        s.ok(LATER, r.status == 200 && pushed && !stuck, json!({ "ledger": ledger(api, &bob), "health": health.body }));
+    }
 
     // ---- invalid
     let stranger = api.person()?;

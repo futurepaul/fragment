@@ -346,6 +346,10 @@ pub enum Refused {
     TooManyHolds,
     /// A price book no newer than the ledger's.
     StaleBook { current: u32 },
+    /// A seat change no newer (by `seq`) than the last one applied
+    /// (`current`): it changes nothing, and is kept by nothing. The seat's
+    /// one writer, the registry, takes its next order past `current`.
+    StaleSeat { current: u64 },
     /// The book prices no such model, instance type or key.
     NoPrice,
     /// More than one reservation (`RESERVATION_MAX`) or one row
@@ -421,7 +425,7 @@ impl Refused {
     /// `budget_used_up` (402), with the reason in the message.
     pub fn code(self) -> ErrorCode {
         match self {
-            Refused::Invalid { .. } | Refused::Ended | Refused::StaleBook { .. } | Refused::NoPrice | Refused::Stale => ErrorCode::InvalidRequest,
+            Refused::Invalid { .. } | Refused::Ended | Refused::StaleBook { .. } | Refused::StaleSeat { .. } | Refused::NoPrice | Refused::Stale => ErrorCode::InvalidRequest,
             Refused::ConflictingBody => ErrorCode::ConflictingBody,
             Refused::UnknownRef | Refused::Wiped => ErrorCode::NotFound,
             Refused::TooManyHolds => ErrorCode::RateLimited,
@@ -442,6 +446,7 @@ impl Refused {
             Refused::Ended => "that reservation was released; only a call that used nothing is released".into(),
             Refused::TooManyHolds => format!("{HOLDS_MAX} reservations are held already; try again as they end"),
             Refused::StaleBook { current } => format!("the ledger charges with price book {current}; a new book has a higher version"),
+            Refused::StaleSeat { current } => format!("the ledger's seat is at order {current}; a change to it has a higher one"),
             Refused::NoPrice => "the price book has no price for that".into(),
             Refused::TooLarge => "that is more than one call or row may cost".into(),
             Refused::Stale => "that row is older than the ledger remembers".into(),
@@ -1012,9 +1017,11 @@ impl Ledger {
         Ok(())
     }
 
-    /// A seat's state from its hook. A change no newer than the last one
-    /// applied (by `seq`) is kept as applied and changes nothing, so a
-    /// late `active` never undoes a `canceled`.
+    /// A seat's state, from the registry, its one writer (docs/billing.md).
+    /// A change no newer than the last one applied (by `seq`) is refused as
+    /// stale, naming the order the ledger is at, so a late `active` never
+    /// undoes a `canceled`, and its sender learns it was not applied (a
+    /// replay of one that was answers as it did).
     pub fn set_seat(&mut self, store: &mut impl Store, c: &SetSeat, now_ms: i64) -> Result<(), Refused> {
         self.roll(now_ms);
         let command = Command::SetSeat(c.clone());
@@ -1024,11 +1031,12 @@ impl Ledger {
         if c.seq == 0 {
             return Err(invalid(Invalid::Order));
         }
-        if c.seq > self.money.seat_seq {
-            self.money.seat = c.seat;
-            self.money.seat_seq = c.seq;
-            self.money.entitle();
+        if c.seq <= self.money.seat_seq {
+            return Err(Refused::StaleSeat { current: self.money.seat_seq });
         }
+        self.money.seat = c.seat;
+        self.money.seat_seq = c.seq;
+        self.money.entitle();
         self.done(store, &c.id, command, now_ms);
         Ok(())
     }

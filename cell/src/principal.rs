@@ -552,13 +552,16 @@ impl PrincipalCell {
             None => SqlStorageValue::Null,
         };
         let gone = c.role.is_none() || reborn;
-        // a change that carries no face (a fragment from before faces)
-        // keeps the one the row has; no change touches the person's archiving
-        // but the one that ends what it was about
+        // the face is the change's, as every column but archiving is: a
+        // fragment sends its face on every row a role names once it has one
+        // (it is never taken back within a life), so a change without one
+        // is a life that has none yet, never the face of one before it; no
+        // change touches the person's archiving but the one that ends what
+        // it was about
         self.rows(
             "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face, archived, searched) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
              ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version,
-               sharing = excluded.sharing, face = COALESCE(excluded.face, memberships.face), searched = excluded.searched,
+               sharing = excluded.sharing, face = excluded.face, searched = excluded.searched,
                archived = CASE WHEN ? THEN 0 ELSE memberships.archived END",
             vec![
                 c.fragment.as_str().into(),

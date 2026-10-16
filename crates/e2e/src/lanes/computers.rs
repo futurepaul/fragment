@@ -20,7 +20,10 @@
 //! frame of the platform's page (frames.rs, `computer_ports`), and no one
 //! else.
 //! A routine, its agent fragment's cron, wakes it asleep, and so does its
-//! agent being added to a new chat, which it then follows at once.
+//! agent being added to a new chat, which it then follows at once. A $200
+//! seat's computer stays awake unless its owner lets it sleep, and one made
+//! while the registry fails the ask for its seat's push fails its making,
+//! and made again, stays awake all the same.
 
 use std::time::Duration;
 
@@ -739,6 +742,42 @@ fn deleted_agent_leaves(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str,
     Ok(())
 }
 
+/// A $200 seat comped before its holder has a computer finds none to tell
+/// (its push counts as done); the computer's making asks the registry to
+/// push again. When that ask fails (a lever fails the registry's
+/// `/orgs/sync` once), the making answers the failure, the computer made,
+/// and made again (the same one) it asks again: it stays awake after all.
+/// Its holder then lets it sleep, and it is put to sleep. A local run's
+/// (the registry's levers).
+fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
+    let person = api.person()?;
+    let id = fragment_core::computer::default_computer_of(&api.identity(&person)?);
+    let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&person), "kind": "seat_always_on" })))?;
+    let pushed = s.eventually(Duration::from_secs(20), || api.signed(&person, "GET", "/api/ledger", None).is_ok_and(|v| v.body["plan"] == "seat_always_on"));
+    s.ok("a $200 seat comped before its holder has a computer reaches their ledger", r.status == 200 && pushed, &r);
+    // the push's last step, its computer's, found none just after the
+    // ledger's: past it, nothing is pushed until it is asked for again
+    std::thread::sleep(Duration::from_secs(2));
+    let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/orgs/sync", "times": 1 } })))?;
+    let failed = api.signed(&person, "POST", "/api/computers", Some(&json!({})))?;
+    let view = |api: &Api| api.signed(&person, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let first = view(api);
+    s.ok(
+        "its computer made while the registry fails to take the ask for its seat's push: the making answers the failure (503), the computer made, not always-on",
+        down.status == 200 && failed.status == 503 && failed.error() == "registry_unavailable" && first["computer"] == id.as_str() && first["alwaysOn"] == false,
+        json!({ "down": down.body, "made": failed.body, "view": first }),
+    );
+    let again = api.signed(&person, "POST", "/api/computers", Some(&json!({})))?;
+    let on = again.status == 200 && again.body["computer"] == id.as_str() && s.eventually(Duration::from_secs(20), || view(api)["alwaysOn"] == true);
+    s.ok("made again (the same one), it asks again: its seat's push reaches it, and it stays awake", on, json!([again.body, view(api)]));
+    let awake = s.eventually(WAKE, || view(api)["phase"] == "awake");
+    let r = api.signed(&person, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(api)["alwaysOn"] == false);
+    let slept = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    s.ok("it woke as an always-on computer does; let sleep, it sleeps at the end", awake && off && slept.body["phase"] == "asleep", json!([view(api), slept.body]));
+    Ok(())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
@@ -1417,6 +1456,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
+    made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an
     // operator makes its owner a guest

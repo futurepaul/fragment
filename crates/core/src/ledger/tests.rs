@@ -386,19 +386,33 @@ fn a_canceled_seat_stops_agents_and_its_fragments_keep_writing() {
     assert_eq!(w.balance(), 49 * USD, "its fragments' hosting is still metered");
 }
 
-/// Hooks arrive out of order: a late `active` never undoes a `canceled`.
+/// Pushes arrive out of order: a late `active` never undoes a `canceled`,
+/// and is refused as stale, naming the order the ledger is at, so its
+/// sender (the registry) knows it was not applied and can order its next
+/// past it. A stale change is kept by nothing: again, it is refused again;
+/// one of its order with another body is stale too, not a conflict.
 #[test]
-fn a_seat_change_older_than_the_last_changes_nothing() {
+fn a_seat_change_older_than_the_last_is_refused_as_stale() {
     let mut w = World::seat();
-    w.ok(seat("s5", SeatState::Canceled, 5));
-    let (ledger, store) = (w.ledger.clone(), w.store.clone());
-    w.replays(seat("s4", SeatState::Active, 4));
-    assert_eq!(w.ledger, ledger, "the late change moved nothing");
-    assert_ne!(w.store, store, "it is kept as applied, so its replay answers the same");
-    assert_eq!(w.ledger.standing(T0), Standing::AgentsStopped { why: Why::SeatCanceled });
+    w.replays(seat("s5", SeatState::Canceled, 5));
+    let stale = Refused::StaleSeat { current: 5 };
+    w.refused(seat("s4", SeatState::Active, 4), stale);
+    w.refused(seat("s4", SeatState::Active, 4), stale);
+    w.refused(seat("s4", SeatState::PastDue, 4), stale);
+    w.refused(seat("s5b", SeatState::Active, 5), stale);
+    assert_eq!(w.ledger.standing(T0), Standing::AgentsStopped { why: Why::SeatCanceled }, "the late change moved nothing");
+    assert_eq!((stale.code(), stale.message()), (ErrorCode::InvalidRequest, "the ledger's seat is at order 5; a change to it has a higher one".to_string()));
     w.refused(seat("s9", SeatState::Active, 0), Refused::Invalid { what: Invalid::Order });
-    w.refused(seat("s4", SeatState::PastDue, 4), Refused::ConflictingBody);
+    w.refused(seat("s5", SeatState::Active, 5), Refused::ConflictingBody);
+    let mut w = w.restarted();
+    w.refused(seat("s4", SeatState::Active, 4), stale);
     w.ok(seat("s6", SeatState::Active, 6));
+    assert_eq!(w.ledger.standing(T0), Standing::Ok);
+    // an order far ahead of any clock (an operator's `seat` command set
+    // one, before it went) is passed by the next change past it
+    w.ok(seat("legacy", SeatState::Canceled, u64::from(u32::MAX) * 1_000));
+    w.refused(seat("s7", SeatState::Active, 7), Refused::StaleSeat { current: u64::from(u32::MAX) * 1_000 });
+    w.ok(seat("s8", SeatState::Active, u64::from(u32::MAX) * 1_000 + 1));
     assert_eq!(w.ledger.standing(T0), Standing::Ok);
 }
 

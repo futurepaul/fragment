@@ -218,6 +218,26 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let left = api.signed(&lead, "DELETE", &talk_path("members/me"), None)?;
     s.ok("the chat's own agent may leave it itself (as its owner's wipe has it do)", left.status == 200, &left);
 
+    // a name deleted and made again is a new life: its owner's list shows
+    // that life's face (none yet, made from no template), never the face
+    // of the life before it
+    let remade = s.named(api, &owner, "members-remade")?;
+    let row_of = |api: &Api| -> Result<serde_json::Value> {
+        let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+        Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == remade.as_str())).cloned().unwrap_or_default())
+    };
+    let made = api.create_with(&owner, json!({ "name": remade, "template": "chat", "title": "The first life" }))?;
+    s.owned(&made.body, &owner);
+    let first = row_of(api)?;
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{remade}"), None)?;
+    s.create(api, &owner, &remade)?;
+    let second = row_of(api)?;
+    s.ok(
+        "a name deleted and made again shows its new life's face in its owner's list (an app, untitled), not the face of the life before",
+        made.status == 200 && first["title"] == "The first life" && first["kind"] == "chat" && deleted.status == 200 && second["role"] == "owner" && second["title"].is_null() && second["kind"] == "app",
+        json!({ "first": first, "second": second }),
+    );
+
     // who has access to what: the owner's view of all they own (GET /api/access)
     let mine = s.named(api, &owner, "members-alone")?;
     s.create(api, &owner, &mine)?;
@@ -327,7 +347,7 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an invite admits the member that reaches the cap", listed(api, &at_cap, &name)?.as_deref() == Some("viewer"), "");
     first_sign_in(&over)?;
     s.ok(
-        "at the member cap a sign-in meets the invite and is refused, and the invite waits on for their next sign-in",
+        "at the member cap a sign-in meets the invite and is refused, and the invite waits on",
         listed(api, &over, &name)?.is_none() && waiting(&Api::email_of(&over))?,
         "",
     );
@@ -335,19 +355,35 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the fragment holds exactly the cap", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
     let r = api.status(&over, &name)?;
     s.ok("the refused person is not a member", r.status == 403, &r);
-    // made a member by their email meanwhile (a place freed for them), their
-    // next sign-in meets the invite with a stronger role held: it is spent
+    // the claim the sign-in could not make is the registry's alarm's to try
+    // again, with a backoff: a place freed, it is made, with no sign-in
+    let r = api.signed(&owner, "DELETE", &path(&format!("members/{}", npub_of(&shouted))), None)?;
+    let met = s.eventually(Duration::from_secs(45), || listed(api, &over, &name).ok().flatten().as_deref() == Some("viewer"));
+    s.ok(
+        "a place freed, the registry's alarm tries the kept claim again: they are a member with no sign-in, and the invite waits no more",
+        r.status == 200 && met && !waiting(&Api::email_of(&over))?,
+        json!({ "removed": r.body, "listed": listed(api, &over, &name)? }),
+    );
+    let r = api.signed(&owner, "GET", &path("members"), None)?;
+    s.ok("the fragment holds the cap again", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
+    // another refused at the cap, then made a member by their email (a place
+    // freed for them): their invite, met with a stronger role held (by the
+    // alarm's try, or their next sign-in's, whichever comes first; one that
+    // made them a viewer first is outranked by the editor's role), is spent
     // all the same, and the owner's list counts it no more
-    let freed = api.signed(&owner, "DELETE", &path(&format!("members/{}", npub_of(&shouted))), None)?;
-    let added = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&over))), Some(&json!({ "role": "editor" })))?;
+    let late = Keys::generate();
+    invite(&Api::email_of(&late), "viewer")?;
+    first_sign_in(&late)?;
+    let refused = listed(api, &late, &name)?.is_none() && waiting(&Api::email_of(&late))?;
     let held = counted(api)?;
-    let waits = waiting(&Api::email_of(&over))?;
-    api.sign_in(&Api::email_of(&over))?;
+    let freed = api.signed(&owner, "DELETE", &path(&format!("members/{}", npub_of(&back))), None)?;
+    let added = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&late))), Some(&json!({ "role": "editor" })))?;
+    api.sign_in(&Api::email_of(&late))?;
     let spent = s.eventually(Duration::from_secs(10), || counted(api).is_ok_and(|n| n.as_u64().is_some_and(|n| Some(n + 1) == held.as_u64())));
     s.ok(
         "an invite met by a member who holds a stronger role is spent: it waits no more, their role is kept, and the owner's list counts it no more",
-        freed.status == 200 && added.status == 200 && waits && spent && !waiting(&Api::email_of(&over))? && listed(api, &over, &name)?.as_deref() == Some("editor"),
-        format!("freed {freed}; added {added}; {held} counted, then {}", counted(api)?),
+        refused && freed.status == 200 && added.status == 200 && spent && !waiting(&Api::email_of(&late))? && listed(api, &late, &name)?.as_deref() == Some("editor"),
+        format!("refused {refused}; freed {freed}; added {added}; {held} counted, then {}", counted(api)?),
     );
 
     // a delete answers promptly, whatever its members: it tells one round

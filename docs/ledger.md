@@ -38,8 +38,11 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
     the seat is active again.
   - `canceled` stops agents. Fragments keep serving and writing on
     whatever credit is left.
-  - Hooks arrive out of order, so each carries `seq` (the hook's own
-    order). A change older than the last applied changes nothing.
+  - Its one writer is the registry (docs/billing.md), whose pushes may
+    arrive out of order, so each carries `seq` (the registry's order). A
+    change no newer than the last applied is refused as stale
+    (`StaleSeat {current}`, the order it is at) and changes nothing; the
+    registry orders its next push past it.
 - **Credit.**
   - Included credit arrives at the start of each UTC month (lazily: the
     first mutation of the month, and every read, see it). It expires at
@@ -175,7 +178,7 @@ mutation first brings the ledger to its time's month.
 |---|---|---|
 | `grant(GrantCredit)` | its `id` (Stripe's payment id, or the operator's) | `()` |
 | `set_plan(SetPlan)` | its `id` | `()` |
-| `set_seat(SetSeat)` | its `id`; ordered by `seq` | `()` |
+| `set_seat(SetSeat)` | its `id`; ordered by `seq` (one no newer than the last applied is refused, `StaleSeat`) | `()` |
 | `set_overdraft(SetOverdraft)` | its `id` | `()` |
 | `set_cap(SetFragmentCap)` | its `id` | `()` |
 | `set_book(SetPriceBook)` | its `id`; ordered by `version` | `()` |
@@ -283,9 +286,12 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
   `LedgerStatus`; `fragment ledger [--json]`.
 - `PUT /api/f/<name>/cap {id, micros}` (the fragment's owner; kept as
   `cap:<fragment>:<id>`); `fragment cap <name> <usd>|default`.
-- Operators: `POST /api/ledger/<user>/grant|plan|seat|overdraft` with
+- Operators: `POST /api/ledger/<user>/grant|plan|overdraft` with
   proto's bodies, their ids kept as `<kind>:<id>`; `fragment ledger
-  grant <user> <usd> --why <text>`.
+  grant <user> <usd> --why <text>`. A seat's state is the registry's
+  alone: operators comp or end seats there (`/api/admin/seats`,
+  `fragment operator comp|uncomp`; docs/billing.md), and the ledger's
+  `seat` command went (2026-10-16).
 
 ## How each meter reaches it
 
@@ -417,7 +423,7 @@ the batch, so a guest's fragments are billed nothing.
 - **A seat's state:** the registry pushes `SetPlan` (the seat's kind)
   and `SetSeat` (active while the seat is good, else canceled) in its own
   `seq`, from the seat and its org's subscription as fetched from Stripe
-  (docs/billing.md, "What a seat does").
+  (docs/billing.md, "What a seat does"). It is the seat's one writer.
 
 ## Assumptions (Paul's to confirm)
 

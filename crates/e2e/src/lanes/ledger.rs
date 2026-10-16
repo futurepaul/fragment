@@ -198,19 +198,17 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an operator names a person by email too; an overdraft past its limit is refused", r.status == 200 && again.status == 200 && bad.status == 400, json!([r.status, again.status, bad.status]));
     let r = command(&owner_id, "plan", json!({ "id": "p1", "plan": "emperor" }))?;
     s.ok("a plan that is none is refused", r.status == 400, &r);
-    // a seat's state, as its payment hook will send it: ordered by `seq`
+    // a seat's state has one writer, the registry (docs/billing.md): an
+    // operator comps or ends a seat there (the orgs section), and the
+    // ledger's own `seat` command is no route, whatever order it names
     let seated = api.person()?;
     let seated_id = api.identity(&seated)?;
-    let canceled = command(&seated_id, "seat", json!({ "id": "s2", "seat": "canceled", "seq": 2 }))?;
-    let late = command(&seated_id, "seat", json!({ "id": "s1", "seat": "active", "seq": 1 }))?;
-    let again = command(&seated_id, "seat", json!({ "id": "s2", "seat": "canceled", "seq": 2 }))?;
-    let zero = command(&seated_id, "seat", json!({ "id": "s0", "seat": "active", "seq": 0 }))?;
+    let ahead = command(&seated_id, "seat", json!({ "id": "s-ahead", "seat": "canceled", "seq": u64::MAX / 2 }))?;
     let sv = ledger(api, &seated);
     s.ok(
-        "a canceled seat stops agents; a change older than it (by seq) changes nothing; again is the same; seq 0 is refused",
-        canceled.status == 200 && late.status == 200 && again.status == 200 && zero.status == 400
-            && sv["seat"] == "canceled" && sv["standing"] == json!({ "standing": "agents_stopped", "why": "seat_canceled" }),
-        &sv,
+        "an operator's ledger `seat` command is no route (404), saying where seats are: their seat is as the registry left it",
+        ahead.status == 404 && ahead.message().contains("/api/admin/seats") && sv["seat"] == "active" && sv["standing"]["standing"] == "ok",
+        json!([ahead.body, sv]),
     );
 
     // ---- a guest: no agents, no AI steps, no fragments of their own

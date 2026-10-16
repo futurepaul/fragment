@@ -26,7 +26,7 @@
 //! An operator's wipe of a person is recorded here, locks them while it
 //! runs, and ends with their rows: `wipe.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
@@ -55,7 +55,7 @@ pub(crate) mod wipe;
 use calls::{
     Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
-    TEST_HOLD_MAX_MS,
+    DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -92,6 +92,9 @@ pub struct RegistryCell {
     /// for this cell's life (a restart answers again), and only the hook,
     /// which answers only on a fleet with levers (`FRAGMENT_TEST_SECRET`), sets it.
     down: Cell<bool>,
+    /// Dev fleets' test hook: the path whose next calls are 503, and how
+    /// many more; for this cell's life, as `down` is.
+    down_for: RefCell<Option<(String, u32)>>,
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
     calls: Cell<u64>,
@@ -113,7 +116,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
-        RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
+        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -123,10 +126,11 @@ impl DurableObject for RegistryCell {
         }
     }
 
-    /// Sign-in's sweep of expired rows (signin.rs), off every request, and
-    /// the seat holders' plans pushed (orgs.rs). A failed run of either is
-    /// logged and arms its next itself; failing that too, the alarm fails
-    /// and the node retries it.
+    /// Sign-in's sweep of expired rows (signin.rs), off every request, the
+    /// seat holders' plans pushed (orgs.rs), and the invite claims a
+    /// sign-in could not make tried again (invites.rs). A failed run of any
+    /// is logged and arms its next itself; failing that too, the alarm
+    /// fails and the node retries it.
     async fn alarm(&self) -> Result<Response> {
         if let Err(e) = self.sweep_alarm().await {
             console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
@@ -144,6 +148,10 @@ impl DurableObject for RegistryCell {
         if let Err(e) = self.sync_alarm().await {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
             self.sync_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        if let Err(e) = self.claims_alarm().await {
+            console_error!("the registry's kept invite claims failed ({:?}): {}", e.code, e.message);
+            self.claims_later().await.map_err(|e| Error::RustError(e.message))?;
         }
         Response::ok("")
     }
@@ -679,6 +687,21 @@ impl RegistryCell {
         Ok(Active { active })
     }
 
+    /// Whether a call to `path` is one `TestHook::DownFor` fails, counting it.
+    fn down_once(&self, path: &str) -> bool {
+        let mut down_for = self.down_for.borrow_mut();
+        let Some((down, left)) = down_for.as_mut() else { return false };
+        if down != path {
+            return false;
+        }
+        assert!(*left > 0, "a hook that fails no more is cleared");
+        *left -= 1;
+        if *left == 0 {
+            *down_for = None;
+        }
+        true
+    }
+
     async fn test_hook(&self, hook: TestHook) -> CellResult<Value> {
         match hook {
             TestHook::Down(down) => {
@@ -692,6 +715,13 @@ impl RegistryCell {
                 }
                 self.hold_ms.set(ms);
                 Ok(json!({ "hold": ms }))
+            }
+            TestHook::DownFor(DownFor { path, times }) => {
+                if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
+                    return Err(CellError::invalid(format!("down for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
+                }
+                *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
+                Ok(json!({ "downFor": { "path": path, "times": times } }))
             }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),
@@ -717,6 +747,9 @@ impl RegistryCell {
         }
         if self.down.get() {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
+        }
+        if self.down_once(&path) {
+            return Err(CellError::new(ErrorCode::RegistryUnavailable, format!("the registry is down for {path} (a test hook)")));
         }
         if let Some(answer) = self.org_route(&path, &bytes).await {
             return answer;

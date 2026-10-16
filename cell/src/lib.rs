@@ -633,8 +633,9 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
 /// signer's (an agent's: its owner's); the deployment's operators grant
-/// credit and set a person's plan, seat and overdraft, the person named by
-/// email or identity.
+/// credit and set a person's plan and overdraft, the person named by email
+/// or identity. A seat's state has one writer, the registry (docs/billing.md):
+/// an operator comps or ends a seat through it.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     if let (Method::Get, []) = (req.method(), rest) {
@@ -673,13 +674,6 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             ask_registry(env, &note(format!("{:?}", c.plan))).await?;
             json_answer(&answer)
         }
-        "seat" => {
-            let mut c: fragment_proto::ledger::SetSeat = command_body(&body, "seat")?;
-            c.id = commanded("seat", &c.id)?;
-            let answer = ledger::ask(env, &person, &c).await?;
-            ask_registry(env, &note(format!("{:?} at {}", c.seat, c.seq))).await?;
-            json_answer(&answer)
-        }
         "overdraft" => {
             let mut c: fragment_proto::ledger::SetOverdraft = command_body(&body, "overdraft")?;
             c.id = commanded("overdraft", &c.id)?;
@@ -687,7 +681,8 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             ask_registry(env, &note(format!("{} micros", c.micros))).await?;
             json_answer(&answer)
         }
-        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, seat, or overdraft"))),
+        // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)
+        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, or overdraft (a seat is comped or ended at /api/admin/seats)"))),
     }
 }
 

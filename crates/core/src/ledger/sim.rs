@@ -238,6 +238,7 @@ pub(super) struct Stats {
     rows_new: u64,
     rows_before: u64,
     rows_stale: u64,
+    seats_stale: u64,
     conflicts: u64,
     retries: u64,
     restarts: u64,
@@ -566,6 +567,11 @@ impl Sim {
                 assert!(spent >= cap, "a cap is reached when its spend is at it");
             }
             (Op::Reserve(_), Ok(Outcome::Reserved(Reserved::Held { .. }))) => self.stats.held += 1,
+            // a seat change reordered behind a newer one
+            (Op::Seat(c), Err(Refused::StaleSeat { current })) => {
+                self.stats.seats_stale += 1;
+                assert!(c.seq <= before.seat_seq && *current == before.seat_seq, "a seat change is stale only at or behind the order applied: {c:?}, {current}");
+            }
             (Op::Settle(s), Ok(Outcome::Settled(settled))) => {
                 if let Some(Entry::Reservation { amount, .. }) = self.store.entry(&s.reference) {
                     if settled.charge > amount {
@@ -878,7 +884,7 @@ pub(super) fn simulate(seed: u64, steps: u64) -> Stats {
 }
 
 impl Stats {
-    fn named(&self) -> [(&'static str, u64); 17] {
+    fn named(&self) -> [(&'static str, u64); 18] {
         [
             ("steps", self.steps),
             ("rollovers", self.rollovers),
@@ -889,6 +895,7 @@ impl Stats {
             ("new rows", self.rows_new),
             ("rows seen before", self.rows_before),
             ("stale rows", self.rows_stale),
+            ("stale seat changes", self.seats_stale),
             ("conflicting bodies", self.conflicts),
             ("retries", self.retries),
             ("restarts", self.restarts),

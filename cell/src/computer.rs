@@ -2219,7 +2219,8 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Post, []) => {
             let id = fragment_core::computer::default_computer_of(who);
             let made = view_of(ask(env, &id, "computer/init", &json!({ "id": id, "owner": who })).await?)?;
-            crate::orgs::computer_made(env, who).await;
+            // its seat's push asked for, or the making failed (made again, it asks again)
+            crate::orgs::computer_made(env, who).await?;
             json_response(&made)
         }
         (Method::Get, []) => {
