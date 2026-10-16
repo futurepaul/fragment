@@ -648,6 +648,42 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     Ok(8)
 }
 
+/// The route's models by their ids, through the intercept (Paul,
+/// 2026-10-16: "be able to run `/model` with hermes and see the real
+/// model"): `GET /v1/models` lists the ids the route takes, naming no agent
+/// (as Hermes' `/model` asks it), and they are the ids the guest's view
+/// names by the route's names (`GET /api/computer`'s `models`); a call
+/// naming one runs on it, metered to the agent's owner; one no slot runs is
+/// refused, naming them, nothing reserved or sent. The replies it adds.
+fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
+    let said = fetched(s, 80, "models")?;
+    let (listed, given) = said.strip_prefix("models: ").and_then(|r| r.split_once("; given: ")).unwrap_or_default();
+    let given: Value = serde_json::from_str(given).unwrap_or(Value::Null);
+    s.ok(
+        "the intercept lists the route's models' ids (GET /v1/models, naming no agent, as Hermes' /model asks it), each once, and they are the ids its view names by the route's names (GET /api/computer's models)",
+        listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }),
+        &said,
+    );
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let said = fetched(s, 81, &format!("think on {MEDIUM_MODEL} hello by id"))?;
+    let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "a call through the intercept naming a model by its id (GLM-5.3, the medium tier's) runs on it, metered to the agent's owner",
+        said == "thought: echo: hello by id" && tried == [MEDIUM_MODEL] && aig.len() == before + 1 && aig.iter().all(|e| end_of(e) == "settled"),
+        json!({ "said": said, "tried": tried, "aig": aig.len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let said = fetched(s, 82, "think on gpt-4o hello")?;
+    s.ok(
+        "one naming a model no slot runs is refused (400), naming the ids it may, nothing reserved or sent",
+        said.starts_with("think failed: 400") && said.contains(MEDIUM_MODEL) && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
+        &said,
+    );
+    Ok(3)
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
@@ -911,6 +947,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
+            replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went

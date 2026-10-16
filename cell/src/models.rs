@@ -58,7 +58,10 @@
 //! A call names a tier, `vision`: the deployment's vision model, for a
 //! runtime's calls about an image (Hermes' screenshots), or `fallback`: the
 //! deployment's fallback model, for a runtime's own switch when its model
-//! stalls (Hermes' `fallback_providers`), each metered the same way.
+//! stalls (Hermes' `fallback_providers`), each metered the same way; or
+//! one of those slots by its model's own id (`Models::named`: the slot of
+//! the tier its `x-fragment-tier` says, when that slot runs it, else the
+//! first that does), which `GET /api/models/v1/models` lists (`list_route`).
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 //!
@@ -84,7 +87,7 @@ use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
 use fragment_core::{decide, multipart, transcribe};
-use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
+use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -536,21 +539,40 @@ pub(crate) struct Whose {
 
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
 /// model call, signed by the agent (`for` names whom it acts for), its
-/// `model` a tier or `vision`. Its owner pays; `fragment` (one the agent
-/// is in) is where the turn is, for that fragment's cap.
+/// `model` one of the route's names (a tier, `vision`, `fallback`) or a
+/// model's id, read with the tier its `x-fragment-tier` says
+/// (`Models::named`). Its owner pays; `fragment` (one the agent is in) is
+/// where the turn is, for that fragment's cap.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
     let caller = caller(env, &req, url, &body).await?;
     let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    let named = match v.get("model") {
-        None | Some(Value::Null) => bounds::route_named(None),
-        Some(Value::String(m)) => bounds::route_named(Some(m)),
-        Some(_) => Err(bounds::Refusal::UnknownTier),
+    let tier = match req.headers().get(bounds::TIER_HEADER)? {
+        None => None,
+        Some(t) => Some(Tier::parse(t.trim()).ok_or_else(|| CellError::invalid(format!("{} names a tier: cheap or medium", bounds::TIER_HEADER)))?),
     };
-    let named = named.map_err(refused)?;
+    let models = &Config::from_env(env).models;
+    let named = match v.get("model") {
+        None | Some(Value::Null) => models.named(None, tier),
+        Some(Value::String(m)) => models.named(Some(m), tier),
+        Some(_) => Err(models.unknown()),
+    };
+    let named = named.map_err(|e| CellError::invalid(e.message()))?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
     let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, body: v, stream };
     complete(env, call, after).await
+}
+
+/// `GET /api/models/v1/models`: the ids an agent's call may name, OpenAI's
+/// list (`Models::listed`), nothing of where each runs. Signed by an agent,
+/// as the route's other calls are; a computer's guest asks its model
+/// intercept (`GET /v1/models`), which answers it itself.
+pub(crate) async fn list_route(req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    let agent = crate::signer_for(env, &req, url, &[]).await?;
+    if agent.kind != IdentityKind::Agent {
+        return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
+    }
+    Ok(Response::from_json(&Config::from_env(env).models.listed())?)
 }
 
 /// Who calls an agent's route (`route`, `decide_route`): the signer, an

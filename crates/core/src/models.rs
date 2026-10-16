@@ -2,15 +2,19 @@
 //! "Lessons from cloudflare/agents" 7 and 8; spike S4). Pure:
 //! cell/src/models.rs makes the calls and meters them on the payer's ledger.
 //!
-//! A call names a tier, never a model: the tier picks the model and caps
-//! what one call may write. The route takes two names besides the tiers
-//! (`Named`): `vision`, the deployment's vision model, for an agent
-//! runtime's calls about an image (Hermes' auxiliary vision, which reads
-//! its `computer_use` screenshots); and `fallback`, the deployment's
-//! fallback model, for a runtime's own switch when its model stalls
-//! (Hermes' `fallback_providers`, after its stale detector gives up on a
-//! call that streams nothing). Neither is a tier: an agent, a job's step or
-//! a manifest names none but the tiers.
+//! A call names one of the route's slots (`Named`): a tier, which picks
+//! the model and caps what one call may write; `vision`, the deployment's
+//! vision model, for an agent runtime's calls about an image (Hermes'
+//! auxiliary vision, which reads its `computer_use` screenshots); or
+//! `fallback`, the deployment's fallback model, for a runtime's own switch
+//! when its model stalls (Hermes' `fallback_providers`, after its stale
+//! detector gives up on a call that streams nothing). Neither of those two
+//! is a tier: an agent, a job's step or a manifest names none but the
+//! tiers. An agent's call may name a slot by its model's own id instead
+//! (`Models::named`; Paul, 2026-10-16: "be able to run `/model` with
+//! hermes and see the real model"): the caller's tier's slot when it says
+//! its tier (`TIER_HEADER`) and that slot runs the id, else the first slot
+//! that does. `Models::ids` are what it may name (`GET /v1/models`).
 //!
 //! Each of those four names runs where the deployment says (`Models`, its
 //! config's `models`): a Workers AI model through its AI Gateway, or a
@@ -116,6 +120,10 @@ pub const FALLBACK_MODEL_DEFAULT: &str = DEEPSEEK_FLASH;
 /// The route's four names, as a deployment's `models` names them, each
 /// where one of its models runs (`Models`).
 pub const SLOTS: [&str; 4] = ["cheap", "medium", FALLBACK, VISION];
+/// The header an agent's runtime says its tier in (`Models::named`): of
+/// two slots running the id a call names, its tier's is the call's (Hermes'
+/// `model.default_headers`). Optional; it names no model by itself.
+pub const TIER_HEADER: &str = "x-fragment-tier";
 /// The largest image Hermes sends for its vision call after a size
 /// refusal: it shrinks one to this many bytes of base64 data URL and tries
 /// again once (its `tools/vision_tools.py`, `_RESIZE_TARGET_BYTES`, which
@@ -282,7 +290,9 @@ impl Models {
     /// https on a host name (`loopback`: or a local fleet's fake at
     /// `http://127.0.0.1:<port>`), or names a query or a trailing `/`, and
     /// its `body` when it is no object, is past `UPSTREAM_BODY_MAX_BYTES`,
-    /// or names a key the route writes (`ROUTE_KEYS`).
+    /// or names a key the route writes (`ROUTE_KEYS`); and a model id two
+    /// slots name at two places (`same_place`): a call names a model by its
+    /// id (`named`), so an id is one model, wherever slots name it.
     pub fn parse(named: Option<&str>, book: &PriceBook, loopback: bool) -> Result<Models, String> {
         let mut models = Models::defaults();
         if let Some(text) = named {
@@ -293,8 +303,12 @@ impl Models {
                 }
             }
         }
-        for (slot, upstream) in models.slots() {
+        let slots = models.slots();
+        for (i, (slot, upstream)) in slots.iter().enumerate() {
             check(upstream, book, loopback).map_err(|e| format!("models.{slot}: {e}"))?;
+            if let Some((first, _)) = slots[..i].iter().find(|(_, u)| u.model() == upstream.model() && !same_place(u, upstream)) {
+                return Err(format!("models.{slot}: {:?} is models.{first}'s model too, where it runs elsewhere: a call names a model by its id, so name it where models.{first} does, or name another", upstream.model()));
+            }
         }
         Ok(models)
     }
@@ -302,6 +316,61 @@ impl Models {
     /// Each slot's name (`SLOTS`) and where it runs.
     pub fn slots(&self) -> [(&'static str, &Upstream); 4] {
         [(SLOTS[0], &self.cheap), (SLOTS[1], &self.medium), (SLOTS[2], &self.fallback), (SLOTS[3], &self.vision)]
+    }
+
+    /// Each slot as a call names it, in `SLOTS`' order, and where it runs.
+    fn named_slots(&self) -> [(Named, &Upstream); 4] {
+        [(Named::Tier(Tier::Cheap), &self.cheap), (Named::Tier(Tier::Medium), &self.medium), (Named::Fallback, &self.fallback), (Named::Vision, &self.vision)]
+    }
+
+    /// The route's models' ids, each once, in `SLOTS`' order: what a call
+    /// may name besides the route's names (`named`), and what `GET
+    /// /v1/models` lists (`listed`).
+    pub fn ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = Vec::with_capacity(SLOTS.len());
+        for (_, u) in self.slots() {
+            if !ids.contains(&u.model()) {
+                ids.push(u.model());
+            }
+        }
+        ids
+    }
+
+    /// `GET /v1/models`, OpenAI's list (its `created` unknown, 0): each of
+    /// `ids`, and nothing of where it runs or with what key. The route's
+    /// names are taken (`named`) and not listed.
+    pub fn listed(&self) -> Value {
+        let data: Vec<Value> = self.ids().into_iter().map(|id| json!({ "id": id, "object": "model", "created": 0, "owned_by": "fragment" })).collect();
+        json!({ "object": "list", "data": data })
+    }
+
+    /// Each slot's model id by its name, as a computer's guest reads them in
+    /// its view (`GET /api/computer`'s `models`).
+    pub fn ids_by_name(&self) -> fragment_proto::computer::ModelIds {
+        let id = |u: &Upstream| u.model().to_string();
+        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision) }
+    }
+
+    /// What a call naming `model` runs, as the route reads its body's
+    /// `model` and its caller's `tier` (`TIER_HEADER`): none named, the
+    /// default tier; one of the route's names (`route_name`), that slot; a
+    /// model's id, the slot of `tier` when that slot runs it, else the first
+    /// slot that does (`SLOTS`' order: a tier's before `fallback` and
+    /// `vision`). Anything else names none (`UnknownModel`). `high` is a
+    /// tier here, refused by `capped`.
+    pub fn named(&self, model: Option<&str>, tier: Option<Tier>) -> Result<Named, UnknownModel> {
+        let Some(name) = model else { return Ok(Named::Tier(fragment_proto::DEFAULT_TIER)) };
+        if let Some(named) = route_name(name) {
+            return Ok(named);
+        }
+        let slots = self.named_slots();
+        let theirs = tier.map(Named::Tier).filter(|t| slots.iter().any(|(n, u)| n == t && u.model() == name));
+        theirs.or_else(|| slots.iter().find(|(_, u)| u.model() == name).map(|(n, _)| *n)).ok_or_else(|| self.unknown())
+    }
+
+    /// The refusal of a `model` that names none of the route's models.
+    pub fn unknown(&self) -> UnknownModel {
+        UnknownModel { allowed: self.ids().into_iter().map(str::to_string).collect() }
     }
 
     /// The model a call naming `named` runs: its tier's, the vision or
@@ -325,6 +394,30 @@ impl Models {
     /// `route`'s model, and the most one call of it writes.
     pub fn capped(&self, named: Named) -> Result<Capped<'_>, Refusal> {
         Ok(Capped { model: self.route(named)?, max_tokens: MAX_TOKENS })
+    }
+}
+
+/// Whether two slots naming one id run it at one place: both on Workers AI,
+/// or both on one OpenAI-compatible API (their keys and bodies may differ).
+fn same_place(a: &Upstream, b: &Upstream) -> bool {
+    match (a, b) {
+        (Upstream::WorkersAi { .. }, Upstream::WorkersAi { .. }) => true,
+        (Upstream::Openai { base_url: x, .. }, Upstream::Openai { base_url: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+/// A call's `model` that names none of the route's models (`Models::named`):
+/// a 400 that lists what it may name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownModel {
+    /// `Models::ids`.
+    pub allowed: Vec<String>,
+}
+
+impl UnknownModel {
+    pub fn message(&self) -> String {
+        format!("model is one of this deployment's models, as GET /v1/models lists them: {}", self.allowed.join(", "))
     }
 }
 
@@ -379,8 +472,8 @@ pub struct Capped<'a> {
     pub max_tokens: u32,
 }
 
-/// What a call to the route names as its `model`: a tier, `vision`, or
-/// `fallback`.
+/// The slot a call to the route runs on: a tier's, `vision`, or `fallback`,
+/// named by its name or by its model's id (`Models::named`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Named {
     Tier(Tier),
@@ -404,7 +497,7 @@ pub enum Refusal {
     /// `high` stays off until Cloudflare raises Unified Billing's Opus
     /// limit, about 2 calls a minute per edge machine (decision 23, S4).
     HighOff,
-    /// `model` names no tier (a model id is never one).
+    /// A job's step names no tier (it names a tier, never a model id).
     UnknownTier,
     /// The body is not a JSON object.
     NotAnObject,
@@ -617,8 +710,9 @@ impl Answer {
     }
 }
 
-/// The tier a tier's name names (`model` in a body, an agent's setting, a
-/// job's step); `None` is the default tier. `vision` is none.
+/// The tier a tier's name names (an agent's setting, a job's step); `None`
+/// is the default tier. `vision` is none, and a model's id is none: only
+/// the model route takes one (`Models::named`).
 pub fn tier_named(name: Option<&str>) -> Result<Tier, Refusal> {
     match name {
         None => Ok(fragment_proto::DEFAULT_TIER),
@@ -626,13 +720,13 @@ pub fn tier_named(name: Option<&str>) -> Result<Tier, Refusal> {
     }
 }
 
-/// What a call to the model route names: `vision`, `fallback`, or a tier
-/// (`tier_named`).
-pub fn route_named(name: Option<&str>) -> Result<Named, Refusal> {
+/// The slot one of the route's own names names: `vision`, `fallback`, or a
+/// tier's (`Models::named` reads a model's id after these).
+fn route_name(name: &str) -> Option<Named> {
     match name {
-        Some(VISION) => Ok(Named::Vision),
-        Some(FALLBACK) => Ok(Named::Fallback),
-        other => tier_named(other).map(Named::Tier),
+        VISION => Some(Named::Vision),
+        FALLBACK => Some(Named::Fallback),
+        other => Tier::parse(other).map(Named::Tier),
     }
 }
 
@@ -1097,12 +1191,12 @@ mod tests {
     /// names, and a call bounded on it.
     #[test]
     fn vision_is_the_routes_and_no_tier() {
-        assert_eq!(route_named(Some("vision")), Ok(Named::Vision));
-        assert_eq!(route_named(Some("medium")), Ok(Named::Tier(Tier::Medium)));
-        assert_eq!(route_named(None), Ok(Named::Tier(fragment_proto::DEFAULT_TIER)), "none named: the default tier");
-        assert_eq!(route_named(Some("Vision")), Err(Refusal::UnknownTier));
-        assert_eq!(route_named(Some(CHEAP_MODEL)), Err(Refusal::UnknownTier), "a model id is never a name");
-        assert_eq!(route_named(Some("high")).and_then(|n| DEFAULTS.capped(n)), Err(Refusal::HighOff));
+        let named = |n: Option<&str>| DEFAULTS.named(n, None);
+        assert_eq!(named(Some("vision")), Ok(Named::Vision));
+        assert_eq!(named(Some("medium")), Ok(Named::Tier(Tier::Medium)));
+        assert_eq!(named(None), Ok(Named::Tier(fragment_proto::DEFAULT_TIER)), "none named: the default tier");
+        assert_eq!(named(Some("Vision")), Err(DEFAULTS.unknown()));
+        assert_eq!(named(Some("high")).map(|n| DEFAULTS.capped(n)), Ok(Err(Refusal::HighOff)));
         assert_eq!(tier_named(Some("vision")), Err(Refusal::UnknownTier), "vision is no tier");
         assert_eq!(Tier::parse("vision"), None);
         assert_eq!((Named::Vision.as_str(), Named::Tier(Tier::Cheap).as_str()), ("vision", "cheap"));
@@ -1124,10 +1218,9 @@ mod tests {
     /// default and on Finite's own deployment.
     #[test]
     fn fallback_is_the_routes_and_no_tier() {
-        assert_eq!(route_named(Some("fallback")), Ok(Named::Fallback));
+        assert_eq!(DEFAULTS.named(Some("fallback"), None), Ok(Named::Fallback));
         assert_eq!(Named::Fallback.as_str(), "fallback");
-        assert_eq!(route_named(Some("Fallback")), Err(Refusal::UnknownTier));
-        assert_eq!(route_named(Some(FALLBACK_MODEL_DEFAULT)), Err(Refusal::UnknownTier), "a model id is never a name");
+        assert_eq!(DEFAULTS.named(Some("Fallback"), None), Err(DEFAULTS.unknown()));
         assert_eq!(tier_named(Some("fallback")), Err(Refusal::UnknownTier), "fallback is no tier: no agent, step or manifest names it");
         assert_eq!(Tier::parse("fallback"), None);
         let f = DEFAULTS.capped(Named::Fallback).unwrap();
@@ -1136,6 +1229,69 @@ mod tests {
         // Hermes' stale switch on Finite's deployment: Workers AI's GLM-5.3 Flash
         let finite = finite();
         assert_eq!(finite.route(Named::Fallback).unwrap().upstream, &workers_ai(GLM_FLASH), "the deployment's, whatever it names");
+    }
+
+    /// Goal (Paul, 2026-10-16): an agent's call may name its model by the
+    /// model's own id, which runs on the slot of the caller's tier when that
+    /// slot runs it, else on the first slot that does, so its key, its body,
+    /// its fallback and its price are that slot's; the route's names still
+    /// name their slots, whatever tier the caller says. Method: every id of
+    /// the defaults, of Finite's OpenRouter tiers (both tiers one id) and of
+    /// its Finite Private ones, with and without the caller's tier.
+    #[test]
+    fn a_call_names_a_model_by_its_id() {
+        let (cheap, medium) = (Named::Tier(Tier::Cheap), Named::Tier(Tier::Medium));
+        let d = &*DEFAULTS;
+        assert_eq!(d.named(Some(GLM_FLASH), None), Ok(cheap), "cheap's and vision's id: the first slot's, a tier's");
+        assert_eq!(d.named(Some(GLM_FLASH), Some(Tier::Medium)), Ok(cheap), "a tier whose slot does not run it is passed over");
+        assert_eq!(d.named(Some(MEDIUM_MODEL), Some(Tier::Cheap)), Ok(medium));
+        assert_eq!(d.named(Some(DEEPSEEK_FLASH), Some(Tier::Cheap)), Ok(Named::Fallback), "the fallback's id, its slot: no fallback of its own");
+        assert_eq!(d.named(Some(MEDIUM_MODEL), Some(Tier::High)), Ok(medium), "high has no slot");
+        let routed = openrouter();
+        assert_eq!(routed.named(Some(OPENROUTER_FLASH), None), Ok(cheap));
+        assert_eq!(routed.named(Some(OPENROUTER_FLASH), Some(Tier::Cheap)), Ok(cheap));
+        assert_eq!(routed.named(Some(OPENROUTER_FLASH), Some(Tier::Medium)), Ok(medium), "both tiers run it: the caller's tier's");
+        assert_eq!(routed.named(Some(GLM_FLASH), Some(Tier::Cheap)), Ok(Named::Fallback), "fallback's and vision's: the first, fallback");
+        let m = routed.capped(medium).unwrap().model;
+        assert_eq!((m.named.as_str(), m.id(), m.upstream), ("medium", OPENROUTER_FLASH, &routed.medium), "the medium slot's model, key and body");
+        assert_eq!(finite().named(Some(FINITE_PRIVATE_FLASH), Some(Tier::Medium)), Ok(medium));
+        // the route's names are names, whatever the caller's tier
+        for (name, slot) in [("cheap", cheap), ("medium", medium), ("vision", Named::Vision), ("fallback", Named::Fallback)] {
+            assert_eq!(routed.named(Some(name), Some(Tier::Medium)), Ok(slot), "{name}");
+        }
+        assert_eq!(routed.named(None, Some(Tier::Medium)), Ok(cheap), "none named is the default tier, as before");
+    }
+
+    /// Goal: an id no slot runs is refused before anything is reserved, the
+    /// refusal listing the ids the route takes (`GET /v1/models`'s), never
+    /// the route's names; the list is OpenAI's, the ids alone, nothing of
+    /// where each runs; and a guest reads each slot's id by its name.
+    /// Invalid: an unknown id, one off by a letter, a name off by its case,
+    /// an empty one.
+    #[test]
+    fn a_model_no_slot_runs_is_refused_naming_those_it_may() {
+        let d = &*DEFAULTS;
+        let allowed = vec![GLM_FLASH.to_string(), MEDIUM_MODEL.to_string(), DEEPSEEK_FLASH.to_string()];
+        for bad in ["gpt-4o", "@cf/zai-org/glm-5.3-flashx", "Cheap", "", OPENROUTER_FLASH] {
+            assert_eq!(d.named(Some(bad), Some(Tier::Cheap)), Err(UnknownModel { allowed: allowed.clone() }), "{bad:?}");
+        }
+        let said = d.unknown().message();
+        assert!(allowed.iter().all(|id| said.contains(id.as_str())) && !said.contains("cheap") && said.contains("GET /v1/models"), "{said}");
+        let routed = openrouter();
+        assert_eq!(routed.ids(), [OPENROUTER_FLASH, GLM_FLASH], "each id once");
+        assert_eq!(routed.named(Some(MEDIUM_MODEL), None), Err(UnknownModel { allowed: vec![OPENROUTER_FLASH.into(), GLM_FLASH.into()] }), "a model the deployment does not run");
+        let listed = routed.listed();
+        assert_eq!(
+            listed,
+            json!({ "object": "list", "data": [
+                { "id": OPENROUTER_FLASH, "object": "model", "created": 0, "owned_by": "fragment" },
+                { "id": GLM_FLASH, "object": "model", "created": 0, "owned_by": "fragment" },
+            ] })
+        );
+        let text = listed.to_string();
+        assert!(["openrouter.ai", "zdr", "cheap", "fallback", "vision", "workers_ai"].iter().all(|w| !text.contains(w)), "ids alone: {text}");
+        assert_eq!(serde_json::to_value(routed.ids_by_name()).unwrap(), json!({ "cheap": OPENROUTER_FLASH, "medium": OPENROUTER_FLASH, "fallback": GLM_FLASH, "vision": GLM_FLASH }));
+        assert_eq!(serde_json::to_value(d.ids_by_name()).unwrap(), json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }));
     }
 
     /// Goal: a deployment's `models` name where each of the route's names
@@ -1181,7 +1337,8 @@ mod tests {
     /// an unknown provider, a missing or extra field (a key is the deploy's,
     /// never the cell's), a model the book does not price, and a base URL
     /// that is no https on a host name, names a query or a trailing /, or is
-    /// a local fleet's fake where none may be. Valid: a local fleet's fake.
+    /// a local fleet's fake where none may be, and an id two slots run at two
+    /// places. Valid: a local fleet's fake, and one id at one place twice.
     #[test]
     fn a_deployments_models_out_of_shape_are_refused() {
         let book = PriceBook::defaults();
@@ -1227,6 +1384,13 @@ mod tests {
         let local = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:4810/v1", "model": "glm-5-3-flash" }));
         assert_eq!(parse(&local, true).unwrap().cheap, openai("http://127.0.0.1:4810/v1", FINITE_PRIVATE_FLASH));
         assert!(parse(&local, false).is_err(), "a deployment never names one");
+        // an id is one model: two slots naming it name one place (a call names it by its id)
+        let elsewhere = json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": GLM_FLASH } }).to_string();
+        refused(&elsewhere, "models.vision: \"@cf/zai-org/glm-5.3-flash\" is models.cheap's model too, where it runs elsewhere");
+        let two_apis = json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH }, "medium": { "provider": "openai", "base_url": "https://b.example/v1", "model": FINITE_PRIVATE_FLASH } });
+        refused(&two_apis.to_string(), "models.medium: \"glm-5-3-flash\" is models.cheap's model too");
+        let one_api = json!({ "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing() }, "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH } });
+        assert!(parse(&one_api.to_string(), false).is_ok(), "one id at one place, its bodies its slots' own");
         // a model the book prices, whichever slot names it
         let mut other = book.clone();
         other.models.retain(|m| m.model != FINITE_PRIVATE_FLASH);

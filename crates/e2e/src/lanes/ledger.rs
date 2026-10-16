@@ -46,6 +46,8 @@ const VISION: &str = CHEAP;
 const FALLBACK: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
 /// The model route, as an agent calls it (its computer's model intercept).
 const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
+/// The ids the model route takes (`fragment_core::models::Models::listed`).
+const MODELS_ROUTE: &str = "/api/models/v1/models";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
 /// Its decisions (fragment_core::decide).
@@ -586,8 +588,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
-    let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "@cf/zai-org/glm-5.3", "messages": [{ "role": "user", "content": "hi" }] })))?;
-    s.ok("a model id is never a tier", r.status == 400, &r);
+    by_id(s, api, &hand, &owner, &owner_id, wait)?;
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
     decisions_route(s, api, wait)?;
@@ -607,6 +608,60 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- the meters: requests, dynamic workers and storage, once each
     s.ai.clear_script();
     meters(s, api, wait)
+}
+
+/// A model by its own id (Paul, 2026-10-16: "be able to run `/model` with
+/// hermes and see the real model"): an agent's call naming one runs on its
+/// slot, metered at its price, falling back as that slot does; one no slot
+/// runs is refused, naming the ids the route takes; and the route lists
+/// them, to an agent alone.
+fn by_id(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wait: Duration) -> Result<()> {
+    let aig = || entries(api, owner_id, "aig:");
+    let say = |model: &str| json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
+    let tried = |s: &Suite, from: usize| s.ai.calls()[from..].iter().map(|c| c.model.clone()).collect::<Vec<_>>();
+    let settled_at = |micros: i64, model: &str| aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == micros && e["entry"]["end"]["usage"]["model"] == model);
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 11 }]);
+    let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&say(GLM)))?;
+    let priced = charge(&tokens(GLM, 30, 0, 11));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, GLM));
+    s.ok(
+        "a call naming a model by its own id (GLM-5.3, the medium tier's) runs on it, settled at its price",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hi" && tried(s, calls) == [GLM] && settled,
+        json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
+    );
+    // the cheap tier's id, its caller's tier said: the cheap slot's, which falls back
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.fail_next(&[429]);
+    s.ai.set_usage(&[Used { prompt: 20, cached: 0, completion: 7 }]);
+    let r = api.call(Call { method: "POST", url: format!("{}{MODEL_ROUTE}", api.base), body: Some(say(CHEAP).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(hand), extra: vec![("x-fragment-tier", "cheap".into())], ..Call::default() })?;
+    let priced = charge(&tokens(FALLBACK, 20, 0, 7));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, FALLBACK));
+    s.ok(
+        "one naming the cheap tier's model by its id, its tier said, is the cheap tier's call: its 429 is made once more on the fallback model, under one hold",
+        r.status == 200 && tried(s, calls) == [CHEAP, FALLBACK] && settled,
+        json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&say("gpt-4o")))?;
+    let said = r.message().to_string();
+    s.ok(
+        "an id no slot runs is refused (400), nothing reserved or sent, naming the ids the route takes and none of its names",
+        r.status == 400 && [CHEAP, GLM, FALLBACK].iter().all(|id| said.contains(id)) && !said.contains("cheap") && tried(s, calls).is_empty() && aig().len() == before,
+        &r,
+    );
+    let r = api.call(Call { method: "POST", url: format!("{}{MODEL_ROUTE}", api.base), body: Some(say(GLM).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(hand), extra: vec![("x-fragment-tier", "cheapest".into())], ..Call::default() })?;
+    s.ok("a tier said that is none is refused (400)", r.status == 400 && r.message().contains("x-fragment-tier names a tier"), &r);
+    let r = api.signed(hand, "GET", MODELS_ROUTE, None)?;
+    let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
+    s.ok(
+        "the route lists the ids it takes (GET /api/models/v1/models), OpenAI's list, each once, and nothing of where each runs",
+        r.status == 200 && r.body["object"] == "list" && listed == [CHEAP, GLM, FALLBACK] && r.body["data"].as_array().is_some_and(|d| d.iter().all(|m| m["object"] == "model")) && !r.text.contains("workers_ai"),
+        &r,
+    );
+    let r = api.signed(owner, "GET", MODELS_ROUTE, None)?;
+    s.ok("a person lists none: the route is an agent's", r.status == 403, &r);
+    Ok(())
 }
 
 /// The route's fallback (Paul, 2026-10-08): a call whose model fails before

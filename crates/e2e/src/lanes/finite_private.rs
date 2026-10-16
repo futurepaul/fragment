@@ -22,9 +22,12 @@
 //! or 402 logged aloud; a refusal of the request is the call's; the agent's
 //! fields past the chat completion's never reach OpenRouter; the route's
 //! `fallback` (Hermes' own switch) and `vision`
-//! run on Workers AI; a call that hangs is the caller's to give up on (the
-//! route never tries again on its own); and a job's `ai.text` runs there
-//! too, falling back the same, a tool loop among its steps.
+//! run on Workers AI; a call naming a model by its own id is its slot's
+//! (Finite Private's the cheap tier's, OpenRouter's the medium tier's with
+//! its routing, Workers AI's the fallback's, with no fallback of its own),
+//! and the route lists those ids; a call that hangs is the caller's to give
+//! up on (the route never tries again on its own); and a job's `ai.text`
+//! runs there too, falling back the same, a tool loop among its steps.
 
 use std::time::Duration;
 
@@ -38,7 +41,7 @@ use super::ai_tools;
 use super::app::ship;
 use super::jobs::{settle, started};
 use super::ledger::{end_of, entries};
-use crate::api::Api;
+use crate::api::{Api, Call};
 use crate::{Suite, FINITE_PRIVATE_KEY};
 
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
@@ -325,6 +328,45 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
         "`vision` runs on Workers AI's GLM-5.3 Flash: Finite Private's images are not qualified",
         r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())],
         format!("{} {:?} {}", r.status, tried(s, calls), r.text),
+    );
+
+    // ---- each slot's model by its own id (Paul, 2026-10-16: "see the real model")
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 25, cached: 0, completion: 9 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat(PRIVATE, false)))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 25, 9))));
+    s.ok(
+        "a call naming Finite Private's model by its id is the cheap tier's: on Finite Private with the platform's key, settled at its price",
+        r.status == 200 && tried(s, calls) == private(1) && call.as_ref().is_some_and(|c| c.body["model"] == PRIVATE && c.authorization.as_deref() == Some(platform_key.as_str())) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.set_usage(&[Used { prompt: 35, cached: 0, completion: 12 }]);
+    let as_medium = Call { method: "POST", url: format!("{}{ROUTE}", api.base), body: Some(chat(ROUTED, true).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(&hand), extra: vec![("x-fragment-tier", "medium".into())], ..Call::default() };
+    let r = api.call(as_medium)?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, ROUTED, charge(&tokens(ROUTED, 35, 12))));
+    s.ok(
+        "one naming OpenRouter's GLM-5.3 Flash by its id, its tier said (medium), is the medium tier's: streamed on OpenRouter with its slot's provider routing, settled from its accounting frame",
+        r.status == 200 && lines(&r.text).last().is_some_and(|l| l["usage"]["completion_tokens"] == 12) && tried(s, calls) == routed(1) && call.as_ref().is_some_and(|c| c.body["provider"] == routing["provider"] && c.body["model"] == ROUTED) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.fail_next(&[429]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat(FLASH, false)))?;
+    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
+    s.ok(
+        "one naming Workers AI's GLM-5.3 Flash (the fallback's and vision's) is the fallback's: on Workers AI, and its 429 is the call's, no second try, the hold given back",
+        r.status == 429 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && released,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+    let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
+    let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
+    s.ok(
+        "the route lists Finite's ids, each once, and nothing of where each runs (no base URL, no routing)",
+        r.status == 200 && listed == [PRIVATE, ROUTED, FLASH] && !r.text.contains("/v1") && !r.text.contains("zdr"),
+        &r,
     );
 
     // ---- a call that hangs: the caller's to give up on
