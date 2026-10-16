@@ -18,7 +18,7 @@ You drive fragments with the `fragment` CLI. On macOS or Linux, with no
 sudo (on Windows, in WSL; the same command updates it):
 
 ```
-mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 ```
 
 If `fragment` is then not found, run it as `~/.local/bin/fragment`, or

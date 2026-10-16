@@ -1694,7 +1694,7 @@ const WHY = {
 // and a coding agent's skill, in Claude Code's folder: behind settings'
 // "Install it yourself", for whoever wants them (a coding agent given the
 // prompt reads /llms.txt and installs it itself).
-const INSTALL = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
+const INSTALL = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
 const SKILL = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
 function section(title, ...children) {
   const s = el("section", "settings-section");

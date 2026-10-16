@@ -29,7 +29,7 @@ This repo holds:
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
 [docs/cloudflare-v1.md](docs/cloudflare-v1.md) for where it is going.
-This repo is [futurepaul/fragment](https://github.com/futurepaul/fragment);
+This repo is [finitecomputer/fragment](https://github.com/finitecomputer/fragment);
 fragment.club runs its `celld` branch (tag `celld-final`) on celld until
 it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
@@ -50,7 +50,7 @@ CLI yourself (macOS or Linux, no sudo; put `~/.local/bin` on your PATH if
 it is not), then pair it with you:
 
 ```
-mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 fragment login --host https://finite.chat
 ```
 

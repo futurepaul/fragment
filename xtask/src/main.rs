@@ -404,7 +404,7 @@ fn check() -> Result<()> {
 }
 
 /// Where the one-line install fetches the CLI from.
-const RELEASES: &str = "https://github.com/futurepaul/fragment/releases/latest/download/";
+const RELEASES: &str = "https://github.com/finitecomputer/fragment/releases/latest/download/";
 /// Each target the release builds, and its asset's name: the `uname -s` and
 /// `uname -m` of the machines it runs on, which the install command names.
 const RELEASE_ASSETS: [(&str, &str); 3] =
