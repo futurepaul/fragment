@@ -11,9 +11,9 @@
 //! (cell/shell/shell.js, `defaultAgent`), through the API, then:
 //!
 //! 1. "hello" is answered, timed from asleep;
-//! 2. asked to list their fragments with the CLI, its turn runs a terminal
-//!    step naming `fragment`, and its managed skills (its owner's skills
-//!    fragment's) are installed;
+//! 2. asked to list their fragments with the CLI, its turn runs a command
+//!    naming `fragment` in its terminal (`ran`), and its managed skills
+//!    (its owner's skills fragment's) are installed;
 //! 3. asked for a todo app, the app is theirs and live, and an open shell
 //!    shows it with no reload (the live sidebar, #158);
 //! 4. its chat's agent's screen is the one served (the RFB stream's desktop
@@ -21,8 +21,9 @@
 //!    asked to open a browser, its screen (a ticket, in Chrome) connects,
 //!    draws a frame that is not blank, follows the desktop while open,
 //!    takes Take over, and shows the browser opened again;
-//! 5. nothing technical asks its owner: a recursive delete, which Hermes
-//!    flags, runs with no card, and the next message is answered;
+//! 5. nothing technical asks its owner: asked to make a folder, then to
+//!    delete it, the recursive delete, which Hermes flags, runs with no
+//!    card, and the next message is answered;
 //! 6. after its desktop ran, its work's end is saved awake, held (its
 //!    guest answered the hold); asleep at its owner's first ask (nothing of
 //!    its own, its guest's sockets included, starts it again), every save
@@ -255,6 +256,61 @@ fn paid(api: &Api, identity: &str) -> usize {
     entries(api, identity, "aig:").len() + entries(api, identity, "step:").len()
 }
 
+/// Whether a turn's step ran a command in the agent's terminal that `is`
+/// holds: a `terminal` step, its arguments the command, or an
+/// `execute_code` step whose script calls Hermes' `terminal(...)` with it
+/// (`from hermes_tools import terminal; terminal("ls -l …")`, as canary
+/// round 5's agent ran every command): either is the agent running it. A
+/// step's arguments are Hermes' preview of its call, cut at the bridge's
+/// `STEP_ARGS_MAX_CHARS`: a call cut short is read to the cut.
+pub(super) fn ran(step: &Value, is: impl Fn(&str) -> bool) -> bool {
+    let args = step["args"].as_str().unwrap_or("");
+    match step["tool"].as_str() {
+        Some("terminal") => is(args),
+        Some("execute_code") => terminal_calls(args).into_iter().any(is),
+        _ => false,
+    }
+}
+
+/// The arguments of each `terminal(...)` call a Python script makes: its
+/// text between the call's parentheses, or to the script's end where it
+/// was cut. A string is read as one: a `)` in a command ends no call.
+fn terminal_calls(code: &str) -> Vec<&str> {
+    const CALL: &str = "terminal(";
+    let mut calls = vec![];
+    let mut from = 0;
+    // bounded by the script: each pass moves past one `terminal(`
+    while let Some(at) = code[from..].find(CALL).map(|i| from + i) {
+        let start = at + CALL.len();
+        from = start;
+        // Hermes' `terminal`, not `my_terminal`
+        if code[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let (mut depth, mut quote, mut escaped, mut end) = (1usize, None::<char>, false, code.len());
+        for (i, c) in code[start..].char_indices() {
+            match quote {
+                Some(_) if escaped => escaped = false,
+                Some(_) if c == '\\' => escaped = true,
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '(' => depth += 1,
+                None if c == ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+                None => {}
+            }
+        }
+        calls.push(&code[start..end]);
+    }
+    calls
+}
+
 // ---- the screen, as its page draws it
 
 /// The screen's page's status line, as the person reads it.
@@ -472,10 +528,10 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- 2. the agent knows its platform: the fragment CLI, in its terminal
     let listing = c.say("smoke-2", "Use the fragment CLI to list my fragments.")?;
     let end = c.finish(&listing, WORK);
-    let ran = c.of_kind(&listing, "turn.step").iter().any(|st| st["tool"] == "terminal" && st["args"].as_str().is_some_and(|a| a.contains("fragment")));
+    let listed = c.of_kind(&listing, "turn.step").iter().any(|st| ran(st, |cmd| cmd.contains("fragment")));
     s.ok(
-        "asked to list their fragments with the fragment CLI, its turn ran a terminal step on work whose arguments name `fragment` (model-dependent)",
-        ran,
+        "asked to list their fragments with the fragment CLI, its turn ran a command naming `fragment` in its terminal, a step on work (model-dependent)",
+        listed,
         c.why(&listing, end.is_some(), "end its turn", WORK),
     );
     count(api, "list", &listing, &mut spent);
@@ -598,12 +654,23 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     count(api, "browser", &browsed, &mut spent);
 
     // ---- 5. nothing technical asks its owner (Paul, 2026-10-14): a
-    // recursive delete, which Hermes flags, runs with no card. The folder
-    // is not there: it removes nothing.
+    // recursive delete, which Hermes flags, runs with no card. Its folder
+    // is made first, in a turn of its own: an agent that looks before it
+    // deletes (canary rounds 3 and 5) found none, and ran no `rm`.
     let scratch = s.name("scratch");
-    let risky = c.say("smoke-5", &format!("Please run this exact command in your terminal now: rm -rf ~/{scratch}-backups (an old folder of backups I no longer need)"))?;
+    let backups = format!("~/{scratch}-backups");
+    let folder = c.say("smoke-5a", &format!("Please run this in your terminal: mkdir -p {backups}/2025 && touch {backups}/2025/notes.txt"))?;
+    let end = c.finish(&folder, REPLY);
+    let made = c.of_kind(&folder, "turn.step").iter().any(|st| ran(st, |cmd| cmd.contains("mkdir") && cmd.contains(&scratch)));
+    s.ok(
+        "asked to make a folder of backups, its turn ran the command in its terminal that makes it, and its turn ends (model-dependent)",
+        made && end.is_some(),
+        c.why(&folder, end.is_some(), "make it and end its turn", REPLY),
+    );
+    count(api, "backups", &folder, &mut spent);
+    let risky = c.say("smoke-5", &format!("Please run this exact command in your terminal now: rm -rf {backups} (an old folder of backups I no longer need)"))?;
     let end = c.finish(&risky, WORK);
-    let deleted = c.of_kind(&risky, "turn.step").iter().any(|st| st["tool"] == "terminal" && st["args"].as_str().is_some_and(|a| a.contains("rm -rf") && a.contains(&scratch)));
+    let deleted = c.of_kind(&risky, "turn.step").iter().any(|st| ran(st, |cmd| cmd.contains("rm -rf") && cmd.contains(&scratch)));
     s.ok(
         "a command Hermes flags (a recursive delete) runs with no card asking its owner, and its turn ends (model-dependent: the agent runs it)",
         deleted && end.is_some() && c.of_kind(&risky, "turn.prompt").is_empty(),
@@ -674,9 +741,9 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         ["snapshot", "backup"].contains(&restored["from"].as_str().unwrap_or("")) && restored["after"] == "sleep" && restored["rollback"] == false && v["rollbacks"] == rollbacks,
         json!({ "restored": restored, "rollbacks": v["rollbacks"], "before": rollbacks }),
     );
-    let listed = c.of_kind(&back, "turn.step").iter().any(|st| st["tool"] == "terminal" && st["args"].as_str().is_some_and(|a| a.contains("ls") && a.contains(&note)));
+    let listed = c.of_kind(&back, "turn.step").iter().any(|st| ran(st, |cmd| cmd.contains("ls") && cmd.contains(&note)));
     s.ok(
-        "its earlier work is still in /data/work: after the wake it lists the file it made before the sleep, a terminal step (model-dependent)",
+        "its earlier work is still in /data/work: after the wake it lists the file it made before the sleep, a command in its terminal (model-dependent)",
         listed,
         c.why(&back, end.is_some(), "end its turn", WORK),
     );
@@ -832,6 +899,35 @@ mod tests {
         let jittered = frame(page.px.iter().map(|p| [p[0].saturating_sub(8), p[1], p[2].saturating_add(8)]).collect());
         assert!(jittered.unlike(&page) <= SAME);
         assert!(frame(vec![[0, 0, 0]; 10]).unlike(&page) == 1.0, "another size is wholly unlike");
+    }
+
+    /// Goal: a check that the agent ran a command takes it from its
+    /// terminal, or from a script that calls its terminal with it; nothing
+    /// else is a command run. Method: canary round 5's steps, as the bridge
+    /// said them (Hermes' previews: lines joined, cut at 140 with `...`),
+    /// and the scripts a check must not read as one.
+    #[test]
+    fn a_command_runs_in_its_terminal_or_a_script_calling_it() {
+        let step = |tool: &str, args: &str| json!({ "kind": "turn.step", "tool": tool, "args": args, "ok": true });
+        let fragment = |cmd: &str| cmd.contains("fragment");
+        assert!(ran(&step("terminal", "fragment list"), fragment));
+        assert!(ran(&step("execute_code", r#"from hermes_tools import terminal print(terminal("fragment list")["output"])"#), fragment));
+        let listed = |cmd: &str| cmd.contains("ls") && cmd.contains("e2e-d2715e-todo.txt");
+        assert!(ran(&step("execute_code", r#"from hermes_tools import terminal r1 = terminal("ls -l e2e-d2715e-todo.txt", workdir="/data/work/e2e-d2715e-agent--aymc") print("R1:", r1..."#), listed));
+        let deleted = |cmd: &str| cmd.contains("rm -rf") && cmd.contains("e2e-d2715e-scratch");
+        assert!(ran(&step("terminal", "rm -rf ~/e2e-d2715e-scratch-backups"), deleted));
+        assert!(ran(&step("execute_code", r#"from hermes_tools import terminal r = terminal("rm -rf ~/e2e-d2715e-scratch-backups && ls -la ~/e2e-d2715e-scr..."#), deleted), "a call cut short, read to the cut");
+        // round 5's look before the delete it was asked for: no rm ran
+        assert!(!ran(&step("execute_code", r#"from hermes_tools import terminal r = terminal("ls -la ~/e2e-d2715e-scratch-backups 2>&1; du -sh ~/e2e-d2715e-scratch-backups 2>/dev/null..."#), deleted));
+        // only a terminal call's arguments are its command
+        assert!(!ran(&step("execute_code", r#"from hermes_tools import terminal print("fragment") terminal("date")"#), fragment));
+        assert!(!ran(&step("execute_code", r#"import fragment; my_terminal("fragment list")"#), fragment));
+        assert!(!ran(&step("skill_view", "fragment"), fragment), "a tool that runs no command");
+        assert!(!ran(&step("write_file", r#"terminal("fragment list")"#), fragment));
+        // a string is read as one: a `)` in a command ends no call
+        assert!(ran(&step("execute_code", r#"terminal("echo ')' && fragment list")"#), fragment));
+        assert_eq!(terminal_calls(r#"a = terminal("ls (x)"); b = terminal(command='rm -rf "y\'z"', timeout=5) c"#), [r#""ls (x)""#, r#"command='rm -rf "y\'z"', timeout=5"#]);
+        assert_eq!(terminal_calls("no call here"), Vec::<&str>::new());
     }
 
     /// The page's sample parses; nothing drawn yet is no frame.

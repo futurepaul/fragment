@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::agent_smoke::ran;
 use super::computers::{agent_replies, phase, turn_of, work_of, QUEUE_DRAIN};
 use super::jobs::records;
 use super::ledger::entries;
@@ -143,7 +144,7 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
     let ended = within(WORK, || work_of(&records(api, &keys, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.end"));
     let took = t0.elapsed();
     let work: Vec<Value> = work_of(&records(api, &keys, &chat_name, "work"), &turn).into_iter().map(|r| r["body"].clone()).collect();
-    let ran = work.iter().any(|w| w["kind"] == "turn.step" && w["tool"] == "terminal" && w["args"].as_str().is_some_and(|a| a.contains("fragment ask")));
+    let asked = work.iter().any(|w| w["kind"] == "turn.step" && ran(w, |cmd| cmd.contains("fragment ask")));
     let told: Vec<String> = agent_replies(&records(api, &keys, &chat_name, "chat"), &juniper_id).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     let pair = their_chat(api, &keys, &juniper_id, &fred_id, &chat_name);
     let (question, answer, fred_turns) = match &pair {
@@ -164,7 +165,7 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (Fred's turns there: {:?}; Juniper told its person: {:?})", fred_turns.iter().map(|t| t["cause"].clone()).collect::<Vec<_>>(), told.iter().map(|t| line(t)).collect::<Vec<_>>());
     let detail = json!({ "work": work, "told": told, "pair": pair, "question": question, "answer": answer, "fredTurns": fred_turns });
     std::fs::write(evidence.join("agent-ask.json"), serde_json::to_vec_pretty(&detail)?)?;
-    s.ok("asked to, Juniper's turn runs `fragment ask` in its terminal (model-dependent)", ran && ended.is_some(), &detail);
+    s.ok("asked to, Juniper's turn runs `fragment ask` in its terminal (model-dependent)", asked && ended.is_some(), &detail);
     s.ok(
         "the CLI made a chat of the two agents and their owner, asked Fred there as Juniper, naming him in `to`, and Fred took it as a turn",
         question.is_some() && fred_turns.iter().any(|t| t["asker"] == juniper_id.as_str() && t["cause"]["seq"] == question.as_ref().map(|q| q["seq"].clone()).unwrap_or(Value::Null)),
