@@ -25,7 +25,7 @@ macOS or Linux, with no sudo (on Windows, run it in WSL). The same line
 updates it:
 
 ```
-mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 ```
 
 If `fragment` is then not found, `~/.local/bin` is not on the PATH: run

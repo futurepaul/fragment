@@ -5,7 +5,7 @@ the CLI. Agents are fragments a computer of your own runs (today, Hermes
 profiles; docs/computers.md).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
-github.com/futurepaul/fragment's `master`, the Cloudflare line since the
+github.com/finitecomputer/fragment's `master`, the Cloudflare line since the
 cut: fragment.club runs the `celld` branch, tag `celld-final`, until
 cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
 `wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
@@ -316,7 +316,7 @@ prebuilt bundle is in the debt ledger).
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.
-- The remote is `fragment-rs`, github.com/futurepaul/fragment: work goes
+- The remote is `fragment-rs`, github.com/finitecomputer/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
   `ci/` are refused). The coordinating session reviews and merges a PR
   once its CI is green. Deploys, adding a remote, deleting Sprites, DNS,

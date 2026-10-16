@@ -1386,7 +1386,7 @@ exit says.
    Linux and the hosted lane on a branch preview. Exit: core fragment
    sections green locally, in CI, and on a preview.
 
-   Status, 2026-10-03 (futurepaul/fragment#115, merged):
+   Status, 2026-10-03 (finitecomputer/fragment#115, merged):
    - Built: the cell on workerd (wrangler 4.145.0, pinned); keys in the
      cell (`crates/core/src/seal.rs`: AES-256-GCM, sealed per Durable
      Object); blobs in R2; the dev stack and the e2e on `wrangler dev`;
@@ -1469,7 +1469,7 @@ exit says.
    shell replaces `/` and `/settings`. Exit: the browser lane at desktop
    and phone sizes, on a preview.
 
-   Status, 2026-10-03 (futurepaul/fragment#117; Skyler's design handoff
+   Status, 2026-10-03 (finitecomputer/fragment#117; Skyler's design handoff
    of 2026-10-02 for every part it draws):
    - Built:
      - **The shell** at `/` and `/settings` (cell/shell/; the server's
@@ -1531,7 +1531,7 @@ exit says.
    publishes and shares an app, ingests into a brain and searches it;
    the skills list matches the skills fragment.
 
-   Status, 2026-10-03 (futurepaul/fragment#118, stacked on #117):
+   Status, 2026-10-03 (finitecomputer/fragment#118, stacked on #117):
    - Built:
      - **The brain** (decision 30): a blessed `brain` template on the
        notes vault UI.
@@ -1580,7 +1580,7 @@ exit says.
    for the in-fragment agent's reply-operation answer path (the agents
    section's, since 2026-10-03).
 
-   Status, 2026-10-03 (futurepaul/fragment#118):
+   Status, 2026-10-03 (finitecomputer/fragment#118):
    - Built:
      - **The in-fragment agent's answer path** has its test, in the agents
        section: valid, invalid, replay, and a crash after the answer.
