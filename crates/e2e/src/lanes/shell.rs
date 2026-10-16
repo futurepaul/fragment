@@ -717,6 +717,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/settings", api.base))?;
     let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?return=%2Fsettings'", wait);
     s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
+    let other = b.eval(&page, "(() => { const f = document.querySelector('#first-run-card form[action]'); return { method: f?.getAttribute('method'), action: f?.getAttribute('action'), says: f?.textContent }; })()")?;
+    s.ok(
+        "and offers another account: a form posting to /auth/switch, back to settings too",
+        other["method"] == "post" && other["action"] == "/auth/switch?return=%2Fsettings" && other["says"] == "Use another account",
+        &other,
+    );
     b.close(page)?;
 
     let email = format!("shell-ui-{}@e2e.test", crate::api::now_s());
