@@ -453,6 +453,14 @@ impl FragmentCell {
                 }
                 json!({ "aged": ms })
             }
+            Some("age-invites") => {
+                // every invite waiting runs out `ms` sooner, and the alarm is
+                // armed for the soonest, as for one that ran out on its own
+                let ms = ms()?;
+                let aged = self.rows("UPDATE invites SET expires_at = expires_at - ? RETURNING email", vec![SqlStorageValue::Integer(ms)])?.len();
+                self.schedule().await?;
+                json!({ "aged": ms, "invites": aged })
+            }
             Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
@@ -557,7 +565,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
         })
     }
 }

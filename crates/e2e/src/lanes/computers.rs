@@ -684,6 +684,61 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
     Ok(3)
 }
 
+/// An agent fragment deleted leaves its computer (cell ended.rs): no longer
+/// in the computer's view (its owner's agents, a chat's @ roster, Settings),
+/// nor counted in its cap, nor named by the registry for its fragment; the
+/// computer keeps its other agents, and a delete, or the owner's unassign,
+/// asked again changes nothing. `lead` is an agent it keeps running; `chat`
+/// is the owner's, its share link `view` (whose `__people` names agents).
+fn deleted_agent_leaves(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, chat: &str, view: &str, lead: &str) -> Result<()> {
+    let agents = || -> Vec<Value> {
+        api.signed(owner, "GET", &format!("/api/computers/{id}"), None).ok().and_then(|r| r.body["agents"].as_array().cloned()).unwrap_or_default()
+    };
+    let runs = |agents: &[Value], identity: &str| agents.iter().any(|a| a["identity"] == identity);
+    let ids = |agents: &[Value]| agents.iter().filter_map(|a| a["identity"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let named = |identity: &str| -> Value {
+        api.page(chat, &format!("__people?id={identity}&view={view}"), None).map(|r| r.body["profiles"][identity].clone()).unwrap_or(Value::Null)
+    };
+    let birch_name = s.named(api, owner, "birch")?;
+    let birch = s.create(api, owner, &birch_name)?;
+    s.commit(&birch, &[("fragment.json", Some(AGENT_JSON))]);
+    s.deploy(&birch);
+    let r = api.signed(owner, "PUT", &format!("/api/computers/{id}/agents/{birch_name}"), Some(&json!({})))?;
+    let birch_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == birch_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let before = agents();
+    let profile = named(&birch_id);
+    s.ok(
+        "an agent fragment assigned runs on its computer, beside its others, and the registry names its agent by it",
+        r.status == 200 && runs(&before, &birch_id) && runs(&before, lead) && profile["kind"] == "agent" && profile["fragment"] == birch_name.as_str(),
+        json!({ "assigned": r.status, "agents": before, "profile": profile }),
+    );
+
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{birch_name}"), None)?;
+    let left = s.eventually(Duration::from_secs(20), || !runs(&agents(), &birch_id));
+    let after = agents();
+    s.ok(
+        "deleted, it leaves its computer: its view runs it no more, and runs its other agents as before",
+        r.status == 200 && left && runs(&after, lead) && ids(&after) == ids(&before).into_iter().filter(|i| *i != birch_id).collect::<Vec<_>>(),
+        json!({ "deleted": r.status, "before": before, "after": after }),
+    );
+    let forgotten = s.eventually(Duration::from_secs(20), || named(&birch_id)["fragment"].is_null());
+    let profile = named(&birch_id);
+    s.ok("and the registry names its agent by the fragment no more", forgotten && profile["kind"] == "agent" && profile["name"].is_null(), &profile);
+    let (cleaned, last) = s.ended_cleaned(api, &birch_name);
+    s.ok("the ended life's cleanup completes, its agent's part with it", cleaned, last);
+
+    // a replay: the delete again, and the owner's unassign of it, are done
+    let again = api.signed(owner, "DELETE", &format!("/api/f/{birch_name}"), None)?;
+    let unassigned = api.signed(owner, "DELETE", &format!("/api/computers/{id}/agents/{birch_name}"), None)?;
+    let still = agents();
+    s.ok(
+        "asked again, the delete is 404, and the owner's unassign of it answers the view without it (an agent gone is done, not an error); the others stay",
+        again.status == 404 && unassigned.status == 200 && !runs(unassigned.body["agents"].as_array().map_or(&[][..], Vec::as_slice), &birch_id) && ids(&still) == ids(&after),
+        json!({ "again": again.status, "unassigned": unassigned.to_string(), "agents": still }),
+    );
+    Ok(())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
@@ -1079,6 +1134,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             s.skip(label, "it needs the stub's fetch, and the fakes' providers behind the swap");
         }
     }
+    deleted_agent_leaves(s, api, &owner, &id, &chat_name, chat["viewToken"].as_str().unwrap_or(""), &identity)?;
 
     // its ports, on its own origin, for its owner
     let r = api.signed(&stranger, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;

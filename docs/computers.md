@@ -19,6 +19,14 @@ runtime. A change that would have to is a design bug (the rule).
   /api/computers/{id}/agents/{fragment}`). Its own key then becomes the
   agent's identity, registered to the fragment's owner, and it signs the
   guest's requests only while it is assigned there.
+- A computer's agents follow their fragments: an agent fragment deleted
+  leaves its computer (its delete's cleanup, retried until done:
+  cell/src/ended.rs), as an unassign does: the guest is given it no
+  more, its owner's pages are told, and it is counted in the computer's
+  cap (16 agents) no more. The registry names its agent by the fragment
+  no more; its identity stays, its key held by no one (that life's
+  alone). A life made again under the name is a new agent, assigned
+  anew.
 - Agents are fragments of kind `agent` that name the computer that runs
   them (decision 14). An agent's identity is its own: its agent
   fragment's npub (decision 45), and its owner is a person. The computer's guest

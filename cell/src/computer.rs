@@ -379,9 +379,15 @@ struct Assign {
     owner: String,
 }
 
+/// `computer/unassign`'s body: the agent fragment it runs no more, and,
+/// from that fragment's ended life (ended.rs), its agent: only that life's
+/// row goes, never one a life made again under the name was assigned.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Unassign {
     fragment: String,
+    #[serde(default)]
+    identity: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1859,8 +1865,18 @@ impl ComputerCell {
             }
             "computer/unassign" => {
                 let b: Unassign = body_json(&mut req).await?;
-                self.exec("DELETE FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?;
-                json_response(&self.view()?)
+                let gone = match &b.identity {
+                    Some(identity) => self.rows("DELETE FROM agents WHERE fragment = ? AND identity = ? RETURNING fragment", vec![b.fragment.as_str().into(), identity.as_str().into()])?,
+                    None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
+                };
+                assert!(gone.len() <= 1, "a computer runs a fragment once");
+                let view = self.view()?;
+                if !gone.is_empty() {
+                    // its owner's pages read its agents again (an agent
+                    // fragment's delete unassigns it unseen: ended.rs)
+                    self.tell_owner().await;
+                }
+                json_response(&view)
             }
             "computer/connections" => {
                 let mut b: SetConnections = body_json(&mut req).await?;
@@ -2284,7 +2300,12 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         }
         (Method::Delete, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
-            crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await?;
+            // an agent fragment gone (deleted: its own delete unassigns it,
+            // ended.rs) has nothing to say: its computer runs it no more
+            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await {
+                Err(e) if e.code != ErrorCode::NotFound => return Err(e),
+                _ => {}
+            }
             json_response(&view_of(ask(env, id, "computer/unassign", &json!({ "fragment": fragment })).await?)?)
         }
         (Method::Post, [id, "ports", port, "ticket"]) => {

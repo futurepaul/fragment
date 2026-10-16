@@ -53,7 +53,7 @@ pub(crate) mod trials;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
     TEST_HOLD_MAX_MS,
 };
@@ -523,6 +523,23 @@ impl RegistryCell {
         self.view(&agent, Some(created))
     }
 
+    /// An agent fragment's life ended (calls.rs `ForgetAgent`): its agent is
+    /// named by it no more (`profiles`, its picture), so a life made again
+    /// under the name never lends its face to this one. Idempotent: a row
+    /// gone already, or naming another fragment, is left as it is.
+    fn forget_agent(&self, b: ForgetAgent) -> CellResult<AgentForgotten> {
+        if !npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) {
+            return Err(CellError::invalid("an agent forgotten is named by its identity and its fragment"));
+        }
+        let gone = self.rows::<HolderRow>(
+            "DELETE FROM agent_fragments WHERE identity = ? AND fragment = ? RETURNING identity",
+            vec![b.identity.as_str().into(), b.fragment.as_str().into()],
+        )?;
+        assert!(gone.len() <= 1, "an agent names one fragment");
+        assert!(self.agent_fragment(&b.identity)?.as_deref() != Some(b.fragment.as_str()), "a forgotten agent is named by its fragment no more");
+        Ok(AgentForgotten { forgot: !gone.is_empty() })
+    }
+
     /// Holds an agent below its owner (`held`: the most it acts with), or
     /// lets it go; only its owner does, and never above editor (an agent
     /// never acts as an owner).
@@ -721,6 +738,7 @@ impl RegistryCell {
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
+            ForgetAgent::PATH => reply::<ForgetAgent>(self.forget_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
             SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),

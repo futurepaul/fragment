@@ -589,8 +589,28 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "removed": npub::display(&target) }))
     }
 
-    fn drop_spent_invites(&self) -> CellResult<()> {
-        self.exec("DELETE FROM invites WHERE expires_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])
+    /// Drops the invites that ran out: the alarm does at each one's expiry
+    /// (`invites_due_at` arms it; fragment.rs `on_alarm`), and every call
+    /// that reads them does first. When any went, the owner's list counts
+    /// them no more: its row is sent again, the alarm armed to send it (a
+    /// call's own flush may send it first). Until then an invite that ran
+    /// out was counted on its owner's list, and shown waiting, until some
+    /// other change to its sharing.
+    pub(crate) async fn drop_spent_invites(&self) -> CellResult<()> {
+        let now = js::now_ms();
+        let gone = self.rows("DELETE FROM invites WHERE expires_at <= ? RETURNING email", vec![SqlStorageValue::Integer(now)])?;
+        assert!(gone.len() <= limits::INVITES_MAX, "a fragment holds at most INVITES_MAX invites");
+        assert!(self.invites_due_at()?.is_none_or(|at| at > now), "no invite left has run out");
+        if !gone.is_empty() {
+            self.sharing_changed()?;
+            self.schedule().await?;
+        }
+        Ok(())
+    }
+
+    /// When the next invite waiting runs out, if one waits (for the alarm).
+    pub(crate) fn invites_due_at(&self) -> CellResult<Option<i64>> {
+        Ok(self.rows("SELECT MIN(expires_at) AS at FROM invites", vec![])?.first().and_then(|r| r["at"].as_i64()))
     }
 
     /// Its title as its members' lists show it, if it has one.
@@ -617,7 +637,7 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("{email:?} is not an email")));
         }
         let name = self.name()?;
-        self.drop_spent_invites()?;
+        self.drop_spent_invites().await?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -679,9 +699,9 @@ impl FragmentCell {
         }
     }
 
-    pub(crate) fn invites(&self, caller: &Caller) -> CellResult<Response> {
+    pub(crate) async fn invites(&self, caller: &Caller) -> CellResult<Response> {
         self.require_owner(caller)?;
-        self.drop_spent_invites()?;
+        self.drop_spent_invites().await?;
         let rows = self.rows("SELECT email, role, expires_at, created_by FROM invites ORDER BY created_at, email", vec![])?;
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
@@ -689,7 +709,7 @@ impl FragmentCell {
     pub(crate) async fn revoke_invite(&self, caller: &Caller, email: &str) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         let email = email.trim().to_ascii_lowercase();
-        self.drop_spent_invites()?;
+        self.drop_spent_invites().await?;
         if self.rows("SELECT email FROM invites WHERE email = ?", vec![email.as_str().into()])?.is_empty() {
             return Err(CellError::new(ErrorCode::NotFound, format!("no invite waits on {email}")));
         }
@@ -703,13 +723,14 @@ impl FragmentCell {
 
     /// The invite waiting on `email`, met by `identity`, a person who just
     /// signed in as it (the registry's `ClaimInvite`): a member at the role
-    /// it said, added by its maker, and a stronger role they hold kept.
+    /// it said, added by its maker, and a stronger role they hold kept;
+    /// either way it is spent, and its owner's list counts it no more.
     /// 404 when none waits (revoked, expired, or met already), and the
     /// registry forgets it. A full fragment keeps it for their next sign-in.
     pub(crate) async fn claim_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
-        self.drop_spent_invites()?;
+        self.drop_spent_invites().await?;
         let rows = self.rows("SELECT role, created_by FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         let Some(row) = rows.first() else {
             return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
@@ -723,7 +744,10 @@ impl FragmentCell {
             self.check_room(current)?;
         }
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
+        // met, whatever it grants: the owner's list counts it no more
+        self.sharing_changed()?;
         if kept {
+            self.flush_index().await;
             return Ok(json!({ "role": current }));
         }
         self.exec(
@@ -732,7 +756,6 @@ impl FragmentCell {
             vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         self.index_change(who, Some(role))?;
-        self.sharing_changed()?;
         self.event("member.joined", &format!("{who} joined as {}, invited by email", role.as_str()), json!({ "principal": who, "role": role, "by": by }));
         if current.is_some() {
             self.reopen_sockets(&format!("p:{who}"), "your role changed");
@@ -744,7 +767,8 @@ impl FragmentCell {
     /// The fragment's sharing, as its owner's list carries it: `guests`
     /// counts the members who are neither the owner nor an agent of theirs,
     /// and `invites` those waiting on an email (as of this change: one
-    /// that runs out later is counted until the next).
+    /// that runs out later is counted until the alarm drops it at its
+    /// expiry, which sends the row again: `drop_spent_invites`).
     pub(crate) fn sharing_counts(&self) -> CellResult<Sharing> {
         let visibility = self.visibility()?;
         let owner = self.must(MetaKey::Owner)?;

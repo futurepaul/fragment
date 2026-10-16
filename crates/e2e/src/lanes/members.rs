@@ -144,6 +144,26 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&pending))), None)?;
     let none = counted(api)?;
     s.ok("the owner's list counts the invites waiting: one made, then revoked", one == 1 && none == 0, format!("{one} then {none}"));
+    // one that runs out waits no more: the fragment's alarm drops it at its
+    // expiry (a lever ages it 30 days), and the owner's list is told unasked
+    let lapsing = Keys::generate();
+    invite(&Api::email_of(&lapsing), "viewer")?;
+    let one = counted(api)?;
+    let age = |api: &Api| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-invites", "ms": limits::INVITE_TTL_S * 1000 })));
+    let aged = age(api)?;
+    let dropped = s.eventually(Duration::from_secs(10), || counted(api).is_ok_and(|n| n == 0));
+    s.ok(
+        "an invite that runs out waits no more: the fragment drops it at its expiry, and its owner's list counts it no more",
+        one == 1 && aged.status == 200 && aged.body["invites"] == 1 && dropped && !waiting(&Api::email_of(&lapsing))?,
+        format!("{one}, then aged {aged}, then {}", counted(api)?),
+    );
+    let again = age(api)?;
+    first_sign_in(&lapsing)?;
+    s.ok(
+        "aged again, nothing is left to run out; and a sign-in as its email meets no invite (the registry's copy is forgotten)",
+        again.status == 200 && again.body["invites"] == 0 && counted(api)? == 0 && listed(api, &lapsing, &name)?.is_none(),
+        &again,
+    );
 
     // restricted, then opened by link again: a new share link, the old one
     // dead (a link holder read `__members`, as the share link lets them)
@@ -315,6 +335,20 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the fragment holds exactly the cap", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
     let r = api.status(&over, &name)?;
     s.ok("the refused person is not a member", r.status == 403, &r);
+    // made a member by their email meanwhile (a place freed for them), their
+    // next sign-in meets the invite with a stronger role held: it is spent
+    // all the same, and the owner's list counts it no more
+    let freed = api.signed(&owner, "DELETE", &path(&format!("members/{}", npub_of(&shouted))), None)?;
+    let added = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&over))), Some(&json!({ "role": "editor" })))?;
+    let held = counted(api)?;
+    let waits = waiting(&Api::email_of(&over))?;
+    api.sign_in(&Api::email_of(&over))?;
+    let spent = s.eventually(Duration::from_secs(10), || counted(api).is_ok_and(|n| n.as_u64().is_some_and(|n| Some(n + 1) == held.as_u64())));
+    s.ok(
+        "an invite met by a member who holds a stronger role is spent: it waits no more, their role is kept, and the owner's list counts it no more",
+        freed.status == 200 && added.status == 200 && waits && spent && !waiting(&Api::email_of(&over))? && listed(api, &over, &name)?.as_deref() == Some("editor"),
+        format!("freed {freed}; added {added}; {held} counted, then {}", counted(api)?),
+    );
 
     // a delete answers promptly, whatever its members: it tells one round
     // of their lists, its owner's first, and its alarm tells the rest

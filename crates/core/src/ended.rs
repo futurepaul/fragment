@@ -2,13 +2,16 @@
 //! /api/f/{name}` and Operators): how one try of a part of it is told
 //! apart, and when the part is tried again.
 //!
-//! An ended life has three kinds of part to clean: each member's list to
-//! tell (one row each), its app's database and blobs (one), and, a wipe's,
-//! its repo (one). A try of a part ends one of three ways:
+//! An ended life has four kinds of part to clean: each member's list to
+//! tell (one row each), its app's database and blobs (one), an agent
+//! fragment's agent (one: its computer runs it no more, and the registry
+//! names it by the fragment no more; not a wipe's, which empties both
+//! itself), and, a wipe's, its repo (one). A try of a part ends one of
+//! three ways:
 //!
 //! - **done**: the part is gone, cleaned by this try or before it (a repo
-//!   code.storage says is gone, or was never there, is gone: asking again
-//!   cannot make it more so);
+//!   code.storage says is gone, or was never there, is gone; so is an
+//!   agent whose computer is gone: asking again cannot make it more so);
 //! - **failed, for now** (`Failure::Transient`): the dependency may answer
 //!   otherwise on a later try (a timeout, a 5xx, a 429). It is tried again,
 //!   the wait doubling (`backoff::outbox_retry_ms`), `TRIES_MAX` times;
@@ -24,6 +27,8 @@
 //! cleaning". A wipe's own call makes every part of its fragment's ended
 //! lives due at once, held ones too: the operator running a wipe again is
 //! the retry, one try a call.
+
+use fragment_proto::ErrorCode;
 
 use crate::backoff::outbox_retry_ms;
 
@@ -102,6 +107,20 @@ pub fn list_told(status: Option<u16>, detail: &str) -> Result<(), Failure> {
     }
 }
 
+/// What a try of an ended agent's leaving was refused with (its
+/// computer's `computer/unassign`, or the registry's forgetting of its
+/// fragment), told apart: none found (404: a computer its owner's wipe
+/// emptied) is done, as an agent already gone is; a 429 or a 5xx may pass
+/// later; any other refusal cannot.
+pub fn agent_left(code: ErrorCode, message: &str) -> Result<(), Failure> {
+    let status = code.status();
+    match status {
+        404 => Ok(()),
+        429 | 500..=599 => Err(Failure::Transient(kept_error(&format!("{status} {message}")))),
+        _ => Err(Failure::Refused(kept_error(&format!("{status} {message}")))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +174,21 @@ mod tests {
         }
         let long = list_told(Some(500), &"y\n".repeat(1000)).unwrap_err();
         assert!(long.message().chars().count() <= ERROR_MAX_CHARS && !long.message().contains('\n'));
+    }
+
+    /// Goal: an ended agent's leaving is done when what it leaves is gone
+    /// (404), tried again for a failure that may pass (429, 5xx), and held
+    /// for any other refusal; the error kept is bounded. Method: each code.
+    #[test]
+    fn an_agents_leaving_is_told_apart() {
+        assert_eq!(agent_left(ErrorCode::NotFound, "no such computer (its owner was wiped)"), Ok(()));
+        for code in [ErrorCode::RateLimited, ErrorCode::HostFailed, ErrorCode::UpstreamFailed, ErrorCode::RegistryUnavailable, ErrorCode::NodeFull] {
+            assert!(matches!(agent_left(code, "x"), Err(Failure::Transient(_))), "{code:?}");
+        }
+        for code in [ErrorCode::InvalidRequest, ErrorCode::Forbidden, ErrorCode::AlreadyExists] {
+            assert!(matches!(agent_left(code, "x"), Err(Failure::Refused(_))), "{code:?}");
+        }
+        let long = agent_left(ErrorCode::HostFailed, &"z\n".repeat(1000)).unwrap_err();
+        assert!(long.message().starts_with("500 ") && long.message().chars().count() <= ERROR_MAX_CHARS);
     }
 }
