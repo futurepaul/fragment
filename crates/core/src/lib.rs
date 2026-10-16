@@ -34,6 +34,7 @@ pub mod names;
 pub mod npub;
 pub mod own_signin;
 pub mod org;
+pub mod owner_browser;
 pub mod price;
 pub mod ratelimit;
 pub mod registry;

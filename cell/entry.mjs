@@ -280,6 +280,7 @@ class ContainerHost {
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+    await this.#settled(() => c.interceptOutboundHttp("browser.fragment.internal", egress("browser")));
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));

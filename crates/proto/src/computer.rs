@@ -288,6 +288,23 @@ pub struct ComputerView {
     /// unless they let it sleep (docs/billing.md).
     #[serde(default)]
     pub always_on: bool,
+    /// The browsers its owner connected to it, newest first
+    /// (docs/explorations/owner-browser.md, a spike).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<ComputerBrowser>,
+}
+
+/// A browser its owner connected to a computer, as its view shows it: its
+/// link's id (what `DELETE …/browser/links/{id}` forgets), the name its
+/// extension gave, whether it is connected now, and when the computer last
+/// heard it connect or leave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerBrowser {
+    pub id: String,
+    pub name: String,
+    pub connected: bool,
+    pub seen_at: i64,
 }
 
 /// One save of a computer's `/data`, as its view shows it.
@@ -468,6 +485,17 @@ pub struct UpdateLater {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortTicket {
+    pub url: String,
+    pub expires_at: i64,
+}
+
+/// `POST /api/computers/{id}/browser/ticket` → a one-time socket URL on
+/// the computer's origin (`ws(s)://…/__browser?t=…`) that connects its
+/// owner's browser, through its extension, as the browser the guest
+/// reaches (docs/explorations/owner-browser.md, a spike).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTicket {
     pub url: String,
     pub expires_at: i64,
 }
