@@ -151,7 +151,12 @@ job alone. The config it deploys from is the secret `DEPLOY_CONFIG`, though
 it holds names and paths alone: the repo is public, and a variable is
 shown in its job's log. It names those two paths, and no
 `stripe.key_file`, which a runner lacks; a secret is never read back, so
-it is set from a file kept beside the config a deploy by hand takes.
+it is set from a file kept beside the config a deploy by hand takes, as
+one line of base64 (`base64 -w0 < <file> | gh secret set DEPLOY_CONFIG
+--env <environment>`), which the job decodes, refusing one that is no
+base64 of a file with something in it. One line, as the runner masks
+each line of a secret as well as the whole: a config's lines of `{` or
+`}` alone would mask every brace in the job's logs.
 `CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
 masked: the runner masks each secret its job names wherever it appears
 in the job's logs, so the account id in wrangler's and xtask's output

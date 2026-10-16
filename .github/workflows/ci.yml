@@ -198,10 +198,11 @@ jobs:
   # only its branch use, and which holds the variable DEPLOY_HOST (its
   # platform's host) and the secrets DEPLOY_CONFIG (the whole deploy
   # config, JSONC: names and paths, a secret only so the public repo's
-  # logs never show it), CLOUDFLARE_API_TOKEN (wrangler's, and the DNS token),
-  # the preview's PREVIEW_TEST_SECRET, and, optional, CLOUDFLARE_ACCOUNT_ID
-  # (below). Every computer image is pinned by digest (`--pinned-only`): a
-  # runner builds none (xtask/src/deploy.rs, `pinned_only`, says why).
+  # logs never show it; in base64, below), CLOUDFLARE_API_TOKEN
+  # (wrangler's, and the DNS token), the preview's PREVIEW_TEST_SECRET,
+  # and, optional, CLOUDFLARE_ACCOUNT_ID (below). Every computer image is
+  # pinned by digest (`--pinned-only`): a runner builds none
+  # (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
     needs: [check, e2e]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
@@ -254,10 +255,14 @@ jobs:
       # config names (deploy/example.jsonc): the token, its DNS token too,
       # and the preview's test secret, each 0600. printf is the shell's
       # own, so no value is ever a process's argument, and nothing here
-      # echoes one. CLOUDFLARE_ACCOUNT_ID is named only to be masked: the
-      # runner masks every secret a job names, wherever it appears in the
-      # job's logs (wrangler's and xtask's registry paths and URLs); unset,
-      # it is empty and masks nothing.
+      # echoes one. The config is set as one line of base64 (`base64 -w0 <
+      # <file> | gh secret set DEPLOY_CONFIG --env <environment>`): the
+      # runner masks each line of a secret too, and a config's lines of `{`
+      # or `}` alone would mask every brace in the job's logs.
+      # CLOUDFLARE_ACCOUNT_ID is named only to be masked: the runner masks
+      # every secret a job names, wherever it appears in the job's logs
+      # (wrangler's and xtask's registry paths and URLs); unset, it is empty
+      # and masks nothing.
       - env:
           DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
@@ -269,7 +274,10 @@ jobs:
           for v in DEPLOY_CONFIG DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
             test -n "${!v}" || { echo "the environment of $GITHUB_REF_NAME's deploy has no $v"; exit 1; }
           done
-          printf '%s\n' "$DEPLOY_CONFIG" > "$RUNNER_TEMP/deploy.jsonc"
+          if ! printf '%s' "$DEPLOY_CONFIG" | base64 -d > "$RUNNER_TEMP/deploy.jsonc" || ! test -s "$RUNNER_TEMP/deploy.jsonc"; then
+            echo "the environment of $GITHUB_REF_NAME's deploy has a DEPLOY_CONFIG that is no config in base64: set it with base64 -w0 < <file> | gh secret set DEPLOY_CONFIG --env <environment>"
+            exit 1
+          fi
           mkdir -p ~/.config/fragment/secrets
           printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
           if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi

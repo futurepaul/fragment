@@ -314,8 +314,9 @@ prebuilt bundle is in the debt ledger).
   holding the variable `DEPLOY_HOST` (its platform's host, whose
   `/healthz` must then answer the commit) and the secrets `DEPLOY_CONFIG`
   (the whole deploy config, names and paths: a secret so the public
-  repo's logs never show it, set from a file kept beside the config a
-  deploy by hand takes, as a secret is never read back),
+  repo's logs never show it, set in base64 from a file kept beside the
+  config a deploy by hand takes, as a secret is never read back: `base64
+  -w0 < <file> | gh secret set DEPLOY_CONFIG --env <environment>`),
   `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's
   `PREVIEW_TEST_SECRET`, and, optional but recommended,
   `CLOUDFLARE_ACCOUNT_ID`, named only so the job's logs mask the account

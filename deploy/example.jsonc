@@ -9,11 +9,11 @@
 //
 // CI deploys (.github/workflows/ci.yml, `deploy`: master's green push to
 // its preview, production's to production) from this file, held whole in
-// its GitHub environment's secret DEPLOY_CONFIG (`gh secret set
-// DEPLOY_CONFIG --env <environment> < <file>`; never read back, so keep
-// the file). There, `dns_token_file` and `test_secret_file` are the paths
-// the job writes them to, below, and every computer image is pinned by
-// digest (`--pinned-only`).
+// its GitHub environment's secret DEPLOY_CONFIG, in base64 (`base64 -w0 <
+// <file> | gh secret set DEPLOY_CONFIG --env <environment>`; never read
+// back, so keep the file). There, `dns_token_file` and `test_secret_file`
+// are the paths the job writes them to, below, and every computer image
+// is pinned by digest (`--pinned-only`).
 {
   // Your Cloudflare account (`wrangler whoami`), and a branch deployment's
   // zone: `--branch <b>` deploys at <b>.<zone>, its fragments at
