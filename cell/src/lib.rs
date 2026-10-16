@@ -949,6 +949,14 @@ fn path_and_query(url: &Url) -> String {
     }
 }
 
+/// The router's own 404, for a path it has no route for: the levers to a
+/// request without the fleet's secret, and `/admin` to anyone but an
+/// operator, answer it word for word, so a scan cannot tell them from a
+/// path that is not there.
+pub(crate) fn no_route(path: &str) -> CellError {
+    CellError::new(ErrorCode::NotFound, format!("no route {path}"))
+}
+
 /// The suffix's own name's redirect to the platform. No cache keeps it, so
 /// the platform can still move: a browser caches a bare `308` for good.
 fn moved(to: &str) -> CellResult<Response> {
@@ -994,7 +1002,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         // missing route is, so a scan cannot tell a preview's from production.
         let carried = req.headers().get(fragment_core::levers::SECRET_HEADER)?;
         if !cfg.test_secret.as_ref().is_some_and(|secret| secret.admits(carried.as_deref())) {
-            return Err(levers::no_route(&path));
+            return Err(no_route(&path));
         }
         let lever = lever.to_vec();
         return levers::route(req, env, cfg, &lever).await;
@@ -1007,7 +1015,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/welcome` a new person's welcome
         (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(env, cfg, &url).await,
-        (Method::Get, ["admin"]) => shell::admin_page(env).await,
+        // the operators' admin page: to anyone else, the 404 below
+        (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
@@ -1213,6 +1222,6 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             to.set_query(url.query());
             Ok(Response::redirect_with_status(to, 308)?)
         }
-        _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
+        _ => Err(no_route(&path)),
     }
 }

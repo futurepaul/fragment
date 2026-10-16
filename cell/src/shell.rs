@@ -10,6 +10,7 @@
 //! the frame mint's redirects) and of the fragments' and computers' hosts
 //! under the suffix; never framed itself.
 
+use fragment_proto::ErrorCode;
 use fragment_templates::File;
 use worker::*;
 
@@ -60,10 +61,23 @@ pub async fn page(env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     crate::assets::body(env, page_file("index.html"), h).await
 }
 
-/// `GET /admin`: the operators' admin page (decision 59), for anyone: it
-/// holds nothing, and its API answers only the deployment's operators.
-/// It frames nothing and is never framed.
-pub async fn admin_page(env: &Env) -> CellResult<Response> {
+/// `GET /admin`: the operators' admin page (decision 59), to the platform
+/// session of one of the deployment's operators alone, by the rule the
+/// admin's API holds the shell's session to (orgs.rs `session_operator`).
+/// To anyone else, signed out, signed in, or with a session that ended,
+/// it is the router's 404 for a path it lacks (lib.rs `no_route`), word
+/// for word: no one else learns it is here. Its API decides again. It
+/// frames nothing and is never framed.
+pub async fn admin_page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    let missing = || crate::no_route(url.path());
+    let Some(token) = crate::auth::platform_session_token(req, url)? else { return Err(missing()) };
+    match crate::orgs::session_operator(env, cfg, token).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(missing()),
+        // a session not live (401), or a person being wiped (403), is no operator's
+        Err(e) if matches!(e.code, ErrorCode::Unauthenticated | ErrorCode::Forbidden) => return Err(missing()),
+        Err(e) => return Err(e),
+    }
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
