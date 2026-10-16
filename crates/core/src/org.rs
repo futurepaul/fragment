@@ -118,6 +118,16 @@ pub fn desired(held: Option<Held>) -> Desired {
     }
 }
 
+/// Whether a person is a guest (decision 49: they make nothing, and are
+/// offered a seat; `GET /api/seat`'s `guest`): they hold no seat, and their
+/// ledger gives them no plan of its own: it is `guest` (a new person's on a
+/// deployment whose plan is guest, or an operator's), or a seat's plan kept
+/// after the seat ended (decision 53: `canceled`, pushed by `desired(None)`).
+/// A deployment's plan for everyone (dev, the e2e) is a seat to them.
+pub fn guest(holds_seat: bool, plan: Plan, seat: SeatState) -> bool {
+    !holds_seat && (plan == Plan::Guest || seat == SeatState::Canceled)
+}
+
 /// The next push's place in a ledger's seat order (`SetSeat::seq`): later
 /// than the last, and never behind the clock in ms (the order any other
 /// writer's `seq` was given in).
@@ -257,6 +267,22 @@ mod tests {
     #[test]
     fn no_seat_cancels_and_leaves_the_plan() {
         assert_eq!(desired(None), Desired { plan: None, seat: SeatState::Canceled, always_on: false });
+    }
+
+    #[test]
+    fn a_guest_holds_no_seat_and_their_ledger_gives_them_none() {
+        // never had one: a guest's plan; or the deployment's for everyone, a seat
+        assert!(guest(false, Plan::Guest, SeatState::Active));
+        assert!(!guest(false, Plan::Seat, SeatState::Active), "the deployment's plan for everyone");
+        assert!(!guest(false, Plan::SeatAlwaysOn, SeatState::Active));
+        // a seat that ended (removed, a comp ended): its plan kept, canceled
+        let ended = desired(None);
+        assert!(guest(false, Plan::SeatAlwaysOn, ended.seat), "their seat ended: a guest, whatever plan it left");
+        assert!(guest(false, Plan::Seat, ended.seat));
+        // holding one, good or lapsed, or just given (its plan on its way)
+        for (plan, seat) in [(Plan::Guest, SeatState::Active), (Plan::SeatAlwaysOn, SeatState::Canceled), (Plan::Seat, SeatState::PastDue)] {
+            assert!(!guest(true, plan, seat), "{plan:?} {seat:?}");
+        }
     }
 
     #[test]

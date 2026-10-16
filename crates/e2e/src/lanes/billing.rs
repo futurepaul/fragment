@@ -301,6 +301,12 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 
+/// An amount of core's as the shell shows it: whole dollars (`$200`).
+fn dollars(micros: i64) -> String {
+    assert_eq!(micros % 1_000_000, 0, "core's prices are whole dollars");
+    format!("${}", micros / 1_000_000)
+}
+
 /// The person's own fragments of `kind`, counted.
 fn owned(api: &Api, keys: &Keys, kind: &str) -> usize {
     api.signed(keys, "GET", "/api/fragments", None)
@@ -445,16 +451,27 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(keys)
     };
     let text = |b: &mut crate::browser::Lease, p: &crate::browser::Page| b.eval(p, "document.getElementById('settings-page')?.innerText ?? ''").map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+    // what is sold, as core has it: every price a page shows is these
+    let offer = fragment_core::stripe::offer();
+    let (seat_price, included, pack) = (dollars(offer.seat_micros), dollars(offer.included_micros), dollars(offer.pack_micros));
 
     // ---- a new guest: the welcome, never settings
     let gus = guest(api, "billing-page-guest")?;
+    let mine = seat(api, &gus);
+    s.ok(
+        "GET /api/seat says who is a guest (a guest's plan, no seat) and what is sold, at core's prices",
+        mine["guest"] == true
+            && mine["seat"].is_null()
+            && mine["offer"] == json!({ "kind": "seat_always_on", "seatMicros": offer.seat_micros, "includedMicros": offer.included_micros, "packMicros": offer.pack_micros }),
+        &mine,
+    );
     let session = api.sign_in(&Api::email_of(&gus))?;
     let page = page_of(&mut b, api, &session, "/")?;
     let welcomed = view(&mut b, &page, WELCOMED, wait);
     let _ = b.screenshot(&page, &shots.join("1-welcome.png"));
     let seen = b.eval(&page, SEEN)?;
     s.ok(
-        "a new guest's first run is the welcome, never settings: what this is, the one seat sold ($200 a month, always on, $100 of credit), a trial code, what more credit costs, the import's place kept hidden, and who is signed in",
+        &format!("a new guest's first run is the welcome, never settings: what this is, the one seat sold ({seat_price} a month, always on, {included} of credit: core's prices), a trial code, what more credit costs, the import's place kept hidden, and who is signed in"),
         welcomed
             && seen["layout"] == false
             && seen["plans"] == json!(["seat_always_on"])
@@ -463,10 +480,9 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seen["errors"] == json!([])
             && seen["card"].as_str().is_some_and(|t| {
                 t.contains("Agents that work for you")
-                    && t.contains("$200 a month, always on")
-                    && t.contains("$100 of credit included each month")
-                    && t.contains("$25 a pack")
-                    && !t.contains("$100 a month")
+                    && t.contains(&format!("{seat_price} a month, always on"))
+                    && t.contains(&format!("{included} of credit included each month"))
+                    && t.contains(&format!("{pack} a pack"))
                     && t.contains(&Api::email_of(&gus))
                     && t.contains("Sign out")
                     && !t.contains("Not now")
@@ -483,7 +499,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "a guest's Billing in settings sells nothing itself: it names the one seat's price, its Get a seat is the welcome's, and nothing a guest has no use for shows (a computer, agents, skills, connections)",
         billing
-            && text(&mut b, &page).contains("A seat, $200 a month")
+            && text(&mut b, &page).contains(&format!("A seat, {seat_price} a month"))
             && offered["links"] == json!(["/welcome"])
             && offered["buys"] == json!([])
             && offered["warned"] == json!([])
@@ -554,7 +570,13 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- Billing manages the seat from here
     b.eval(&page, "(location.assign('/settings'), true)")?;
-    let managed = view(&mut b, &page, "location.pathname === '/settings' && /\\$200 always-on seat/.test(document.getElementById('settings-page')?.innerText ?? '') && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')", wait);
+    let held = format!("Always-on seat, {seat_price} a month");
+    let managed = view(
+        &mut b,
+        &page,
+        &format!("location.pathname === '/settings' && (document.getElementById('settings-page')?.innerText ?? '').includes({held:?}) && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')"),
+        wait,
+    );
     let _ = b.screenshot(&page, &shots.join("5-billing.png"));
     let shown = text(&mut b, &page);
     let buttons = b.eval(&page, "[...document.querySelectorAll('#settings-page button')].map((b) => b.textContent)")?;
@@ -562,7 +584,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let alone = b.eval(&page, "!document.querySelector('.billing-seats') && ![...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent.startsWith('Org'))")?;
     let warned = b.eval(&page, "[...document.querySelectorAll('.settings-warning')].map((w) => w.textContent)")?;
     s.ok(
-        "their Billing shows their seat, a $200 always-on seat: an org of one shows no org's table, only its invoices and seats for others, and no first run of its own",
+        &format!("their Billing shows their seat, an always-on seat at {seat_price} a month: an org of one shows no org's table, only its invoices and seats for others, and no first run of its own"),
         managed && alone == true && warned == json!([]) && has("Payment and invoices") && has("Add seats for others") && !has("Make your first agent"),
         json!({ "shown": shown, "buttons": buttons, "warned": warned }),
     );
@@ -580,7 +602,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let unasked = b.eval(&page, "![...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Add seats for others')")?;
     s.ok("as its admin they add a seat by email: it waits, invited, and their org's seats now show unasked", added && unasked == true, text(&mut b, &page));
     let before = ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
-    if !act(s, &mut b, &page, "Billing's Buy $25 of credit", &click_text("#settings-page button", "Buy $25 of credit"))? {
+    let buy = format!("Buy {pack} of credit");
+    if !act(s, &mut b, &page, &format!("Billing's {buy}"), &click_text("#settings-page button", &buy))? {
         return Ok(());
     }
     let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
@@ -589,8 +612,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let credited = view(&mut b, &page, "location.pathname === '/settings' && /Paid: the credit is yours/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
     s.ok(
-        "they buy $25 of credit on Stripe's page, and it is theirs as they land back in settings",
-        at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + 25_000_000),
+        &format!("they buy {pack} of credit on Stripe's page, and it is theirs as they land back in settings"),
+        at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + offer.pack_micros),
         ledger(api, &gus),
     );
     b.close(page)?;
@@ -765,6 +788,50 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         "a guest given a seat goes straight to their first run, never the welcome's seats, and it makes their agent",
         given.status == 200 && straight && made,
         json!({ "given": given.body, "seen": b.eval(&page, SEEN)? }),
+    );
+
+    // ---- their comp ends: their ledger keeps its plan, canceled (decision
+    // 53), and they keep their chat; to the shell, its Billing and its
+    // welcome alike they are a guest, and Get a seat reaches the seat
+    let comp = given.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let ended = api.signed(&s.operator, "DELETE", &format!("/api/admin/seats/{comp}"), None)?;
+    let guested = s.eventually(PUSHED, || seat(api, &max)["guest"] == true);
+    let (kept, mine) = (ledger(api, &max), seat(api, &max));
+    s.ok(
+        "their comp ended, GET /api/seat says they are a guest (no seat), though their ledger keeps the seat's plan, canceled",
+        ended.status == 200 && guested && mine["seat"].is_null() && kept["plan"] == "seat" && kept["seat"] == "canceled" && owned(api, &max, "chat") == 1,
+        json!({ "ended": ended.body, "seat": mine, "ledger": { "plan": kept["plan"], "seat": kept["seat"] } }),
+    );
+    b.reload(&page)?;
+    let home = view(&mut b, &page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]') && document.getElementById('sidebar-new-chat')?.getAttribute('aria-label') === 'Search chats and apps'", wait);
+    let makes = b.eval(&page, "[!document.getElementById('new-chat').hidden && 'new-chat', document.getElementById('add-app') && 'add-app'].filter(Boolean)")?;
+    b.eval(&page, "(location.assign('/settings'), true)")?;
+    let billed = view(&mut b, &page, "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    let headings = b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?;
+    s.ok(
+        "the shell agrees: home, their chat open, makes nothing (its launcher only finds), and their Billing says they are a guest, with settings a guest's (no computer or agents)",
+        home && makes == json!([]) && billed && headings.as_array().is_some_and(|h| ["Computer", "Agents"].iter().all(|x| !h.contains(&json!(x)))),
+        json!({ "makes": makes, "headings": headings, "billing": text(&mut b, &page) }),
+    );
+    if !act(s, &mut b, &page, "their Billing's Get a seat", &click_text("#settings-page a", "Get a seat"))? {
+        return Ok(());
+    }
+    let offered = view(
+        &mut b,
+        &page,
+        &format!("{WELCOMED} && [...document.querySelectorAll('#first-run-card a')].some((a) => a.textContent === 'Not now') && document.getElementById('first-run-card').innerText.includes({:?})", format!("{seat_price} a month, always on")),
+        wait,
+    );
+    let _ = b.screenshot(&page, &shots.join("10-comp-ended.png"));
+    let seen = b.eval(&page, SEEN)?;
+    if !act(s, &mut b, &page, "the welcome's seat", &click("#first-run-card [data-plan=seat_always_on]"))? {
+        return Ok(());
+    }
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
+    s.ok(
+        "its Get a seat reaches the seat offer, though they own a chat (not home, nor a first run): the one seat at core's price, Not now back to their chat, and its seat goes to Stripe's Checkout",
+        offered && at_stripe,
+        json!({ "seen": seen, "at": b.eval(&page, "location.href")? }),
     );
     b.close(page)?;
     println!("      (screenshots: {})", shots.display());

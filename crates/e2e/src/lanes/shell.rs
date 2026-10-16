@@ -110,7 +110,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
         &session,
         "POST",
         &format!("/api/f/{agent}/files"),
-        Some(&json!({ "files": [{ "path": "SOUL.md", "text": "Water the tomatoes.\n" }, { "path": "agent.json", "text": "{\"tier\":\"cheap\",\"color\":\"#62c8af\"}" }] })),
+        Some(&json!({ "files": [{ "path": "SOUL.md", "text": "Water the tomatoes.\n" }, { "path": "agent.json", "text": "{\"tier\":\"cheap\"}" }] })),
         &[],
     )?;
     let deploy = shell(api, &session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
@@ -865,7 +865,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "name": first_name, "soul": soul.text }),
     );
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
-    s.ok("the shell's first agent names the cheap tier (GLM-5.3 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
+    s.ok(
+        "the shell's first agent names the cheap tier (GLM-5.3 Flash), and no colour: its colour is its identity's",
+        settings.status == 200 && settings.body["tier"] == "cheap" && settings.body.get("color").is_none(),
+        &settings,
+    );
     // ready is ready: its computer awake, and the agent following its chat
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
@@ -1267,6 +1271,25 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let gone = b.until(page, &format!("!document.querySelector('#sidebar-agent img') && !document.querySelector('[data-agent-face={a}] img') && document.querySelector('[data-picture-label={a}]')?.textContent === 'Add a picture'", a = js(&agent)), wait);
     let none = super::faces::fetched(api, &format!("/api/identities/{id}/picture"))?;
     s.ok("Remove takes its picture away: no picture in the sidebar or its row, which offers Add again, and none at its address", gone && none.status == 404, none.status);
+    // its colour, by its identity (the agent template's agent-color.js, which
+    // the shell and the chat link to), is one colour on its page, in the
+    // sidebar and on its chat's page; agent.json names none
+    let tint = "(e) => e?.style.getPropertyValue('--agent-color') ?? null";
+    let want = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&id)))?;
+    let sidebar = b.eval(page, &format!("({tint})(document.querySelector('#sidebar-agent .agent-avatar'))"))?;
+    let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("({tint})(document.querySelector('#head-marks .agent-avatar'))")).ok() == Some(want.clone()));
+    b.click(page, "#sidebar-agent")?;
+    let profile = menu_item(b, page, "Its profile")?;
+    let on_page = profile && s.eventually(wait, || b.eval_in_frame(page, &agent, &format!("({tint})(document.getElementById('avatar'))")).ok() == Some(want.clone()));
+    let settings = shell(api, me.session, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None, &[])?;
+    s.ok(
+        "its colour is its identity's, one on its own page, in the sidebar and on its chat's page; agent.json names none",
+        want.as_str().is_some_and(|c| c.starts_with('#')) && sidebar == want && in_chat && on_page && settings.status == 200 && settings.body.get("color").is_none(),
+        json!({ "identity's": want, "sidebar": sidebar, "agentPage": b.eval_in_frame(page, &agent, &format!("({tint})(document.getElementById('avatar'))")).ok(), "agentJson": settings.body }),
+    );
+    // back to Settings' Agents, which its profile's window left
+    b.click(page, "#settings")?;
+    b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({rename})"), wait);
     // on a phone: its name's field is 16px, and its row's controls stay on screen
     b.viewport(page, 390, 844, true)?;
     b.reload(page)?;
@@ -1702,9 +1725,10 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
 /// them from settings ideally"): OpenRouter's row is connected with a
 /// press, through its own page (the fake's, which approves at once), with
 /// no key pasted and no CLI; then each agent offers the provider's models
-/// beside Workers AI's, and the one picked is its agent.json's `model`,
-/// its tier and colour kept, which its computer runs its next turn on.
-/// Workers AI again takes the model away; disconnecting takes the offer.
+/// beside its tier's (named by the tier, never a vendor), and the one
+/// picked is its agent.json's `model`, its tier kept, which its computer
+/// runs its next turn on. Its tier again takes the model away;
+/// disconnecting takes the offer.
 fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let row = format!("#settings-connections [data-provider={:?}]", crate::SWAP_ROUTER);
@@ -1743,19 +1767,23 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
         json!({ "popup": said.1, "manage": manage }),
     );
-    // each agent offers the provider's models beside Workers AI's
-    let pickers = b.eval(page, "[...document.querySelectorAll('[data-model-for]')].map((p) => [p.dataset.modelFor, p.dataset.read === '1', [...p.options].map((o) => [o.value, o.textContent])])")?;
-    let first = pickers[0].clone();
-    let lead = first[0].as_str().unwrap_or("").to_string();
+    // each agent offers the provider's models beside its tier's, by the tier's name
+    let lead = b.eval(page, "document.querySelector('[data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
-    let options = first[2].as_array().cloned().unwrap_or_default();
-    s.ok(
-        "then each agent offers the provider's models, after Workers AI's, which it runs on now",
-        read && !lead.is_empty() && options.first().is_some_and(|o| o[0] == "" && o[1] == "Workers AI") && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5"),
-        &pickers,
-    );
+    let options = b.eval(page, &format!("[...(document.querySelector('[data-model-for={lead:?}]')?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
+    let options = options.as_array().cloned().unwrap_or_default();
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
+    let vendor = b.eval(page, "document.getElementById('settings-page').innerText.includes('Workers AI') || [...document.querySelectorAll('[data-model-for] option')].some((o) => o.textContent.includes('Workers AI'))")?;
+    s.ok(
+        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier (cheap: Cheap) and no vendor: no Workers AI anywhere in settings",
+        read && !lead.is_empty()
+            && before["tier"] == "cheap"
+            && options.first().is_some_and(|o| o[0] == "" && o[1] == "Cheap")
+            && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5")
+            && vendor == false,
+        json!({ "options": options, "agentJson": before, "workersAi": vendor }),
+    );
     let pick = |b: &mut Browser, value: &str| -> Result<bool> {
         b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
         Ok(b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.saved === {value:?}"), wait))
@@ -1767,15 +1795,15 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
     s.ok(
-        "picked, it is the agent's agent.json model ({provider, id}), its tier and colour kept",
-        saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" }) && after["tier"] == before["tier"] && after["color"] == before["color"],
+        "picked, it is the agent's agent.json model ({provider, id}), its tier kept, and no colour (its identity's)",
+        saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" }) && after["tier"] == before["tier"] && after.get("color").is_none(),
         json!({ "before": before, "after": after }),
     );
     b.reload(page)?;
     let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
     let back = pick(b, "")?;
     let gone = agent_json();
-    s.ok("settings shows it again as picked; Workers AI again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && document.querySelectorAll('[data-model-for]').length === 0"), wait);

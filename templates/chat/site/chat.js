@@ -19,8 +19,8 @@
 // buttons (enabled only for the identity the card asks), its replies, and
 // how the turn ended when that was not plainly. Names come from the
 // fragment (`__members`: its agents, the lead first; `__people`: names and
-// pictures); an agent's color is chosen from its identity until agents
-// carry one, and the chat takes its lead's. Files go both ways as the chat's
+// pictures); an agent's color is chosen by its identity (agent-color.js,
+// the agent template's), and the chat takes its lead's. Files go both ways as the chat's
 // blobs (`fragment.blob`, read at `__blob/<sha256>`); a voice memo is one,
 // recorded here (MediaRecorder) and shown as a player wherever audio is.
 // "Notify me" subscribes this browser for its person, from a click
@@ -42,6 +42,7 @@
 // runs. The look is Skyler's (the Fragment UI handoff, 2026-10-02).
 
 import * as fragment from "./__fragment.js";
+import { colorOf } from "./agent-color.js";
 import { svg } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
@@ -90,8 +91,6 @@ const MENU_MAX = 64;
 const QUOTE_SHOWN_CHARS = 140;
 const ROLES = ["public", "viewer", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
-// Skyler's agent colors; an agent's is chosen by its identity.
-const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const SUGGESTIONS = ["Build something", "Explore an idea", "Make a plan"];
 const SHA256 = /^[0-9a-f]{64}$/;
 // The recorder validates its finished clip against the cell's audio types.
@@ -207,15 +206,6 @@ export function clock(ms) {
 /// does not follow a word character, so an email address is no mention.
 export function mentions(text) {
   return [...String(text).matchAll(/(?<![A-Za-z0-9_])@([A-Za-z0-9_-]+)/g)].map((m) => m[1].toLowerCase());
-}
-
-/// An agent's color, one of Skyler's, the same for its identity everywhere.
-export function colorOf(id) {
-  if (!id) return AGENT_COLORS[0];
-  // FNV-1a over the id's UTF-16 units
-  let h = 0x811c9dc5;
-  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
-  return AGENT_COLORS[h % AGENT_COLORS.length];
 }
 
 // A fragment's name at the start of its host's first label (docs/api.md, Names).

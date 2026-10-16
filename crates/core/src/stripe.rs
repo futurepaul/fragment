@@ -11,7 +11,8 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::org::SeatKind;
+use fragment_proto::ledger::SeatState;
+use fragment_proto::org::{Offer, SeatKind};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -43,11 +44,16 @@ pub const META_PACK: &str = "fragment_pack";
 
 /// The one seat Stripe sells (`SeatKind::SOLD`; Paul, 2026-10-15: "the
 /// $200 plan and the $25 credit pack"): its monthly price, found by its
-/// lookup key (a price change is a new Price with the key moved to it,
-/// `transfer_lookup_key`), and its amount in cents, as `xtask stripe
-/// check` expects it (decision 25). A `seat` is an operator's comp only.
+/// lookup key, and its amount in cents, the price's truth: Checkout refuses
+/// a Price of another amount (cell/src/billing.rs), and `xtask stripe
+/// check` expects this one (decision 25). A price change is a change here,
+/// and a new Price with the key moved to it (`transfer_lookup_key`). A
+/// `seat` is an operator's comp only.
 pub const SEAT_LOOKUP_KEY: &str = "fragment_seat_always_on_month";
 pub const SEAT_CENTS: i64 = 20_000;
+pub const SEAT_MICROS: i64 = SEAT_CENTS * CENT_MICROS;
+/// A cent, in the ledger's micro-dollars.
+const CENT_MICROS: i64 = 10_000;
 
 /// A seat of a kind Stripe does not sell, asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +61,7 @@ pub struct NotSold(pub SeatKind);
 
 impl NotSold {
     pub fn message(self) -> String {
-        format!("a {} seat is not sold: the one seat is seat_always_on, $200 a month, always on", self.0.as_str())
+        format!("a {} seat is not sold: the one seat is seat_always_on, ${} a month, always on", self.0.as_str(), SEAT_CENTS / 100)
     }
 }
 
@@ -72,7 +78,15 @@ pub fn for_sale(kind: SeatKind) -> Result<SeatKind, NotSold> {
 /// spent.
 pub const PACK_LOOKUP_KEY: &str = "fragment_credit_pack";
 pub const PACK_CENTS: i64 = 2_500;
-pub const PACK_MICROS: i64 = PACK_CENTS * 10_000;
+pub const PACK_MICROS: i64 = PACK_CENTS * CENT_MICROS;
+
+/// What is sold, as a page shows it (`GET /api/seat`'s `offer`): the one
+/// seat, its price and the credit it includes each month (the ledger's,
+/// `ledger::included`), and a pack's price. Pages read these, never their
+/// own copies.
+pub fn offer() -> Offer {
+    Offer { kind: SeatKind::SOLD, seat_micros: SEAT_MICROS, included_micros: crate::ledger::included(SeatKind::SOLD.plan(), SeatState::Active), pack_micros: PACK_MICROS }
+}
 
 /// Whether metadata names this deployment: fragment's, and this one's.
 pub fn ours(metadata: &BTreeMap<String, String>, deployment: &str) -> bool {
@@ -416,6 +430,9 @@ mod tests {
         assert_eq!(for_sale(SeatKind::Seat), Err(NotSold(SeatKind::Seat)));
         assert!(NotSold(SeatKind::Seat).message().contains("$200"));
         assert_eq!((SEAT_LOOKUP_KEY, SEAT_CENTS), ("fragment_seat_always_on_month", 20_000));
+        // what a page shows is these, the always-on seat's included credit the ledger's
+        let o = offer();
+        assert_eq!((o.kind, o.seat_micros, o.included_micros, o.pack_micros), (SeatKind::SeatAlwaysOn, 200_000_000, crate::ledger::SEAT_ALWAYS_ON_INCLUDED, 25_000_000));
         assert_eq!(EVENTS.len(), 4);
     }
 }

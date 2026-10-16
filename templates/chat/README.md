@@ -23,8 +23,9 @@ and "Notify me"), `markdown.js`
 attachments: images, audio and video shown inline, every one opened or
 downloaded), `response-actions.js` (copy, share and their feedback),
 `icons.js` (Lucide's paths; `LUCIDE-LICENSE.txt`), `tooltips.js`,
-`chat.css`, and `agent.png` (the agents' avatar, the agent template's
-own, linked). Every URL in it is
+`chat.css`, `agent.png` (the agents' avatar) and `agent-color.js` (an
+agent's colour, by its identity), each the agent template's own,
+linked. Every URL in it is
 relative, so it works on a fragment's own host, under `/f/<name>/`, and
 served from the platform's release.
 

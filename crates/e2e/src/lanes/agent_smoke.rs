@@ -81,24 +81,14 @@ const FOLLOW: Duration = Duration::from_secs(60);
 /// One look every few seconds: each is a request to the preview.
 const POLL: Duration = Duration::from_secs(3);
 
-/// The shell's agent colours, its first agent's soul (which never names it)
-/// and its first chat's title (cell/shell/shell.js: `COLORS`, `colorOf`,
-/// `firstSoul`, `FIRST_CHAT`), so the agent is made as a person's is.
-const COLORS: [&str; 6] = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
+/// The shell's first agent's soul (which never names it) and its first
+/// chat's title (cell/shell/shell.js: `firstSoul`, `FIRST_CHAT`), so the
+/// agent is made as a person's is.
 const TITLE: &str = "Novatron DX";
 const FIRST_CHAT: &str = "Your first chat";
 
 fn first_soul(owner: &str) -> String {
     format!("You are {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
-}
-
-/// The shell's `colorOf`: FNV-1a over the identity's UTF-16 units.
-fn color_of(id: &str) -> &'static str {
-    let mut h: u32 = 0x811c_9dc5;
-    for unit in id.encode_utf16() {
-        h = (h ^ u32::from(unit)).wrapping_mul(0x0100_0193);
-    }
-    COLORS[(h % COLORS.len() as u32) as usize]
 }
 
 fn mins(d: Duration) -> String {
@@ -464,7 +454,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     // assigned before its computer's first start, which then runs it
     let assigned = api.signed(&keys, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium", "color": color_of(&identity) }))?);
+    let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium" }))?);
     let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(&email) }, { "path": "agent.json", "text": agent_json }] });
     let soul = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/files"), Some(&files))?;
     let deployed = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/deploy"), Some(&json!({})))?;
@@ -853,17 +843,6 @@ mod tests {
 
     fn frame(px: Vec<[u8; 3]>) -> Frame {
         Frame { width: 48, height: 30, px }
-    }
-
-    /// The shell's colour for an identity: FNV-1a as its JavaScript computes
-    /// it (`Math.imul` over UTF-16 units), so the agent's is a person's.
-    #[test]
-    fn an_agents_colour_is_the_shells() {
-        // FNV-1a 32 of "a" is 0xe40c292c (the published vector), 4 mod 6;
-        // of "id:7f3a9c00e1", 0xb2098be9, 1 mod 6
-        assert_eq!(color_of("a"), COLORS[4]);
-        assert_eq!(color_of("id:7f3a9c00e1"), COLORS[1]);
-        assert_eq!(color_of(""), COLORS[(0x811c_9dc5u32 % 6) as usize]);
     }
 
     /// A black screen, or one colour with a little noise, is blank; a

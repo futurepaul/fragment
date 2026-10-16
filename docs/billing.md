@@ -187,6 +187,8 @@ For docs/MODEL.md's truth map:
 | A computer's always-on | the computer | the registry, from its owner's plan and choice |
 | Trial codes and their uses | the registry | operators; redemptions |
 | What an operator did | the registry's admin log | every admin route |
+| Whether a person is a guest | `GET /api/seat`'s `guest`, from the registry's seat and, holding none, their ledger's plan (`fragment_core::org::guest`) | nothing: read at each ask, never kept |
+| What a seat and a pack cost, and the credit a seat includes | core's constants (`fragment_core::stripe`, `ledger::included`); Stripe's Prices must match them | a code change; pages read `GET /api/seat`'s `offer` |
 
 The registry is already one Durable Object for the fleet (a debt-ledger
 entry). Orgs add small tables and little traffic: seat changes,
@@ -204,8 +206,13 @@ the move if it ever outgrows that, not before.
 - **Products and prices:** two Products, the two things sold: "Fragment
   always-on seat", its Price monthly at $200 by the lookup key
   `fragment_seat_always_on_month`, and "Fragment credit, $25", its Price
-  once at $25 by `fragment_credit_pack`. A price change is a new Price
-  with the key moved, and no config edit. The $100 seat's
+  once at $25 by `fragment_credit_pack`. Their amounts are core's
+  constants (`crates/core/src/stripe.rs`: `SEAT_CENTS`, `PACK_CENTS`),
+  the price's truth: Checkout refuses a Price of any other amount
+  (cell/src/billing.rs), `xtask stripe check` expects them, and the shell
+  shows them from `GET /api/seat`'s `offer`. A price change is a code
+  change (the constant, and a new Price with the key moved to it), not a
+  config edit. The $100 seat's
   (`fragment_seat_month`) is not made, and a subscription with an item on
   it is not fragment's (2026-10-15). Tax as finite-mono's: code
   `txcd_10103001`, tax-exclusive, automatic tax on (decision 54).
@@ -474,13 +481,20 @@ settings page)").
     made, in the chat, its computer's phase); the person may type at
     once, and send once the agent is in the chat. Each thing is made
     once (a retry or a reload reuses what was made).
-- **Who skips it:** someone holding a seat (bought, an org's claimed at
-  sign-in, or the deployment's plan) goes straight to the first run.
-  Someone with a chat of their own goes home, a lapsed seat's
-  Checkout applied first.
+- **Who skips it:** someone who is no guest (a seat bought, an org's
+  claimed at sign-in, or the deployment's plan) goes straight to the
+  first run, or home with a chat of their own. A Checkout's return for
+  someone with a chat of their own is applied, then home.
 - **An invitee** (a guest someone shared something with) lands on what
   was shared: home, with a note of what a guest may do and what a seat
   gives. Its "Get a seat" opens the welcome, whose "Not now" goes back.
+  So does Billing's for a guest whose seat ended (removed, or a comp
+  ended): they keep their chats, and the welcome offers them the seat.
+- **Who is a guest, and what it costs:** `GET /api/seat` alone says
+  (docs/api.md, Seats and orgs): its `guest` (no seat held, and no plan
+  of their own on their ledger: `fragment_core::org::guest`), and its
+  `offer`, the prices every line above shows (core's constants), so the
+  shell, Billing and the welcome never disagree.
 - **Later:** a place is kept, hidden, beside the seats for "Import your
   finite.computer agent" (fbfc's import, not built).
 
@@ -490,7 +504,7 @@ for a seat once someone holds one:
 - **A guest** sees what a seat gives and its price, and "Get a seat",
   which opens the welcome.
 - **A seat holder** sees their seat, its kind, who provides it, this
-  month's usage and credit, and "Buy $25 of credit". On `seat_always_on`
+  month's usage and credit, and "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
   it adds "let it sleep".
 - **An org admin** sees the seats table: email, kind, and pending or
   held. From it they:

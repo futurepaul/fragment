@@ -89,15 +89,22 @@ impl Call for EndComp {
     type Answer = OrgMember;
 }
 
-/// `POST /orgs/mine`: the asker's seat, org, and the seats offered them.
+/// `POST /orgs/mine`: the asker's seat, org, and the seats offered them,
+/// and who they are (`GET /api/seat` asks their ledger too).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Mine {
     pub by: By,
 }
 
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Mined {
+    pub person: String,
+    pub mine: MySeat,
+}
+
 impl Call for Mine {
     const PATH: &'static str = "/orgs/mine";
-    type Answer = MySeat;
+    type Answer = Mined;
 }
 
 /// `POST /orgs/sleeps`: a seat's holder lets their always-on computer sleep, or not.
@@ -452,9 +459,9 @@ impl RegistryCell {
         Ok(who)
     }
 
-    fn mine(&self, b: Mine) -> CellResult<MySeat> {
+    fn mine(&self, b: Mine) -> CellResult<Mined> {
         let who = self.person_by(&b.by)?;
-        self.my_seat(&who.id)
+        Ok(Mined { mine: self.my_seat(&who.id)?, person: who.id })
     }
 
     pub(super) fn my_seat(&self, person: &str) -> CellResult<MySeat> {

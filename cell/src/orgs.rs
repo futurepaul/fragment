@@ -6,14 +6,14 @@
 //! and computer; this module only checks who asks.
 
 use fragment_core::mail::PRODUCT;
-use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SetSeatKind, SetSleeps};
+use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
-use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, OrgOf, Sleeps, SyncSeat};
+use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat};
 use crate::registry::admin;
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
@@ -35,13 +35,25 @@ fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     })
 }
 
-/// `/api/seat`: `GET` the asker's seat, org and the seats offered them;
-/// `PUT {sleeps}` lets their always-on computer sleep, or not.
+/// `/api/seat`: `GET` the asker's seat, org and the seats offered them,
+/// whether they are a guest, and what is sold; `PUT {sleeps}` lets their
+/// always-on computer sleep, or not.
 pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = by(env, &req, url, &bytes)?;
     match req.method() {
-        Method::Get => json_answer(&ask_registry(env, &Mine { by }).await?),
+        Method::Get => {
+            let Mined { person, mine } = ask_registry(env, &Mine { by }).await?;
+            // holding none, their ledger says whether a plan of its own gives them one
+            let guest = match mine.seat {
+                Some(_) => false,
+                None => {
+                    let ledger = crate::ledger::ask(env, &person, &crate::ledger::Status {}).await?;
+                    fragment_core::org::guest(false, ledger.plan, ledger.seat)
+                }
+            };
+            json_answer(&SeatStatus { mine, guest, offer: fragment_core::stripe::offer() })
+        }
         Method::Put => {
             let set: SetSleeps = body(&bytes)?;
             json_answer(&ask_registry(env, &Sleeps { by, sleeps: set.sleeps }).await?)

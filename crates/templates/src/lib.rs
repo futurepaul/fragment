@@ -84,12 +84,14 @@ pub fn shell(name: &str) -> Option<&'static File> {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 17] = [
+const SHELL_PUBLISHED: [(&str, &str); 18] = [
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
     ("viewer.js", "text/javascript; charset=utf-8"),
     ("agent-identity.js", "text/javascript; charset=utf-8"),
+    // an agent's colour: the agent template's, linked (templates/agent/site)
+    ("agent-color.js", "text/javascript; charset=utf-8"),
     ("app-icons.js", "text/javascript; charset=utf-8"),
     ("lucide-icons.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),

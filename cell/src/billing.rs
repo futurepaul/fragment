@@ -247,7 +247,7 @@ async fn returned(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8
         Some(k) => By::Key(k.clone()),
         None => By::Identity(who.id.clone()),
     };
-    ask_registry(env, &Mine { by }).await
+    Ok(ask_registry(env, &Mine { by }).await?.mine)
 }
 
 /// `POST /api/billing/portal`: Stripe's portal for the org the asker
