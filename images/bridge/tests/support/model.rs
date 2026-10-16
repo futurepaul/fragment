@@ -47,8 +47,11 @@
 //!   DeepSeek did on 2026-10-09), on any model but the route's `fallback`,
 //!   which answers it at once.
 //!
-//! It records each request's `model` and `x-fragment-agent` (a screenshot's
-//! description comes as the route's `vision`: Hermes' auxiliary vision).
+//! It records each request's `model`, `x-fragment-agent` and
+//! `x-fragment-tier` (a screenshot's description comes as the route's
+//! `vision`: Hermes' auxiliary vision), and lists the route's models' ids
+//! at `GET /v1/models` as the intercept does (`CHEAP_ID`, `FALLBACK_ID`:
+//! the ids the fake API's view names, `ids`).
 //!
 //! It answers transcriptions too, `POST /v1/audio/transcriptions` in
 //! OpenAI's multipart shape, as the route's `whisper` does (decision 9):
@@ -71,11 +74,24 @@ use tokio::sync::watch;
 
 use fragment_bridge::net::{self, Body};
 
+/// The route's models' ids the image reads in its view (`GET
+/// /api/computer`'s `models`), as Finite's deployment names them: its tiers
+/// on OpenRouter's GLM-5.3 Flash, its fallback and vision on Workers AI's.
+pub const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
+pub const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+
+/// The view's `models`, by the route's names.
+pub fn ids() -> Value {
+    json!({ "cheap": CHEAP_ID, "medium": CHEAP_ID, "fallback": FALLBACK_ID, "vision": FALLBACK_ID })
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Call {
     pub path: String,
     pub model: String,
     pub agent: Option<String>,
+    /// Its `x-fragment-tier`: the tier its agent runs on.
+    pub tier: Option<String>,
     pub stream: bool,
     /// The request as it came (a failure's detail: what the model was given);
     /// a transcription's, its form's fields but the audio.
@@ -176,11 +192,11 @@ impl Model {
 pub const STALL_S: u64 = 120;
 
 /// Whether a call stalls: its last user message says `stall`, and it is
-/// not to the route's `fallback`.
+/// not to the route's `fallback` (by its id, or its name).
 fn stalls(body: &Value) -> bool {
     let last_user = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).map(|m| text_of(&m["content"])).unwrap_or_default();
     // Hermes' review prompts say "install" (and so `stall`): never one of a test's
-    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != "fallback"
+    last_user.contains("stall") && !last_user.starts_with("Review the conversation above") && body["model"] != FALLBACK_ID && body["model"] != "fallback"
 }
 
 /// How long a call waits whose last user message says `take your time`: past
@@ -386,23 +402,26 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
 async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let tier = req.headers().get("x-fragment-tier").and_then(|v| v.to_str().ok()).map(str::to_string);
     let authorization = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
     let content_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if path.starts_with("/generated/") && path.ends_with(".png") {
         return Response::builder().status(StatusCode::OK).header("content-type", "image/png").body(http_body_util::Full::new(bytes::Bytes::from_static(IMAGE))).unwrap();
     }
     if path.ends_with("/models") {
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
+        // the intercept's list (`Models::listed`): the ids, never the route's names
+        let model = |id: &str| json!({ "id": id, "object": "model", "created": 0, "owned_by": "fragment" });
+        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID)] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     if path.ends_with("/audio/transcriptions") {
         let (fields, answer) = transcription(&content_type, &body, &agent, &authorization);
-        calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, stream: false, body: fields, authorization });
+        calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, tier, stream: false, body: fields, authorization });
         return answer;
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
-    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone(), authorization });
+    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, tier, stream, body: v.clone(), authorization });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
@@ -414,7 +433,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         tokio::time::sleep(std::time::Duration::from_millis(UNHURRIED_MS)).await;
     }
     let (text, tool) = answer(&v);
-    let model = v["model"].as_str().unwrap_or("cheap").to_string();
+    let model = v["model"].as_str().unwrap_or(CHEAP_ID).to_string();
     let usage = json!({ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 });
     let finish = if tool.is_some() { "tool_calls" } else { "stop" };
     if !stream {

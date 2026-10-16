@@ -63,6 +63,17 @@ pub struct ComputerAgent {
     pub credentials: Vec<AgentCredential>,
 }
 
+/// The model route's models' ids by the route's names
+/// (`fragment_core::models::Models::ids_by_name`): what a call may name
+/// each slot by besides its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelIds {
+    pub cheap: String,
+    pub medium: String,
+    pub fallback: String,
+    pub vision: String,
+}
+
 /// What a provider's credential is (docs/computers.md, "Connections and
 /// operator keys"; `fragment_core::catalog`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -253,6 +264,12 @@ pub struct ComputerView {
     /// or not (so an image can pass them all through, once).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_env: Vec<String>,
+    /// The guest's view only: the model route's models' ids, by its names,
+    /// as the deployment names them now (docs/computers.md, "A model by its
+    /// id"), so a guest names its models by their ids and follows a change
+    /// of them while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<ModelIds>,
     /// What its last start that came up restored (docs/computers.md, "What
     /// a wake restored"); none before its first.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -959,7 +959,8 @@ pub struct MemberList {
 /// Finite's own runs both on Finite Private's GLM-5.3 Flash (decision 61).
 /// `high` (Opus) is a name the platform
 /// refuses, saying why, until Cloudflare raises Unified Billing's Opus
-/// limit; a model id is never one.
+/// limit; a model id is never one (a model call may name a tier's model by
+/// its id instead: `fragment_core::models::Models::named`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {

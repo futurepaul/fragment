@@ -651,8 +651,10 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, credentials: [{provider, kind,
-    env, placeholder, hosts, modelBase?}]}], credentialEnv}`: the agents to run, and
-    each one's credentials (below, Connections and operator keys). **They
+    env, placeholder, hosts, modelBase?}]}], credentialEnv, models: {cheap,
+    medium, fallback, vision}}`: the agents to run, each one's credentials
+    (below, Connections and operator keys), and the model route's models'
+    ids by its names (below, Models, "A model by its id"). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
     again while awake and runs the new set, with nothing restarted. The
@@ -717,7 +719,8 @@ expires within 30 days. The container application is the deployment's
 
 - `POST http://model.fragment.internal/v1/chat/completions`, OpenAI's
   shape, with `model` a tier (`cheap`, `medium`, or `high` while it is
-  on) and `x-fragment-agent`. The intercept makes it the platform's
+  on), or one of the route's models by its own id (below, "A model by
+  its id"), and `x-fragment-agent`. The intercept makes it the platform's
   model route as that agent (`POST /api/models/v1/chat/completions`,
   signed as the agent: docs/api.md, docs/ledger.md), which allows only
   the tier's model and a capped `max_tokens`, drops the guest's auth
@@ -745,6 +748,46 @@ expires within 30 days. The container application is the deployment's
   | `medium` | the same as `cheap` | GLM-5.3 (`@cf/zai-org/glm-5.3`) |
   | `fallback` | Workers AI's GLM-5.3 Flash | DeepSeek V4 Flash (`@cf/deepseek-ai/deepseek-v4-flash-0731`) |
   | `vision` | Workers AI's GLM-5.3 Flash | GLM-5.3 Flash |
+
+  **A model by its id** (Paul, 2026-10-16: "instead of 'cheap model' can
+  we pass through to hermes the actual model name in use? … it just
+  seems good practice to be able to run `/model` with hermes and see the
+  real model"; `fragment_core::models::Models::named`):
+  - `GET http://model.fragment.internal/v1/models` lists the ids a call
+    may name: OpenAI's list (`{object: "list", data: [{id, object:
+    "model", created: 0, owned_by: "fragment"}]}`), each slot's model
+    once, in the order `cheap`, `medium`, `fallback`, `vision`, and
+    nothing of where each runs (no base URL, no key, no `body`). The route's
+    names are taken and not listed. The intercept answers it itself,
+    naming no agent and metering nothing: every agent on the computer may
+    name every id, and Hermes' `/model` asks it with no key and no header
+    of ours. The platform's own is `GET /api/models/v1/models`, an agent's
+    (docs/api.md, Models).
+  - A call naming an id runs on the slot of the caller's tier when that
+    slot runs it (`x-fragment-tier: cheap` or `medium`, optional: the
+    intercept sends it on), else on the first slot that does, in that
+    order: a tier's before `fallback` and `vision`. The slot is the call's
+    as if it named the slot: its key, its `body`, its fallback (a tier's
+    falls back; `fallback`'s and `vision`'s do not), its price. An id no
+    slot runs is refused, 400, the message listing those it may name;
+    nothing is reserved or sent. The route's names keep naming their slots,
+    whatever tier the caller says.
+  - An id is one model: a deployment whose two slots name one id at two
+    places (Workers AI and an API, or two APIs) is refused by its deploy
+    and at the cell's first request. Two slots naming one id at one place
+    (Finite's tiers both on OpenRouter's GLM-5.3 Flash) are fine, and the
+    caller's tier tells them apart.
+  - The guest reads each slot's id by its name in its view (`GET
+    /api/computer`'s `models`: `{cheap, medium, fallback, vision}`; The
+    fragment API, above), as the deployment names them now. A change to
+    the deployment's `models` is a deploy, and no new image: a guest that
+    reads its view while awake (ours, every 3 s) names the new ids within
+    seconds, nothing restarted, and one that read them once names ids no
+    slot may run any more, refused (400) until it reads them again. Not an
+    environment variable read at the start: a computer that stays awake
+    (always on) would keep naming the ids it started with. A guest that
+    names the route's names (an image from before the ids, the stub's
+    `think`) runs on as before.
 
   **What an OpenAI-compatible API is sent.** The agent's chat completion
   fields the route, our jobs and Hermes use (`CLIENT_KEYS`: `messages`,
@@ -840,12 +883,13 @@ expires within 30 days. The container application is the deployment's
   (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a
   time-based fallback "only if time-based fallback is built into
   hermes"): its stale detector kills a call that streams nothing for 20 s
-  (`providers.custom.models.<tier>.stale_timeout_seconds`, that model's
-  alone: `vision`, whose answers come whole and slower, keeps Hermes'
-  default), tries it once more (`HERMES_STREAM_RETRIES=1`, the gateway's
-  environment), then, its one retry spent (`agent.api_max_retries: 1`),
-  switches to its `fallback_providers`: the route's `fallback` (the
-  deployment's fallback model, its key `agent:<name>` naming the agent;
+  (`providers.custom.models.<its tier's model's id>.stale_timeout_seconds`,
+  that model's alone: `vision`, whose answers come whole and slower, keeps
+  Hermes' default), tries it once more (`HERMES_STREAM_RETRIES=1`, the
+  gateway's environment), then, its one retry spent
+  (`agent.api_max_retries: 1`), switches to its `fallback_providers`: the
+  route's `fallback` by its model's id (the deployment's fallback model,
+  its key `agent:<name>` naming the agent;
   Workers AI's GLM-5.3 Flash on Finite's own deployment, so a stall on
   OpenRouter or Finite Private ends on Workers AI), about 40 s after the stall began. The next turn starts on its tier
   again (Hermes' `restore_primary_runtime`). An owner's own model and the
@@ -854,9 +898,10 @@ expires within 30 days. The container application is the deployment's
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
-- Any other path is 404, unmetered. Hermes probes `GET /api/show`
-  (Ollama's model metadata) with no `x-fragment-agent`; it falls back to
-  its configured context length. Anthropic's shape
+- Any other path is 404, unmetered (`GET /v1/models` answers: above, "A
+  model by its id"). Hermes probes `GET /api/show` (Ollama's model
+  metadata) with no `x-fragment-agent`; it keeps its configured context
+  length. Anthropic's shape
   (`/anthropic/v1/messages`) comes with the high tier, which is off
   (decision 23).
 - `model` may also be `vision`: the deployment's vision model (its
@@ -872,7 +917,11 @@ expires within 30 days. The container application is the deployment's
   a job's step and a manifest name only tiers.
 - Our Hermes image's profiles send their image calls to `vision`
   (`auxiliary.vision`: provider `custom`, model `vision`, through the
-  intercept), whatever the agent's tier. Hermes describes each
+  intercept), whatever the agent's tier: by the route's name, not its
+  model's id, since a deployment may run vision on a tier's model (every
+  preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
+  whose call falls back to the fallback model, which may read no images
+  (DeepSeek V4 Flash); `vision` has no fallback. Hermes describes each
   `computer_use` screenshot with it and hands the main model the words
   (named outright, Hermes routes every capture so: its
   `tools/computer_use/vision_routing.py`), and an image a person attaches
@@ -940,9 +989,24 @@ expires within 30 days. The container application is the deployment's
   sent on, and nothing of them reaches the gateway, Workers AI or a log.
 - Our Hermes image sets `x-fragment-agent` on every call of an agent's
   profile (its `model.default_headers`), the main model's and the
-  auxiliary ones' (titles, memory reviews, vision). Its
+  auxiliary ones' (titles, memory reviews, vision), and a tier agent's
+  `x-fragment-tier`. Its
   speech-to-text, whose client takes no header, names the agent by its
   key (each profile's `stt.openai.api_key`, `agent:<name>`).
+- **Our Hermes image names its models by their ids** (Paul, 2026-10-16):
+  a tier agent's profile's model is its tier's model's id (`model.default:
+  "z-ai/glm-5.3-flash"` on Finite's deployment), and its fallback the
+  fallback's (`fallback_providers[0].model`), read from the computer's view
+  (`models`) at boot and every 3 s after, a change rewriting each profile's
+  config, which Hermes reads at the agent's next turn. So Hermes knows the
+  model it runs: its owner's `/model` in the chat says `Current:
+  \`z-ai/glm-5.3-flash\` on Custom endpoint`, its prompt's `Model:` line
+  names it, and Hermes' guidance for the model's family is that model's
+  (its tool-use and execution guidance, which it gives GLM and DeepSeek
+  models and gave none named `cheap`). A view that names no ids (a
+  platform from before them) leaves the route's names. The Docker lane
+  reads the config, `/model`, and a change of the ids while it runs
+  (images/bridge/tests/docker.rs).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -1159,7 +1223,8 @@ offered (decision 60 says why, with the vendors' words).
   credentials hold the named provider with a `modelBase`, its profile's
   main model becomes that provider's:
   - `provider: custom`, `base_url` the `modelBase`, `default` the model's
-    id;
+    id, which its owner's `/model` shows (the Docker lane's
+    `an_agent_runs_on_its_owners_model`);
   - its key is the placeholder;
   - no `context_length`: Hermes reads OpenRouter's.
 
@@ -1268,7 +1333,8 @@ settings and state):
   "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (cheap by
-  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23). One the
+  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23), which
+  its profile names by its model's id (above, Models). One the
   platform does not answer for (no 200, 403 or 404) is said
   (`profile.tier_unread`), and the profile's config stays as the last boot
   wrote it, its tier with it; a profile with none yet takes the cheap

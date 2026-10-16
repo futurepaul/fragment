@@ -8,11 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
+use fragment_bridge::api::{model_id_ok, ModelIds};
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
 
-/// A model tier (docs/computers.md, Models): the model intercept maps it to
-/// the tier's model; Hermes sends it as the model's name.
+/// A model tier (docs/computers.md, Models): an agent's `agent.json` names
+/// it, and Hermes sends its model's id (`ModelIds`) through the model
+/// intercept, saying its tier (`TIER_HEADER`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Cheap,
@@ -68,22 +70,17 @@ pub struct OwnModel {
     pub id: String,
 }
 
-/// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
-/// catalog holds its offer to the same).
-pub const MODEL_ID_MAX_BYTES: usize = 128;
 /// A model base URL the platform names, at most.
 pub const MODEL_BASE_MAX_BYTES: usize = 512;
 
 impl OwnModel {
     /// The model `agent.json` names, if it names one well: a provider's
-    /// name (`[a-z0-9-]`, 1 to 32) and an id of 1 to `MODEL_ID_MAX_BYTES`
-    /// letters, digits and `.`, `_`, `-`, `:`, `/`, `@`.
+    /// name (`[a-z0-9-]`, 1 to 32) and a model's id (`model_id_ok`).
     pub fn of(agent_json: &[u8]) -> Option<OwnModel> {
         let v: serde_json::Value = serde_json::from_slice(agent_json).ok()?;
         let (provider, id) = (v["model"]["provider"].as_str()?, v["model"]["id"].as_str()?);
         let provider_ok = (1..=32).contains(&provider.len()) && provider.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-        let id_ok = (1..=MODEL_ID_MAX_BYTES).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'/' | b'@'));
-        (provider_ok && id_ok).then(|| OwnModel { provider: provider.into(), id: id.into() })
+        (provider_ok && model_id_ok(id)).then(|| OwnModel { provider: provider.into(), id: id.into() })
     }
 }
 
@@ -130,15 +127,60 @@ impl MainModel {
     }
 }
 
+/// The platform's model route as the guest reaches it: the intercept's base
+/// URL (`FRAGMENT_MODEL`), and its models' ids by its names as the
+/// computer's view names them now (`GET /api/computer`'s `models`;
+/// docs/computers.md, "A model by its id"). A tier agent's profile names
+/// its tier's model by its id, and its fallback by the fallback's (Paul,
+/// 2026-10-16: "be able to run `/model` with hermes and see the real
+/// model"), so Hermes knows the model it runs: `/model` shows it, its
+/// prompt's `Model:` line names it, and its model-family guidance (GLM's,
+/// DeepSeek's) is the model's. A change to the deployment's `models` is
+/// read with the view, every 3 s, and rewrites each profile's config (no
+/// new image, nothing restarted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub base: String,
+    pub ids: ModelIds,
+}
+
+impl Route {
+    /// The route at `base`, its ids the view's (`models`), or the route's
+    /// own names, which it takes as well, from a platform that names none.
+    pub fn new(base: &str, models: Option<&ModelIds>) -> Route {
+        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into() };
+        Route { base: base.into(), ids: models.cloned().unwrap_or_else(names) }
+    }
+
+    /// The model a tier agent's profile names: its tier's id (`high`, off
+    /// and on no slot, by its name).
+    pub fn tier(&self, tier: Tier) -> &str {
+        match tier {
+            Tier::Cheap => &self.ids.cheap,
+            Tier::Medium => &self.ids.medium,
+            Tier::High => Tier::High.name(),
+        }
+    }
+}
+
+/// The header a tier agent's calls say its tier in
+/// (`fragment_core::models::TIER_HEADER`): of two slots running the id it
+/// names (both tiers on one model), its tier's is the call's.
+pub const TIER_HEADER: &str = "x-fragment-tier";
 /// The model route's name for the deployment's vision model
-/// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it.
+/// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it, by
+/// this name and not its model's id. A deployment may run vision on a
+/// tier's model (every preview: GLM-5.3 Flash), and an id names that
+/// tier's slot, whose call falls back to the fallback model, which may read
+/// no images (DeepSeek V4 Flash); `vision` has no fallback.
 pub const VISION_MODEL: &str = "vision";
 /// The model route's name for transcription
 /// (`fragment_core::transcribe::WHISPER`): Hermes' speech-to-text names it.
 pub const TRANSCRIBE_MODEL: &str = "whisper";
 /// The model route's name for the deployment's fallback model
 /// (`fragment_core::models::FALLBACK`): a tier agent's `fallback_providers`
-/// names it.
+/// names its id (`ModelIds::fallback`), or this name when the platform names
+/// none.
 pub const FALLBACK_MODEL: &str = "fallback";
 /// How long a tier agent's call may stream nothing before Hermes kills it
 /// (its `providers.<id>.models.<model>.stale_timeout_seconds`; Paul,
@@ -275,7 +317,8 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
 
 /// An agent's profile config: its model, through the model intercept, as
 /// that agent (`x-fragment-agent` on every call, the main model's and the
-/// auxiliary ones'), and its vision model (the route's `vision`); and what
+/// auxiliary ones'), a tier's by its model's id (`ModelIds`), saying its
+/// tier (`TIER_HEADER`), and its vision model (the route's `vision`); and what
 /// its terminal is given: who it is
 /// (`PROFILE_ENV`) and every credential's environment variable the
 /// deployment may give it (`credential_env`, the guest view's: Hermes reads
@@ -286,8 +329,8 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
 /// (`PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY`, …: its
 /// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
 /// profile's credentials file (`credentials_sh`) as its shell starts.
-pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credential_env: &[String], credentials_file: &Path) -> String {
-    let base = model_base.trim_end_matches('/');
+pub fn profile_config(agent: &Agent, main: &MainModel, route: &Route, credential_env: &[String], credentials_file: &Path) -> String {
+    let base = route.base.trim_end_matches('/');
     let mut y = String::new();
     y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model changes.\n", agent.fragment, main.name()));
     match main {
@@ -297,7 +340,7 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
                 Tier::High => ("anthropic", format!("{base}/anthropic")),
                 Tier::Cheap | Tier::Medium => ("custom", format!("{base}/v1")),
             };
-            y.push_str(&format!("model:\n  provider: {}\n  base_url: {}\n  default: {}\n", q(provider), q(&url), q(tier.name())));
+            y.push_str(&format!("model:\n  provider: {}\n  base_url: {}\n  default: {}\n", q(provider), q(&url), q(route.tier(*tier))));
             // The guest holds no credential: the intercept strips auth and adds its own.
             y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
         }
@@ -312,7 +355,11 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     }
     // On every call, the main model's and the auxiliary ones': the route
     // reads it, and the swap sends no `x-fragment-` header to a provider.
+    // A tier agent's says its tier too: an id both tiers run is its tier's.
     y.push_str(&format!("  default_headers:\n    x-fragment-agent: {}\n", q(&agent.fragment)));
+    if let MainModel::Tier(tier) = main {
+        y.push_str(&format!("    {TIER_HEADER}: {}\n", q(tier.name())));
+    }
     // The managed skills and the platform skill's view (skills.rs), below
     // the profile's own `skills/`: an agent's own wins, and a managed one
     // over the platform's, which leaves the view for it.
@@ -358,18 +405,18 @@ pub fn profile_config(agent: &Agent, main: &MainModel, model_base: &str, credent
     // keeps Hermes' default), tries it once more (`STREAM_RETRIES`), then,
     // its one retry spent (`api_max_retries`), switches to its
     // `fallback_providers`: the route's `fallback`, the deployment's
-    // fallback model, through the intercept as the agent (its key names
-    // the agent). The next turn starts on its tier again (Hermes'
+    // fallback model by its id, through the intercept as the agent (its key
+    // names the agent). The next turn starts on its tier again (Hermes'
     // `restore_primary_runtime`). The route itself falls back when a model
     // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
     // answers nothing. An owner's own model and the high tier have none.
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
-        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(tier.name())));
+        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
         y.push_str("agent:\n  api_max_retries: 1\n");
         y.push_str(&format!(
             "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
             q(&format!("{base}/v1")),
-            q(FALLBACK_MODEL),
+            q(&route.ids.fallback),
             q(&format!("agent:{}", agent.fragment))
         ));
     }
@@ -870,6 +917,31 @@ mod tests {
         Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
+    /// The tiers' models as Finite's names them, but for a medium tier of
+    /// its own, so each slot's id is seen where it goes.
+    const CHEAP_ID: &str = "z-ai/glm-5.3-flash";
+    const MEDIUM_ID: &str = "@cf/zai-org/glm-5.3";
+    const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
+
+    fn ids() -> ModelIds {
+        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into() }
+    }
+
+    fn route(base: &str) -> Route {
+        Route::new(base, Some(&ids()))
+    }
+
+    /// Goal (Paul, 2026-10-16): a profile names each tier's model by the id
+    /// the computer's view gives; a platform that names none leaves the
+    /// route's names, which it takes too; `high`, on no slot, is its name.
+    #[test]
+    fn the_routes_ids_are_the_views() {
+        let r = route("http://m");
+        assert_eq!((r.tier(Tier::Cheap), r.tier(Tier::Medium), r.tier(Tier::High)), (CHEAP_ID, MEDIUM_ID, "high"), "high has no slot");
+        let named = Route::new("http://m", None);
+        assert_eq!((named.tier(Tier::Cheap), named.tier(Tier::Medium), named.ids.fallback.as_str(), named.ids.vision.as_str()), ("cheap", "medium", "fallback", "vision"));
+    }
+
     #[test]
     fn tiers_read_and_fall_back() {
         assert_eq!(Tier::of(Some(br#"{"tier":"cheap"}"#), false), Tier::Cheap);
@@ -881,13 +953,19 @@ mod tests {
         }
     }
 
-    /// Goal: a new agent without settings runs on Flash. Method: read no
-    /// agent.json and check the config Hermes consumes at its first turn.
+    /// Goal: a new agent without settings runs on Flash, its config naming
+    /// the cheap tier's model by its id and saying its tier; with no ids
+    /// given, by the tier's name. Method: read no agent.json and check the
+    /// config Hermes consumes at its first turn.
     #[test]
     fn a_new_agents_profile_defaults_to_cheap() {
         let tier = Tier::of(None, false);
-        let config = profile_config(&agent(), &tier.into(), "http://model.fragment.internal", &[], Path::new("/c.sh"));
-        assert!(config.contains("  default: \"cheap\"\n"), "{config}");
+        let config = profile_config(&agent(), &tier.into(), &route("http://model.fragment.internal"), &[], Path::new("/c.sh"));
+        assert!(config.contains("  default: \"z-ai/glm-5.3-flash\"\n"), "{config}");
+        assert!(config.contains("  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n    x-fragment-tier: \"cheap\"\n"), "{config}");
+        let named = Route::new("http://model.fragment.internal", None);
+        let config = profile_config(&agent(), &tier.into(), &named, &[], Path::new("/c.sh"));
+        assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
     }
 
     /// An `agent.json` the platform answered for is a tier (none there is
@@ -938,15 +1016,15 @@ mod tests {
         assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let p = profile_config(&agent(), &Tier::Medium.into(), "http://model.fragment.internal/", &[], creds);
+        let p = profile_config(&agent(), &Tier::Medium.into(), &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
-        assert!(p.contains("default: \"medium\""));
+        assert!(p.contains("default: \"@cf/zai-org/glm-5.3\"") && p.contains("    x-fragment-tier: \"medium\"\n"), "its tier's model by its id, its tier said: {p}");
         assert!(p.contains("x-fragment-agent: \"juniper--k3x9\""), "every model call names its agent");
-        let h = profile_config(&agent(), &Tier::High.into(), "http://model.fragment.internal", &[], creds);
-        assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
+        let h = profile_config(&agent(), &Tier::High.into(), &route("http://model.fragment.internal"), &[], creds);
+        assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\"") && h.contains("default: \"high\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
-        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), &Tier::Cheap.into(), "http://model.fragment.internal", &[], creds))] {
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
             assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
@@ -958,11 +1036,11 @@ mod tests {
         }
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
-        let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"fallback\"\n    api_key: \"agent:juniper--k3x9\"\n";
-        let c = profile_config(&agent(), &Tier::Cheap.into(), "http://model.fragment.internal", &[], creds);
-        for (tier, config) in [("cheap", &c), ("medium", &p)] {
-            assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model: {config}");
-            assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{tier}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
+        let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/zai-org/glm-5.3-flash\"\n    api_key: \"agent:juniper--k3x9\"\n";
+        let c = profile_config(&agent(), &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds);
+        for (tier, id, config) in [("cheap", CHEAP_ID, &c), ("medium", MEDIUM_ID, &p)] {
+            assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model, by its id: {config}");
+            assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{id}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
             assert!(config.contains("agent:\n  api_max_retries: 1\n"), "{config}");
             assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
         }
@@ -1017,7 +1095,7 @@ mod tests {
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() }));
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
-            let p = profile_config(&a, &main, "http://model.fragment.internal", &[], creds);
+            let p = profile_config(&a, &main, &route("http://model.fragment.internal"), &[], creds);
             for overlaid in ["command_allowlist", "approvals:", "security:", "platform_hints:", "clarify_timeout"] {
                 assert!(!p.contains(overlaid), "the overlay's alone, never the {} profile's: {p}", main.name());
             }
@@ -1069,7 +1147,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), &Tier::Medium.into(), "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), &Tier::Medium.into(), &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
@@ -1157,7 +1235,7 @@ mod tests {
             ("perplexity", "PERPLEXITY_API_KEY", "web:\n  search_backend: \"perplexity\"\n"),
         ] {
             let mut a = agent();
-            let write = |a: &Agent| profile_config(a, &Tier::Cheap.into(), "http://m", &[env.into()], Path::new("/c.sh"));
+            let write = |a: &Agent| profile_config(a, &Tier::Cheap.into(), &route("http://m"), &[env.into()], Path::new("/c.sh"));
             let absent = write(&a);
             assert!(!absent.contains(selection), "catalog alone never selects {provider}");
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
@@ -1171,7 +1249,7 @@ mod tests {
         for (provider, env) in [("perplexity", "PERPLEXITY_API_KEY"), ("firecrawl", "FIRECRAWL_API_KEY"), ("xai", "XAI_API_KEY")] {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
         }
-        let config = profile_config(&a, &Tier::Cheap.into(), "http://m", &[], Path::new("/c.sh"));
+        let config = profile_config(&a, &Tier::Cheap.into(), &route("http://m"), &[], Path::new("/c.sh"));
         assert!(config.contains("  search_backend: \"firecrawl\"\n"), "Firecrawl wins over Perplexity");
         assert!(!config.contains("\"xai\""), "X search is a separate native tool, never a web backend");
         assert!(profile_env(&a).contains("XAI_API_KEY=fck_xai_"));
@@ -1207,7 +1285,7 @@ mod tests {
         assert_eq!(why, None);
         assert_eq!(main.name(), "openrouter:anthropic/claude-sonnet-5.5");
         assert_eq!(MainModel::of(&a, Tier::Medium, None), (MainModel::Tier(Tier::Medium), None), "none named: its tier");
-        let p = profile_config(&a, &main, "http://model.fragment.internal", &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
+        let p = profile_config(&a, &main, &route("http://model.fragment.internal"), &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
         let want = format!("model:\n  provider: \"custom\"\n  base_url: \"https://openrouter.ai/api/v1\"\n  default: \"anthropic/claude-sonnet-5.5\"\n  api_key: \"fck_openrouter_{tag}\"\n  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n");
         assert!(p.contains(&want), "{p}");
         assert!(!p.contains("context_length"), "its provider says its context: {p}");
@@ -1232,7 +1310,7 @@ mod tests {
         let s = credentials_sh(&a);
         assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
         let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
-        let p = profile_config(&a, &Tier::Medium.into(), "http://model.fragment.internal", &env, Path::new("/c.sh"));
+        let p = profile_config(&a, &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\"]"), "{p}");
     }
 
@@ -1243,7 +1321,7 @@ mod tests {
         let mut env: Vec<String> = PROVIDER_ENV_BLOCKLIST.lines().map(str::to_string).collect();
         assert!(env.len() > 300, "the full pinned policy, not just today's offered providers");
         env.extend(["AUXILIARY_TEST_API_KEY", "AUXILIARY_TEST_BASE_URL", "GATEWAY_RELAY_TEST_TOKEN", "GATEWAY_RELAY_TEST_SECRET", "GATEWAY_RELAY_TEST_KEY", "GOOGLE_OAUTH_ACCESS_TOKEN", "X_API_BEARER_TOKEN"].map(str::to_string));
-        let p = profile_config(&agent(), &Tier::Medium.into(), "http://model.fragment.internal", &env, Path::new("/c.sh"));
+        let p = profile_config(&agent(), &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         let passed = p.lines().find(|l| l.starts_with("  env_passthrough:")).unwrap();
         assert_eq!(passed, "  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"X_API_BEARER_TOKEN\"]");
     }
@@ -1262,7 +1340,7 @@ mod tests {
             credential("d", &["A_KEY"], &format!("fck_d_{tag}")),
         ];
         assert_eq!(credential_vars(&a), vec![("A_KEY".to_string(), format!("fck_a_{tag}"))]);
-        let p = profile_config(&a, &Tier::Medium.into(), "http://m", &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
+        let p = profile_config(&a, &Tier::Medium.into(), &route("http://m"), &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"A_KEY\"]"), "{p}");
         assert!(!credentials_sh(&a).contains("rm -rf"));
     }

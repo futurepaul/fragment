@@ -1651,7 +1651,8 @@ One OpenAI-shaped chat completion on a tier's model, metered on its
 payer's ledger (cell/src/models.rs). Tiers: `cheap` (the default for
 agents and calls naming no tier) and `medium`. `high` (Opus) is refused,
 400, saying why, until Cloudflare raises Unified Billing's Opus limit; a
-model id is never a tier. `vision` names the deployment's vision model,
+model id is never a tier (though a call may name a tier's model by its
+id: below). `vision` names the deployment's vision model,
 for a runtime's calls about an image (Hermes' screenshots:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
@@ -1692,9 +1693,26 @@ switch when its model stalls, streaming nothing (our Hermes image's
 tier's call, has no fallback of its own, and is no tier an agent or a
 job's step may name.
 
+A call may name one of those four by its model's own id instead (Paul,
+2026-10-16: "be able to run `/model` with hermes and see the real
+model"; `fragment_core::models::Models::named`; docs/computers.md, "A
+model by its id"): the slot of the caller's tier when that slot runs it
+(`x-fragment-tier: cheap` or `medium`, optional; any other value is
+refused, 400), else the first slot that does, in the order `cheap`,
+`medium`, `fallback`, `vision`. The call is that slot's, as if it named
+the slot: its model, its key, its `body`, its fallback and its price.
+An id no slot runs is refused, 400, nothing reserved or sent, the message
+listing the ids a call may name, which `GET /api/models/v1/models` lists
+too: OpenAI's list (`{object: "list", data: [{id, object: "model",
+created: 0, owned_by: "fragment"}]}`), each id once, nothing of where each
+runs, and none of the route's names, which are taken all the same. An id
+is one model: a deployment whose two slots name one id at two places is
+refused. A job's step names a tier, never an id.
+
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `GET /api/models/v1/models` | an agent | → the ids its calls may name, OpenAI's list (above) |
+| `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier, `vision`, `fallback`, or one of their models' ids (`x-fragment-tier` its tier, optional) → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 | `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` names whom it acts for) | a decision, `{model?, input, questions, media?}`, its media inline → `{model, answers, usage}` (Decisions, above) |
 

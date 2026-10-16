@@ -1320,11 +1320,13 @@ impl ComputerCell {
     /// The guest's own view (`GET /api/computer`): its agents, each with
     /// the credentials it may use now (a connection its owner connected, an
     /// operator key the deployment holds, an own key its owner gave; none
-    /// its owner narrowed it from), each a placeholder naming the agent.
+    /// its owner narrowed it from), each a placeholder naming the agent; and
+    /// the model route's models' ids, as the deployment names them now.
     async fn guest_view(&self) -> CellResult<ComputerView> {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        view.models = Some(self.cfg.models.ids_by_name());
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -1548,6 +1550,7 @@ impl ComputerCell {
             agents: self.agents()?,
             origin,
             credential_env: vec![],
+            models: None,
             restored: saves.restored().cloned(),
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
@@ -2520,7 +2523,8 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     .await?;
     let authorization = signed["header"].as_str().ok_or_else(|| CellError::host("the agent fragment signed nothing"))?;
     let headers = Headers::new();
-    for k in ["content-type", "accept", "if-none-match", "range"] {
+    // the caller's tier, which the model route reads (`Models::named`), and no other of ours
+    for k in ["content-type", "accept", "if-none-match", "range", fragment_core::models::TIER_HEADER] {
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
         }
@@ -2549,31 +2553,35 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
-/// /v1/chat/completions`, OpenAI's shape, with `model` a tier, `POST
-/// /v1/audio/transcriptions`, OpenAI's multipart shape, with `model`
-/// `whisper`, or `POST /v1/decide`, a typed decision on the Clef family;
-/// each names its agent (`models::agent_named`: the
-/// `x-fragment-agent` header, or the key `agent:<name>` from a client that
-/// sends no header of its own). It is the platform's model route as that
-/// agent (`models::route`, `models::transcription_route`,
-/// `models::decide_route`, signed as
+/// /v1/chat/completions`, OpenAI's shape, with `model` one of the route's
+/// names or a model's id, `POST /v1/audio/transcriptions`, OpenAI's
+/// multipart shape, with `model` `whisper`, or `POST /v1/decide`, a typed
+/// decision on the Clef family; each names its agent
+/// (`models::agent_named`: the `x-fragment-agent` header, or the key
+/// `agent:<name>` from a client that sends no header of its own). It is the
+/// platform's model route as that agent (`models::route`,
+/// `models::transcription_route`, `models::decide_route`, signed as
 /// egress_api signs, only for an agent that runs on this computer), which
 /// bounds it, meters it to the agent's owner, and refuses at zero credit.
 /// The guest's auth headers, its key among them, go nowhere: only the
-/// agent's name, the content type and `accept` are sent on. Any other path
-/// is 404, unmetered.
+/// agent's name, its tier (`x-fragment-tier`, when it says one), the
+/// content type and `accept` are sent on. `GET /v1/models` is answered
+/// here, naming no agent (Hermes' `/model` asks it with no key and no
+/// header of ours): the ids every agent here may name
+/// (`Models::listed`), unmetered. Any other path is 404, unmetered.
 async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let (route, max) = match (req.method(), req.path().as_str()) {
         (Method::Post, "/v1/chat/completions") => ("/api/models/v1/chat/completions", crate::models::MODEL_BODY_MAX_BYTES),
         (Method::Post, "/v1/audio/transcriptions") => ("/api/models/v1/audio/transcriptions", fragment_core::transcribe::BODY_MAX_BYTES),
         (Method::Post, "/v1/decide") => ("/api/models/v1/decide", crate::models::MODEL_BODY_MAX_BYTES),
-        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions, /v1/audio/transcriptions and /v1/decide")),
+        (Method::Get, "/v1/models") => return json_response(&Config::from_env(env).models.listed()),
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers GET /v1/models, POST /v1/chat/completions, /v1/audio/transcriptions and /v1/decide")),
     };
     let named = fragment_core::models::agent_named(req.headers().get(AGENT_HEADER)?.as_deref(), req.headers().get("authorization")?.as_deref());
     let agent = named.map_err(|why| CellError::new(ErrorCode::Unauthenticated, why.message()))?;
     let headers = Headers::new();
     headers.set(AGENT_HEADER, &agent)?;
-    for k in ["content-type", "accept"] {
+    for k in ["content-type", "accept", fragment_core::models::TIER_HEADER] {
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
         }

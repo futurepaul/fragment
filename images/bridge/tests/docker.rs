@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use support::fake::{person, Fake};
-use support::model::Model;
+use support::model::{Model, CHEAP_ID, FALLBACK_ID};
 
 /// An install for the session, offline (as the e2e's hermes lane has it):
 /// a package Hermes builds and installs through apt as root, and a program
@@ -105,7 +105,13 @@ impl Container {
             // the marker goes before the image's own entrypoint runs, as PID 1
             args.extend(["--ipc=none", "--entrypoint", "/bin/sh"].map(String::from));
         }
-        for (k, v) in [("FRAGMENT_API", format!("http://api.fragment.internal:{api}")), ("FRAGMENT_MODEL", format!("http://model.fragment.internal:{model}")), ("FRAGMENT_COMPUTER", "computer:00aa".into()), ("FRAGMENT_IMAGE", tag.into())] {
+        let given = [
+            ("FRAGMENT_API", format!("http://api.fragment.internal:{api}")),
+            ("FRAGMENT_MODEL", format!("http://model.fragment.internal:{model}")),
+            ("FRAGMENT_COMPUTER", "computer:00aa".into()),
+            ("FRAGMENT_IMAGE", tag.into()),
+        ];
+        for (k, v) in given {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
         }
@@ -315,12 +321,27 @@ async fn the_hermes_image() {
     });
     {
         // Hermes also probes `/api/show` (Ollama's model metadata) with no
-        // agent; the model intercept answers only the completions routes,
-        // and Hermes falls back to its configured context length.
+        // agent; the model intercept answers only `/v1/models` and the
+        // completions routes, and Hermes keeps its configured context length.
         let calls: Vec<_> = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect();
         assert!(!calls.is_empty());
         assert!(calls.iter().all(|c| c.agent.as_deref() == Some("juniper--k3x9")), "every model call names its agent: {calls:?}");
-        assert!(calls.iter().any(|c| c.model == "cheap"), "the agent's tier from agent.json: {calls:?}");
+        let tiers: Vec<_> = calls.iter().filter(|c| c.model == CHEAP_ID).collect();
+        assert!(!tiers.is_empty() && tiers.iter().all(|c| c.tier.as_deref() == Some("cheap")), "the agent's tier from agent.json, its model by its id, its tier said: {calls:?}");
+        assert!(calls.iter().all(|c| c.model != "cheap"), "no call names the tier's name: {calls:?}");
+        // the config Hermes reads (Paul, 2026-10-16: "see the real model"):
+        // its tier's model and its fallback by their ids, as it was given them
+        let config = c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+        for want in [
+            format!("  default: \"{CHEAP_ID}\"\n"),
+            "    x-fragment-tier: \"cheap\"\n".to_string(),
+            format!("      \"{CHEAP_ID}\":\n        stale_timeout_seconds: 20\n"),
+            format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal:{}/v1\"\n    model: \"{FALLBACK_ID}\"\n", model.addr.port()),
+            "    model: \"vision\"\n".to_string(),
+        ] {
+            assert!(config.contains(&want), "its config has {want:?}:\n{config}");
+        }
+        assert!(c.logs().lines().any(|l| l.contains("\"boot.model_ids\"") && l.contains(CHEAP_ID)), "the boot says the ids its view named");
         // A fresh profile's first message carries no first-contact note of
         // Hermes' (v0.21.5 appended "This is the user's very first message
         // ever…", and the model introduced itself and named /help; since
@@ -691,10 +712,10 @@ async fn a_stalled_model_falls_back_to_the_routes_fallback() {
     }
     let took = asked.elapsed();
     let made: Vec<support::model::Call> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "stall, then answer")).cloned().collect();
-    let fell = made.iter().position(|c| c.model == "fallback");
+    let fell = made.iter().position(|c| c.model == FALLBACK_ID);
     eprintln!("hermes: a stalled turn's reply in {} ms; its calls: {:?}", took.as_millis(), made.iter().map(|c| format!("{} stream={}", c.model, c.stream)).collect::<Vec<_>>());
     let fell = fell.unwrap_or_else(|| panic!("the turn never asked the route's fallback: {:?}", made.iter().map(|c| &c.model).collect::<Vec<_>>()));
-    let stalled = made[..fell].iter().filter(|c| c.model == "cheap").count();
+    let stalled = made[..fell].iter().filter(|c| c.model == CHEAP_ID).count();
     assert!(stalled >= 2, "its tier was asked, and asked once more, before the fallback: {stalled} tries");
     let fallback = &made[fell];
     assert!(
@@ -717,8 +738,8 @@ async fn a_stalled_model_falls_back_to_the_routes_fallback() {
     let t2 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     fake.until(120_000, "the next turn's reply", |w| answered(w, &t2).is_some()).await;
     let next: Vec<String> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "and now?")).map(|c| c.model.clone()).collect();
-    assert_eq!(next.first().map(String::as_str), Some("cheap"), "the next turn is on its tier: {next:?}");
-    assert!(!next.iter().any(|m| m == "fallback"), "and needs no fallback: {next:?}");
+    assert_eq!(next.first().map(String::as_str), Some(CHEAP_ID), "the next turn is on its tier: {next:?}");
+    assert!(!next.iter().any(|m| m == FALLBACK_ID), "and needs no fallback: {next:?}");
 }
 
 /// A turn whose tool writes a SQLite database of its own for about six
@@ -1766,6 +1787,13 @@ async fn commands_and_quotes_reach_hermes() {
     for earlier in ["what did you mean", "use the terminal slowly", "[paul] hello"] {
         assert!(!history.contains(earlier), "the new session holds none of the chat before ({earlier:?}): {history}");
     }
+
+    // /model: the model its tier runs, by its id, and the ids the route takes
+    let before = calls().len();
+    let shown = model_shown(&fake, &chat, &c).await;
+    eprintln!("commands: /model said {shown:?}");
+    assert!(shown.contains(CHEAP_ID) && !shown.starts_with("scripted:"), "Hermes' /model names the real model: {shown:?}; {}", told(&fake, &chat, &c));
+    assert!(calls()[before..].iter().all(|x| !x.body["messages"].to_string().contains("/model")), "no model call for it");
 
     // refused: never said to Hermes
     let global = turn(&command("model", "glm --global"));
@@ -2823,7 +2851,7 @@ async fn an_agent_runs_on_its_owners_model() {
     let before = model.calls.lock().unwrap().len();
     asked(&fake, &chat, &c, "hello on the route", replied).await;
     let calls = calls_of(before);
-    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == "cheap"), "its tier, through the route: {calls:?}");
+    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == CHEAP_ID), "its tier, through the route: {calls:?}");
 
     // its owner connects the provider and picks one of its models
     let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");
@@ -2849,16 +2877,42 @@ async fn an_agent_runs_on_its_owners_model() {
         "its own model, at its provider, the placeholder its key: {main:?}"
     );
     assert!(!c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]).contains("sk-or-"), "no key of the person's anywhere in its config");
+    // `/model` shows the model it runs: its owner's, by its id
+    let shown = model_shown(&fake, &chat, &c).await;
+    assert!(shown.contains(id), "/model shows its own model: {shown:?}");
 
     // disconnected: its tier again, through the route
     fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
     let t = Instant::now();
-    while !config().contains("  default: \"cheap\"\n") {
+    while !config().contains(&format!("  default: \"{CHEAP_ID}\"\n")) {
         assert!(t.elapsed() < Duration::from_secs(30), "the profile never went back to its tier; its config:\n{}", config());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let before = model.calls.lock().unwrap().len();
     asked(&fake, &chat, &c, "hello on the route again", replied).await;
     let calls = calls_of(before);
-    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == "cheap"), "its tier again: {calls:?}");
+    assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == CHEAP_ID), "its tier again: {calls:?}");
+
+    // the deployment's models change while it runs (a release): its view
+    // names the new id, and the next turn's calls name it, nothing restarted
+    let next = "z-ai/glm-5.4-flash";
+    fake.with(|w| w.computer["models"]["cheap"] = json!(next));
+    let t = Instant::now();
+    while !config().contains(&format!("  default: \"{next}\"\n")) {
+        assert!(t.elapsed() < Duration::from_secs(30), "the profile never named the new id; its config:\n{}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello on the new model", replied).await;
+    let calls = calls_of(before);
+    assert!(!calls.is_empty() && calls.iter().all(|c| c.model == next), "the new id, read from its view: {calls:?}");
+}
+
+/// What `/model` (no model named) answers in the chat, its owner's command:
+/// Hermes' own reply, no model call.
+async fn model_shown(fake: &Fake, chat: &str, c: &Container) -> String {
+    let said = fake.say(chat, &person("paul"), json!({ "kind": "command", "command": "model", "args": "" }));
+    let t = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
+    within(fake, chat, c, 120_000, "/model's end", ended_turn(chat, &t)).await;
+    fake.with(|w| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == t.as_str())).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
 }

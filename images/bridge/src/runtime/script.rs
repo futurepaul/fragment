@@ -41,7 +41,13 @@
 //! - `think <text>`: one model call through the computer's model intercept
 //!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
 //!   model's answer; `think as <key> <text>` names its agent by its key
-//!   alone, `Authorization: Bearer <key>`, as an OpenAI SDK does;
+//!   alone, `Authorization: Bearer <key>`, as an OpenAI SDK does; `think on
+//!   <model> <text>` names `<model>` (a model's id, or any name) instead of
+//!   the cheap tier;
+//! - `models`: what the intercept lists (`GET /v1/models`, no agent named:
+//!   as Hermes' `/model` asks it) and what the computer's view names by the
+//!   route's names (`GET /api/computer`'s `models`): the reply is `models:
+//!   <ids, comma between>; given: <the view's, as JSON>`;
 //! - `transcribe <words> [as <key>] [header <agent>]`: a voice memo that
 //!   says `<words>` (a WAV the Workers AI fake reads them from) sent through
 //!   the intercept as an OpenAI SDK sends one, `POST
@@ -294,17 +300,18 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| format!("{url}: no answer"))?
 }
 
-/// One model call, `said` as the user's message, as `agent`, named by its
+/// One model call, `said` as the user's message, on `on` (a model's id or
+/// a name; the cheap tier unless named), as `agent`, named by its
 /// `x-fragment-agent`, or by `key` alone (`Authorization: Bearer <key>`):
 /// the answer's text.
-async fn think(agent: &str, key: Option<&str>, said: &str) -> Result<String, String> {
+async fn think(agent: &str, key: Option<&str>, on: Option<&str>, said: &str) -> Result<String, String> {
     use http_body_util::{BodyExt, Full, Limited};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
     let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
     let base = crate::net::Base::parse(&model)?;
-    let body = serde_json::json!({ "model": "cheap", "messages": [{ "role": "user", "content": said }] }).to_string();
+    let body = serde_json::json!({ "model": on.unwrap_or("cheap"), "messages": [{ "role": "user", "content": said }] }).to_string();
     let named = match key {
         Some(k) => ("authorization", format!("Bearer {k}")),
         None => ("x-fragment-agent", agent.to_string()),
@@ -328,6 +335,46 @@ async fn think(agent: &str, key: Option<&str>, said: &str) -> Result<String, Str
         }
     };
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
+}
+
+/// `models`: the ids the intercept lists (`GET /v1/models`, naming no
+/// agent, as Hermes' `/model` asks it), and the computer's view's.
+async fn models() -> Result<String, String> {
+    use http_body_util::{BodyExt, Empty, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
+    let base = crate::net::Base::parse(&model)?;
+    let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
+    let view = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let given = serde_json::to_string(&view.models).expect("ids serialize");
+    let req = hyper::Request::get(base.url("/v1/models")).header("host", base.authority()).body(Empty::<bytes::Bytes>::new()).map_err(|e| e.to_string())?;
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let call = async {
+        let res = client.request(req).await.map_err(|e| e.to_string())?;
+        let status = res.status().as_u16();
+        let bytes = Limited::new(res.into_body(), 64 * 1024).collect().await.map_err(|e| e.to_string())?.to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        let ids: Vec<&str> = v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
+        match (status, v["object"].as_str()) {
+            (200, Some("list")) => Ok(format!("{}; given: {given}", ids.join(", "))),
+            _ => Err(format!("{status} {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>())),
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the intercept did not answer".to_string())?
+}
+
+/// `think [as <key>] [on <model>] <text>`: the key, the model, the text.
+fn think_words(said: &str) -> (Option<&str>, Option<&str>, &str) {
+    let (key, said) = match said.strip_prefix("as ").and_then(|r| r.split_once(' ')) {
+        Some((key, said)) => (Some(key), said),
+        None => (None, said),
+    };
+    match said.strip_prefix("on ").and_then(|r| r.split_once(' ')) {
+        Some((on, said)) => (key, Some(on), said),
+        None => (key, None, said),
+    }
 }
 
 /// A second of silence, as a WAV, that says `words` in a chunk of its own
@@ -503,13 +550,16 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     let mut reply = format!("echo: [{}] {}", ts.asker_name, ts.text);
     if let Some(said) = ts.text.strip_prefix("think ") {
-        let (key, said) = match said.strip_prefix("as ").and_then(|r| r.split_once(' ')) {
-            Some((key, said)) => (Some(key), said),
-            None => (None, said),
-        };
-        reply = match think(&ts.agent.fragment, key, said).await {
+        let (key, on, said) = think_words(said);
+        reply = match think(&ts.agent.fragment, key, on, said).await {
             Ok(answer) => format!("thought: {answer}"),
             Err(e) => format!("think failed: {e}"),
+        };
+    }
+    if text.trim() == "models" {
+        reply = match models().await {
+            Ok(listed) => format!("models: {listed}"),
+            Err(e) => format!("models failed: {e}"),
         };
     }
     if text.trim() == "credentials" {
@@ -673,6 +723,15 @@ mod tests {
 
     /// `transcribe`'s grammar: its words, its key (`agent:<itself>` unless
     /// named) and a header's agent; and its memo, a WAV that says them.
+    #[test]
+    fn think_reads_its_key_and_model() {
+        assert_eq!(think_words("hello model"), (None, None, "hello model"));
+        assert_eq!(think_words("as agent:j--k3x9 hello"), (Some("agent:j--k3x9"), None, "hello"));
+        assert_eq!(think_words("on @cf/zai-org/glm-5.3 hello there"), (None, Some("@cf/zai-org/glm-5.3"), "hello there"));
+        assert_eq!(think_words("as k on z-ai/glm-5.3-flash hi"), (Some("k"), Some("z-ai/glm-5.3-flash"), "hi"));
+        assert_eq!(think_words("on"), (None, None, "on"), "no model without words after it");
+    }
+
     #[test]
     fn transcribe_reads_its_key_and_header() {
         assert_eq!(transcribe_words("hello from a memo", "juniper--k3x9"), ("hello from a memo", "agent:juniper--k3x9".to_string(), None));

@@ -88,6 +88,31 @@ pub struct Computer {
     /// in, whether its agents hold it now or not.
     #[serde(default, rename = "credentialEnv")]
     pub credential_env: Vec<String>,
+    /// The model route's models' ids by its names, as the deployment names
+    /// them now (docs/computers.md, "A model by its id"); none from a
+    /// platform before them.
+    #[serde(default)]
+    pub models: Option<ModelIds>,
+}
+
+/// The model route's models' ids, by its names: what a call may name each
+/// slot by besides its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelIds {
+    pub cheap: String,
+    pub medium: String,
+    pub fallback: String,
+    pub vision: String,
+}
+
+/// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
+/// catalog holds its offer to the same).
+pub const MODEL_ID_MAX_BYTES: usize = 128;
+
+/// A model's id: 1 to `MODEL_ID_MAX_BYTES` letters, digits and `.`, `_`,
+/// `-`, `:`, `/`, `@` (the platform's `catalog::valid_model_id`).
+pub fn model_id_ok(id: &str) -> bool {
+    (1..=MODEL_ID_MAX_BYTES).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'/' | b'@'))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -279,6 +304,11 @@ impl Api {
         }
         if c.agents.iter().any(|a| a.credentials.len() > crate::runtime::CREDENTIALS_MAX) || c.credential_env.len() > crate::runtime::CREDENTIALS_MAX * 4 {
             return Err(ApiError::Decode(format!("more credentials than a deployment offers (at most {})", crate::runtime::CREDENTIALS_MAX)));
+        }
+        if let Some(m) = &c.models {
+            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().find(|id| !model_id_ok(id)) {
+                return Err(ApiError::Decode(format!("models: {bad:?} is no model id")));
+            }
         }
         Ok(c)
     }

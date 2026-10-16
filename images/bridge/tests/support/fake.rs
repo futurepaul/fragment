@@ -196,7 +196,7 @@ impl Fake {
     /// `0.0.0.0:0` for a container to reach).
     pub async fn start(bind: &str, agents: &[&str]) -> Fake {
         let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}--k3x9"), "identity": format!("npub1{l}"), "name": l, "owner": "npub1paul" })).collect();
-        let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "npub1paul", "image": "test", "agents": agents }), page: 1000, ..World::default() };
+        let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "npub1paul", "image": "test", "agents": agents, "models": super::model::ids() }), page: 1000, ..World::default() };
         world.names.insert("npub1paul".into(), "paul".into());
         world.names.insert("npub1skyler".into(), "skyler".into());
         for a in world.computer["agents"].as_array().cloned().unwrap_or_default() {
