@@ -6,12 +6,17 @@ The platform carries no Hermes code (docs/cloudflare-v1.md, "The rule");
 the connector the cell had until the cut is at tag `celld-final`
 (`cell/src/relay.rs`).
 
-Pinned to Hermes v0.21.6 (tag `v0.21.6`, commit `818c13be1dc4`,
-2026-10-08; images/hermes/Dockerfile names its image), contract version
+Pinned to Hermes v0.21.7 (tag `v0.21.7`, commit `71d34bad1045`,
+2026-10-12; images/hermes/Dockerfile names its image), contract version
 1, read from `gateway/relay/` (its code wins over its contract
 document). Read first from v0.21.5 (tag `v2026.9.24`); v0.21.6 only drops
 its plugin-compat names and takes its prompts' labels from translations
-(English as before): the wire is unchanged. Relay is marked
+(English as before), and v0.21.7 only restates its annotations (a lint
+sweep: `Dict` as `dict`, `asyncio.TimeoutError` as `TimeoutError`): the
+wire is unchanged. v0.21.7's "compaction marks emitted to Relay" are
+another Relay's: NVIDIA's NeMo Relay (`nemo-relay`, 0.10), Hermes'
+in-process telemetry runtime, which exports only to an
+`OTEL_EXPORTER_OTLP_*` endpoint, and the image names none. Relay is marked
 experimental: it may change without a deprecation cycle, so a Hermes
 upgrade re-reads it, and the real-Hermes lane
 (`images/bridge/tests/docker.rs`) runs the real image against it.

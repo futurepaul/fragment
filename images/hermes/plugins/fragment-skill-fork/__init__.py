@@ -1,4 +1,4 @@
-"""Image-owned copy-on-write for Hermes v0.21.6; never modifies upstream code.
+"""Image-owned copy-on-write for Hermes v0.21.7; never modifies upstream code.
 
 Only our two immutable external roots are forked. Hermes' read-before-write,
 validation, security scan and deletion rules still own the actual mutation.
