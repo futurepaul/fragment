@@ -804,6 +804,25 @@ impl Socket {
         }
     }
 
+    /// Sends `text` as one text frame, as it is (the owner's browser's
+    /// frames are `<socket> <message>`, no JSON of their own).
+    pub fn send_text(&mut self, text: &str) -> Result<()> {
+        self.0.send(tungstenite::Message::Text(text.to_string().into()))?;
+        Ok(())
+    }
+
+    /// The next text frame, as it is; `Err` on a timeout or a close (its
+    /// code and reason in the message).
+    pub fn next_text(&mut self) -> Result<String> {
+        loop {
+            match self.0.read()? {
+                tungstenite::Message::Text(t) => return Ok(t.to_string()),
+                tungstenite::Message::Close(f) => anyhow::bail!("closed {}", f.map(|f| format!("{} {}", u16::from(f.code), f.reason)).unwrap_or_default()),
+                _ => {}
+            }
+        }
+    }
+
     /// Sends `bytes` as one binary frame (an RFB client's).
     pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.0.send(tungstenite::Message::Binary(bytes.to_vec().into()))?;
