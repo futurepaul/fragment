@@ -259,15 +259,19 @@ prebuilt bundle is in the debt ledger).
   to run. A branch deploy whose config names `stripe.key_file` makes the
   branch's own endpoint each time and uploads its secret as a Worker
   secret beside the test secret (decision 58).
-- `cargo xtask deploy --config <file> [--branch <name>]`: builds and
-  deploys to Cloudflare from a deployment's config, kept outside the repo
-  (`deploy/example.jsonc`; xtask/src/deploy.rs). It lists the store first
-  and refuses, before anything is built, when a secret the config names
-  is missing (naming the `secret set` for each); it binds them by name
-  and uploads no secret but a branch's test secret. A branch is a complete
-  copy at `<branch>.<zone>`, its fragments at
-  `<name>--<branch>.<zone>`. `cargo xtask teardown --config
-  <file> --branch <name>` removes one (irreversible: ask Paul).
+- `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only]`:
+  builds and deploys to Cloudflare from a deployment's config, kept
+  outside the repo (`deploy/example.jsonc`; xtask/src/deploy.rs). It
+  lists the store first and refuses, before anything is built, when a
+  secret the config names is missing (naming the `secret set` for each);
+  it binds them by name and uploads no secret but a branch's test
+  secret. A branch is a complete copy at `<branch>.<zone>`, its
+  fragments at `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
+  refuses, before anything is read or built, a config with a computer
+  image built from the tree (a `dockerfile`), naming it: every image is
+  kept at its digest, and the deploy needs no Docker. `cargo xtask
+  teardown --config <file> --branch <name>` removes one (irreversible:
+  ask Paul).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (the release's files: `templates/`, the shell's,
@@ -285,25 +289,44 @@ prebuilt bundle is in the debt ledger).
   included (CI: images.yml's `docker`, below). The e2e's computer
   sections run the stub image under `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
-  shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
-  restore on every run and save only from master's pushes (each key's
-  contents are named in the workflow). `images.yml` runs `images/`'s
-  `check` on every change there, and `docker`, the Docker lane above
+  shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
+  a push to master or `production` that both are green for, `deploy`
+  (below). Its caches restore on every run and save only from master's
+  pushes (each key's contents are named in the workflow); a push's run is
+  never cancelled by a newer one, which waits (a pull request's is).
+  `images.yml` runs `images/`'s `check` on every change there, and
+  `docker`, the Docker lane above
   (both images built, then every `--ignored` test of docker.rs on them,
   in parallel; about 13 minutes), on pull requests and master's
   pushes that touch images/hermes, images/bridge, images/stub, the
   images' manifest or lock, or the workflow (its `changes` job reads what
   changed), and on a run by hand. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
-- Master deploys to Cloudflare (`xtask deploy`): branch copies on a dev
-  zone (master's preview is `preview.finite.build`), and production
-  (`finite.chat`, its fragments on `*.finite.place`, in Finite's
-  production account: Paul, 2026-10-16) only at cutover.
+- CI deploys to Cloudflare (ci.yml's `deploy`: `xtask deploy
+  --pinned-only`) on every green push: master's to its preview,
+  `preview.finite.build` (`--branch preview`, a branch copy on the dev
+  zone), and the `production` branch's to production (`finite.chat`, its
+  fragments on `*.finite.place`, in Finite's production account: Paul,
+  2026-10-16). Only Paul updates `production` (protected: no force push,
+  no deletion): his push, or the pull request he merges into it, is the
+  approval of a production deploy. Each deploys from a GitHub
+  environment, `preview` or `production`, that only its branch may use,
+  holding the variables `DEPLOY_CONFIG` (the whole deploy config: names
+  and paths, no secret) and `DEPLOY_HOST` (its platform's host, whose
+  `/healthz` must then answer the commit), and the secrets
+  `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token) and the
+  preview's `PREVIEW_TEST_SECRET`; the job writes those two where a CI
+  config names them, `~/.config/fragment/secrets/cloudflare-api-token`
+  and `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
+  config names is pinned by digest: a canary is built by a deploy by
+  hand, where Docker runs, and its digest then pinned in the preview's
+  `DEPLOY_CONFIG` (docs/computers.md, "One round"). Other branches'
+  copies deploy by hand.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
-  hosted fleet, production deploys, and DNS changes are Paul's to
-  approve.
+  hosted fleet, production deploys by hand, and DNS changes are Paul's
+  to approve.
 
 ## Rules
 
@@ -319,5 +342,7 @@ prebuilt bundle is in the debt ledger).
 - The remote is `fragment-rs`, github.com/finitecomputer/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
   `ci/` are refused). The coordinating session reviews and merges a PR
-  once its CI is green. Deploys, adding a remote, deleting Sprites, DNS,
-  and anything else irreversible are Paul's to approve.
+  once its CI is green, which deploys it to the preview. Only Paul
+  updates the `production` branch. Other deploys, adding a remote,
+  deleting Sprites, DNS, and anything else irreversible are Paul's to
+  approve.

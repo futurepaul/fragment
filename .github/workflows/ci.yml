@@ -10,19 +10,26 @@
 # with its own build and node; the `e2e` job is green when every shard is.
 #
 # Caches are restored on every run and saved only from master's pushes
-# (a PR reads master's): each key names what it holds below. A save comes
-# right after the step that fills it, so a red e2e still saves its build.
+# (a PR reads master's, and so does production's): each key names what it
+# holds below. A save comes right after the step that fills it, so a red
+# e2e still saves its build.
+#
+# A green push deploys (`deploy`, below): master's to the preview,
+# production's to production.
 name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [master, production]
   pull_request:
   workflow_dispatch:
 
+# a pull request's newer run cancels its older one; a push's run is never
+# cancelled, as it may be deploying: a newer push's waits for it (and
+# replaces one already waiting)
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -182,4 +189,100 @@ jobs:
     timeout-minutes: 5
     steps:
       - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
+
+  # Continuous deployment, on a green push: master's to the preview
+  # (`--branch preview`), production's to production. Only Paul updates
+  # `production` (a protected branch): his push, or the pull request he
+  # merges into it, is the approval. Each deploys from a GitHub environment
+  # of its name, `preview` or `production`, which the repo's settings let
+  # only its branch use, and which holds the variables DEPLOY_CONFIG (the
+  # whole deploy config, JSONC: names and paths, no secret) and DEPLOY_HOST
+  # (its platform's host), the secret CLOUDFLARE_API_TOKEN (wrangler's,
+  # and the DNS token), and, the preview's, PREVIEW_TEST_SECRET. Every
+  # computer image is pinned by digest (`--pinned-only`): a runner builds
+  # none (xtask/src/deploy.rs, `pinned_only`, says why).
+  deploy:
+    needs: [check, e2e]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    environment: ${{ github.ref_name == 'production' && 'production' || 'preview' }}
+    # one deploy at a time to each, never cancelled mid-way
+    concurrency:
+      group: deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      # the deploy reads its commit, and needs no git credentials
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # restored, never saved here: the e2e's keys, as a deploy builds what
+      # the e2e's build does (xtask in target/debug, the cell's wasm32
+      # builds in cell/target); the same paths as its restores (they are
+      # part of each cache's version)
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/release
+            target/debug
+            cell/target
+          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock') }}
+          restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cache/worker-build
+          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock') }}
+          restore-keys: worker-build-0.8.5-${{ runner.os }}-
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
+      # the config, and the two files it reads by path, at the paths a CI
+      # config names (deploy/example.jsonc): the token, its DNS token too,
+      # and the preview's test secret, each 0600. printf is the shell's
+      # own, so no value is ever a process's argument, and nothing here
+      # echoes one. The config, a variable, is in the log as it is.
+      - env:
+          DEPLOY_CONFIG: ${{ vars.DEPLOY_CONFIG }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PREVIEW_TEST_SECRET: ${{ secrets.PREVIEW_TEST_SECRET }}
+        run: |
+          umask 077
+          for v in DEPLOY_CONFIG DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
+            test -n "${!v}" || { echo "the environment of $GITHUB_REF_NAME's deploy has no $v"; exit 1; }
+          done
+          printf '%s\n' "$DEPLOY_CONFIG" > "$RUNNER_TEMP/deploy.jsonc"
+          mkdir -p ~/.config/fragment/secrets
+          printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
+          if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
+      - run: cargo xtask deploy --config "$RUNNER_TEMP/deploy.jsonc" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # the deployment answers with this commit: /healthz's x-fragment-deploy
+      # is the deploy's `git rev-parse --short=12 HEAD`. A route can 522 for
+      # seconds after a deploy, so it is asked every 10 s, twelve times.
+      - env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          want=${GITHUB_SHA::12}
+          for _ in $(seq 12); do
+            got=$(curl -sI --max-time 10 "https://$DEPLOY_HOST/healthz" | tr -d '\r' | sed -n 's/^x-fragment-deploy: *//Ip')
+            case "$got" in "$want"*) echo "https://$DEPLOY_HOST answers with $got"; exit 0 ;; esac
+            sleep 10
+          done
+          echo "https://$DEPLOY_HOST/healthz answers with ${got:-no x-fragment-deploy}, not $want"
+          exit 1
 

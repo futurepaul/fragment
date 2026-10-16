@@ -140,6 +140,17 @@ store secrets:
   makes the endpoint) is uploaded as the Worker secret
   `FRAGMENT_STRIPE_WEBHOOK` (decision 58). Never printed.
 
+**On CI's deploy** (.github/workflows/ci.yml, `deploy`) the deploying
+machine is a runner, which holds no file of its own. Its GitHub
+environment (`preview` or `production`) holds the secrets
+`CLOUDFLARE_API_TOKEN`, which wrangler deploys with and which the job
+also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
+DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
+`~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
+job alone; the config it deploys from (the variable `DEPLOY_CONFIG`)
+names those two paths, and no `stripe.key_file`, which a runner lacks.
+Paul sets them in the repository's settings.
+
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a

@@ -1,6 +1,6 @@
-//! `cargo xtask deploy --config <file> [--branch <name>]` and `cargo xtask
-//! teardown --config <file> --branch <name>` (docs/cloudflare-v1.md,
-//! decisions 4 and 20).
+//! `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only]`
+//! and `cargo xtask teardown --config <file> --branch <name>`
+//! (docs/cloudflare-v1.md, decisions 4 and 20).
 //!
 //! A deployment's configuration is a file outside the repo (JSONC, keys as
 //! in `Deployment`), so anyone deploys their own without a fork. Its
@@ -606,18 +606,46 @@ fn checked(d: Deployment) -> Result<Deployment> {
     Ok(d)
 }
 
-fn args(rest: &[String]) -> Result<(PathBuf, Option<String>)> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask deploy|teardown --config <file> [--branch <name>]");
-    let (mut config, mut branch) = (None, None);
+/// A deploy's or a teardown's arguments.
+struct Args {
+    config: PathBuf,
+    branch: Option<String>,
+    /// A deploy's `--pinned-only` (`pinned_only`).
+    pinned_only: bool,
+}
+
+fn args(rest: &[String]) -> Result<Args> {
+    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>");
+    let (mut config, mut branch, mut pinned_only) = (None, None, false);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
+            "--pinned-only" => pinned_only = true,
             _ => return Err(usage()),
         }
     }
-    Ok((config.ok_or_else(usage)?, branch))
+    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only })
+}
+
+/// `--pinned-only`, CI's deploy (.github/workflows/ci.yml): every computer
+/// image the config names is kept at its digest, so the deploy builds none.
+/// A runner keeps no layer cache: a build there stamps every layer anew,
+/// pushes the whole base (gigabytes) and makes a new digest at every
+/// deploy, which tells each computer pinned to it that an update is ready
+/// (docs/computers.md, "What changes a version"). An image built from the
+/// tree is refused, by name, before anything is read, built or made.
+fn pinned_only(d: &Deployment) -> Result<()> {
+    let built: Vec<&str> = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str()).collect();
+    if !built.is_empty() {
+        bail!(
+            "--pinned-only builds no image, and this config builds {} from the tree: pin each at a digest this account's registry holds ({REGISTRY}/{}/<repository>@sha256:<64 hex>; docs/computers.md, \"Stable and canary\"), or deploy it without --pinned-only where Docker runs",
+            built.join(", "),
+            d.account_id
+        );
+    }
+    Ok(())
 }
 
 /// wrangler on the pinned Node (`devstack::Tools::wrangler`), for `account`.
@@ -723,8 +751,11 @@ pub fn stripe(rest: &[String]) -> Result<()> {
 }
 
 pub fn deploy(rest: &[String]) -> Result<()> {
-    let (config, branch) = args(rest)?;
+    let Args { config, branch, pinned_only: pinned } = args(rest)?;
     let d = load(&config)?;
+    if pinned {
+        pinned_only(&d)?;
+    }
     let n = names(&d, branch.as_deref())?;
     // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
@@ -998,7 +1029,8 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
 pub fn teardown(rest: &[String]) -> Result<()> {
-    let (config, branch) = args(rest)?;
+    let Args { config, branch, pinned_only } = args(rest)?;
+    anyhow::ensure!(!pinned_only, "--pinned-only is a deploy's: a teardown builds nothing");
     let d = load(&config)?;
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
@@ -1460,6 +1492,43 @@ mod tests {
         assert!(refused(json!({}), "pinned-neither").contains("parse"), "neither");
         assert!(pinned_ok(&format!("registry.cloudflare.com/{account}/a/b.c_d-e@sha256:{digest}"), &account));
         assert!(!pinned_ok(&stable, ""), "no account");
+    }
+
+    /// Goal: CI's deploy (`--pinned-only`) builds no image. Method: the
+    /// deploy itself, on a config whose DNS token's file is not there, so
+    /// that a deploy that gets past its first checks stops at reading it.
+    /// Invalid: a canary built from the tree beside a pinned stable, refused
+    /// naming it before that read (and deployed by hand without the flag);
+    /// the flag on a teardown. Valid: every image at its digest, or no
+    /// computers.
+    #[test]
+    fn a_pinned_only_deploy_refuses_an_image_it_would_build() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let account = v["account_id"].as_str().unwrap().to_string();
+        let stable = json!({ "image": format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{}", "9f".repeat(32)) });
+        let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
+        v["dns_token_file"] = json!(devstack::repo_root().join("target/xtask-tests/pinned-only/no-dns-token"));
+        let deploy_with = |v: &Value, test: &str, more: &[&str]| {
+            let path = config_file(test, v);
+            let rest: Vec<String> = [&["--config", path.to_str().unwrap(), "--branch", "preview"][..], more].concat().iter().map(|s| s.to_string()).collect();
+            deploy(&rest).err().map(|e| format!("{e:#}")).unwrap_or_default()
+        };
+        let read_the_token = "read the secret file";
+
+        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": built });
+        let refused = deploy_with(&v, "pinned-only-canary-built", &["--pinned-only"]);
+        assert!(refused.contains("--pinned-only builds no image, and this config builds hermes-canary from the tree") && !refused.contains(read_the_token), "{refused}");
+        assert!(deploy_with(&v, "pinned-only-by-hand", &[]).contains(read_the_token), "without the flag it goes on");
+
+        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": stable });
+        assert!(deploy_with(&v, "pinned-only-pinned", &["--pinned-only"]).contains(read_the_token), "every image at its digest");
+        v.as_object_mut().unwrap().remove("computers");
+        assert!(deploy_with(&v, "pinned-only-no-computers", &["--pinned-only"]).contains(read_the_token), "no computers, no image");
+
+        let path = config_file("pinned-only-teardown", &v);
+        let refused = teardown(&["--config", path.to_str().unwrap(), "--branch", "preview", "--pinned-only"].map(String::from)).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("--pinned-only is a deploy's"), "{refused}");
     }
 
     /// The deployment's mail: its `mail_from` is the cell's
