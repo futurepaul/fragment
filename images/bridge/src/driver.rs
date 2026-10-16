@@ -207,9 +207,8 @@ pub async fn restore_gate(cfg: &Config, mut stop: watch::Receiver<bool>) -> bool
 
 enum Msg {
     Input(Input),
-    /// `GET /api/computer` as read (in a task of its own), and the agent
-    /// whose fragments to list now (`None`: those due).
-    Computer(api::Computer, Option<String>),
+    /// `GET /api/computer` as read (in a task of its own).
+    Computer(api::Computer),
 }
 
 /// What followers read of the engine without asking it: the cursors, as of
@@ -329,7 +328,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
-    let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), last: Mutex::new(HashMap::new()) };
+    let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
         if step.dirty {
@@ -351,7 +350,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     if let Some(fragment) = joined {
                         shared.joined(&fragment);
                     }
-                    reread(&api, &inbox_tx, Some(agent));
+                    // the agent as the engine runs it: a read of the computer
+                    // first would be one more call whose failure loses the join
+                    let a = engine.agents().iter().find(|a| a.fragment == agent).expect("the engine asks to list only an agent it runs");
+                    follows.discover(a.clone());
                 }
             }
         }
@@ -379,17 +381,14 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let Some(m) = m else { break Ok(()) };
                 let step = match m {
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
-                    Msg::Computer(c, only) => {
+                    Msg::Computer(c) => {
                         let agents = gated(c.agents, &ready);
                         let now = Some(named(&agents));
                         screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
                         // An agent that left this computer (or is not ready) is followed no more.
                         follows.keep_only(&agents);
-                        match only {
-                            Some(agent) => agents.iter().filter(|a| a.fragment == agent).for_each(|a| follows.discover(a.clone())),
-                            None => follows.rediscover_due(&agents),
-                        }
+                        follows.rediscover_due(&agents);
                         s
                     }
                 };
@@ -409,7 +408,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
                 if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
-                    reread(&api, &inbox_tx, None);
+                    reread(&api, &inbox_tx);
                 }
             }
             r = &mut runtime_task => break runtime_result(r, name),
@@ -429,11 +428,11 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 
 /// Reads `GET /api/computer` in a task of its own (a slow platform never
 /// holds the engine), into the inbox.
-fn reread(api: &Api, inbox: &mpsc::Sender<Msg>, only: Option<String>) {
+fn reread(api: &Api, inbox: &mpsc::Sender<Msg>) {
     let (api, inbox) = (api.clone(), inbox.clone());
     tokio::spawn(async move {
         if let Some(c) = ask_once(&api).await {
-            let _ = inbox.send(Msg::Computer(c, only)).await;
+            let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
 }
@@ -467,24 +466,33 @@ async fn ask_until(api: &Api, stop: watch::Receiver<bool>) -> Option<api::Comput
 type FollowKey = (String, String, String);
 
 /// The fragments each agent follows: one task per `(agent, fragment,
-/// channel)`.
+/// channel)`, and at most one discovery per agent under way.
 struct Follows {
     api: Api,
     inbox: mpsc::Sender<Msg>,
     shared: Arc<Shared>,
     stop: watch::Receiver<bool>,
     running: Arc<Mutex<HashMap<FollowKey, tokio::task::JoinHandle<()>>>>,
+    discovering: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     last: Mutex<HashMap<String, Instant>>,
 }
 
 impl Follows {
-    /// Stops following for agents no longer on this computer.
+    /// Stops following for agents no longer on this computer, and listing
+    /// their fragments.
     fn keep_only(&self, agents: &[Agent]) {
         let mut running = self.running.lock().expect("followers");
         running.retain(|(agent, fragment, channel), h| {
             let keep = agents.iter().any(|a| &a.fragment == agent);
             if !keep {
                 crate::ev!("follow.dropped", { "agent": agent, "fragment": fragment, "channel": channel, "why": "the agent left this computer" });
+                h.abort();
+            }
+            keep
+        });
+        self.discovering.lock().expect("discoveries").retain(|agent, h| {
+            let keep = agents.iter().any(|a| &a.fragment == agent);
+            if !keep {
                 h.abort();
             }
             keep
@@ -505,58 +513,110 @@ impl Follows {
 
     /// Lists the agent's fragments, and follows each chat and its tasks it
     /// does not follow yet (in a task of its own: a slow listing never
-    /// holds the engine).
+    /// holds the engine). What a read failed in a way asking again may pass
+    /// (no answer, 429, 5xx) is asked again after a jittered backoff until
+    /// it answers: the list, or only the fragments whose channels did not
+    /// read, what was found meanwhile followed. Never left to the next
+    /// cadence (`DISCOVER_EVERY_MS`): until a start's first listing its
+    /// agent follows nothing, its own `tasks` (and so a `joined`) included.
+    /// One discovery an agent at a time: a newer one (a join's, the
+    /// cadence's) lists after whatever asked for it, and takes the place of
+    /// one still under way.
     fn discover(&self, agent: Agent) {
         self.last.lock().expect("last").insert(agent.fragment.clone(), Instant::now());
         let (api, inbox, shared, stop, running) = (self.api.clone(), self.inbox.clone(), self.shared.clone(), self.stop.clone(), self.running.clone());
-        tokio::spawn(async move {
-            let follows = match list_follows(&api, &agent).await {
-                Ok(f) => f,
-                Err(e) => {
-                    crate::ev!("discover.failed", { "agent": agent.fragment, "error": e.to_string() });
+        let name = agent.fragment.clone();
+        let task = tokio::spawn(async move {
+            let mut backoff = Backoff::default();
+            let mut missed: Option<Vec<String>> = None;
+            // bounded by the platform's answers, or `stop`: one listing a pass
+            loop {
+                match list_follows(&api, &agent, missed.take()).await {
+                    Ok(listed) => {
+                        crate::ev!("discover", { "agent": agent.fragment, "follows": listed.follows.len(), "missed": listed.missed.len() });
+                        let mut running = running.lock().expect("followers");
+                        running.retain(|_, h| !h.is_finished());
+                        for (fragment, channel) in listed.follows {
+                            let key = (agent.fragment.clone(), fragment.clone(), channel.clone());
+                            if running.contains_key(&key) {
+                                continue;
+                            }
+                            let h = tokio::spawn(follow(api.clone(), agent.clone(), fragment, channel, inbox.clone(), shared.clone(), stop.clone()));
+                            running.insert(key, h);
+                        }
+                        if listed.missed.is_empty() {
+                            return;
+                        }
+                        missed = Some(listed.missed);
+                    }
+                    Err(e) => {
+                        crate::ev!("discover.failed", { "agent": agent.fragment, "error": e.to_string(), "again": e.retryable() });
+                        if !e.retryable() {
+                            return;
+                        }
+                    }
+                }
+                if !backoff.wait(stop.clone()).await {
                     return;
                 }
-            };
-            crate::ev!("discover", { "agent": agent.fragment, "follows": follows.len() });
-            let mut running = running.lock().expect("followers");
-            running.retain(|_, h| !h.is_finished());
-            for (fragment, channel) in follows {
-                let key = (agent.fragment.clone(), fragment.clone(), channel.clone());
-                if running.contains_key(&key) {
-                    continue;
-                }
-                let h = tokio::spawn(follow(api.clone(), agent.clone(), fragment, channel, inbox.clone(), shared.clone(), stop.clone()));
-                running.insert(key, h);
             }
         });
+        if let Some(before) = self.discovering.lock().expect("discoveries").insert(name, task) {
+            before.abort();
+        }
     }
 }
 
+/// What one listing found for an agent to follow, and the fragments whose
+/// channels did not read in a way asking again may pass.
+struct Listed {
+    follows: Vec<(String, String)>,
+    missed: Vec<String>,
+}
+
 /// What an agent follows: `chat` of every fragment it is in that has a
-/// postable `chat` channel, and `tasks` of its own fragment if it has one.
-async fn list_follows(api: &Api, agent: &Agent) -> Result<Vec<(String, String)>, ApiError> {
-    let mut fragments = api.fragments(&agent.fragment).await?;
-    fragments.truncate(limits::DISCOVER_FRAGMENTS_MAX);
-    if !fragments.iter().any(|f| f.name == agent.fragment) {
-        fragments.push(api::FragmentEntry { name: agent.fragment.clone(), role: String::new(), kind: String::new(), owned: false, title: String::new() });
-    }
-    let mut out = Vec::new();
-    for f in fragments {
-        if out.len() >= limits::FOLLOWS_PER_AGENT_MAX {
+/// postable `chat` channel, and `tasks` of its own fragment if it has one;
+/// of `only` those fragments, when named (a listing's misses, asked again).
+/// A fragment whose channels do not read is passed over (the agent left it,
+/// or asking again changes nothing) or missed, and keeps the agent from no
+/// other.
+async fn list_follows(api: &Api, agent: &Agent, only: Option<Vec<String>>) -> Result<Listed, ApiError> {
+    let names = match only {
+        Some(names) => names,
+        None => {
+            let mut names: Vec<String> = api.fragments(&agent.fragment).await?.into_iter().map(|f| f.name).collect();
+            names.truncate(limits::DISCOVER_FRAGMENTS_MAX);
+            if !names.contains(&agent.fragment) {
+                names.push(agent.fragment.clone());
+            }
+            names
+        }
+    };
+    assert!(names.len() <= limits::DISCOVER_FRAGMENTS_MAX + 1, "a listing reads a bounded set of fragments");
+    let mut out = Listed { follows: Vec::new(), missed: Vec::new() };
+    for name in names {
+        // a miss holds a follow's place: one asked again stays within the bound
+        if out.follows.len() + out.missed.len() >= limits::FOLLOWS_PER_AGENT_MAX {
             crate::ev!("discover.bounded", { "agent": agent.fragment, "max": limits::FOLLOWS_PER_AGENT_MAX });
             break;
         }
-        let channels = match api.channels(&agent.fragment, &f.name).await {
+        let channels = match api.channels(&agent.fragment, &name).await {
             Ok(c) => c,
             Err(e) if e.gone() => continue,
-            Err(e) => return Err(e),
+            Err(e) => {
+                crate::ev!("discover.unread", { "agent": agent.fragment, "fragment": name, "error": e.to_string(), "again": e.retryable() });
+                if e.retryable() {
+                    out.missed.push(name);
+                }
+                continue;
+            }
         };
-        let own = f.name == agent.fragment;
+        let own = name == agent.fragment;
         for c in channels {
             let chat = c.name == records::CHAT && c.post.is_some() && !own;
             let tasks = c.name == records::TASKS && own;
             if chat || tasks {
-                out.push((f.name.clone(), c.name.clone()));
+                out.follows.push((name.clone(), c.name.clone()));
             }
         }
     }
