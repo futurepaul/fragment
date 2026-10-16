@@ -16,11 +16,23 @@
 //! left to clean, with no life or claim, the object's storage goes whole
 //! (`deleteAll`).
 //!
+//! **An agent fragment's agent goes with it.** Its life's end records its
+//! agent (`ended_agents`): the alarm has its computer run it no more
+//! (`computer/unassign`, naming that agent, so a life made again under the
+//! name and assigned meanwhile keeps its place; the owner's pages are told)
+//! and the registry name it by the fragment no more (`ForgetAgent`). Until
+//! then a deleted agent stayed on its computer: in its owner's agents, a
+//! chat's @ roster and Settings, counted in the computer's cap, its guest
+//! still running it. A computer gone (its owner's wipe) is done, as an
+//! agent unassigned already is (`fragment_core::ended::agent_left`).
+//!
 //! A delete keeps the life's code.storage repo (made again, the name finds
 //! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators)
 //! is the same end with its repo recorded beside it (`ended_repos`), which
 //! the alarm deletes with the rest, retried as the rest are: the life is
-//! cleaned up only once its repo is gone too.
+//! cleaned up only once its repo is gone too. It records no agent: the wipe
+//! empties the computer before (its `computer` step) and the registry's
+//! rows after (`registry`).
 //!
 //! **A try that fails** is told apart (`fragment_core::ended`): a part
 //! already gone is done (a repo code.storage says is gone, or was never
@@ -53,10 +65,12 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{missing, Caller, FragmentCell, MetaKey, CLAIM_TTL_MS};
 use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
+use crate::registry::calls;
 use crate::routed::Signed;
 
-/// The ended lives (one row each, until all is cleaned) and the lists each
-/// has still to tell.
+/// The ended lives (one row each, until all is cleaned), the lists each
+/// has still to tell, a wipe's repo, and an agent fragment's agent (its
+/// `computer` none once that runs it no more).
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS ended (
   incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL,
@@ -67,6 +81,8 @@ CREATE TABLE IF NOT EXISTS ended_index (
 CREATE INDEX IF NOT EXISTS ended_index_due ON ended_index (next_at);
 CREATE TABLE IF NOT EXISTS ended_repos (
   incarnation INTEGER PRIMARY KEY, repo TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ended_agents (
+  incarnation INTEGER PRIMARY KEY, identity TEXT NOT NULL, computer TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS ended_errors (
   incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part));
 ";
@@ -75,21 +91,26 @@ CREATE TABLE IF NOT EXISTS ended_errors (
 const PART_LISTS: &str = "lists";
 const PART_STORED: &str = "stored";
 const PART_REPO: &str = "repo";
+const PART_AGENT: &str = "agent";
 
 /// Each ended life, oldest first, and what it has left: its lists still to
-/// tell, its app's database or blobs (`stored`), its repo (`repos`), the
-/// most failed tries of a part left (`tries`), and the last error of a part
-/// left (`part: error`). `attempts` is the stored part's own count.
+/// tell, its app's database or blobs (`stored`), its repo (`repos`), its
+/// agent (`agents`), the most failed tries of a part left (`tries`), and
+/// the last error of a part left (`part: error`). `attempts` is the stored
+/// part's own count.
 const LIVES_LEFT: &str = "SELECT e.incarnation, e.name, e.stored, e.attempts,
   (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists,
   (SELECT COUNT(*) FROM ended_repos r WHERE r.incarnation = e.incarnation) AS repos,
+  (SELECT COUNT(*) FROM ended_agents a WHERE a.incarnation = e.incarnation) AS agents,
   MAX(CASE WHEN e.stored = 1 THEN e.attempts ELSE 0 END,
       (SELECT COALESCE(MAX(i.attempts), 0) FROM ended_index i WHERE i.incarnation = e.incarnation),
-      (SELECT COALESCE(MAX(r.attempts), 0) FROM ended_repos r WHERE r.incarnation = e.incarnation)) AS tries,
+      (SELECT COALESCE(MAX(r.attempts), 0) FROM ended_repos r WHERE r.incarnation = e.incarnation),
+      (SELECT COALESCE(MAX(a.attempts), 0) FROM ended_agents a WHERE a.incarnation = e.incarnation)) AS tries,
   (SELECT x.part || ': ' || x.error FROM ended_errors x WHERE x.incarnation = e.incarnation AND (
       (x.part = 'stored' AND e.stored = 1)
       OR (x.part = 'lists' AND EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = e.incarnation))
-      OR (x.part = 'repo' AND EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = e.incarnation)))
+      OR (x.part = 'repo' AND EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = e.incarnation))
+      OR (x.part = 'agent' AND EXISTS (SELECT 1 FROM ended_agents a WHERE a.incarnation = e.incarnation)))
     ORDER BY x.at DESC LIMIT 1) AS error
 FROM ended e ORDER BY e.incarnation";
 
@@ -99,6 +120,9 @@ const CLEARED_PER_PASS: i64 = 4;
 const BLOB_PAGES_PER_PASS: usize = 10;
 /// Ended lives' repos one pass deletes (one code.storage call each).
 const REPOS_PER_PASS: i64 = 4;
+/// Ended lives' agents one pass takes off their computers and out of the
+/// registry's names (two calls each, at most).
+const AGENTS_PER_PASS: i64 = 4;
 
 /// `wipe/end`'s body: the person a wipe ends this fragment for, and their
 /// agents (whose lists the wipe empties, as it empties theirs).
@@ -141,6 +165,17 @@ struct EndedRepo {
     attempts: i64,
 }
 
+/// An ended life's agent, still to leave its computer (`computer`, none
+/// once it has) and the registry's names.
+#[derive(Deserialize)]
+struct EndedAgent {
+    incarnation: i64,
+    identity: String,
+    computer: Option<String>,
+    attempts: i64,
+    name: String,
+}
+
 /// An ended life whose facet's database or blobs are still to go.
 #[derive(Deserialize)]
 struct Stored {
@@ -155,11 +190,18 @@ impl FragmentCell {
     /// Ends this life in one synchronous step, with no await: a crash
     /// leaves the life whole, or ended with all its cleanup recorded, and
     /// a delete asked again after an error records nothing twice.
-    /// Records what the alarm cleans after, stops the app, closes the
-    /// sockets, and drops the life's tables, made again empty.
+    /// Records what the alarm cleans after (an agent fragment's agent
+    /// among it), stops the app, closes the sockets, and drops the life's
+    /// tables, made again empty.
     pub(crate) fn end_life(&self) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version] =
-            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion])?;
+        self.end(true)
+    }
+
+    /// `end_life`, its agent recorded to leave its computer and the
+    /// registry's names (`agent`), or not (a wipe's, which empties both).
+    fn end(&self, agent: bool) -> CellResult<Ended> {
+        let [name, created_at, owner, npub, version, identity, computer] =
+            self.metas([MetaKey::Name, MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Npub, MetaKey::IndexVersion, MetaKey::AgentIdentity, MetaKey::Computer])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
@@ -181,6 +223,17 @@ impl FragmentCell {
              ON CONFLICT (incarnation, principal) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
         )?;
+        // an agent fragment's agent, whose key was this life's alone: it
+        // ran on its owner's one computer (decision 13), named while it is
+        // assigned. Unassigned since, that computer is asked all the same
+        // (a no-op): nothing else reaches its row once this life is gone
+        if let (true, Some(identity)) = (agent, identity) {
+            let computer = computer.unwrap_or_else(|| fragment_core::computer::default_computer_of(&owner));
+            self.exec(
+                "INSERT INTO ended_agents (incarnation, identity, computer, next_at) VALUES (?, ?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+                vec![SqlStorageValue::Integer(incarnation), identity.as_str().into(), computer.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
         // its database goes with the alarm; nothing runs in it from now
         if let Err(e) = js::abort_app_facet(&self.raw, &facet, "the fragment was deleted") {
             console_warn!("{name}: stopping the app facet {facet}: {}", e.message);
@@ -209,7 +262,7 @@ impl FragmentCell {
             "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        let ended = self.end_life()?;
+        let ended = self.end(false)?;
         assert_eq!(self.ended_repo_rows(incarnation)?, 1, "the ended life's repo is recorded beside it");
         Ok(ended)
     }
@@ -229,20 +282,22 @@ impl FragmentCell {
     pub(crate) fn ended_due_at(&self) -> CellResult<Option<i64>> {
         let rows = self.rows(
             "SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM ended_index UNION ALL SELECT MIN(next_at) FROM ended WHERE stored = 1
-               UNION ALL SELECT MIN(next_at) FROM ended_repos)",
+               UNION ALL SELECT MIN(next_at) FROM ended_repos UNION ALL SELECT MIN(next_at) FROM ended_agents)",
             vec![],
         )?;
         Ok(rows.first().and_then(|r| r["at"].as_i64()))
     }
 
     /// The alarm's part: tells a batch of lists, clears what storage is
-    /// due, and forgets each life with nothing left. Nothing here fails
-    /// the alarm: what fails waits, doubling, and is tried again, until it
-    /// is held (`fragment_core::ended`).
+    /// due, takes the agents off their computers, and forgets each life
+    /// with nothing left. Nothing here fails the alarm: what fails waits,
+    /// doubling, and is tried again, until it is held
+    /// (`fragment_core::ended`).
     pub(crate) async fn drain_ended(&self) {
         self.tell_ended(None).await;
         self.clear_ended().await;
         self.clear_repos().await;
+        self.clear_agents().await;
         self.forget_ended().await;
     }
 
@@ -379,6 +434,61 @@ impl FragmentCell {
         }
     }
 
+    /// The ended lives' agents due, at most `AGENTS_PER_PASS`: each one's
+    /// computer runs it no more (that agent's row alone: a life made again
+    /// under the name keeps its own), then the registry names it by its
+    /// fragment no more; its row goes once both are done. Each call is
+    /// idempotent, so a try cut between them, or made twice, is harmless;
+    /// a computer done is not asked again.
+    async fn clear_agents(&self) {
+        let due: Vec<EndedAgent> = match self.typed(
+            "SELECT a.incarnation, a.identity, a.computer, a.attempts, e.name FROM ended_agents a JOIN ended e USING (incarnation)
+             WHERE a.next_at <= ? ORDER BY a.next_at LIMIT ?",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(AGENTS_PER_PASS)],
+        ) {
+            Ok(due) => due,
+            Err(e) => return console_error!("the ended lives' agents did not read ({:?}): {}", e.code, e.message),
+        };
+        assert!(due.len() as i64 <= AGENTS_PER_PASS, "a pass takes a bounded batch of agents");
+        for a in due {
+            let inc = SqlStorageValue::Integer(a.incarnation);
+            let wrote = match self.agent_leaves(&a).await {
+                Ok(()) => {
+                    console_log!("{}", json!({ "event": "ended.agent-left", "fragment": a.name, "agent": a.identity, "incarnation": a.incarnation }));
+                    self.exec("DELETE FROM ended_agents WHERE incarnation = ?", vec![inc])
+                }
+                Err(failure) => {
+                    let update = "UPDATE ended_agents SET attempts = ?, next_at = ? WHERE incarnation = ?";
+                    self.failed_part(a.incarnation, PART_AGENT, a.attempts, &failure, update, vec![inc]).map(|after| {
+                        console_error!("{}: the ended life's agent {} did not leave (try {}, held: {}): {}", a.name, a.identity, after.attempts, rules::held(after.attempts), failure.message());
+                    })
+                }
+            };
+            if let Err(e) = wrote {
+                console_error!("{}: the ended life's agent row did not write ({:?}): {}", a.name, e.code, e.message);
+            }
+        }
+    }
+
+    /// One try of an ended agent's leaving: its computer's, then the
+    /// registry's (`fragment_core::ended::agent_left` tells their refusals
+    /// apart: none found is done).
+    async fn agent_leaves(&self, a: &EndedAgent) -> Result<(), Failure> {
+        let here = |e: CellError| Failure::Transient(format!("its row ({:?}): {}", e.code, e.message));
+        if let Some(computer) = &a.computer {
+            let asked = json!({ "fragment": a.name, "identity": a.identity });
+            if let Err(e) = crate::computer::ask(&self.env, computer, "computer/unassign", &asked).await {
+                rules::agent_left(e.code, &format!("its computer {computer}: {}", e.message))?;
+            }
+            self.exec("UPDATE ended_agents SET computer = NULL WHERE incarnation = ?", vec![SqlStorageValue::Integer(a.incarnation)]).map_err(here)?;
+        }
+        let forget = calls::ForgetAgent { identity: a.identity.clone(), fragment: a.name.clone() };
+        match crate::ask_registry(&self.env, &forget).await {
+            Ok(_) => Ok(()),
+            Err(e) => rules::agent_left(e.code, &format!("the registry: {}", e.message)),
+        }
+    }
+
     /// Forgets each ended life with nothing left to clean. The last one
     /// forgotten, with no life made since and no create claiming the name,
     /// lets the object's storage go whole, as a delete's did before it
@@ -387,6 +497,7 @@ impl FragmentCell {
         let forgot = self.rows(
             "DELETE FROM ended WHERE stored = 0 AND NOT EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = ended.incarnation)
                AND NOT EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = ended.incarnation)
+               AND NOT EXISTS (SELECT 1 FROM ended_agents a WHERE a.incarnation = ended.incarnation)
              RETURNING name, incarnation, ended_at",
             vec![],
         );
@@ -424,7 +535,7 @@ impl FragmentCell {
     }
 
     /// The test lever `ended` (ops.rs): each ended life, and what is left
-    /// of its cleanup (`lists`, `stored`, `repos`, the most failed `tries`
+    /// of its cleanup (`lists`, `stored`, `repos`, `agents`, the most failed `tries`
     /// of a part left, whether one is `held`, and its last `error`). It
     /// answers on an object with no life.
     pub(crate) fn ended_view(&self) -> CellResult<Value> {
@@ -483,7 +594,8 @@ impl FragmentCell {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec("UPDATE ended_index SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
         self.exec("UPDATE ended SET next_at = ?1 WHERE stored = 1 AND next_at > ?1", vec![now.clone()])?;
-        self.exec("UPDATE ended_repos SET next_at = ?1 WHERE next_at > ?1", vec![now])
+        self.exec("UPDATE ended_repos SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
+        self.exec("UPDATE ended_agents SET next_at = ?1 WHERE next_at > ?1", vec![now])
     }
 
     /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs),

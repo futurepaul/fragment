@@ -142,6 +142,27 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
+/// `POST /agents/forget`: an agent fragment's life ended (its delete:
+/// cell/src/ended.rs), so the registry names its agent by it no more. Only
+/// that agent's row, and only while it names that fragment: a life made
+/// again under the name has an agent of its own.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForgetAgent {
+    pub identity: String,
+    pub fragment: String,
+}
+
+/// `ForgetAgent`'s answer: whether a row went (none: forgotten before).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AgentForgotten {
+    pub forgot: bool,
+}
+
+impl Call for ForgetAgent {
+    const PATH: &'static str = "/agents/forget";
+    type Answer = AgentForgotten;
+}
+
 /// `POST /held`: an agent held below its owner, or let go (`held: None`),
 /// by its owner (decision 36).
 #[derive(Serialize, Deserialize)]

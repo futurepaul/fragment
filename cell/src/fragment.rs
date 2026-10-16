@@ -978,7 +978,7 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 self.create_invite(&caller, body).await
             }
-            (Method::Get, ["api", "invites"]) => self.invites(&caller),
+            (Method::Get, ["api", "invites"]) => self.invites(&caller).await,
             (Method::Delete, ["api", "invites", email]) => self.revoke_invite(&caller, email).await,
             (Method::Put, ["api", "cap"]) => {
                 let body = body_json(&mut req).await?;
@@ -1286,6 +1286,11 @@ impl FragmentCell {
             // what an ended life still has to clean, if anything
             return self.schedule().await;
         }
+        // an invite that ran out waits no more, and its owner's list is told
+        // in this pass's flush (`arm` wakes the alarm at each one's expiry)
+        if let Err(e) = self.drop_spent_invites().await {
+            self.event("invites.drop-failed", &e.message, json!({ "code": e.code }));
+        }
         self.flush_index().await;
         self.flush_search().await;
         self.flush_joined().await;
@@ -1406,7 +1411,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, ended, also];
+        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
