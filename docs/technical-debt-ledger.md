@@ -1276,3 +1276,24 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a fragment's pages hear its agents' face changes (an
   agent fragment's install telling the chats it is in, as its joining
   does).
+
+## A wake from a snapshot waits for its guest to be heard (#362)
+
+- **Observed:** 2026-10-16, canary rounds r4 and r6 on the preview: a
+  container Cloudflare restored from a snapshot took the DO's execs for
+  about a second and then answered nothing; its guest never egressed,
+  and its start had looked fine, so nothing fell back (#362).
+- **Shortcut:** a start from a snapshot is up only once its guest reads
+  its own view (`GET /api/computer`) within `ALIVE_MS`, 45 s; unheard,
+  it is answered as a snapshot that would not start (docs/computers.md,
+  Lifecycle). An image that never reads its view wakes 45 s late, from
+  the image and its save.
+- **Risk:** a dead one costs its person 45 s and a restore; a guest that
+  reads its view later than the wait (a backoff past it) is judged dead
+  and woken again from its save; and a container that dies after its
+  guest's first read is still not caught here (its sleep's bounds end it).
+- **First proof:** the logs' `{snapshot: "dead"}` lines against the
+  snapshot wakes (`restored {from: "snapshot"}`).
+- **Delete when:** Cloudflare fixes #362 and a canary round shows no
+  `snapshot: "dead"` across its snapshot wakes; or snapshots go
+  (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.

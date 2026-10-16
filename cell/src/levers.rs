@@ -8,7 +8,7 @@
 //!   POST /api/test/ledger   {identity, op, …}: a lever on that person's ledger
 //!   POST /api/test/keys     {fragment, op, …}: seal or open as that fragment
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
-//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, always-on)
+//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
@@ -153,9 +153,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
         }
         (Method::Post, ["computer"]) => {
-            /// `{computer, op, times?, on?}`: a lever on that computer
-            /// (computer.rs, `lever`): `times` is `fail-saves`', `on` is
-            /// `always-on`'s.
+            /// `{computer, op, times?, on?, ms?, freeze?}`: a lever on that
+            /// computer (computer.rs, `lever`): `times` is `fail-saves`',
+            /// `on` is `always-on`'s, `ms` is `hang-backups`' and
+            /// `alive-check`'s, `freeze` is `alive-check`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -165,6 +166,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 times: Option<u32>,
                 #[serde(default)]
                 on: Option<bool>,
+                #[serde(default)]
+                ms: Option<u32>,
+                #[serde(default)]
+                freeze: Option<bool>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -177,7 +182,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on })).await?)
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),

@@ -124,12 +124,23 @@ pub const HOLD_WAIT_MS: i64 = 20_000;
 /// A hold (the touch, the wait, the answer) reports within this, or it is
 /// asked again.
 pub const HOLD_DEADLINE_MS: i64 = 90_000;
-/// A save reports within this, or it is asked again (spike S3: 52 MB in
-/// 3.3 s, so a few GiB fit).
+/// A save reports within this, or it failed, as one that says so did
+/// (spike S3: 52 MB in 3.3 s, so a few GiB fit). The cell's own bounds on
+/// a save's steps end it sooner (cell/src/computer.rs, `SAVE_STEPS_MS`):
+/// this catches a report its isolate lost.
 pub const SAVE_DEADLINE_MS: i64 = 10 * 60_000;
 /// Saves of `/data` kept: a wake restores the newest that restores, and
 /// falls back to the one before it (F5 of docs/explorations/pi-durable.md).
 pub const SAVES_KEPT: usize = 3;
+/// A start from a snapshot is up only once its guest has read its own view
+/// (`GET /api/computer`, which an image reads as its entrypoint starts:
+/// `alive`) within this of the DO's last step of that start: a container
+/// Cloudflare restores from a snapshot can come up dead, taking execs for a
+/// second and then nothing, its guest never heard from (#362). A healthy
+/// guest reads it within 2 s (r4, r6); one whose first tries came before
+/// its intercepts were set waits out its backoff, at most 30 s and half
+/// again of jitter for our bridge's (`net::Backoff`).
+pub const ALIVE_MS: i64 = 45_000;
 
 const _: () = assert!(PREWAKE_MS < IDLE_MS, "a pre-wake holds less than a record");
 const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "retries stay within a start's deadline");
@@ -138,6 +149,7 @@ const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_M
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
+const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
 
 /// The deployment's rules for its computers' lifecycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -720,16 +732,35 @@ impl Lifecycle {
         }
     }
 
-    /// A step of the save under way that ran past its deadline (its
-    /// isolate died with it, say) is asked for again.
-    fn ask_again(&mut self, generation: u64, saving: Saving, now_ms: i64, step: &mut Step) {
+    /// An awake save failed: tried again after a pause, held no more.
+    fn awake_save_failed(&mut self, generation: u64, why: &str, now_ms: i64, step: &mut Step) {
+        assert!(matches!(self.phase, Phase::Awake { .. }), "an awake save's failure is an awake computer's");
+        self.saving = None;
+        self.save_failed(why, now_ms);
+        self.save_due_ms = Some(now_ms + self.retry_pause_ms());
+        step.actions.push(Action::Unhold { generation });
+    }
+
+    /// A step of the save under way that ran past its deadline. A hold or a
+    /// stop is asked for again: the cell bounds each well within its
+    /// deadline, so one past it lost its report (its isolate died with it,
+    /// say). A save past its deadline failed, counted as any failure is:
+    /// asked again, a backup that never returns would keep its sleep held
+    /// and billed for good, and the unsaved bound would never end it.
+    fn overdue(&mut self, generation: u64, saving: Saving, now_ms: i64, rules: &Rules, step: &mut Step) {
         let sleeping = matches!(self.phase, Phase::Sleeping { .. });
         match saving {
             Saving::Hold { .. } => {
                 self.saving = Some(Saving::Hold { since_ms: now_ms });
                 step.actions.push(if sleeping { Action::Sleep { generation } } else { Action::Hold { generation } });
             }
-            Saving::Save { held, .. } => self.save(generation, held, now_ms, step),
+            Saving::Save { seq, .. } => {
+                let why = format!("save {seq} did not report within {} minutes", SAVE_DEADLINE_MS / 60_000);
+                match sleeping {
+                    true => self.sleep_save_failed(generation, &why, now_ms, rules, step),
+                    false => self.awake_save_failed(generation, &why, now_ms, step),
+                }
+            }
             Saving::Stop { saved, .. } => {
                 assert!(sleeping, "only a sleep stops");
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved });
@@ -1005,10 +1036,7 @@ impl Lifecycle {
             }
             (Phase::Awake { generation, .. }, Event::SaveFailed { generation: g, seq, why }) if g == generation && self.answers(seq) => {
                 // awake, it is tried again after a pause; a sleep saves anyway
-                self.saving = None;
-                self.save_failed(&why, now_ms);
-                self.save_due_ms = Some(now_ms + self.retry_pause_ms());
-                step.actions.push(Action::Unhold { generation });
+                self.awake_save_failed(generation, &why, now_ms, &mut step);
             }
             (Phase::Sleeping { generation, .. }, Event::SaveFailed { generation: g, seq, why }) if g == generation && self.answers(seq) => {
                 self.sleep_save_failed(generation, &why, now_ms, rules, &mut step);
@@ -1116,7 +1144,7 @@ impl Lifecycle {
                     self.sleep(generation, now_ms, false, &mut step);
                 } else if let Some(s) = self.saving {
                     if now_ms >= s.deadline_ms() {
-                        self.ask_again(generation, s, now_ms, &mut step);
+                        self.overdue(generation, s, now_ms, rules, &mut step);
                     }
                 } else {
                     let settled = self.keepalives == 0 && self.save_due_ms.is_some_and(|due| now_ms >= due);
@@ -1129,7 +1157,7 @@ impl Lifecycle {
             (Phase::Sleeping { generation, since_ms }, Event::Alarm) => {
                 let s = self.saving.unwrap_or(Saving::Stop { since_ms, saved: false });
                 if now_ms >= s.deadline_ms() {
-                    self.ask_again(generation, s, now_ms, &mut step);
+                    self.overdue(generation, s, now_ms, rules, &mut step);
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
@@ -1252,6 +1280,33 @@ pub fn unheld(text: &str) -> Option<String> {
     }
     let cut = clean[..end].trim_end();
     (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// What a start knows of its guest as it waits for it (`alive`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alive {
+    /// Its guest read its view since the container started: it is up.
+    Heard,
+    /// Not yet, and its wait has time left.
+    Waiting,
+    /// Its wait ran out unheard: a container that came up dead (#362).
+    Dead,
+}
+
+/// Whether the guest of a start is alive at `now_ms`: the container started
+/// at `started_ms`; the guest last read its own view at `heard_ms` (whose
+/// guest it was: a read before the start was a container before it); and
+/// the start's wait for it, `bound_ms` long, began at `waiting_ms`, once the
+/// DO had done its own steps. A read after the start counts however early,
+/// one before the wait included: the guest reads its view as it starts.
+pub fn alive(heard_ms: Option<i64>, started_ms: i64, waiting_ms: i64, now_ms: i64, bound_ms: i64) -> Alive {
+    assert!(started_ms <= waiting_ms && waiting_ms <= now_ms, "a start waits after it started, and time runs forward");
+    assert!(bound_ms > 0, "a wait is bounded");
+    match heard_ms {
+        Some(at) if at >= started_ms => Alive::Heard,
+        _ if now_ms - waiting_ms >= bound_ms => Alive::Dead,
+        _ => Alive::Waiting,
+    }
 }
 
 /// A save of `/data`, as the Computer DO keeps it: the `DirectoryBackup`
@@ -2564,7 +2619,9 @@ mod tests {
 
     /// Goal (P2): a sleep holds the guest, then saves (held, or not when
     /// the guest never answered), then stops; its life's end says it saved.
-    /// A step that never reports is asked for again at its deadline.
+    /// A hold or a stop that never reports is asked for again at its
+    /// deadline; a save that never reports failed
+    /// (`a_save_that_never_answers_fails_at_its_deadline`).
     #[test]
     fn a_sleep_holds_then_saves_then_stops() {
         let mut l = Lifecycle::new();
@@ -2584,7 +2641,7 @@ mod tests {
         assert_eq!((l.phase.clone(), s.alarm_ms), (Phase::Asleep, None));
 
         // an image that never answers is saved anyway, recorded as not held;
-        // each step that never reports is asked for again at its deadline
+        // a hold or a stop that never reports is asked for again at its deadline
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         l.apply(Event::Sleep, T + 10_000);
@@ -2593,16 +2650,13 @@ mod tests {
         let s = l.apply(Event::Held { generation: g, held: false }, T + 10_000 + HOLD_DEADLINE_MS + HOLD_WAIT_MS);
         assert_eq!(s.actions, vec![Action::Save { generation: g, held: false, seq: 1 }]);
         let at = T + 10_000 + HOLD_DEADLINE_MS + HOLD_WAIT_MS;
-        let s = l.apply(Event::Alarm, at + SAVE_DEADLINE_MS);
-        assert_eq!(s.actions, vec![Action::Save { generation: g, held: false, seq: 2 }], "its save, again, a new one");
-        assert!(l.apply(Event::Saved { generation: g, seq: 1 }, at + SAVE_DEADLINE_MS + 1).actions.is_empty(), "the first one's late answer changes nothing");
-        let s = l.apply(Event::Saved { generation: g, seq: 2 }, at + SAVE_DEADLINE_MS + 2);
+        let s = l.apply(Event::Saved { generation: g, seq: 1 }, at + 4_000);
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }]);
-        let s = l.apply(Event::Alarm, at + SAVE_DEADLINE_MS + 2 + SLEEP_DEADLINE_MS);
+        let s = l.apply(Event::Alarm, at + 4_000 + SLEEP_DEADLINE_MS);
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "its stop, again");
         // its container exits as it is signalled: the sleep ended it, saved
-        let s = l.apply(Event::Exited { generation: g }, at + SAVE_DEADLINE_MS + SLEEP_DEADLINE_MS + 3);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: at + SAVE_DEADLINE_MS + SLEEP_DEADLINE_MS + 3, restart: false }));
+        let s = l.apply(Event::Exited { generation: g }, at + 5_000 + SLEEP_DEADLINE_MS);
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: at + 5_000 + SLEEP_DEADLINE_MS, restart: false }));
         // a lifecycle stored mid-sleep before saves were its own reads as in
         // its stop: its deadline asks for the stop, unsaved
         let mut v = serde_json::to_value(Lifecycle { phase: Phase::Sleeping { generation: 1, since_ms: T }, generation: 1, ..Lifecycle::new() }).unwrap();
@@ -2828,6 +2882,148 @@ mod tests {
         assert!(metered.iter().all(|(a, b)| *b <= f || *a >= f + rules.unsaved_max_ms), "none in the window: {metered:?}");
         let total: i64 = metered.iter().map(|(a, b)| b - a).sum();
         assert_eq!(total, (metered.last().unwrap().1 - (T + 3_000)) - rules.unsaved_max_ms, "all but the window: {metered:?}");
+    }
+
+    /// Goal (r4, r6): a save that never reports failed at its deadline, as
+    /// one that says so does, so I5's bound applies. A sleep's: kept awake
+    /// (held no more, saying why), tried again after a pause, each try's
+    /// save never answering either, until past `unsaved_max_ms` it sleeps
+    /// unsaved, its life's end saying so; the time from its first failure
+    /// to the bound is free (Paul, 2026-10-08) and the rest metered once.
+    /// Before, its save was asked for again at each deadline, for good: the
+    /// computer held, answering no one, and its awake time owed. Invalid:
+    /// before its deadline it waits. Replay: the hung save's late answers,
+    /// and an alarm again, change nothing. Restart: stored mid-save and read
+    /// back, it fails at the same deadline. Awake, a save that never
+    /// reports fails too, counted, and told from the second in a row.
+    #[test]
+    fn a_save_that_never_answers_fails_at_its_deadline() {
+        let rules = Rules::default();
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let mut metered: Vec<(i64, i64)> = vec![];
+        let keep = |s: &Step, metered: &mut Vec<(i64, i64)>| {
+            for a in &s.actions {
+                if let Action::Meter { from_ms, to_ms } = a {
+                    metered.push((*from_ms, *to_ms));
+                }
+            }
+        };
+        // its idle sleep: the hold answers, the save never does
+        let s = l.apply_with(Event::Alarm, T + IDLE_MS, &rules);
+        keep(&s, &mut metered);
+        assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g }));
+        let saving = T + IDLE_MS + 500;
+        let (_, _, hung) = save_asked(&l.apply_with(Event::Held { generation: g, held: true }, saving, &rules));
+        assert_eq!(l.next_alarm(), Some(saving + SAVE_DEADLINE_MS), "its deadline is the alarm it asks for");
+        let s = l.apply_with(Event::Alarm, saving + SAVE_DEADLINE_MS - 1, &rules);
+        assert!(s.actions.is_empty() && matches!(l.phase, Phase::Sleeping { .. }), "before its deadline it waits: {s:?}");
+        // restart: stored mid-save and read back
+        let mut l: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        let first = saving + SAVE_DEADLINE_MS;
+        let s = l.apply_with(Event::Alarm, first, &rules);
+        keep(&s, &mut metered);
+        assert_eq!(s.actions, vec![Action::Meter { from_ms: T + IDLE_MS, to_ms: first }, Action::Unhold { generation: g }], "failed: metered to it, kept, held no more");
+        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: first }, "the same container, awake");
+        assert!(matches!(&s.note, SaveNote::Says(why) if why.contains("could not save") && why.contains(&format!("save {hung} did not report within 10 minutes"))), "{:?}", s.note);
+        let bound = first + rules.unsaved_max_ms;
+        let u = l.unsaved(&rules).expect("a failure is counted");
+        assert_eq!((u.failures, u.failing.since_ms, u.sleep_failed_since_ms, u.stops_at_ms), (1, first, Some(first), Some(bound)));
+        // replay: the hung save's late answers, and the alarm again
+        let before = l.clone();
+        assert!(l.apply_with(Event::Saved { generation: g, seq: hung }, first + 100, &rules).actions.is_empty());
+        assert!(l.apply_with(Event::SaveFailed { generation: g, seq: hung, why: "late".into() }, first + 200, &rules).actions.is_empty());
+        assert!(l.apply_with(Event::Alarm, first, &rules).actions.is_empty());
+        assert_eq!(l, before, "a late answer and an alarm again change nothing");
+        // its tries, each save hung, until the bound ends them (bounded: the
+        // pause doubles, and each try takes a deadline)
+        let mut tries = 1;
+        let mut at;
+        let mut alarms = 0;
+        let stopped = loop {
+            alarms += 1;
+            assert!(alarms < 64, "the bound ends the tries");
+            at = l.next_alarm().expect("an alarm is due");
+            let s = l.apply_with(Event::Alarm, at, &rules);
+            keep(&s, &mut metered);
+            if s.actions.contains(&Action::Sleep { generation: g }) {
+                assert!(at <= bound, "no try begins past the bound: {at} > {bound}");
+                save_asked(&l.apply_with(Event::Held { generation: g, held: true }, at + 500, &rules));
+                continue;
+            }
+            if s.actions.iter().any(|a| matches!(a, Action::Stop { .. })) {
+                break s;
+            }
+            if s.actions.contains(&Action::Unhold { generation: g }) {
+                tries += 1;
+                assert!(matches!(l.phase, Phase::Awake { .. }) && l.unsaved(&rules).is_some_and(|u| u.failures == tries), "try {tries} failed at its deadline");
+            }
+        };
+        assert!(tries >= 3, "tried again within the bound: {tries}");
+        assert_eq!(stopped.actions.last(), Some(&Action::Stop { generation: g, saved: false }), "past the bound it sleeps unsaved: {stopped:?}");
+        assert!(at >= bound && at <= bound + HOLD_DEADLINE_MS + SAVE_DEADLINE_MS, "the try under way at the bound ends within its own deadline: {} ms past", at - bound);
+        assert!(matches!(&stopped.note, SaveNote::Says(why) if why.contains("slept unsaved")), "{:?}", stopped.note);
+        let s = l.apply_with(Event::Asleep { generation: g }, at + 5_000, &rules);
+        keep(&s, &mut metered);
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false }), "its next wake is a rollback");
+        // billing: nothing in the window, all else once
+        metered.sort();
+        assert!(metered.iter().all(|(a, b)| a < b) && metered.windows(2).all(|w| w[0].1 <= w[1].0), "{metered:?}");
+        assert!(metered.iter().all(|(a, b)| *b <= first || *a >= bound), "none in the window: {metered:?}");
+        let total: i64 = metered.iter().map(|(a, b)| b - a).sum();
+        assert_eq!(total, (at + 5_000 - (T + 3_000)) - rules.unsaved_max_ms, "all but the window: {metered:?}");
+
+        // awake: a save that never reports fails at its deadline, tried again
+        // after a pause, and its owner is told from the second in a row
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Tab }, T + 4_000);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
+        let mut at = T + 10_000 + SAVE_SETTLE_MS;
+        for n in 1..=UNSAVED_NOTICE_FAILURES {
+            let s = l.apply(Event::Alarm, at);
+            assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "save {n}, awake: {s:?}");
+            let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+            let due = at + 500 + SAVE_DEADLINE_MS;
+            let s = l.apply(Event::Alarm, due);
+            assert_eq!(s.actions.last(), Some(&Action::Unhold { generation: g }), "save {n} failed: {s:?}");
+            assert!(matches!(l.phase, Phase::Awake { .. }) && l.saving().is_none());
+            let u = l.unsaved(&Rules::default()).expect("counted");
+            assert_eq!((u.failures, u.sleep_failed_since_ms, u.stops_at_ms), (n, None, None), "an awake save opens no window");
+            assert!(u.failing.why.contains(&format!("save {seq} did not report")), "{:?}", u.failing);
+            assert!(l.apply(Event::Saved { generation: g, seq }, due + 1).actions.is_empty(), "its late answer changes nothing");
+            at = l.save_due_ms.expect("its retry is due");
+            assert_eq!(at, due + (SAVE_RETRY_MS << (n - 1)), "after a growing pause");
+        }
+    }
+
+    /// Goal (#362): a start from a snapshot is up only once its guest has
+    /// read its own view since the container started, however early; past
+    /// its wait unheard, it came up dead, and the lifecycle answers it as a
+    /// snapshot that would not start: the same wake starts the image and
+    /// the save, no strike; a second in that wake is a strike. Invalid: a
+    /// read before the start (an earlier container's) is not this one's.
+    /// Method: the decision at each edge, then the lifecycle's answer.
+    #[test]
+    fn a_snapshot_start_is_up_once_its_guest_is_heard() {
+        let (started, waiting) = (T, T + 800);
+        assert_eq!(alive(None, started, waiting, waiting, ALIVE_MS), Alive::Waiting);
+        assert_eq!(alive(Some(T + 300), started, waiting, waiting, ALIVE_MS), Alive::Heard, "a read before its wait began is its guest's");
+        assert_eq!(alive(Some(T), started, waiting, waiting + 10, ALIVE_MS), Alive::Heard, "at its start itself");
+        assert_eq!(alive(Some(T - 1), started, waiting, waiting + ALIVE_MS - 1, ALIVE_MS), Alive::Waiting, "an earlier container's read is not its");
+        assert_eq!(alive(Some(T - 1), started, waiting, waiting + ALIVE_MS, ALIVE_MS), Alive::Dead);
+        assert_eq!(alive(None, started, waiting, waiting + ALIVE_MS, ALIVE_MS), Alive::Dead, "unheard at the bound");
+        assert_eq!(alive(Some(waiting + ALIVE_MS), started, waiting, waiting + ALIVE_MS, ALIVE_MS), Alive::Heard, "heard at the bound: up");
+        // the cell reports a dead one as a snapshot that would not start
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let s = l.apply(Event::SnapshotFailed { generation: g, why: "its guest did not read its view within 45 s".into() }, T + ALIVE_MS + 1_000);
+        assert_eq!((s.actions, l.failures), (vec![Action::Start { generation: g + 1 }], 0), "the same wake, from the image and the save, no strike");
+        let s = l.apply(Event::SnapshotFailed { generation: g + 1, why: "dead again".into() }, T + 2 * ALIVE_MS);
+        assert_eq!((s.actions.len(), l.failures, l.phase.clone()), (0, 1, Phase::Asleep), "a second in the wake is a strike, tried again after a pause");
+        assert!(l.retry_at_ms.is_some());
     }
 
     /// Goal (F5): a start whose save will not restore (its archive gone or
