@@ -61,7 +61,7 @@ show everywhere within seconds, and nothing restarts. Never write
 `/data/hermes/profiles`, to rename yourself: the computer writes it from
 your name and writes it again. Your `@name` (your fragment's label)
 stays what people type to mention you. Your job, the rest of who you
-are, is your `SOUL.md`.
+are, is your `SOUL.md`: never put your name in it.
 
 ## Your owner's other agents
 

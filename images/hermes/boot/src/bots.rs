@@ -73,6 +73,14 @@ pub fn description(soul: &str) -> String {
     format!("{}…", cut.trim_end())
 }
 
+/// An agent's name (docs/api.md, "An agent's name and picture"): its agent
+/// fragment's title, else its name on the computer, else its fragment's
+/// label. What its `profile.yaml` (`profile_yaml`) and its config's
+/// `agent.system_prompt` (hermes.rs, `told_name`) say, from one read.
+pub fn name<'a>(agent: &'a Agent, title: Option<&'a str>) -> &'a str {
+    [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty()).unwrap_or_else(|| label(&agent.fragment))
+}
+
 /// An agent's `profile.yaml`: Hermes' profile metadata, which its roster
 /// reads (each teammate's name and role, `_profile_role`) and which marks
 /// the install as Bot-Mode-managed (`ui_meta.hermes-bots`). Its name, its
@@ -83,8 +91,7 @@ pub fn description(soul: &str) -> String {
 /// job's first line (`description`). Written whole at every boot, for an
 /// agent assigned while the computer runs, and when a sync pulls its job.
 pub fn profile_yaml(agent: &Agent, title: Option<&str>, soul: Option<&str>) -> String {
-    let name = [title.unwrap_or(""), agent.name.as_str()].into_iter().map(str::trim).find(|n| !n.is_empty());
-    let name = name.unwrap_or_else(|| label(&agent.fragment));
+    let name = name(agent, title);
     let about = soul.map(description).unwrap_or_default();
     let mut y = format!(
         "# Written by hermes-boot for {}, from its agent fragment, and written again as that changes: its Bot Mode identity (images/hermes/boot/src/bots.rs). Never edit it: rename the agent with `fragment agent --name`.\n",
@@ -266,12 +273,13 @@ mod tests {
     }
 
     /// What every agent is told of its name and picture (the platform
-    /// skill's page, computer.md): the one way to change them, and never by
-    /// the profile's files, which the boot writes again.
+    /// skill's page, computer.md): the one way to change them, never by
+    /// the profile's files, which the boot writes again, and never its
+    /// name in its job, which a rename would leave behind.
     #[test]
     fn an_agent_is_told_how_to_rename_itself() {
         let page = include_str!("computer.md");
-        for said in ["fragment agent --name", "fragment agent --picture", "fragment agent --no-picture", "`profile.yaml`", "256 KiB"] {
+        for said in ["fragment agent --name", "fragment agent --picture", "fragment agent --no-picture", "`profile.yaml`", "256 KiB", "never put your name in it"] {
             assert!(page.contains(said), "computer.md says {said}");
         }
     }
