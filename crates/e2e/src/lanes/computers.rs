@@ -504,7 +504,7 @@ const RECOVERY_CHECKS: [&str; 11] = [
     "its next wake goes back to that save, told once, the same notice; and its agent answers",
     "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
     "asleep, its owner's restart starts it, fresh from its save",
-    "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from a sleep's failed save to its bound, or to the restart that ended it; the time before and after is",
+    "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
 ];
 
 /// What its owner is told, and the way back to working (rung 4 of
@@ -540,9 +540,11 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let t0 = crate::api::now_ms();
     let r = failing_sleep(s)?;
     let t1 = crate::api::now_ms();
-    // its free window opens at the failure (the lever says when)
+    // its bound counts from the failure, and its free window opens as the
+    // try that failed began (the lever says when each was)
     let unsaved_since = || lever(api, c.id, "saves").ok().and_then(|r| r.body["unsavedSince"].as_i64());
-    let first_free = unsaved_since();
+    let free_since = || lever(api, c.id, "saves").ok().and_then(|r| r.body["freeSince"].as_i64());
+    let first_free = free_since().filter(|free| (t0..=t1).contains(free) && unsaved_since().is_some_and(|since| *free <= since));
     let unsaved = notice(&r.body, "unsaved");
     let stops = unsaved["stopsAt"].as_i64().unwrap_or(0);
     s.ok(
@@ -594,8 +596,10 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let zebra_seq = zebra.body["record"]["seq"].as_i64().unwrap_or(0);
     let zebra_ran = s.eventually(c.wake, || replied(zebra_seq).is_some());
     // the bound runs out: no save works, and nothing uses it
+    let t2 = crate::api::now_ms();
     let r = failing_sleep(s)?;
-    let second_free = unsaved_since();
+    let second_failed = unsaved_since();
+    let second_free = free_since().filter(|free| *free >= t2 && second_failed.is_some_and(|since| *free <= since));
     let stops = notice(&r.body, "unsaved")["stopsAt"].as_i64().unwrap_or(i64::MAX);
     let wait = Duration::from_millis((stops - crate::api::now_ms()).clamp(0, bound + 5_000) as u64) + Duration::from_secs(30);
     let slept = s.eventually(wait, || view()["phase"] == "asleep");
@@ -626,9 +630,9 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             })
             .collect()
     };
-    let windows: Vec<(i64, i64)> = [first_free.map(|f| (f, restarted_at)), second_free.map(|f| (f, f + bound))].into_iter().flatten().collect();
+    let windows: Vec<(i64, i64)> = [first_free.map(|f| (f, restarted_at)), second_free.zip(second_failed).map(|(f, failed)| (f, failed + bound))].into_iter().flatten().collect();
     // the stop's seconds past the bound reach the ledger as it goes to sleep
-    let after = |rows: &[(i64, i64)]| second_free.is_some_and(|f| rows.iter().any(|(from, _)| *from >= f + bound));
+    let after = |rows: &[(i64, i64)]| second_failed.is_some_and(|f| rows.iter().any(|(from, _)| *from >= f + bound));
     s.eventually(Duration::from_secs(15), || after(&awake()));
     let rows = awake();
     let overlapping: Vec<&(i64, i64)> = rows.iter().filter(|(from, to)| windows.iter().any(|(a, b)| from < b && to > a)).collect();

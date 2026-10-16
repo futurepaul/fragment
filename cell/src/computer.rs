@@ -1945,6 +1945,7 @@ impl ComputerCell {
                 v["generation"] = json!(life.generation());
                 v["saving"] = json!(life.saving());
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
+                v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));

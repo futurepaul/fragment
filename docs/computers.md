@@ -132,7 +132,7 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 |---|---|---|---|
 | **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
-| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, up to the bound, is free |
+| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
 | **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
 | **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
@@ -269,17 +269,21 @@ the loss unless saves recover by then. So the bound is kept as decision
 18 has it.
 
 **The window is free** (Paul, 2026-10-08: the time a computer is kept
-for saves the platform failed is the platform's). Its awake time from a
-sleep's failed save to the bound is not metered: the lifecycle meters up
-to the failure, then passes the window over (`Lifecycle::unmetered`, its
-meters at most two intervals, before it and after it), so nothing is
-charged and nothing refunded. The window ends early when a save works,
-its owner restarts it, or its container goes; what comes after it, and
-whatever holds it past the bound (its person using it), is metered as
-any. A save that hangs fails only at its bound (below, "Bounds"), so the
-time its first failing try took, at most the hold's and the save's
-bounds (about 10 minutes), comes before the window and is metered, as a
-last try's past the bound is.
+for saves the platform failed is the platform's, the whole failing try
+included: the coordinator, 2026-10-16). Its awake time is not metered
+from the start of the try whose save failed first (its sleep's hold:
+a save that hung to its bound, below, "Bounds", was the platform's for
+all its minutes) to the bound, which counts from that failure as its
+owner is told; nor, past the bound, the try under way at it, to that
+try's failure. The lifecycle meters up to the try's start, then passes
+the window over (`Lifecycle::unmetered`, its meters at most two
+intervals, before it and after it), so nothing is charged and nothing
+refunded. The window ends early when a save works (that try's own time
+free, metering again from its end), its owner restarts it (free to its
+restart's save's end), or its container goes; what comes after it, the
+stop's seconds after its last failed try, and whatever holds it past the
+bound (its person using it) and the try begun after that hold, are
+metered as any.
 
 **The agent.** A turn a restart cut ends as lost, and the agent's next
 turn there is told what was cut (docs/bridge.md, "The turn after a cut one
@@ -2115,7 +2119,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
   charged. Nor is the time a computer is kept for its failed saves: from
-  a sleep's failed save to `computers.unsaved_max_ms` after it, or to the
+  the start of a sleep's try whose save failed (a hung save's minutes
+  included) to `computers.unsaved_max_ms` after that failure (and the try
+  under way then, to its own failure), or to the
   save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
   route. Each operator key's call is held on the agent's owner's ledger
@@ -2166,9 +2172,14 @@ for a host) and finds the same `HOME`, `~` and modes.
   the bound; an update told awake, between turns, never for the version it
   runs or one put off),
   and that no meter falls in a free window. The free window: nothing
-  metered from a sleep's failed save to its bound, before and after it as
-  any, a late report or an alarm again metering nothing twice, the same
-  across a restart of the DO. A save that never reports failed at its
+  metered from the start of a sleep's try whose save failed to its bound,
+  before and after it as any, a late report or an alarm again metering
+  nothing twice, the same across a restart of the DO
+  (`the_whole_failing_try_is_free`: a hung first save free from its
+  start, a quick failure as before, metering again once a save works, a
+  restart of the DO or its owner's mid-window, the try at the bound free
+  to its failure, one begun past it metered, and no window over time
+  metered already). A save that never reports failed at its
   deadline (`a_save_that_never_answers_fails_at_its_deadline`): a
   sleep's kept, tried again, each try hung, and ended unsaved by the
   bound, its window free; awake, counted and told from the second; its
