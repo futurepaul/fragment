@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fragment</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 12px; width: 320px; }
+  h2 { font-size: 13px; margin: 14px 0 6px; }
+  p { margin: 0 0 8px; }
+  label { display: block; margin: 4px 0; }
+  .muted { color: #666; }
+  .warning { color: #a33; }
+  #tabs { max-height: 220px; overflow: auto; margin-top: 6px; }
+  #tabs label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+<p id="said">…</p>
+<button id="disconnect" type="button" hidden>Disconnect</button>
+<h2>What your agents may use</h2>
+<label><input type="radio" name="access" value="own"> Only the tabs they open</label>
+<label><input type="radio" name="access" value="chosen"> Those, and tabs I choose</label>
+<label><input type="radio" name="access" value="all"> All my tabs and windows</label>
+<p id="note" class="muted"></p>
+<div id="tabs"></div>
+<script type="module" src="popup.js"></script>

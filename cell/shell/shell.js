@@ -1729,6 +1729,80 @@ function say(text) {
   text.split("`").forEach((part, i) => p.append(i % 2 ? el("code", null, part) : part));
   return p;
 }
+// The browsers its agents may use (docs/explorations/owner-browser.md, a
+// spike): each one linked to the computer, by the name its extension
+// gave, connected or when it was last heard, forgotten from here (on
+// any device); and this browser, which the Fragment extension, when it
+// has it, says is connected or not (`{fragmentBrowser: "status"}` from
+// its script on this page: to which computer, by which link) and
+// connects with a one-time ticket minted here.
+let ownBrowser = null;
+addEventListener("message", (e) => {
+  if (e.source !== window || e.origin !== location.origin || e.data?.fragmentBrowser !== "status") return;
+  const was = ownBrowser;
+  ownBrowser = { connected: !!e.data.connected, computer: e.data.computer ?? null, link: e.data.link ?? null, error: e.data.error ?? null };
+  $("settings-browser")?.replaceWith(browserLine());
+  // this browser connected, or left: the computer's list of its browsers changed too
+  if (state.computer && (was?.connected !== ownBrowser.connected || was?.link !== ownBrowser.link)) {
+    api("GET", `/api/computers/${seg(state.computer.computer)}`)
+      .then((v) => {
+        computerIs(v);
+        $("settings-browser")?.replaceWith(browserLine());
+      })
+      .catch(() => {});
+  }
+});
+function browserLine() {
+  const c = state.computer;
+  const rows = el("div", "settings-browsers");
+  for (const b of c?.browsers ?? []) {
+    const here = ownBrowser?.link === b.id;
+    const forget = el("button", "quiet", "Forget");
+    forget.type = "button";
+    forget.dataset.action = "browser-forget";
+    forget.dataset.browser = b.id;
+    forget.onclick = async () => {
+      forget.disabled = true;
+      try {
+        await api("DELETE", `/api/computers/${seg(c.computer)}/browser/links/${seg(b.id)}`);
+        computerIs(await api("GET", `/api/computers/${seg(c.computer)}`));
+        if (state.page === "Settings") await openSettings(false);
+      } catch (e) {
+        notice("That browser was not forgotten", e.message);
+        forget.disabled = false;
+      }
+    };
+    const row = el("div", "settings-actions");
+    row.dataset.browser = b.id;
+    row.append(el("span", null, `${b.name}${here ? " (this browser)" : ""}: ${b.connected ? "connected" : `last seen ${when(b.seenAt)}`}`), forget);
+    rows.append(row);
+  }
+  // this browser: connected to this person's computer, not another's
+  // (another sign-in in this browser)
+  const mine = ownBrowser?.connected && `computer:${ownBrowser.computer}` === c?.computer;
+  if (!ownBrowser) rows.append(el("span", "muted", "Add the Fragment extension to this browser to let your agents use it."));
+  else if (!mine) {
+    const on = el("button", "quiet", "Connect this browser");
+    on.type = "button";
+    on.dataset.action = "browser-connect";
+    on.onclick = async () => {
+      on.disabled = true;
+      try {
+        const t = await api("POST", `/api/computers/${seg(c.computer)}/browser/ticket`);
+        window.postMessage({ fragmentBrowser: "connect", url: t.url }, location.origin);
+      } catch (e) {
+        notice("This browser did not connect", e.message);
+        on.disabled = false;
+      }
+    };
+    const row = el("div", "settings-actions");
+    row.append(...(ownBrowser.error ? [el("span", "settings-warning", ownBrowser.error)] : []), on);
+    rows.append(row);
+  }
+  const line = actionLine("Browsers", rows);
+  line.id = "settings-browser";
+  return line;
+}
 function renderSettingsPage(page, sections) {
   const layout = el("div", "settings-layout");
   const nav = el("nav", "settings-nav");
@@ -1867,6 +1941,7 @@ async function openSettings(push = true) {
     screens.push(screen);
   }
   if (screens.length) computer.append(actionLine("Screens", ...screens));
+  if (c) computer.append(browserLine());
   // the way back to working when something is wrong with it: asked once
   // more before it cuts what its agents are doing
   if (c) {
@@ -1907,6 +1982,9 @@ async function openSettings(push = true) {
   const skills = await skillsSection();
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
   renderAgentFaces();
+  // the extension, if this browser has it, says how it is: asked once its
+  // line is shown, so its answer finds the line to redraw
+  if (c) window.postMessage({ fragmentBrowser: "hello" }, location.origin);
 }
 
 // Building with a coding agent: one prompt that names this platform's
