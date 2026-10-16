@@ -693,6 +693,17 @@ mod tests {
     /// flagged as a prompt injection (its `_INJECTION_PATTERNS`).
     const HERMES_INJECTION_PATTERNS: [&str; 9] = ["ignore previous instructions", "ignore all previous", "you are now", "disregard your", "forget your instructions", "new instructions:", "system prompt:", "<system>", "]]>"];
 
+    /// `cli/SKILL.md` as `fragment skill` prints it at the image's build,
+    /// which `PLATFORM_MAX_BYTES` holds: its blanks filled with the CLI's
+    /// default host (the build has no config: cli/src/main.rs
+    /// `DEFAULT_HOST`) and its stand-in for a fragment's origin
+    /// (crates/templates `ANY_FRAGMENT`). The file as committed is about 110
+    /// bytes shorter: measured unfilled, this passed while the image's
+    /// build refused a skill of 16 451 bytes.
+    fn cli_skill() -> String {
+        include_str!("../../../../cli/SKILL.md").replace("{{platform}}", "https://finite.chat").replace("{{fragment}}", "https://<name>.<the platform's domain for fragments>")
+    }
+
     /// Valid: the platform skill is named `fragment`, says what the
     /// computer adds before the CLI's own skill, whole, and reads to Hermes
     /// as a skill (one frontmatter, a one-line description it lists, nothing
@@ -700,7 +711,8 @@ mod tests {
     /// with no frontmatter, or another name, is refused.
     #[test]
     fn the_platform_skill_is_the_clis_after_the_computers_page() {
-        let cli = include_str!("../../../../cli/SKILL.md");
+        let cli = &cli_skill();
+        assert!(!cli.contains("{{platform}}") && !cli.contains("{{fragment}}"), "both blanks filled, as the CLI fills them (a secret's `{{NAME}}` is none)");
         let skill = platform_skill(cli).unwrap();
         assert!(skill.starts_with("---\nname: fragment\ndescription: \"You are an agent on a Fragment computer"), "{skill}");
         let (front, body) = skill.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).unwrap();
@@ -729,7 +741,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hermes-boot-references-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let platform = root.join("platform");
-        let skill = platform_skill(include_str!("../../../../cli/SKILL.md")).unwrap();
+        let skill = platform_skill(&cli_skill()).unwrap();
         write_platform_skill(&platform, &skill).unwrap();
         check_references(&platform).unwrap();
         write_file(&platform, "test/example/SKILL.md", b"Read `references/example.md`.\n").unwrap();
@@ -775,7 +787,7 @@ mod tests {
         let at = |d: &str| root.join(d.trim_start_matches('/'));
         let external: Vec<PathBuf> = EXTERNAL_DIRS.iter().map(|d| at(d)).collect();
         let (managed, platform, view) = (at(MANAGED_DIR), at(PLATFORM_DIR), at(PLATFORM_VIEW));
-        let skill = platform_skill(include_str!("../../../../cli/SKILL.md")).unwrap();
+        let skill = platform_skill(&cli_skill()).unwrap();
         write_platform_skill(&platform, &skill).unwrap();
         std::fs::create_dir_all(own.join("garden-notes")).unwrap();
         std::fs::write(own.join("garden-notes/SKILL.md"), "---\nname: garden-notes\n---\n").unwrap();

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doc</title>
+  <link rel="stylesheet" href="./__fragment.css">
+  <link rel="stylesheet" href="./doc.css">
+  <link rel="stylesheet" href="./notes.css">
+  <script type="module" src="./notes.js"></script>
+</head>
+<!-- Readers' cursors are off: <html lang="en" data-cursors> turns them on. -->
+<body>
+<div class="notes-page">
+<main data-notes>
+
+<h1 data-a="title">A doc</h1>
+<p class="lede" data-a="lede">A page of writing that its readers leave notes on, paragraph by paragraph, the way a shared document takes comments. Point at a paragraph, or select a few words in it, and press <b>+ Note</b>.</p>
+
+<section>
+  <h2 data-a="notes-h">How notes work</h2>
+  <p data-a="notes-1">Every block of this page that has a <code>data-a</code> id takes notes. On a wide window they sit in the margin, level with their paragraph; on a narrow one, a button under the paragraph opens them.</p>
+  <figure class="fig" data-a="notes-fig">
+    <svg viewBox="0 0 360 132" role="img" aria-label="A reader's note goes through the annotate operation into the doc's table; every open page sees it, and the notes channel carries a record of it">
+      <rect class="n" x="8" y="10" width="96" height="44" rx="8"/><text class="t" x="20" y="30">a reader</text><text class="s" x="20" y="45">signed in</text>
+      <rect class="n" x="8" y="78" width="96" height="44" rx="8"/><text class="t" x="20" y="98">an agent</text><text class="s" x="20" y="113">fragment call</text>
+      <line class="ln" x1="104" y1="32" x2="140" y2="58"/><line class="ln" x1="104" y1="100" x2="140" y2="74"/>
+      <rect class="n acc" x="140" y="44" width="92" height="44" rx="8"/><text class="t" x="152" y="64">annotate</text><text class="s" x="152" y="79">the doc's app</text>
+      <line class="ln" x1="232" y1="58" x2="256" y2="32"/><line class="ln" x1="232" y1="74" x2="256" y2="100"/>
+      <rect class="n" x="256" y="10" width="96" height="44" rx="8"/><text class="t" x="268" y="30">every page</text><text class="s" x="268" y="45">live, at once</text>
+      <rect class="n" x="256" y="78" width="96" height="44" rx="8"/><text class="t" x="268" y="98">notes</text><text class="s" x="268" y="113">a channel</text>
+    </svg>
+    <figcaption>One table, four operations. Whoever opens the page reads the notes; people and agents who are signed in write them.</figcaption>
+  </figure>
+  <p data-a="notes-2">A reply joins its thread. Only a note's author or the page's owner resolves a thread or deletes a note, and a delete is for good.</p>
+</section>
+
+<section>
+  <h2 data-a="agents-h">Notes for agents</h2>
+  <p data-a="agents-1">The notes are operations, so an agent reads and answers them the way a person does:</p>
+  <pre data-a="agents-code"><code>fragment call &lt;doc&gt; notes
+fragment call &lt;doc&gt; annotate --input '{"anchor": "lede", "text": "Clearer?"}'
+fragment call &lt;doc&gt; annotate --input '{"reply_to": 1, "text": "Yes."}'
+fragment call &lt;doc&gt; resolve --input '{"id": 1, "resolved": true}'</code></pre>
+  <p data-a="agents-2">They are also tools of <code>fragment mcp &lt;doc&gt;</code>, and each change is a record on the <code>notes</code> channel.</p>
+</section>
+
+<section>
+  <h2 data-a="yours-h">Make it yours</h2>
+  <ul>
+    <li data-a="yours-1">Write in <code>site/index.html</code>. Give each block a <code>data-a</code> id of its own (letters, digits, <code>-</code> and <code>_</code>) and keep it when you edit the block: a note follows its id.</li>
+    <li data-a="yours-2">A note whose id is gone is not lost: it is listed at the end of the page.</li>
+    <li data-a="yours-3">Add <code>data-cursors</code> to <code>&lt;html&gt;</code> to show readers each other's cursors.</li>
+  </ul>
+</section>
+
+</main>
+</div>
+</body>
+</html>

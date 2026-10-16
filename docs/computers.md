@@ -301,7 +301,7 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   Dockerfile), the Hermes base by its digest, and the fragment CLI's build:
   `cli/` (its code, GUIDE.md and SKILL.md), the crates it builds from
   (`crates/core`, `nip98`, `proto`, `templates`), the templates it
-  scaffolds (`blank`, `calories`, `inbox`, `notes`, `todo`), and the root
+  scaffolds (`blank`, `calories`, `doc`, `inbox`, `notes`, `todo`), and the root
   manifest and lock. A change to anything else (the cell, the shell, the
   chat page and the other blessed templates, the e2e, xtask, the docs)
   leaves every build step cached, so the canary's digest, and its

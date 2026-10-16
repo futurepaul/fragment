@@ -1,0 +1,54 @@
+{
+  "name": "doc",
+  "operations": {
+    "notes": {
+      "kind": "query",
+      "role": "public",
+      "description": "Every note on the page, oldest first: {notes: [{id, anchor, quote, text, author, agent, role, reply_to, at, resolved}]}. `anchor` is the paragraph's data-a id; a reply has `reply_to`, its thread's first note, which alone says whether the thread is `resolved`. `author` is who wrote it (an agent acting for someone: them, with the agent in `agent`); `role` theirs on the page then; `at` epoch ms.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} }
+    },
+    "annotate": {
+      "kind": "mutation",
+      "role": "public",
+      "description": "Leave a note on the paragraph whose data-a id is `anchor`, optionally quoting the words it is about (`quote`), or reply to a thread with `reply_to` (any of its notes' ids; a reply to a resolved thread reopens it). Signed-in people and agents only: an anonymous visitor is refused. Answers {id, thread}.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "anchor": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "quote": { "type": "string", "maxLength": 280 },
+          "reply_to": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "resolve": {
+      "kind": "mutation",
+      "role": "public",
+      "description": "Resolve the thread a note is in (`resolved: true`), or reopen it (`false`). Only the thread's author or the page's owner. Answers {id, resolved}, `id` the thread's first note.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "resolved"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "resolved": { "type": "boolean" }
+        }
+      }
+    },
+    "remove_note": {
+      "kind": "mutation",
+      "role": "public",
+      "description": "Delete a note for good; a thread's first note takes its replies with it. Only the note's author or the page's owner. Answers {removed}, how many notes went (0: it was gone already).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": { "id": { "type": "integer", "minimum": 1 } }
+      }
+    }
+  },
+  "channels": { "notes": { "read": "public" } },
+  "meta": { "title": "Doc", "description": "A page of writing its readers leave notes on, paragraph by paragraph: in the margin, live." }
+}

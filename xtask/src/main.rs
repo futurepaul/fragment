@@ -235,7 +235,7 @@ fn dev(args: &[String]) -> Result<()> {
 }
 
 /// The templates `try` scaffolds.
-const TRY_TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
+const TRY_TEMPLATES: [&str; 4] = ["todo", "inbox", "notes", "doc"];
 
 fn try_template(args: &[String]) -> Result<()> {
     let usage = || format!("usage: cargo xtask try <{}> [name]", TRY_TEMPLATES.join("|"));
@@ -278,7 +278,8 @@ fn try_template(args: &[String]) -> Result<()> {
         println!("  or a page    curl -s -X POST '{hook}' -H 'content-type: application/json' -d '{{\"payload\":{{\"url\":\"https://example.com\"}}}}'");
     }
     println!("  the CLI      {alias}");
-    println!("               fragment runs {name} | fragment channel {name} | fragment call {name} list");
+    let query = if tpl == "doc" { "notes" } else { "list" };
+    println!("               fragment runs {name} | fragment channel {name} | fragment call {name} {query}");
     println!("  change it    edit {}, then: fragment deploy {name} --dir {}", dir.join(&name).display(), dir.join(&name).display());
     Ok(())
 }
