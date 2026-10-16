@@ -2369,10 +2369,15 @@ desktop's width, a sheet from the bottom on a phone. Any other agents of
 theirs are in no list (a setting may offer more than one later); a chat
 with one of them is a chat, listed and found as any other. **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
-apps we teach the user how to prompt for new apps"): a window of eight
-ways to ask, each saying who the app is for and what it does, `…` the
-part to make their own (`APP_PROMPTS`, one list in shell.js), and a
-desktop with no apps says what lands there and offers its first three.
+apps we teach the user how to prompt for new apps"): a window of ways to
+ask, each saying who the app is for and what it does, `…` the part to
+make their own (`APP_PROMPTS`, twelve in one list in shell.js), and a
+desktop with no apps says what lands there and offers the same ways.
+Both show three at a time (Paul, 2026-10-16: "we shouldn't overwhelm
+people with prompts"), the list's first three as a page loads, and a die
+under them (🎲, "Show three more ideas") deals three more to both: never
+one showing, and each of the twelve once before any again (a deck,
+shuffled again when it runs out; a reload deals the first three again).
 They are suggestions: nothing is made, sent or shown as if it were.
 Pressed, one goes into the composer of the person's chat, selected at its
 `…`, for them to change and send: the chat open, if it is their own; else

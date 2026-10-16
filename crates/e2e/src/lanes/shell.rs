@@ -928,10 +928,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // its windows (the agents' screens) closed: the desktop itself
     b.eval(&page, "([...document.querySelectorAll('#stack .pane button[aria-label=Close]')].forEach((b) => b.click()), true)")?;
     let bare = b.until(&page, "document.getElementById('viewer').classList.contains('is-empty') && document.getElementById('desktop-empty').getBoundingClientRect().height > 0", wait);
-    let empty = b.eval(&page, "({ title: document.querySelector('#desktop-empty .desktop-empty-title')?.textContent ?? null, asks: [...document.querySelectorAll('#desktop-empty .desktop-suggestion')].map((b) => b.textContent), apps: document.querySelectorAll('#apps [data-key^=\"app:\"]').length })")?;
+    let empty = b.eval(&page, "({ title: document.querySelector('#desktop-empty .desktop-empty-title')?.textContent ?? null, asks: [...document.querySelectorAll('#desktop-empty .desktop-suggestion')].map((b) => b.textContent), die: document.querySelector('#desktop-empty .prompt-dice')?.getAttribute('aria-label') ?? null, apps: document.querySelectorAll('#apps [data-key^=\"app:\"]').length })")?;
     s.ok(
-        "at a desktop's width the desktop shows beside the chat: no apps yet, it says where they land and offers three ways to ask their agent for one, and its dock offers Add",
-        desktop && bare && empty["apps"] == 0 && empty["title"] == "Your apps land here" && empty["asks"].as_array().is_some_and(|l| l.len() == 3),
+        "at a desktop's width the desktop shows beside the chat: no apps yet, it says where they land and offers three ways to ask their agent for one, the first three of the twelve, with a die for three more, and its dock offers Add",
+        desktop && bare && empty["apps"] == 0 && empty["title"] == "Your apps land here" && strings(&empty["asks"]) == APP_PROMPTS[..3] && empty["die"] == DIE_LABEL,
         &empty,
     );
     let _ = b.screenshot(&page, &shots.join("desktop-empty.png"));
@@ -1260,10 +1260,12 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// scrolling, with its sidebar open and closed, a chat holding a long
 /// word, code and a wide table (the table scrolls in its own box), the
 /// launcher, settings (its Your data with an export ready, its widest
-/// rows), the share sheet, an app's window and the ways to ask for one;
-/// no field a phone zooms into on focus (16px or more), in the shell, the
-/// chat, the launcher, settings and the sheet; and, at 375, a way to ask
-/// pressed goes into the chat's composer, the desktop's sheet closed.
+/// rows), the share sheet, an app's window and the ways to ask for one
+/// (three, then three more from its die, a target of 44 px or more inside
+/// the screen); no field a phone zooms into on focus (16px or more), in
+/// the shell, the chat, the launcher, settings and the sheet; and, at 375,
+/// a way to ask the die dealt, pressed, goes into the chat's composer, the
+/// desktop's sheet closed.
 /// Safari's keyboard, bounce and zoom are not Chrome's: a phone tests those.
 fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -1361,17 +1363,31 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.eval(page, "(document.querySelector('#apps [data-key^=\"app:\"]')?.click(), true)")?;
         b.until(page, "!!document.querySelector('#stack .pane iframe')", wait);
         places.push(("an app's window", b.eval(page, PAGE_FITS)?));
-        // ways to ask for an app: the dock's Add, in the desktop's sheet
+        // ways to ask for an app: the dock's Add, in the desktop's sheet, three
         let prompts = "#stack .pane[data-key=prompts] .app-prompt";
+        let die = "#stack .pane[data-key=prompts] .prompt-dice";
+        let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
         b.eval(page, "(document.getElementById('add-app')?.click(), true)")?;
-        b.until(page, &format!("document.querySelectorAll('{prompts}').length === 8"), wait);
+        b.until(page, &format!("document.querySelectorAll('{prompts}').length === 3"), wait);
         places.push(("ways to ask for an app", b.eval(page, PAGE_FITS)?));
+        // and three more from its die, a thumb's target in the sheet, every one inside the screen
+        b.until(page, settled, wait);
+        let first = b.eval(page, &format!("[...document.querySelectorAll('{prompts}')].map((b) => b.textContent)"))?;
+        b.eval(page, &format!("(document.querySelector('{die}')?.click(), true)"))?;
+        let dealt = b.until(page, &format!("(() => {{ const h = [...document.querySelectorAll('{prompts}')].map((b) => b.textContent); return h.length === 3 && h.every((p) => !{first}.includes(p)); }})()"), wait);
+        b.until(page, settled, wait);
+        let target = b.eval(
+            page,
+            &format!("(() => {{ const r = document.querySelector('{die}')?.getBoundingClientRect(); const inside = [...document.querySelectorAll('{prompts}')].every((b) => b.getBoundingClientRect().right <= innerWidth + 1); \
+              return {{ ok: !!r && r.width >= 44 && r.height >= 44 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && inside, die: r && [r.left, r.top, r.width, r.height], inside, width: innerWidth, height: innerHeight }}; }})()"),
+        )?;
+        let fits = b.eval(page, PAGE_FITS)?;
+        places.push(("ways to ask, dealt by its die", json!({ "ok": dealt && target["ok"] == true && fits["ok"] == true, "first": first, "target": target, "page": fits })));
         if w == 375 {
-            b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-prompts.png")));
-            let text = b.eval(page, &format!("document.querySelectorAll('{prompts}')[3]?.textContent ?? ''"))?.as_str().unwrap_or("").to_string();
+            let text = b.eval(page, &format!("document.querySelector('{prompts}')?.textContent ?? ''"))?.as_str().unwrap_or("").to_string();
             let before = chat_count(api, session, &chat);
-            b.eval(page, &format!("(document.querySelectorAll('{prompts}')[3]?.click(), true)"))?;
+            b.eval(page, &format!("(document.querySelector('{prompts}')?.click(), true)"))?;
             let filled = s.eventually(wait, || b.eval_in_frame(page, &chat, COMPOSER).ok().is_some_and(|v| v["value"] == text.as_str() && v["focused"] == true));
             let uncovered = b.until(page, "!document.getElementById('layout').classList.contains('right-open') && !document.getElementById('layout').classList.contains('left-open') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
             let seen = b.eval_in_frame(page, &chat, "(() => { const r = document.getElementById('text').getBoundingClientRect(); return { top: r.top, bottom: r.bottom, innerHeight }; })()")?;
@@ -1387,7 +1403,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         }
         let bad: Vec<Value> = places.iter().filter(|(_, v)| v["ok"] != true).map(|(p, v)| json!({ "place": p, "seen": v })).collect();
         s.ok(
-            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet, an app's window and the ways to ask for one"),
+            &format!("at {w} px on a phone, the page stays in its viewport, never scrolling or wider: the chat (its sidebar closed and open), a long word, code and a wide table, the launcher, settings and its Your data, the share sheet, an app's window, and the ways to ask for one, three and three more from its die (a 44 px target)"),
             echoed && bad.is_empty(),
             json!({ "bad": bad, "places": places.iter().map(|(p, _)| p).collect::<Vec<_>>() }),
         );
@@ -2510,13 +2526,40 @@ fn chat_count(api: &Api, session: &str, chat: &str) -> usize {
     shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=1000"), None, &[]).ok().and_then(|r| r.body["records"].as_array().map(Vec::len)).unwrap_or(usize::MAX)
 }
 
+/// The ways to ask for an app the shell offers, three at a time (Paul's
+/// twelve, 2026-10-16, in his order: `APP_PROMPTS` in cell/shell/shell.js),
+/// and the label of the die that deals three more.
+const APP_PROMPTS: [&str; 12] = [
+    "Make a shared grocery list my family can add to from their phones",
+    "Tell me on my phone as soon as … comes back in stock or drops in price",
+    "Every morning, read these sites and send me a short summary: …",
+    "Make a page for our trip to … where we log who paid for what and it shows who owes whom",
+    "Build a habit tracker that shows my weekly streak for: …",
+    "Make an RSVP page for my dinner on Saturday that tells me who's coming",
+    "Make a reading list where I paste a link and it keeps the title and a one-line summary",
+    "Build a chore chart for our house that rotates the jobs each week between: …",
+    "Make a page where my team votes on … and everyone sees the results live",
+    "Make a page where friends pick which evenings work for …, and it shows the best night",
+    "Make a status board that pings me when a build or deploy fails for …",
+    "Make a trip planner for … that my friends can add ideas and dates to",
+];
+const DIE_LABEL: &str = "Show three more ideas";
+
+/// A JSON array's strings.
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect()
+}
+
 /// Asking for an app (Paul, 2026-10-14: "rather than spawning generic apps
 /// we teach the user how to prompt for new apps"), on a desktop's width:
-/// the empty desktop's three ways to ask (`asks`) and the dock's Add's
-/// eight, no templates; one pressed goes into the open chat's composer
-/// (one of theirs), focused, in place of what was typed and of a quote,
-/// its `…` selected, and nothing is sent (the chat's records stay as they
-/// were). The chat it went to.
+/// the empty desktop's three ways to ask (`asks`) and the dock's Add's,
+/// three at a time (Paul, 2026-10-16), the same three, no templates; one
+/// pressed goes into the open chat's composer (one of theirs), focused, in
+/// place of what was typed and of a quote, its `…` selected, and nothing
+/// is sent (the chat's records stay as they were). The die deals three
+/// more: never one showing, all twelve in four hands before any again,
+/// the empty desktop's the same hand; one it dealt goes into the composer
+/// as the first did. The chat it went to.
 fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, asks: &Value, shots: &std::path::Path) -> Result<String> {
     let wait = std::time::Duration::from_secs(30);
     let open = open_chat(b, page);
@@ -2538,20 +2581,23 @@ fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // the dock's Add
     b.click(page, "#add-app")?;
     let pane = "#stack .pane[data-key=prompts]";
-    let listed = b.until(page, &format!("document.querySelectorAll('{pane} .app-prompt').length === 8"), wait);
+    let hand = format!("[...document.querySelectorAll('{pane} .app-prompt')].map((b) => b.textContent)");
+    let three = format!("document.querySelectorAll('{pane} .app-prompt').length === 3");
+    let listed = b.until(page, &three, wait);
     let shown = b.eval(
         page,
-        &format!("({{ title: document.querySelector('{pane} .pane-title')?.textContent ?? null, prompts: [...document.querySelectorAll('{pane} .app-prompt')].map((b) => b.textContent), templates: !!document.querySelector('{pane} form, {pane} input, .catalog') }})"),
+        &format!("({{ title: document.querySelector('{pane} .pane-title')?.textContent ?? null, prompts: {hand}, die: document.querySelector('{pane} .prompt-dice')?.getAttribute('aria-label') ?? null, templates: !!document.querySelector('{pane} form, {pane} input, .catalog') }})"),
     )?;
-    let prompts: Vec<String> = shown["prompts"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect();
+    let prompts = strings(&shown["prompts"]);
     s.ok(
-        "the dock's Add opens ways to ask their agent for an app, in a window on the desktop, and no templates: eight, the empty desktop's three first, some with a … to make theirs",
+        "the dock's Add opens ways to ask their agent for an app, in a window on the desktop, and no templates: three at a time, the first three of the twelve (the empty desktop's), some with a … to make theirs, and a die for three more",
         listed
             && shown["title"] == "Ask for an app"
             && shown["templates"] == false
-            && prompts.len() == 8
-            && asks.as_array().is_some_and(|a| a.iter().zip(&prompts).all(|(x, p)| x == p.as_str()))
-            && prompts.iter().any(|p| p.contains('…')),
+            && prompts == APP_PROMPTS[..3]
+            && strings(asks) == prompts
+            && prompts.iter().any(|p| p.contains('…'))
+            && shown["die"] == DIE_LABEL,
         &shown,
     );
     b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
@@ -2576,6 +2622,45 @@ fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         "one pressed goes into the open chat's composer in place of what was typed, and clears the reply's quote set just before (a request is no reply), focused, its … selected to type over; the window closes, and nothing is sent",
         quoted && composed && closed && framed && after == before,
         json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after], "quoted": quoted, "framed": framed }),
+    );
+
+    // its die, the window open again on the hand it showed: four deals
+    b.click(page, "#add-app")?;
+    let reopened = b.until(page, &three, wait);
+    let mut hands = vec![strings(&b.eval(page, &hand)?)];
+    for _ in 0..4 {
+        let last = js(&serde_json::to_string(&hands[hands.len() - 1])?);
+        b.click(page, &format!("{pane} .prompt-dice"))?;
+        b.until(page, &format!("(() => {{ const h = {hand}; return h.length === 3 && JSON.stringify(h) !== {last}; }})()"), wait);
+        hands.push(strings(&b.eval(page, &hand)?));
+    }
+    let focused = b.eval(page, &format!("document.activeElement === document.querySelector('{pane} .prompt-dice')"))? == true;
+    let desktop = strings(&b.eval(page, "[...document.querySelectorAll('#desktop-empty .desktop-suggestion')].map((b) => b.textContent)")?);
+    let fresh = hands.windows(2).all(|w| {
+        let dealt: std::collections::BTreeSet<&String> = w[1].iter().collect();
+        dealt.len() == 3 && w[1].iter().all(|p| APP_PROMPTS.contains(&p.as_str()) && !w[0].contains(p))
+    });
+    let cycled: std::collections::BTreeSet<&String> = hands[..4].iter().flatten().collect();
+    s.ok(
+        "its die deals three more each time, none of the three showing: the first hand and three deals show all twelve, none twice, and the next deal none of the last; the empty desktop's is the same hand, and the die keeps the focus",
+        reopened && hands[0] == APP_PROMPTS[..3] && fresh && cycled.len() == 12 && desktop == hands[4] && focused,
+        json!({ "hands": hands, "desktop": desktop, "focused": focused }),
+    );
+    b.until(page, "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)", wait);
+    let _ = b.screenshot(page, &shots.join("desktop-prompts-dealt.png"));
+    // one it dealt, pressed
+    let text = hands[4][0].clone();
+    let slot = if text.contains('…') { "…" } else { "" };
+    let before = chat_count(api, session, chat);
+    b.eval(page, &format!("(document.querySelector('{pane} .app-prompt')?.click(), true)"))?;
+    let composed = s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER).ok().is_some_and(|v| v["value"] == text.as_str() && v["focused"] == true && v["selected"] == slot));
+    let closed = b.until(page, &format!("!document.querySelector('{pane}')"), wait);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let after = chat_count(api, session, chat);
+    s.ok(
+        "one the die dealt, pressed, goes into the composer as the first did, focused, its … (if it has one) selected; the window closes, and nothing is sent",
+        composed && closed && after == before,
+        json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after] }),
     );
     Ok(open)
 }
