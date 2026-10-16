@@ -1261,8 +1261,8 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 /// word, code and a wide table (the table scrolls in its own box), the
 /// launcher, settings (its Your data with an export ready, its widest
 /// rows), the share sheet, an app's window and the ways to ask for one
-/// (three, then three more from its die, a target of 44 px or more inside
-/// the screen); no field a phone zooms into on focus (16px or more), in
+/// (three, then three more from its die, a target of 44 px or more that a
+/// press reaches); no field a phone zooms into on focus (16px or more), in
 /// the shell, the chat, the launcher, settings and the sheet; and, at 375,
 /// a way to ask the die dealt, pressed, goes into the chat's composer, the
 /// desktop's sheet closed.
@@ -1370,7 +1370,9 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.eval(page, "(document.getElementById('add-app')?.click(), true)")?;
         b.until(page, &format!("document.querySelectorAll('{prompts}').length === 3"), wait);
         places.push(("ways to ask for an app", b.eval(page, PAGE_FITS)?));
-        // and three more from its die, a thumb's target in the sheet, every one inside the screen
+        // and three more from its die: a thumb's target in the sheet, the
+        // one a press there reaches once its window scrolls to it, every
+        // prompt inside the screen's width
         b.until(page, settled, wait);
         let first = b.eval(page, &format!("[...document.querySelectorAll('{prompts}')].map((b) => b.textContent)"))?;
         b.eval(page, &format!("(document.querySelector('{die}')?.click(), true)"))?;
@@ -1378,8 +1380,9 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         b.until(page, settled, wait);
         let target = b.eval(
             page,
-            &format!("(() => {{ const r = document.querySelector('{die}')?.getBoundingClientRect(); const inside = [...document.querySelectorAll('{prompts}')].every((b) => b.getBoundingClientRect().right <= innerWidth + 1); \
-              return {{ ok: !!r && r.width >= 44 && r.height >= 44 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && inside, die: r && [r.left, r.top, r.width, r.height], inside, width: innerWidth, height: innerHeight }}; }})()"),
+            &format!("(() => {{ const d = document.querySelector('{die}'); d?.scrollIntoView({{ block: 'nearest' }}); const r = d?.getBoundingClientRect(); const hit = !!r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === d; \
+              const inside = [...document.querySelectorAll('{prompts}')].every((b) => b.getBoundingClientRect().right <= innerWidth + 1); \
+              return {{ ok: !!r && r.width >= 44 && r.height >= 44 && r.left >= 0 && r.right <= innerWidth && hit && inside, die: r && [r.left, r.top, r.width, r.height], hit, inside, width: innerWidth, height: innerHeight }}; }})()"),
         )?;
         let fits = b.eval(page, PAGE_FITS)?;
         places.push(("ways to ask, dealt by its die", json!({ "ok": dealt && target["ok"] == true && fits["ok"] == true, "first": first, "target": target, "page": fits })));
