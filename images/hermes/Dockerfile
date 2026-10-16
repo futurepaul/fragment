@@ -253,6 +253,18 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/computer-check
 exec /opt/fragment/bin/hermes-boot check-restore
 EOF
 COPY --from=cli /out/fragment /usr/local/bin/fragment
+# Hermes' own CLI, by name, in an agent's terminal (`hermes --version`,
+# `hermes config`). Hermes runs its commands from a login shell (`bash -l`,
+# its terminal's snapshot; `bash -lic`, a background process), where
+# Debian's /etc/profile sets a user's PATH to /usr/local/bin:/usr/bin:/bin:…,
+# dropping the image's /opt/hermes/bin, which Hermes puts first. Upstream
+# links its other tools into /usr/local/bin (node, npm, python3, rg,
+# ffmpeg), not hermes.
+COPY --chmod=755 <<'EOF' /usr/local/bin/hermes
+#!/bin/sh
+# Hermes' CLI on a login shell's PATH (images/hermes/Dockerfile).
+exec /opt/hermes/bin/hermes "$@"
+EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/hooks /opt/fragment/hooks

@@ -1670,6 +1670,50 @@ async fn a_tools_temp_files_are_its_work() {
     });
 }
 
+/// Goal (Paul on preview, 2026-10-16: asked its version, an agent read
+/// "0.0.0" from Hermes' package metadata, and found `hermes` only by its
+/// full path): an agent runs Hermes' own CLI by name, each way its tools
+/// run a command. Its terminal and a background process it starts run in
+/// a login shell (`bash -l`, `bash -lic`), where Debian's `/etc/profile`
+/// sets PATH anew, without the image's `/opt/hermes/bin`; the image puts
+/// `hermes` in `/usr/local/bin` (images/hermes/Dockerfile). Pinned that
+/// it is the image's that the terminal finds, so the day Hermes' login
+/// shell keeps the image's PATH this fails and that file goes.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agent_runs_hermes_by_name() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("by-name", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // what Hermes says it is, by its full path: `Hermes Agent v0.21.7`
+    let full = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/bin/hermes", "--version"]);
+    let version = full.lines().next().and_then(|l| l.split(" (").next()).unwrap_or("").to_string();
+    assert!(version.starts_with("Hermes Agent v"), "Hermes says its version by its full path: {full:?}");
+    let terminal = tool_said(&fake, &chat, &c, "run: echo found=$(command -v hermes) && hermes --version").await;
+    let started = "/data/work/juniper--k3x9/started-hermes.txt";
+    let background = tool_said(&fake, &chat, &c, &format!("start: hermes --version > {started} 2>&1")).await;
+    let t = Instant::now();
+    // bounded: a minute
+    while !c.exec(&["test", "-s", started]) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the background process wrote nothing; the terminal said {background:?}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let background = c.exec_out(&["cat", started]);
+    let code = tool_said(&fake, &chat, &c, "code: import subprocess; print(subprocess.run(['hermes', '--version'], capture_output=True, text=True).stdout)").await;
+    let ran = [("its terminal", &terminal), ("a background process", &background), ("execute_code", &code)];
+    for (tool, text) in ran {
+        eprintln!("by name: {tool} said {text:?}");
+    }
+    for (tool, text) in ran {
+        assert!(text.contains(&version), "{tool} runs `hermes` by name, as {version:?}: {text:?}");
+    }
+    let found = said(&terminal, "found");
+    assert_eq!(found, "/usr/local/bin/hermes", "its terminal found Hermes' CLI at {found:?}: at /opt/hermes/bin/hermes, Hermes' login shell keeps the image's PATH now, and /usr/local/bin/hermes (images/hermes/Dockerfile) can go");
+}
+
 /// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
 /// doesn't work very well"): real Hermes' clarify with choices is a card
 /// showing its question, its "Other" answered in words; answered so on the
