@@ -15,8 +15,9 @@ webhook inbox, a small site. Your person signs in at {{platform}}, where
 their apps are, and shares them from there or through you.
 
 This page is the handoff. {{platform}}/llms-full.txt (the same text as
-`fragment guide`) is the whole manual: read it before you build past a
-template.
+`fragment guide`) is the whole manual (the folder, operations, jobs and
+their steps, deploys, sharing, who can do what where, the ledger,
+errors): read it all before you build past a template.
 
 ## Install
 
@@ -147,9 +148,3 @@ codex mcp add groceries -- fragment mcp groceries             # Codex
 
 `fragment list` shows what your person has. An operation without a
 `description` is no tool: describe the ones a model should use.
-
-## Then
-
-Run `fragment guide` (or read {{platform}}/llms-full.txt, the same
-text) and read it all before you build: the folder, operations, jobs and
-their steps, deploys, sharing, who can do what where, the ledger, errors.
