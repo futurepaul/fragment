@@ -370,9 +370,11 @@ mark sends the same batch again, which answers as before.
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
   ledger waives an always-on seat's awake time; no wake starts when
   `may_spend(wake)` refuses. The time a computer is kept for its failed
-  saves (a sleep's failed save to `computers.unsaved_max_ms` after it) is
-  never metered: the platform's, not its owner's (Paul, 2026-10-08;
-  docs/computers.md, "What its owner is told").
+  saves (from the start of a sleep's try whose save failed, a hung save's
+  minutes included, to `computers.unsaved_max_ms` after that failure, and
+  the try under way then to its failure) is never metered: the
+  platform's, not its owner's (Paul, 2026-10-08; docs/computers.md, "What
+  its owner is told").
 - **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
   own SQLite and its blobs, and meters `bytes × hours since the last
   sample` (`store:<fragment>@<incarnation>:<class>:<at>`) to the
