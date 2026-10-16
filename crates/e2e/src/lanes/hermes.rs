@@ -595,6 +595,40 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent its owner holds at viewer edits nothing", status_of(&held).as_deref() == Some("403"), json!(reply_of(&held)));
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": null })))?;
 
+    // decision 62 (proposed): the lead keeps the rest. In its terminal it
+    // makes a teammate in one step, acting for its owner (`fragment agent
+    // --new`, the agents-finite skill's): made, started on this computer,
+    // its job live, and its own chat with its owner, which the lead made
+    // and left, so the new one leads it and answers there. It never stops
+    // itself; it stops the teammate. Ids h140 to h142.
+    let oak = s.name("oak");
+    let made = run(s, 140, &format!("fragment agent --new {oak} --name Oak --job 'You keep the oak grove for your owner.' --json | grep -c '\"leftChat\":true' | sed 's/^/made-/'"))?;
+    let (oak_name, oak_chat) = (owner_name(&oak), owner_name(&format!("{oak}-chat")));
+    let view = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body;
+    let oak_id = view["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == oak_name.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let oak_members = api.signed(&owner, "GET", &format!("/api/f/{oak_chat}/members"), None)?.body["members"].clone();
+    let oak_agents: Vec<&Value> = oak_members.as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").collect();
+    s.ok(
+        "the lead makes a teammate from its terminal (`fragment agent --new`): running on its computer, its own chat its owner's, the teammate alone of the agents there (the lead made it and left)",
+        said(&made, "made-1") && fragment_core::npub::is_identity(&oak_id) && oak_agents.len() == 1 && oak_agents[0]["principal"] == oak_id.as_str(),
+        json!({ "reply": made, "agent": oak_name, "chat": oak_chat, "members": oak_members }),
+    );
+    let r = api.signed(&owner, "POST", &format!("/api/f/{oak_chat}/channels/chat"), Some(&json!({ "id": "o1", "body": { "text": "hello oak" } })))?;
+    let greeted = turn_of(&oak_name, &oak_chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let oak_reply = || agent_replies(&records(api, &owner, &oak_chat, "chat"), &oak_id).into_iter().find(|r| r["body"]["turn"] == greeted.as_str()).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
+    let answered = s.eventually(NEW_AGENT, || oak_reply().is_some());
+    s.ok("and the teammate answers its owner in its own chat, as itself", answered && oak_reply().is_some_and(|t| t.contains("hello oak")), json!(oak_reply()));
+    let itself = run(s, 141, "fragment agent --stop --json | grep -c 'never starts or stops itself' | sed 's/^/itself-/'")?;
+    s.ok("the lead never stops itself (the platform refuses)", said(&itself, "itself-1"), json!(itself));
+    let stopped = run(s, 142, &format!("fragment agent {oak} --stop --json | grep -c '\"running\":false' | sed 's/^/stopped-/'"))?;
+    let view = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body;
+    let still: Vec<&str> = view["agents"].as_array().into_iter().flatten().filter_map(|a| a["fragment"].as_str()).collect();
+    s.ok(
+        "it stops the teammate (its fragment kept), and runs on itself",
+        said(&stopped, "stopped-1") && !still.contains(&oak_name.as_str()) && still.contains(&agent_name.as_str()),
+        json!({ "reply": stopped, "agents": still }),
+    );
+
     // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
     // in our Hermes image"): Hermes' user runs anything as root with sudo,
     // here offline (a package it builds, through apt; a program into
