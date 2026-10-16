@@ -882,7 +882,8 @@ fragment.club until cutover (decisions 34–35).
 
 - **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
   its model block (tier, the model intercept, `x-fragment-agent`), its
-  skills' directories, its vision model, its browser and its terminal,
+  name (`agent.system_prompt`: docs/computers.md, "Its name, in our
+  Hermes image"), its skills' directories, its vision model, its browser and its terminal,
   written whole at each boot; anything Hermes or the agent wrote there
   is lost. Hermes' managed scope (`/etc/hermes/config.yaml`, which the
   boot writes for what every profile shares) cannot carry the rest: it
@@ -1252,27 +1253,6 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** any report of a downgrade.
 - **Delete when:** both zones send HSTS (at cutover, when they move to
   Cloudflare), checked by the hosted lane.
-
-## An agent's own chat's title is a copy its owner's shell keeps
-
-- **Observed:** 2026-10-14 (Paul on p5): his agent renamed itself (its
-  fragment's `meta.title`, deployed), and its own chat, titled with its
-  old name when the shell made it, kept that name in the sidebar and the
-  chat's header.
-- **Shortcut:** the shell shows an agent's own chat (`<label>-chat`, its
-  person's) by its agent's title, and, seeing the chat's own title differ,
-  writes the agent's name into the chat's `fragment.json` and deploys it,
-  once a page (cell/shell/shell.js, `followNames`; docs/api.md, "An
-  agent's name and picture").
-- **Risk:** until its owner opens the shell, what reads the chat's own
-  title (its share sheet's heading, search, the access view, an export)
-  says the old name; two of the owner's tabs may both write it (the second
-  commits nothing).
-- **First proof:** the e2e's `shell-ui` renames the agent as the CLI does,
-  and waits for the chat's own title to follow.
-- **Delete when:** a chat that is an agent's own names no title of its own
-  (the platform shows it by its agent's, as the shell does), or the
-  platform keeps the two one where it installs the agent's.
 
 ## A chat's page not framed by its owner learns a rename at the agent's next turn
 

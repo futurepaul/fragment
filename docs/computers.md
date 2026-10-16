@@ -1637,6 +1637,27 @@ bridge's prompt lives (`approvals.timeout` and `agent.clarify_timeout`
 are both `BRIDGE_PROMPT_TTL_MS`'s, an hour; `HERMES_BOOT_CARD_TIMEOUT_S`
 is a test's shorter one).
 
+### Its name, in our Hermes image
+
+An agent's name is its agent fragment's title (docs/api.md, "An agent's
+name and picture"), and the image tells the agent it at every turn, in
+every chat: each profile's own config holds it in `agent.system_prompt`
+(`hermes::told_name`: "Your name is Juniper: your agent fragment's
+title, as it is now", and that a name an earlier message or its memory
+uses was from before a rename), which Hermes reads from the profile's
+config at each turn and adds to that turn's system prompt alone (its
+ephemeral system prompt, never kept in a session's). The boot writes it
+from the title it reads for Bot Mode (below), once a round for both: at
+each boot, and every `HERMES_BOOT_MODEL_MS` (10 s) while awake, so a
+rename reaches the agent's next turn, its Bot Chat's lasting session
+too, nothing restarted; a title unread leaves the config as it was. A
+`${` in a name is broken apart (`$ {`): Hermes expands `${VAR}` in a
+config's strings from its environment. Nothing else tells the agent its
+name: its `SOUL.md` is its job (the shell's first agent's names none),
+and Hermes' Bot Mode tells it its `@handle` alone. An agent made before
+this whose `SOUL.md` still says its old name is told its name all the
+same; its owner, or the agent, may take the name out of its job.
+
 ### Bot Mode in our Hermes image
 
 Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has

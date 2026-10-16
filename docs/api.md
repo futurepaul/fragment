@@ -301,18 +301,19 @@ install of live into its face (`{kind, title, picture?}`: `picture` the
 address it is served at, below), and that face is what is shown:
 
 - its owner's list (`GET /api/fragments`: the agent fragment's `title`
-  and `picture`), so the shell's sidebar, its own chat's row and header
-  (an agent's own chat is called by its agent: The shell, below),
-  Settings, and the roster the shell hands a chat's page;
+  and `picture`), so the shell's sidebar, Settings, and the roster the
+  shell hands a chat's page (a chat's own title is the chat's, never its
+  agent's: The shell, below);
 - `__people` and `job.people` on any fragment (an agent's `title`, and
   its `picture` whole), so a chat's authors and faces, its header, its
   `@` list, and its push notifications (their `title` and `icon`: docs/
   chat-records.md, "Push");
 - the share sheet and the access view (an agent's `title`), and an
   export (its members' `title`);
-- its computer's runtime: our Hermes image names it in Bot Mode by its
-  title (docs/computers.md, "Bot Mode in our Hermes image"). Bot Mode
-  has no picture.
+- its computer's runtime: our Hermes image tells the agent its name at
+  every turn, and names it in Bot Mode by its title (docs/computers.md,
+  "Its name, in our Hermes image" and "Bot Mode in our Hermes image").
+  Bot Mode has no picture.
 
 Its label (`juniper` of `juniper--k3x9`) stays its `name` in a profile
 and its computer's view: the word that `@mentions` it, and its runtime's
@@ -336,8 +337,11 @@ past 120 characters is refused the same way. Nothing restarts: the shell
 follows its person's list (its watch), a chat's page reads its owner's
 roster as it changes and asks `__people` again as each of an agent's
 turns ends, and our Hermes image reads the title again every 10 s. A
-runtime's own files never hold either (Hermes' `profile.yaml` is written
-from the title, and written again).
+runtime's own files never hold either (Hermes' `profile.yaml`, and the
+line of its profile's config that tells it its name, are written from
+the title, and written again), nor does the agent's job: its `SOUL.md`
+says what it does, never who it is (the shell's first agent's names
+none; one an owner or agent wrote may).
 
 **Served** at `GET /api/identities/{npub}/picture`, `{npub}` the agent's
 (its fragment's own npub): the bytes of the commit whose install checked
@@ -2463,13 +2467,13 @@ the `chat` template labelled `<agent's label>-chat-<n>`, titled "New
 chat", the agent added as an editor (which wakes its computer). Its
 context is its own (an agent's runtime keys its session by its chat). An
 untitled one with that agent where nothing has been said yet opens again
-instead of another. The agent's own chat, `<label>-chat`, stays the one
-called by its agent: the shell shows it by its agent's title, Rename
-there renames the agent too (elsewhere only the chat), and a title of its
-own that differs from its agent's (an agent renamed by itself, or from
-its fragment) is set to it once the person's shell sees it, so its share
-sheet, search and export say it too (Identities, "An agent's name and
-picture"); and it is the one `fragment ask` and Hermes' Bot Mode find.
+instead of another. The agent's own chat, `<label>-chat` (the first
+run's, titled "Your first chat": below), is titled on its own as any
+chat is, never by its agent: the sidebar names the agent above it, and
+Rename in a chat's ⋯ renames that chat alone, as Rename in the agent's
+menu and Settings' Agents rename the agent alone (Identities, "An
+agent's name and picture"). It is the one `fragment ask` and Hermes'
+Bot Mode find, by its label.
 An agent shows its picture, where it has one, in place of its tinted
 image wherever the shell draws it (the sidebar, a chat's mark, the
 launcher, Settings). A chat still
@@ -2530,8 +2534,10 @@ finds.
 **The first run, in its chat.** The person's first agent is made with
 its chat (decision 10), once they hold a seat (one bought on the welcome
 is set up on its card first: docs/billing.md, The shell), and the chat
-comes first: the shell makes it and
-opens it at once with `?setup=1`, then makes the agent, assigns it to
+comes first: the shell makes it, titled "Your first chat" (Paul,
+2026-10-16: the sidebar shows the agent's name above it), and
+opens it at once with `?setup=1`, then makes the agent (its job, its
+`SOUL.md`, names it nowhere: its name is its title alone), assigns it to
 their computer, adds it to the chat (which wakes the computer) and waits
 for it to follow the chat. For that chat's frame alone the `agents`
 answer also carries `setup: {steps: [{text, state}], error}` (`state`

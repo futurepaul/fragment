@@ -2821,6 +2821,27 @@ async fn bots_message_each_other() {
         let turn = first(chat, agent, "hello in another chat");
         within(&fake, chat, &c, 180_000, "a first reply in a chat that is no Bot Chat", |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
     }
+    // each agent is told its name, its agent fragment's title, at every
+    // turn (hermes.rs, `told_name`), in its Bot Chat and any other chat:
+    // fern, renamed before her first turn, and again while her session
+    // runs, is told the new one at her next turn, nothing restarted
+    let system = |agent: &str, said: &str| calls_of(&model, agent, said).into_iter().next().map(|m| content_text(&m.body["messages"][0])).unwrap_or_default();
+    let said = system("juniper--k3x9", "hello");
+    assert!(said.contains("Your name is Juniper: your agent fragment's title"), "juniper is told her name in her Bot Chat: {said}");
+    let said = system("fern--k3x9", "hello in another chat");
+    assert!(said.contains("Your name is Fernando: ") && !said.contains("Your name is Fern:"), "fern is told the name she was given: {said}");
+    fake.with(|w| w.fragments.get_mut("fern--k3x9").expect("fern's fragment").title = "Fernanda".into());
+    let config = || c.exec_out(&["cat", "/data/hermes/profiles/fern--k3x9/config.yaml"]);
+    let t = Instant::now();
+    while !config().contains("Your name is Fernanda: ") {
+        assert!(t.elapsed() < Duration::from_secs(40), "fern's config follows her new name: {}", config());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let turn = first(&garden, "fern--k3x9", "who are you now");
+    within(&fake, &garden, &c, 180_000, "fern's turn after her rename", |w| w.bodies(&garden, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let said = system("fern--k3x9", "who are you now");
+    assert!(said.contains("Your name is Fernanda: ") && !said.contains("Your name is Fernando"), "her next turn, in the same session, is told her new name: {said}");
+    assert_eq!(c.logs().matches("\"boot.init\"").count(), 1, "nothing restarted for it");
     let started = c.logs().matches("\"botmode.started\"").count();
     c.restart();
     let t = Instant::now();

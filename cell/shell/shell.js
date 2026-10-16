@@ -117,17 +117,10 @@ const byName = (name) => state.fragments.find((f) => f.name === name);
 // a name is its label and a random suffix (decision 47): `todo--k3x9`
 const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
 const own = (f) => f.role === "owner";
-// The person's agent fragment whose own chat `name` is: the chat the shell
-// made with it, `<label>-chat` beside its `<label>` (defaultAgent), theirs.
-function ownChatOf(name) {
-  const f = byName(name);
-  const label = f?.kind === "chat" && own(f) ? labelOf(name).match(/^(.+)-chat$/)?.[1] : null;
-  return label ? state.fragments.find((a) => a.kind === "agent" && own(a) && labelOf(a.name) === label)?.name ?? null : null;
-}
-// A fragment's title; an agent's own chat is called by its agent, whose
-// name is its agent fragment's title, however that changed (docs/api.md,
-// "An agent's name and picture").
-const titleOf = (name) => byName(ownChatOf(name))?.title || byName(name)?.title || labelOf(name);
+// A fragment's title: an agent's is its name, its agent fragment's alone
+// (docs/api.md, "An agent's name and picture"); a chat's is its own,
+// whoever is in it.
+const titleOf = (name) => byName(name)?.title || labelOf(name);
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
@@ -700,10 +693,9 @@ function renderChats() {
 function openPrimaryMenu(trigger) {
   const primary = primaryAgent();
   if (!primary) return;
-  const itsChat = agentsOwnChat(primary.fragment);
   openMenu(trigger, [
     ...(primary.identity && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
-    ...(itsChat ? [{ icon: "rename", text: "Rename…", onClick: () => rename(itsChat.name) }] : []),
+    { icon: "rename", text: "Rename…", onClick: () => rename(primary.fragment) },
     { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(primary.fragment) }] : []),
   ]);
@@ -795,26 +787,20 @@ function openChatMenu(name, trigger) {
   ]);
 }
 // The identity of the person's own agent a direct chat is with (its row's
-// one agent), or of the agent whose title it carries while its row names
-// none; null for a group, or a chat with someone else's agent.
+// one agent, or the agent its label is for while its row names none:
+// `agentsOf`); null for a group, or a chat with someone else's agent.
 function chatAgentOf(name) {
   if (!name || isGroup(name)) return null;
   const id = agentsOf(name)[0];
-  if (id) return state.agents.has(id) ? id : null;
-  const title = titleOf(name);
-  return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.identity ?? null;
+  return id && state.agents.has(id) ? id : null;
 }
 // the agent fragment a direct chat is with (a group's agents keep names of their own)
 const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? null;
-// An agent's own chat: the one the shell made with it, `<label>-chat` beside
-// its `<label>` (defaultAgent), which its title follows (rename), Hermes' Bot
-// Mode messages (images/hermes/boot/src/bots.rs, `bot_chat`) and `fragment
-// ask` finds; any other chat with it ("New chat") is titled on its own.
-const isAgentsOwnChat = (name) => {
-  const agent = agentOfChat(name);
-  return !!agent && labelOf(name) === `${labelOf(agent)}-chat`;
-};
-// the person's own chat that is `agent`'s own (by its label), made or not yet
+// An agent's own chat: the one the shell made with it first, `<label>-chat`
+// beside its `<label>` (defaultAgent), which Hermes' Bot Mode messages
+// (images/hermes/boot/src/bots.rs, `bot_chat`) and `fragment ask` find. It
+// is titled on its own, as any chat ("Your first chat": FIRST_CHAT), and
+// never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 
 function openChat(name, push = true) {
@@ -1251,7 +1237,7 @@ async function composeApp(text) {
   else composing.set(name, text);
 }
 
-// ---- renaming: the chat's title (and, its own chat's, its agent's, so they stay one) ----
+// ---- renaming: a chat's title, or an agent's (its name), each alone ----
 // A fragment's title, its fragment.json's `meta.title`, deployed.
 async function retitle(name, title, message) {
   const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
@@ -1259,18 +1245,10 @@ async function retitle(name, title, message) {
   await api("POST", `/api/f/${seg(name)}/files`, { message, files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
   await api("POST", `/api/f/${seg(name)}/deploy`, {});
 }
-// What a rename of `name` retitles: an agent (its fragment, from Settings),
-// with its own chat; an agent's own chat, with its agent, so they stay one;
-// any other chat alone.
-function renamed(name) {
-  if (byName(name)?.kind === "agent") return [name, agentsOwnChat(name)?.name].filter(Boolean);
-  const agent = ownChatOf(name) ?? (isAgentsOwnChat(name) ? agentOfChat(name) : null);
-  return [agent, name].filter(Boolean);
-}
 let renaming = null;
 function rename(name) {
   renaming = name;
-  const agent = renamed(name).length > 1 || byName(name)?.kind === "agent";
+  const agent = byName(name)?.kind === "agent";
   $("rename-title").textContent = agent ? "Name your agent" : "Name this chat";
   $("rename-label").textContent = agent ? "Agent name" : "Chat name";
   $("agent-name").value = titleOf(name);
@@ -1284,7 +1262,7 @@ $("rename-form").onsubmit = async (e) => {
   const title = $("agent-name").value.trim();
   if (!title || !renaming) return;
   try {
-    for (const name of renamed(renaming)) await retitle(name, title, "rename");
+    await retitle(renaming, title, "rename");
     $("rename-agent").close();
     await load();
   } catch (err) {
@@ -1292,20 +1270,6 @@ $("rename-form").onsubmit = async (e) => {
     $("rename-error").hidden = false;
   }
 };
-// An agent's own chat keeps its agent's name (`renamed`), however the agent
-// was renamed (by itself, from its fragment or the CLI: docs/api.md, "An
-// agent's name and picture"): one whose title the list says differs is
-// retitled to it, once a page.
-const following = new Set();
-function followNames() {
-  for (const f of chats()) {
-    const title = byName(ownChatOf(f.name))?.title;
-    const key = `${f.name}\n${title}`;
-    if (!title || f.title === title || following.has(key)) continue;
-    following.add(key);
-    retitle(f.name, title, "its agent's name").catch(() => following.delete(key));
-  }
-}
 
 // ---- the launcher: one input for starting a chat or finding one again ----
 // The sidebar's +, the phone's top bar + and ⌘K (Skyler, 2026-10-12).
@@ -2780,7 +2744,16 @@ function setupChanged(change) {
   Object.assign(setup, change);
   rosterChanged();
 }
-const firstSoul = (name, owner) => `You are ${name}, ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+// Its job (its SOUL.md, written once: an agent already set up keeps its
+// own), never its name: that is its agent fragment's title alone, which a
+// rename changes (Paul, 2026-10-16: renamed, its job still said the old one).
+const firstSoul = (owner) => `You are ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+// Its chat's own title (Paul, 2026-10-16), never the agent's name, which the
+// sidebar shows above it.
+const FIRST_CHAT = "Your first chat";
+// The name of NAMES an earlier try's label was made from (`freeLabel(slug(name))`,
+// maybe with its `-<n>`), so a retry names its agent as that try would have.
+const nameOfLabel = (label) => NAMES.find((n) => new RegExp(`^${slug(n)}(-[0-9]+)?$`).test(label));
 // a chat an earlier try made before its agent: theirs, `<label>-chat`, no agent in it
 const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.name));
 // Whether the first run is owed, from the platform alone: a seat's person
@@ -2806,17 +2779,18 @@ async function defaultAgent() {
   await load();
   const owner = state.me.email || "your person";
   if (!setup) {
-    // an earlier try's names, by what it made: its agent, else its chat
+    // an earlier try's names, by what it made: its agent, else its chat's
+    // label (the chat's title is its own)
     const agent = primaryAgent();
-    const chat = agent ? agentsOwnChat(agent.fragment) : chats().find(unjoined);
-    const title = (agent && titleOf(agent.fragment)) || chat?.title || pickName();
-    const label = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : freeLabel(slug(title));
-    setup = { label, title, chat: null, made: false, joined: false, ready: false, error: null };
+    const chat = agent ? null : chats().find(unjoined);
+    const earlier = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : null;
+    const title = agent ? titleOf(agent.fragment) : (earlier && nameOfLabel(earlier)) || pickName();
+    setup = { label: earlier ?? freeLabel(slug(title)), title, chat: null, made: false, joined: false, ready: false, error: null };
   }
   setupChanged({ error: null });
   const { title, label } = setup;
   const chatName = state.fragments.find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
-    (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title })).name;
+    (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
   setupChanged({ chat: chatName });
   await load();
   if (!state.frames.has(chatName)) openChat(chatName);
@@ -2838,7 +2812,7 @@ async function defaultAgent() {
     await api("POST", `/api/f/${agent.name}/files`, {
       key: "agent-default",
       message: "the default agent",
-      files: [{ path: "SOUL.md", text: firstSoul(title, owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
+      files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
     });
   }
   await api("POST", `/api/f/${agent.name}/deploy`, {});
@@ -2968,7 +2942,6 @@ async function load(changed = false) {
   markSeen();
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
-  followNames();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});

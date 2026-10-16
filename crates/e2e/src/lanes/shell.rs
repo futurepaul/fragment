@@ -363,6 +363,9 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
 /// How long a message takes to reach a person's search: its fragment's
 /// alarm sends it, and a backoff waits on a list that holds no role yet.
 const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The first chat's title (cell/shell/shell.js, `FIRST_CHAT`): its own,
+/// never its agent's name.
+const FIRST_CHAT: &str = "Your first chat";
 
 /// A search's message hits in `fragment`.
 fn hits_in(r: &Reply, fragment: &str) -> Vec<Value> {
@@ -844,6 +847,23 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "agent": row, "agents": owned("agent"), "chats": owned("chat") }),
     );
 
+    // its chat's title is its own (Paul, 2026-10-16), and its job never
+    // names it: its name is its agent fragment's title alone
+    let first_name = row.as_str().unwrap_or("").to_string();
+    let chat_row = js(&format!("#chats [data-key={}] .label", js(&format!("chat:{chat}"))));
+    let shown = b.eval(&page, &format!("({{ row: document.querySelector({chat_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
+    let listed = own_row_of(api, &session, &chat);
+    s.ok(
+        "their first chat is titled \"Your first chat\", never its agent's name: its row, the shell's header and its own title",
+        listed["title"] == FIRST_CHAT && shown["row"] == FIRST_CHAT && shown["header"] == FIRST_CHAT && first_name != FIRST_CHAT,
+        json!({ "listed": listed, "shown": shown, "agent": first_name }),
+    );
+    let soul = shell(api, &session, "GET", &format!("/api/f/{}/file?path=SOUL.md", own_named(api, &session, &first_label)?), None, &[])?;
+    s.ok(
+        "its first agent's job (its SOUL.md) says what it does and never its name",
+        soul.status == 200 && soul.text.contains("default agent") && !first_name.is_empty() && !soul.text.contains(&first_name),
+        json!({ "name": first_name, "soul": soul.text }),
+    );
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
     s.ok("the shell's first agent names the cheap tier (GLM-5.3 Flash)", settings.status == 200 && settings.body["tier"] == "cheap", &settings);
     // ready is ready: its computer awake, and the agent following its chat
@@ -1113,12 +1133,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 /// An agent's name and picture in the shell (docs/api.md, "An agent's name
 /// and picture"): Settings' Agents renames the person's agent and gives it
 /// a picture from the row's own controls, and both reach the sidebar, its
-/// own chat's row and header, its settings row, the chat's page (its
-/// header, and its replies' byline and face) and the share sheet, with no
-/// reload. Renamed elsewhere (as `fragment agent` does), the shell follows,
-/// and titles its own chat after it. Remove takes the picture away
-/// everywhere. On a phone the name's field is 16px (no zoom on focus) and
-/// the row's controls stay on screen.
+/// settings row, the chat's page (its header, and its replies' byline and
+/// face) and the share sheet, with no reload, while its first chat keeps
+/// its own title. Renamed elsewhere (as `fragment agent` does), the shell
+/// and its page follow, and nothing on its page says an old name (its job
+/// names none). Rename asks for the chat's name in the chat's ⋯, the
+/// agent's in its menu. Remove takes the picture away everywhere. On a
+/// phone the name's field is 16px (no zoom on focus) and the row's
+/// controls stay on screen.
 fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     b.viewport(page, 1280, 900, false)?;
@@ -1140,12 +1162,13 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let renamed = b.until(
         page,
         &format!(
-            "document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === 'Frank' && document.querySelector({screen})?.textContent === \"Open Frank's screen\""
+            "document.querySelector('#sidebar-agent .title')?.textContent === 'Frank' && document.querySelector({face})?.textContent === 'Frank' && document.querySelector({own_row})?.textContent === {first_chat} && document.querySelector({screen})?.textContent === \"Open Frank's screen\"",
+            first_chat = js(FIRST_CHAT)
         ),
         wait,
     );
     s.ok(
-        "Settings' Agents renames the person's agent: its name shows in the sidebar, its own chat's row, its settings row and its screen's button, with no reload",
+        "Settings' Agents renames the person's agent: its name shows in the sidebar, its settings row and its screen's button, with no reload, and its first chat's row keeps the chat's own title",
         asked && renamed,
         b.eval(page, &format!("({{ pill: document.querySelector('#sidebar-agent .title')?.textContent, row: document.querySelector({face})?.textContent, chat: document.querySelector({own_row})?.textContent, screen: document.querySelector({screen})?.textContent }})"))?,
     );
@@ -1165,9 +1188,9 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     b.eval(page, &format!("(document.querySelector({face})?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("settings-agent-face.png"));
-    // the chat: its header in the shell, and its page
+    // the chat: its header in the shell (the chat's own title), and its page
     open_row(b, page, chat, wait)?;
-    let headed = b.until(page, "document.getElementById('chat-title').textContent === 'Frank'", wait);
+    let headed = b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(FIRST_CHAT)), wait);
     let in_page = format!(
         "(() => {{ const p = {}; const m = document.querySelector('#head-marks img'); const by = [...document.querySelectorAll('.msg.agent .who')].pop(); \
          return document.getElementById('head-label')?.textContent === 'Frank' && !!m && m.src.endsWith(p) && m.naturalWidth === 16 && !!by && by.textContent.includes('Frank') && !!by.querySelector('img') && by.querySelector('img').src.endsWith(p); }})()",
@@ -1175,7 +1198,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     let framed = s.eventually(wait, || b.eval_in_frame(page, chat, &in_page).ok() == Some(Value::Bool(true)));
     s.ok(
-        "its chat's header is its new name, and the chat's page names it and shows its picture in its header and its replies' byline",
+        "its first chat's header in the shell is still the chat's own title, and the chat's page names the agent anew and shows its picture in its header and its replies' byline",
         headed && framed,
         b.eval_in_frame(page, chat, "({ head: document.getElementById('head-label')?.textContent, marks: document.getElementById('head-marks')?.innerHTML, by: [...document.querySelectorAll('.msg.agent .who')].pop()?.innerHTML })")?,
     );
@@ -1183,19 +1206,58 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let sheet = super::signin::with_session(api, "GET", &format!("/share/{chat}"), me.session)?;
     s.ok("its chat's share sheet names it so, with its picture", sheet.status == 200 && sheet.text.contains("Frank") && sheet.text.contains(&format!("src=\"{path}\"")), &sheet);
     // renamed elsewhere, as `fragment agent --name` does (its files, then a
-    // deploy): the shell follows, and titles its own chat after it
+    // deploy): the sidebar and the chat's page follow; the chat's own title
+    // is the chat's, and stays
     let mut manifest = shell(api, me.session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
     manifest["meta"]["title"] = json!("Frankie");
     let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
     let wrote = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
     let deployed = shell(api, me.session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
-    let followed = b.until(page, &format!("document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie' && document.querySelector({own_row})?.textContent === 'Frankie' && document.getElementById('chat-title').textContent === 'Frankie'"), wait);
-    let titled = s.eventually(wait, || own_row_of(api, me.session, chat)["title"] == "Frankie");
+    let followed = b.until(page, "document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie'", wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
+    let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
+    let listed = own_row_of(api, me.session, chat);
     s.ok(
-        "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar, its chat's row, header and page follow with no reload, and the shell titles its own chat after it",
-        wrote.status == 200 && deployed.status == 200 && followed && titled && in_frame,
-        json!({ "chat": own_row_of(api, me.session, chat) }),
+        "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar and the chat's page follow with no reload, and its first chat keeps its own title: its row, its header and its fragment's",
+        wrote.status == 200 && deployed.status == 200 && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
+        json!({ "shown": kept, "chat": listed }),
+    );
+    // its page (its menu's Its profile): its new name, and no old one
+    // anywhere on it (its job names none)
+    b.click(page, "#sidebar-agent")?;
+    let profile = menu_item(b, page, "Its profile")?;
+    let mut seen = Value::Null;
+    // its own origin's frame (a screen's names it in its address too)
+    let its_page = api.site_origin(&agent);
+    let named = profile
+        && s.eventually(wait, || {
+            seen = b.eval_in_frame(page, &its_page, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title, soul: document.getElementById('soul')?.textContent ?? '', text: document.body.innerText })").unwrap_or(Value::Null);
+            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent"))
+        });
+    let text = seen["text"].as_str().unwrap_or("");
+    let _ = b.screenshot(page, &shots.join("agent-page-renamed.png"));
+    s.ok(
+        "its page shows its new name, and none of the names it had (its job says what it does, never who it is)",
+        named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank"),
+        json!({ "was": me.first_title, "seen": seen }),
+    );
+    // Rename asks for what it renames: the chat's name in the chat's ⋯, the
+    // agent's in its menu, each alone
+    let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
+        b.click(page, open)?;
+        menu_item(b, page, "Rename…")?;
+        b.until(page, "document.getElementById('rename-agent').open", wait);
+        let said = b.eval(page, "({ title: document.getElementById('rename-title').textContent, value: document.getElementById('agent-name').value })")?;
+        b.eval(page, "(document.getElementById('rename-cancel').click(), true)")?;
+        b.until(page, "!document.getElementById('rename-agent').open", wait);
+        Ok(said)
+    };
+    let chats_own = asked_for(b, "#chat-options")?;
+    let agents_own = asked_for(b, "#sidebar-agent")?;
+    s.ok(
+        "Rename… in the first chat's ⋯ names the chat (\"Name this chat\", its own title), and in the agent's menu the agent (\"Name your agent\", its name)",
+        chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Frankie" }),
+        json!({ "chat": chats_own, "agent": agents_own }),
     );
     // Remove: gone everywhere
     b.click(page, "#settings")?;
@@ -2051,7 +2113,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("searching a message's words lists it under Messages, in its chat", found, b.eval(page, "document.getElementById('search-results').innerText")?);
     let _ = b.screenshot(page, &shots.join("desktop-search.png"));
     b.click(page, &hit)?;
-    let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
+    let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(FIRST_CHAT)), wait);
     s.ok("clicking it opens its chat", opened, b.eval(page, "document.getElementById('chat-title').textContent")?);
     b.click(page, "#sidebar-new-chat")?;
     b.eval(page, &fill("#workspace-search", "Reader"))?;
@@ -2073,7 +2135,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let row_of = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
     b.click(page, "#chat-options")?;
     let archived = menu_item(b, page, "Archive")?;
-    let left = b.until(page, &format!("!{} && {} && document.getElementById('chat-title').textContent !== {}", row_of(&first_chat), row_of(&group), js(me.first_title)), wait);
+    let left = b.until(page, &format!("!{} && {} && document.getElementById('chat-title').textContent !== {}", row_of(&first_chat), row_of(&group), js(FIRST_CHAT)), wait);
     s.ok("Archive, from its ⋯: the chat leaves the list, and another opens", archived && left, b.eval(page, "document.getElementById('chats').innerText")?);
     b.click(page, "#sidebar-new-chat")?;
     b.eval(page, &fill("#workspace-search", "water garden"))?;
@@ -2082,7 +2144,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("search still finds it, marked archived", marked, b.eval(page, "document.getElementById('search-results').innerText")?);
     b.click(page, &hit)?;
     // the launcher gone (it fades out over the page), its chat open
-    b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
+    b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(FIRST_CHAT)), wait);
     b.click(page, "#chat-options")?;
     let unarchived = menu_item(b, page, "Unarchive")?;
     let back = b.until(page, &row_of(&first_chat), wait);
