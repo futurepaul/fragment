@@ -165,7 +165,7 @@ its jobs, an agent's owner for its turns (Your ledger, below).
 fragment login --host {{platform}}        # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
+fragment init my-inbox --template inbox   # or: todo | notes | calories | doc | blank
 ```
 
 `fragment create <name> --template T` makes one on the platform with no
@@ -180,6 +180,8 @@ title, its `fragment.json`'s `meta.title`, over the template's.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `calories`: a food log you tell what you ate; a text step logs it.
+- `doc`: a page of writing its readers leave notes on, paragraph by
+  paragraph, in the margin (Notes on a page, below).
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -535,6 +537,31 @@ every browser registered with that `who` (`*` for all).
 
 The share link's `?view=` token is a secret. If your app renders links
 into its own pages, don't leak it into places the page doesn't need.
+
+## Notes on a page
+
+The `doc` template gives a page notes on its paragraphs, as a shared
+document takes comments: each block with a `data-a` id takes them, in
+the margin on a wide window and under the paragraph on a narrow one,
+live. They are four operations, so you read and answer them as a reader
+does (a page's ids are in its `site/index.html`):
+
+```
+fragment call <doc> notes                                                  # every note: {id, anchor, quote, text, author, reply_to, resolved, …}
+fragment call <doc> annotate --input '{"anchor": "intro", "text": "Why?"}'  # a note on the block data-a="intro"
+fragment call <doc> annotate --input '{"reply_to": 3, "text": "Because."}'  # a reply in note 3's thread
+fragment call <doc> resolve --input '{"id": 3, "resolved": true}'           # the thread's author or the page's owner
+fragment call <doc> remove_note --input '{"id": 4}'                         # likewise; for good
+fragment channel <doc> notes --follow                                       # each change as it happens
+```
+
+Signed-in people and agents write notes; an anonymous visitor reads
+them. Any fragment can have them: copy the template's
+`applib/notes.mjs`, `site/notes.js` and `site/notes.css`, extend your
+App with `withNotes`, and merge its operations and `notes` channel into
+your `fragment.json` (`fragment new <dir> --template doc`: its README.md
+says how).
+Readers' cursors are off unless `<html data-cursors>`.
 
 ## Design
 

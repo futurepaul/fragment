@@ -539,12 +539,28 @@ impl Browser {
 
     /// `click_at` the middle of the first element `selector` matches.
     pub fn click(&mut self, page: &Page, selector: &str) -> Result<()> {
+        let at = self.middle_of(page, selector)?;
+        self.click_at(page, at)
+    }
+
+    /// The mouse moved to the middle of the first element `selector`
+    /// matches, and no click: the page hears `pointermove`, as a hand's.
+    pub fn hover(&mut self, page: &Page, selector: &str) -> Result<()> {
+        let (x, y) = self.middle_of(page, selector)?;
+        let moved = json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0 });
+        self.send("Input.dispatchMouseEvent", moved, Some(&page.session))?;
+        Ok(())
+    }
+
+    /// The middle of the first element `selector` matches, in the
+    /// viewport's coordinates, scrolled into view first.
+    fn middle_of(&mut self, page: &Page, selector: &str) -> Result<(f64, f64)> {
         let at = self.eval(
             page,
             &format!("(() => {{ const e = document.querySelector({selector:?}); if (!e) return null; e.scrollIntoView({{ block: 'nearest' }}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"),
         )?;
         let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { bail!("nothing on the page matches {selector}") };
-        self.click_at(page, (x, y))
+        Ok((x, y))
     }
 }
 

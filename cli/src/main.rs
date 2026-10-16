@@ -173,7 +173,7 @@ enum Cmd {
     Init {
         /// Fragment name (also the folder name, created in the current dir)
         name: String,
-        /// Template name: todo (default) | inbox | notes
+        /// Template name: todo (default) | blank | inbox | notes | calories | doc (`fragment new --list`)
         #[arg(long)]
         template: Option<String>,
     },
@@ -378,7 +378,7 @@ enum Cmd {
     New {
         /// Target directory (created if missing)
         dir: Option<PathBuf>,
-        /// Template name: todo (default) | inbox | notes
+        /// Template name: todo (default) | blank | inbox | notes | calories | doc (`fragment new --list`)
         #[arg(long)]
         template: Option<String>,
         /// List available templates

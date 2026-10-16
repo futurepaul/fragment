@@ -71,7 +71,7 @@ pub fn agent_doc(text: &str, platform: &str, fragment: &str) -> String {
 /// that names none of them lists them in this order), each copied into
 /// the fragment's repo (cell/src/publish.rs). `notes` stays with the CLI
 /// (`fragment new --template notes`).
-pub static CATALOG: [&Template; 4] = [&BLANK, &TODO, &INBOX, &CALORIES];
+pub static CATALOG: [&Template; 5] = [&BLANK, &TODO, &INBOX, &CALORIES, &DOC];
 
 /// A file of cell/shell/ by its path there: a published one, or a page
 /// (`index.html`, `admin.html`).
@@ -292,7 +292,7 @@ pub(crate) mod tests {
         assert!(SHELL.iter().chain([&SKILL_MD, &GUIDE_MD]).all(|f| hashes.contains(f.sha256)));
         assert!(NOTES.files.iter().any(|f| f.path == "app.mjs" && !hashes.contains(f.sha256)), "notes is the CLI's");
         assert!(NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).all(|f| hashes.contains(f.sha256)), "its viewer is the brain's");
-        assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories"]);
+        assert_eq!(CATALOG.map(|t| t.name), ["blank", "todo", "inbox", "calories", "doc"]);
     }
 
     /// Goal: the assets directory a build writes is the release's files by
@@ -361,5 +361,45 @@ pub(crate) mod tests {
             let undescribed: Vec<&String> = m.operations.iter().filter(|(_, d)| d.description.is_none()).map(|(op, _)| op).collect();
             assert!(undescribed.is_empty(), "{} leaves {undescribed:?} undescribed", t.name);
         }
+    }
+
+    /// Goal: the doc template's notes hold together, so a fragment that
+    /// copies them gets what the README says. Valid: its manifest's
+    /// operations are exactly the verbs `applib/notes.mjs` defines and
+    /// guards, each public and described, beside the `notes` channel it
+    /// publishes to, which takes no posts; `app.mjs` takes the mixin; the
+    /// page marks its column and blocks and loads the notes, cursors off;
+    /// the README names every verb. Invalid: a verb renamed in one place
+    /// and not the others.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_doc_templates_notes_hold_together() {
+        use fragment_proto::Role;
+        let text = |path: &str| std::str::from_utf8(DOC.file(path).unwrap_or_else(|| panic!("doc has {path}")).bytes).expect("utf-8");
+        let m = fragment_core::manifest::parse(text("fragment.json").as_bytes()).expect("doc's fragment.json");
+        let verbs = ["notes", "annotate", "resolve", "remove_note"];
+        let declared: Vec<&str> = m.operations.keys().map(String::as_str).collect();
+        let mut sorted = verbs.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(declared, sorted, "doc declares the notes' verbs, and only them");
+        for (name, op) in &m.operations {
+            assert_eq!(op.role, Role::Public, "{name}: whoever opens the page; the app decides who writes");
+            assert!(op.description.as_deref().is_some_and(|d| !d.is_empty()), "{name} is described");
+        }
+        let notes = m.channels.get("notes").expect("the notes channel");
+        assert!(notes.read == Role::Public && notes.post.is_none(), "the app alone writes the notes channel, which its readers read");
+        let mixin = text("applib/notes.mjs");
+        assert!(mixin.contains(&format!("const VERBS = {verbs:?};")), "the mixin guards the same verbs");
+        for verb in verbs {
+            assert!(mixin.contains(&format!("\n    {verb}(")), "the mixin defines {verb}");
+            assert!(text("README.md").contains(&format!("`{verb}`")), "the README names {verb}");
+        }
+        assert!(mixin.contains("call.publish(\"notes\""), "its changes go to the notes channel");
+        assert!(text("app.mjs").contains("extends withNotes(DurableObject)"), "app.mjs takes the mixin");
+        let page = text("site/index.html");
+        for wanted in ["<main data-notes>", "class=\"notes-page\"", "./notes.js", "./notes.css", "./__fragment.css", "data-a=\"lede\""] {
+            assert!(page.contains(wanted), "the page has {wanted}");
+        }
+        assert!(page.contains("<html lang=\"en\">"), "cursors are off by default (the e2e turns them on by this tag)");
     }
 }

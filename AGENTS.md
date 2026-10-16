@@ -99,7 +99,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, faces, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, transcribe, finite-private, orgs, billing,
+  brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
   shell-ui, wipe, hermes, agent-smoke, sync, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
@@ -226,7 +226,7 @@ prebuilt bundle is in the debt ledger).
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
-- `cargo xtask try <todo|inbox|notes> [name]` (with `cargo xtask dev` running):
+- `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
   a curl for the inbox, and a `fragment` alias for the dev stack. The
@@ -234,7 +234,8 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, and `calories`: a channel trigger and a text step), and
+  `blank`, `calories`: a channel trigger and a text step, and `doc`:
+  paragraph notes, a mixin in `applib/` any app can take), and
   `fragment create --template` makes one on the platform; the shell offers
   no templates: its dock's Add teaches how to ask an agent for an app.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,

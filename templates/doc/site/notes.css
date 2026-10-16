@@ -1,0 +1,69 @@
+/* Notes on a page's paragraphs (notes.js), on the platform's stylesheet
+   (./__fragment.css: its colors, Funnel Sans, its radius). Every class is
+   `notes-…`, so a page's own styles keep their names. The margin needs
+   the column inside a `.notes-page`: at 72rem and wider the two sit side
+   by side, threads level with their paragraph; narrower, the margin is
+   hidden and notes open under the paragraph. --notes-column is the
+   column's width beside the margin. */
+[data-a] { position: relative; }
+[data-a].notes-has::after { content: ""; position: absolute; top: .15em; bottom: .15em; right: -.6rem; width: 3px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
+[data-a].notes-lit { border-radius: 6px; background-color: color-mix(in srgb, var(--accent) 6%, transparent); box-shadow: 0 0 0 .35rem color-mix(in srgb, var(--accent) 6%, transparent); }
+
+.notes-gutter { display: none; }
+@media (min-width: 72rem) {
+  .notes-page { display: grid; grid-template-columns: minmax(0, var(--notes-column, 44rem)) 18rem; column-gap: 4rem; justify-content: center; align-items: start; }
+  .notes-page > :not(.notes-gutter) { margin: 0; width: 100%; max-width: none; }
+  .notes-gutter { display: block; position: relative; }
+}
+.notes-slot { position: absolute; left: 0; right: 0; display: grid; gap: .5rem; }
+.notes-thread { display: grid; gap: .5rem; padding: .6rem .7rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); font-size: .8125rem; text-align: left; }
+.notes-thread.lit { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.notes-thread.resolved { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .6rem; background: transparent; color: var(--muted); }
+.notes-note { display: grid; gap: .2rem; }
+.notes-note + .notes-note { border-top: 1px solid var(--line); padding-top: .5rem; }
+.notes-note.by-owner { border-left: 2px solid var(--accent); padding-left: .5rem; }
+.notes-head { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.notes-head time { margin-left: auto; color: var(--faint); font-size: .75rem; }
+.notes-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notes-actions { display: flex; gap: .9rem; }
+.notes-tag { display: inline-block; font: 500 .6875rem/1.5 var(--font-mono); letter-spacing: .04em; padding: 0 .4rem; border-radius: 4px; border: 1px solid var(--line-strong); color: var(--muted); white-space: nowrap; }
+.notes-tag.owner { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+button.notes-link { min-height: 0; padding: 0; border-radius: 0; background: none; color: var(--muted); font-size: .75rem; font-weight: 500; }
+button.notes-link:hover { color: var(--accent); }
+button.notes-ghost { background: transparent; color: var(--fg); border: 1px solid var(--line-strong); }
+.notes-quote { margin: 0; padding: .1rem .5rem; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: .78rem; font-style: italic; }
+.notes-composer { display: grid; gap: .45rem; padding: .6rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); font-size: .8125rem; }
+.notes-thread .notes-composer { padding: 0; border: 0; background: none; }
+.notes-composer p { margin: 0; }
+.notes-composer textarea { width: 100%; font-size: .875rem; }
+.notes-composer-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.notes-composer button { min-height: 2rem; padding: 0 .9rem; font-size: .8125rem; }
+/* the sign-in, as the composer's main action: a pill of the text's color */
+a.notes-signin { display: inline-flex; align-items: center; min-height: 2rem; padding: 0 .9rem; border-radius: 999px; background: var(--fg); color: var(--bg); font-size: .8125rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.notes-err { margin: 0; color: var(--danger); font-size: .75rem; }
+.notes-muted { color: var(--muted); }
+.notes-inline { display: grid; gap: .5rem; margin: .4rem 0 1rem; }
+.notes-toggle { justify-self: start; min-height: 1.75rem; padding: 0 .7rem; background: var(--soft); color: var(--fg); border: 1px solid var(--line); font-size: .75rem; font-weight: 500; }
+.notes-orphans { margin-top: 3rem; }
+.notes-orphan { display: grid; gap: .4rem; margin-bottom: .75rem; }
+.notes-avatar { display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; object-fit: cover; color: #fff; font-size: 10px; font-weight: 700; }
+.notes-status { position: fixed; left: .75rem; bottom: max(.75rem, env(safe-area-inset-bottom)); z-index: 40; margin: 0; padding: .3rem .7rem; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; color: var(--danger); font-size: .75rem; }
+
+/* the note button: in the gap beside the paragraph, or a pill at the
+   bottom of a narrow page */
+.notes-btn { position: absolute; z-index: 25; min-height: 1.6rem; padding: 0 .65rem; background: var(--surface); color: var(--fg); border: 1px solid var(--line-strong); font-size: .75rem; }
+.notes-btn:hover { border-color: var(--accent); color: var(--accent); }
+.notes-btn.floating { position: fixed; left: 50%; bottom: max(1rem, env(safe-area-inset-bottom)); transform: translateX(-50%); min-height: 2.5rem; padding: 0 1.1rem; background: var(--fg); color: var(--bg); border: 0; font-size: .875rem; z-index: 40; }
+
+/* other readers, with <html data-cursors>: cursors over the page, faces
+   in the corner; a cursor near the edge must never widen the page */
+html[data-cursors] body { overflow-x: clip; }
+.notes-cursors { position: absolute; top: 0; left: 0; width: 0; height: 0; pointer-events: none; z-index: 30; }
+.notes-cursor { position: absolute; top: 0; left: 0; transition: transform .12s linear; }
+.notes-cursor svg path { fill: var(--c); stroke: var(--bg); stroke-width: 1.2; }
+.notes-cursor span { position: absolute; top: 17px; left: 11px; padding: 1px 7px; border-radius: 999px; background: var(--c); color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.notes-cursor.flip span { left: auto; right: -2px; }
+@media (prefers-reduced-motion: reduce) { .notes-cursor { transition: none; } }
+.notes-here { position: fixed; bottom: max(.75rem, env(safe-area-inset-bottom)); right: .75rem; z-index: 40; display: flex; align-items: center; gap: .4rem; padding: .2rem .6rem .2rem .25rem; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .75rem; }
+.notes-here .faces { display: flex; }
+.notes-here .faces > * + * { margin-left: -6px; box-shadow: 0 0 0 2px var(--surface); }
