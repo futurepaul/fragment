@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills: six Fragment platform contracts and six integrations Paul retains:
+Twelve skills. Six are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -47,6 +47,10 @@ Twelve skills: six Fragment platform contracts and six integrations Paul retains
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 
+And six are integrations Paul retains:
+
+| Skill | Its prerequisites |
+|---|---|
 | cocod-finite | Cashu wallet / Lightning payments; initialized wallet required |
 | nostr-agent-interface-cli-finite | Nostr CLI and schema discovery; signing material required for writes |
 | x-api-finite | Read-only app-bearer X API helper; operator key required |

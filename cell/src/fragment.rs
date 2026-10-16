@@ -1094,8 +1094,8 @@ impl FragmentCell {
             if body.template.is_none() {
                 return Err(CellError::invalid("a title is a template's fragment's, its first fragment.json's; others say theirs in fragment.json"));
             }
-            if title.trim().is_empty() || title.chars().count() > 120 {
-                return Err(CellError::invalid("a title is 1 to 120 characters"));
+            if title.trim().is_empty() || title.chars().count() > limits::TITLE_MAX_CHARS {
+                return Err(CellError::invalid(format!("a title is 1 to {} characters", limits::TITLE_MAX_CHARS)));
             }
         }
         let cs_cfg = self.cfg.codestorage();

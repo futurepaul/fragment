@@ -51,6 +51,10 @@ pub mod limits {
     /// paragraph, never a manual (`MANIFEST_MAX_BYTES` bounds them all
     /// together).
     pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
+    /// A fragment's title (`fragment.json`'s `meta.title`: an agent's
+    /// name), in characters: in its manifest, given at its create, or
+    /// written by `fragment agent --name`.
+    pub const TITLE_MAX_CHARS: usize = 120;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -100,7 +104,8 @@ pub mod limits {
     /// A page of a channel on the live socket also ends at about this many
     /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
     pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
-    /// Records one mutation may publish.
+    /// Effects one mutation may have, of every kind together: the records
+    /// it publishes, the files it writes, and its pushes.
     pub const EFFECTS_MAX: usize = 64;
     /// App channels per fragment.
     pub const CHANNELS_MAX: usize = 32;
@@ -195,6 +200,10 @@ pub mod limits {
     /// What one mutation or one job step may write to files, and in how many.
     pub const FILE_WRITE_MAX_BYTES: usize = 256 * 1024;
     pub const FILE_WRITES_MAX: usize = 16;
+    /// What one `POST /api/f/{name}/files` may write in all, decoded: an
+    /// editor's write (an image or a document, `fragment write`), larger
+    /// than an app's; bigger files go through the CLI as blobs.
+    pub const API_FILES_WRITE_MAX_BYTES: usize = 1024 * 1024;
     /// Push subscriptions a fragment holds.
     pub const PUSH_SUBS_MAX: u64 = 10_000;
     /// A push's `who`, the tag a page subscribed with, in characters
@@ -236,6 +245,10 @@ pub mod limits {
 const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX < limits::SEARCH_ENTRIES_MAX);
 const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
 const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
+// An editor's write through the API is an app's and more, in a body the
+// router reads.
+const _: () = assert!(limits::FILE_WRITE_MAX_BYTES < limits::API_FILES_WRITE_MAX_BYTES);
+const _: () = assert!(limits::API_FILES_WRITE_MAX_BYTES < limits::BODY_MAX_BYTES);
 
 /// A secret's name: `^[A-Z][A-Z0-9_]{0,63}$`.
 pub fn valid_secret_name(name: &str) -> bool {
@@ -592,7 +605,8 @@ pub struct CreateFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     /// With `template`, the fragment's title: its first `fragment.json`'s
-    /// `meta.title`, over the template's (at most 120 characters).
+    /// `meta.title`, over the template's (at most
+    /// `limits::TITLE_MAX_CHARS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }

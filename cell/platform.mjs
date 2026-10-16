@@ -162,7 +162,7 @@ class FileEffects {
   #push(effect, size) {
     if (this.#count >= FILE_WRITES_MAX) throw new Error(`a mutation writes at most ${FILE_WRITES_MAX} files`);
     if (this.#size + size > FILE_WRITE_MAX_BYTES) throw new Error(`a mutation writes at most ${FILE_WRITE_MAX_BYTES} bytes of files`);
-    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects`);
+    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects: its records, file writes and pushes together`);
     this.#count++;
     this.#size += size;
     this.#effects.push(effect);
@@ -218,7 +218,7 @@ class Call {
   push(who, payload) {
     if (this.#effects === null) throw new Error("push is for mutations; a query cannot push");
     const text = JSON.stringify(checkPush(who, payload));
-    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects`);
+    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects: its records, file writes and pushes together`);
     this.#effects.push({ push: who, payload: JSON.parse(text) });
   }
 
@@ -228,7 +228,7 @@ class Call {
     if (!validKind(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
     const text = JSON.stringify(body ?? null);
     if (utf8Bytes(text) > RECORD_BODY_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_BODY_MAX_BYTES} bytes`);
-    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation publishes at most ${EFFECTS_MAX} records`);
+    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects: its records, file writes and pushes together`);
     this.#effects.push({ channel, kind, body: JSON.parse(text) });
   }
 }

@@ -51,7 +51,7 @@ struct Portal {
 
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     if acting_for(url)?.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(crate::FOR_HONORED));
     }
     Ok(match caller(env, req, url, Payload::Read(bytes))? {
         Caller::Key(k) => By::Key(k),

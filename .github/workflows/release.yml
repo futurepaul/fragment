@@ -28,11 +28,16 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: Linux-x86_64
+          # built on an arm64 runner: ring's C needs aarch64-linux-musl-gcc,
+          # which its musl-tools has
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: Linux-aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: musl toolchain
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -906,6 +906,24 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && members_only["shareLink"].is_null(),
         json!([public, linked, members_only]),
     );
+    // `fragment write` takes a file up to the files API's own cap (past an
+    // app's), and refuses one past it before sending it, naming the cap
+    let big = s.scratch.join("write-big.txt");
+    std::fs::write(&big, "w".repeat(limits::FILE_WRITE_MAX_BYTES + 1))?;
+    let wrote = s.cli_json(api, &home, &["write", &name, "notes/big.txt", "--from", &big.display().to_string(), "--json"])?;
+    let read = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=notes/big.txt"), None)?;
+    std::fs::write(&big, "w".repeat(limits::API_FILES_WRITE_MAX_BYTES + 1))?;
+    let (exit, past) = refused(s, &["write", &name, "notes/past.txt", "--from", &big.display().to_string(), "--json"]);
+    s.ok(
+        &format!("fragment write commits a file past an app's {} KiB to main, and refuses one past the files API's {} KiB before sending it (invalid_usage)", limits::FILE_WRITE_MAX_BYTES / 1024, limits::API_FILES_WRITE_MAX_BYTES / 1024),
+        wrote["commit"].is_string()
+            && read.status == 200
+            && read.bytes.len() == limits::FILE_WRITE_MAX_BYTES + 1
+            && exit == Some(2)
+            && past["error"]["code"] == "invalid_usage"
+            && past["error"]["message"].as_str().is_some_and(|m| m.contains(&format!("at most {} KiB", limits::API_FILES_WRITE_MAX_BYTES / 1024))),
+        json!({ "wrote": wrote, "read": read.status, "bytes": read.bytes.len(), "past": past }),
+    );
     Ok(())
 }
 

@@ -18,10 +18,6 @@ use crate::js;
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
-/// What one `POST /api/files` may write in all: an editor's write (an
-/// image or a document), larger than an app's (`limits::FILE_WRITE_MAX_BYTES`);
-/// bigger files go through the CLI as blobs.
-const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 /// A template a fragment can start from (`fragment_templates::CATALOG`):
 /// its files are copied into the fragment's repo.
@@ -152,8 +148,8 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("at most {} files per write", fragment_proto::limits::FILE_WRITES_MAX)));
         }
         let total: usize = writes.iter().filter_map(|w| w.bytes.as_ref().map(Vec::len)).sum();
-        if total > API_WRITE_MAX_BYTES {
-            return Err(CellError::too_large("the files written", total, API_WRITE_MAX_BYTES));
+        if total > fragment_proto::limits::API_FILES_WRITE_MAX_BYTES {
+            return Err(CellError::too_large("the files written", total, fragment_proto::limits::API_FILES_WRITE_MAX_BYTES));
         }
         // an agent's picture is refused here, before it is committed, as its
         // install refuses one (docs/api.md, "An agent's name and picture")

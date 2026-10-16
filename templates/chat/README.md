@@ -19,8 +19,12 @@ docs/chat-records.md is the contract its page and code read and write,
 and says how the page lays a chat out. The page is `site/`: `index.html`,
 `chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
 and "Notify me"), `markdown.js`
-(agents' text as DOM, never as markup), `icons.js` (Lucide's paths;
-`LUCIDE-LICENSE.txt`), `tooltips.js`, and `chat.css`. Every URL in it is
+(agents' text as DOM, never as markup), `media.js` (a message's
+attachments: images, audio and video shown inline, every one opened or
+downloaded), `response-actions.js` (copy, share and their feedback),
+`icons.js` (Lucide's paths; `LUCIDE-LICENSE.txt`), `tooltips.js`,
+`chat.css`, and `agent.png` (the agents' avatar, the agent template's
+own, linked). Every URL in it is
 relative, so it works on a fragment's own host, under `/f/<name>/`, and
 served from the platform's release.
 

@@ -73,7 +73,7 @@ impl Operator {
 /// the key of an identity it lists. Anyone else is 403.
 async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8]) -> CellResult<Operator> {
     if acting_for(url)?.is_some() {
-        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+        return Err(CellError::invalid(crate::FOR_HONORED));
     }
     let key = authenticate(req, url, Payload::Read(body))?;
     if cfg.is_operator(Some(&key), "")? {
