@@ -443,7 +443,7 @@ enum OperatorCmd {
     /// else a new org of one (the email is mailed)
     Comp {
         email: String,
-        /// seat ($100: a computer that sleeps) or always-on ($200)
+        /// seat (a computer that sleeps) or always-on
         #[arg(long, default_value = "seat")]
         kind: String,
         #[arg(long)]

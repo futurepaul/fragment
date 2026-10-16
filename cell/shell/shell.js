@@ -11,11 +11,12 @@
 // (2026-10-02); what it did not draw is the older prototype's, in its look.
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
+import { colorOf } from "./agent-color.js";
 import { appIcon } from "./app-icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
-import { billingSections, returning, seatOffer } from "./billing.js";
+import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -42,8 +43,6 @@ const ICON = {
   newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
-// Skyler's agent palette: a plain colored circle, no eyes
-const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 // A new agent's name, when its maker names none (Paul, 2026-10-03): the
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
@@ -82,7 +81,7 @@ const PROMPT_HAND = 3;
 if (APP_PROMPTS.length < 2 * PROMPT_HAND || APP_PROMPTS.length % PROMPT_HAND) throw new Error(`APP_PROMPTS holds whole hands of ${PROMPT_HAND}, at least two: ${APP_PROMPTS.length}`);
 const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), deck: shuffled(APP_PROMPTS.map((_, i) => i).slice(PROMPT_HAND)) };
 
-// me: the signed-in person; guest: whether their plan is a guest's, who
+// me: the signed-in person; guest: whether they are a guest (`GET /api/seat`), who
 // makes nothing (decision 49); fragments: their list (name, role, kind,
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
@@ -130,15 +129,8 @@ const shown = (list) => list.filter((f) => !f.archived);
 // sent, since the router matches segments as they are, not decoded.
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const framed = (name, path = "/") => `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
-// An agent's colour, chosen by its identity as the chat's page chooses it
-// (templates/chat: FNV-1a over the id), so the two always agree.
-const colorOf = (id) => {
-  if (!id) return COLORS[0];
-  let h = 0x811c9dc5;
-  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
-  return COLORS[h % COLORS.length];
-};
-// An agent's face: its colour, by its identity, and its picture (its agent
+// An agent's face: its colour, by its identity (agent-color.js, the one
+// its own page and its chats' pages choose by), and its picture (its agent
 // fragment's avatar.png, as the person's list last said: an address on this
 // platform), shown instead of its tinted image when it has one.
 const agentFace = (fragment, id) => ({ color: colorOf(id), picture: byName(fragment)?.picture ?? null });
@@ -1789,13 +1781,14 @@ async function openSettings(push = true) {
   // a credit pack's Checkout returning, before the ledger is read
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false) };
   const back = await returning(billingHelpers);
-  const [ledger, linked, uses, access] = await Promise.all([
+  const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
+    api("GET", "/api/seat").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
-  if (ledger) setGuest(ledger.plan === "guest");
+  if (mySeat) setGuest(mySeat.guest);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
@@ -1836,7 +1829,7 @@ async function openSettings(push = true) {
   signout.append(out);
   account.append(actionLine("Sign-ins", link), actionLine("Session", signout));
   // the person's seat, credit and org (billing.js), and why agents stop
-  const billing = await billingSections(billingHelpers, ledger, back);
+  const billing = await billingSections(billingHelpers, ledger, mySeat, back);
   // everything that is theirs, to download (a guest's too: what is shared
   // with them, named)
   const data = dataSection();
@@ -1899,7 +1892,7 @@ async function openSettings(push = true) {
   const mine = [...state.agents.values()];
   // the models a provider the person connected offers (its own credit pays)
   const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
-  if (mine.length && modeled.length) agents.append(say("Each agent runs on Workers AI's model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
+  if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
   agents.append(...(mine.length ? mine.flatMap((a) => {
     const row = el("button", "row", "Open");
     row.type = "button";
@@ -2286,9 +2279,13 @@ function dataSection() {
 }
 
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model
-// of a provider the person connected, or none (Workers AI's, its `tier`).
-// Its computer reads agent.json again within seconds and runs its next
-// turn on it. Vision and voice notes stay on the platform's own models.
+// of a provider the person connected, or none: its `tier`'s, shown by the
+// tier's name (which model that is, the deployment's `models` say, and a
+// person's session reads none of it). Its computer reads agent.json again
+// within seconds and runs its next turn on it. Vision and voice notes stay
+// on the platform's own models.
+const TIER = { cheap: "Cheap", medium: "Medium" };
+const tierName = (tier) => TIER[tier ?? DEFAULT_AGENT_TIER] ?? tier;
 const modelValue = (provider, id) => `${provider} ${id}`;
 function modelOption(value, text) {
   const o = el("option", null, text);
@@ -2302,7 +2299,8 @@ function modelPicker(a, row, modeled) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
-  pick.append(modelOption("", "Workers AI"));
+  const tiered = modelOption("", tierName());
+  pick.append(tiered);
   for (const p of modeled) {
     const group = el("optgroup");
     group.label = `${providerName(p.provider)} (your account)`;
@@ -2313,6 +2311,7 @@ function modelPicker(a, row, modeled) {
   pick.disabled = true;
   agentJson(a.fragment)
     .then((j) => {
+      tiered.textContent = tierName(j?.tier);
       const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
       // one named by hand, not offered here, is shown as it is
       if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
@@ -2324,14 +2323,14 @@ function modelPicker(a, row, modeled) {
     pick.disabled = true;
     said.textContent = "Saving…";
     try {
-      // what agent.json holds now (its tier, its colour), the model changed
+      // what agent.json holds now (its tier), the model changed
       const now = await agentJson(a.fragment).catch(() => ({}));
       const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
       const [provider, id] = pick.value ? pick.value.split(" ") : [];
       if (provider) next.model = { provider, id };
       else delete next.model;
       await api("POST", `/api/f/${seg(a.fragment)}/files`, {
-        message: provider ? `its model: ${id}` : "its model: Workers AI",
+        message: `its model: ${provider ? id : next.tier}`,
         files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }],
       });
       said.textContent = "Saved: its next message uses it.";
@@ -2639,23 +2638,27 @@ function signIn() {
 // A new person's welcome (docs/billing.md, "The shell"): what this is, the
 // one seat and a trial code, then Stripe's Checkout, whose return comes
 // back here (`?checkout=<session>`, or `?checkout=canceled`), as a mailed
-// trial's link does (`?trial=<code>`). A seat already held (bought, an
-// org's claimed at sign-in, or the deployment's plan) goes on to the first
-// agent; someone with a chat of their own goes home.
+// trial's link does (`?trial=<code>`). Someone who is no guest (a seat
+// bought, an org's claimed at sign-in, or the deployment's plan) goes home,
+// or on to the first agent; a guest is offered the seat, whatever they
+// own (one whose seat ended keeps their chats).
 async function welcome() {
   const q = new URLSearchParams(location.search);
   const back = q.get("checkout");
   const paid = back && back !== "canceled" ? back : null;
-  if (chats().some(own)) {
-    // a lapsed seat paid again: applied, then home
-    if (paid) await api("POST", `/api/billing/sessions/${encodeURIComponent(paid)}`, {}).catch(() => {});
+  const goHome = () => {
     history.replaceState(null, "", "/");
     return start();
+  };
+  if (paid && chats().some(own)) {
+    // a seat paid for again: applied, then home
+    await api("POST", `/api/billing/sessions/${encodeURIComponent(paid)}`, {}).catch(() => {});
+    return goHome();
   }
   if (paid) return creatingAgent({ session: paid });
-  if (!state.guest) return creatingAgent();
   const mine = await api("GET", "/api/seat").catch(() => null);
-  if (mine?.seat?.good) return creatingAgent({});
+  if (mine) setGuest(mine.guest);
+  if (!state.guest) return chats().some(own) ? goHome() : creatingAgent(mine?.seat ? {} : null);
   history.replaceState(null, "", WELCOME);
   // LATER (fbfc's import; not built): "Import your finite.computer agent",
   // a choice beside the seats for someone moving their agent here. Its
@@ -2806,13 +2809,13 @@ async function defaultAgent() {
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   if (!id) throw new Error("its computer did not take it");
-  // its job and colour, written once: an agent already set up keeps its own
+  // its job and tier, written once: an agent already set up keeps its own
   const written = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
   if (!written) {
     await api("POST", `/api/f/${agent.name}/files`, {
       key: "agent-default",
       message: "the default agent",
-      files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
+      files: [{ path: "SOUL.md", text: firstSoul(owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER }, null, 2) + "\n" }],
     });
   }
   await api("POST", `/api/f/${agent.name}/deploy`, {});
@@ -2997,29 +3000,32 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  const [, ledger] = await Promise.all([load(), api("GET", "/api/ledger").catch(() => null)]);
-  setGuest(ledger?.plan === "guest");
+  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
+  setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
   // the first agent is made at home; settings open as asked, chats or not;
   // a guest makes nothing (decision 49): with nothing shared with them,
   // their home is the welcome; once something is (an invitee's), it is
-  // what is shared with them, and a seat offered
+  // what is shared with them, and a seat offered. A seat of theirs (not the
+  // deployment's plan) may reach their ledger a moment after it is given:
+  // its first run waits for it (`seatFirst`)
   const settings = !open && location.pathname === SETTINGS;
-  if (!open && !settings && await owesFirstAgent()) return creatingAgent();
+  if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !open && !settings && state.guest) return welcome();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
-  else if (state.guest) guestHome();
+  else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
   prewake();
 }
 
-// ---- a guest: they see and edit what is shared with them, and make
-// nothing (decision 49), so no button offers to make something ----
+// ---- a guest (`GET /api/seat`'s `guest`: no seat, and no plan of their
+// own) sees and edits what is shared with them, and makes nothing
+// (decision 49), so no button offers to make something ----
 function setGuest(guest) {
   state.guest = guest;
   renderChats();
@@ -3028,7 +3034,7 @@ function setGuest(guest) {
 }
 // With no chat to show: the first app shared with them in its window, and
 // beside it what a guest may do, and what a seat gives (the welcome's).
-function guestHome() {
+function guestHome(offer) {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
   const seat = el("a", "allow", "Get a seat");
@@ -3038,7 +3044,7 @@ function guestHome() {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", "You see and edit what people share with you: it shows in the sidebar as they share it. A seat, $200 a month, gives you agents of your own, the always-on computer they run on, and apps of your own.", seat);
+  notice("You're a guest", `You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, seat);
 }
 
 start().catch((e) => {

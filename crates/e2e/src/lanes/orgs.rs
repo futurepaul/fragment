@@ -171,7 +171,11 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("its holder's seat is canceled: agents stop; the plan is kept", pushed && ledger(api, &bob)["plan"] == "seat_always_on", ledger(api, &bob));
     let mine = api.signed(&bob, "GET", "/api/seat", None)?;
-    s.ok("an admin whose comp ended keeps their org, seatless", mine.status == 200 && mine.body["seat"].is_null() && mine.body["admin"] == true && mine.body["org"].is_object(), &mine);
+    s.ok(
+        "an admin whose comp ended keeps their org, seatless, and is a guest (no seat; their ledger's plan kept, canceled)",
+        mine.status == 200 && mine.body["seat"].is_null() && mine.body["admin"] == true && mine.body["org"].is_object() && mine.body["guest"] == true,
+        &mine,
+    );
     let r = api.signed(&operator, "DELETE", &format!("/api/admin/seats/{carol_seat}"), None)?;
     let view = api.signed(&alice, "GET", "/api/org", None)?;
     s.ok("a waiting seat that ends is gone from its org", r.status == 200 && view.body["members"].as_array().map(Vec::len) == Some(1), &view);
@@ -226,6 +230,11 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(&format!("refused: {what}"), r.status == status, &r);
     }
     let none = api.signed(&stranger, "GET", "/api/seat", None)?;
-    s.ok("someone with no seat reads none", none.status == 200 && none.body["seat"].is_null() && none.body["org"].is_null() && none.body["offered"] == json!([]), &none);
+    let plan = ledger(api, &stranger)["plan"].clone();
+    s.ok(
+        "someone with no seat reads none, and is a guest only when their ledger's plan is (the deployment's plan for everyone, the e2e's seat, makes none)",
+        none.status == 200 && none.body["seat"].is_null() && none.body["org"].is_null() && none.body["offered"] == json!([]) && none.body["guest"] == (plan == "guest"),
+        json!({ "seat": none.body, "plan": plan }),
+    );
     Ok(())
 }

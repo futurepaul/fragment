@@ -1923,7 +1923,7 @@ fails, and made again, asks again).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/seat` | a person | → `MySeat {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}]}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org |
+| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}], guest, offer: {kind, seatMicros, includedMicros, packMicros}}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org (`MySeat`); `guest`, whether they are a guest (decision 49: they make nothing, and are offered a seat): they hold no seat, and their ledger gives them no plan of its own, its plan `guest` (a new person's on a deployment whose plan is guest, or an operator's) or a seat's plan kept after the seat ended (`canceled`; `fragment_core::org::guest`); and `offer`, what is sold, in micro-dollars: the one seat (`seat_always_on`), its monthly price and the credit it includes each month, and a credit pack's price, core's constants (`fragment_core::stripe::offer`), which every page shows them from |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
 | `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
 | `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`), held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
@@ -2352,25 +2352,28 @@ settings at `/settings`, the welcome at `/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. A new person's first run never goes through settings
 (docs/billing.md, "The shell"): a guest with nothing shared with them
-lands on the welcome, the two seats and a trial code
+lands on the welcome, the seat and a trial code
 (cell/shell/billing.js `seatOffer`), which a mailed trial's
 `/welcome?trial=<code>` fills in, then Stripe's Checkout, whose return
 (`/welcome?checkout=<id>`, or `canceled`) comes back to it: applied
 (`POST /api/billing/sessions/<id>`), the seat's plan waited for, then
 their first agent made; a seat (bought, an org's, or the deployment's
-plan) with no chat makes it at once at `/`. A guest (their ledger's
-plan) makes nothing (decision 49), so the shell offers them nothing to
+plan) with no chat makes it at once at `/`. Whether someone is a guest
+is `GET /api/seat`'s `guest` alone, and every price the shell shows is
+its `offer` (Seats and orgs). A guest makes nothing (decision 49), so the
+shell offers them nothing to
 make: once something is shared with them, their home is what is shared
 (a chat in the middle, else the first app in its window), beside a note
 of what a guest may do and what a seat gives, whose Get a seat opens the
-welcome; their settings are their Billing, their account, then Your
-data. Its
+welcome, which offers the seat to any guest, one whose seat ended and
+who keeps their chats too; their settings are their Billing, their
+account, then Your data. Its
 settings hold the person's account (email, sign-ins, identity id,
 picture, `/auth/link` to add another sign-in, a POST to
 `/auth/logout`), their Billing (cell/shell/billing.js: for a guest, Get
 a seat, to the welcome; a seat's kind,
-org, trial's end and lapse, "let it sleep" for a $200 seat, this month's
-credit and a $25 pack; for an org's admin, its seats and admins to add,
+org, trial's end and lapse, "let it sleep" for an always-on seat, this month's
+credit and a credit pack; for an org's admin, its seats and admins to add,
 change and remove, and Stripe's portal, the org shown once someone else
 is in it: its admin alone sees Payment and invoices and "Add seats for
 others", which shows it; a pack's Checkout's return,

@@ -91,7 +91,7 @@ pub struct OfferedSeat {
     pub kind: SeatKind,
 }
 
-/// `GET /api/seat`'s answer.
+/// A person's seat, their org, and the seats offered them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MySeat {
@@ -100,6 +100,29 @@ pub struct MySeat {
     pub org: Option<OrgRef>,
     pub admin: bool,
     pub offered: Vec<OfferedSeat>,
+}
+
+/// `GET /api/seat`'s answer: `MySeat`, whether they are a guest
+/// (`fragment_core::org::guest`), and what is sold, for a page to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatStatus {
+    #[serde(flatten)]
+    pub mine: MySeat,
+    pub guest: bool,
+    pub offer: Offer,
+}
+
+/// What is sold (decision 25; `fragment_core::stripe::offer`), in
+/// micro-dollars: the one seat's kind, its monthly price and the credit it
+/// includes each month, and a credit pack's price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offer {
+    pub kind: SeatKind,
+    pub seat_micros: i64,
+    pub included_micros: i64,
+    pub pack_micros: i64,
 }
 
 /// `PUT /api/seat`: a `seat_always_on` holder lets their computer sleep, or not.

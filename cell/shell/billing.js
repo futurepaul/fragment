@@ -1,11 +1,12 @@
 // The shell's Billing (docs/billing.md, "The shell"; docs/api.md, Seats
-// and orgs, Billing): a person's seat, their credit, and their org's.
-// A guest's seat and trial code are the welcome's (`seatOffer`, for
-// shell.js `welcome`), which Billing links to; a seat's holder sees it,
-// lets a $200 seat's computer sleep, and buys credit; an org's admin adds
-// and removes seats and admins, and opens Stripe's portal for card and
-// invoices. One seat is sold, $200 a month and always on (Paul,
-// 2026-10-15); a `seat` is an operator's comp. An org is shown once
+// and orgs, Billing): a person's seat, their credit, and their org's,
+// from `GET /api/seat` (`mine`: their seat, whether they are a guest, and
+// what is sold, its prices core's). A guest's seat and trial code are the
+// welcome's (`seatOffer`, for shell.js `welcome`), which Billing links to;
+// a seat's holder sees it, lets an always-on seat's computer sleep, and
+// buys credit; an org's admin adds and removes seats and admins, and opens
+// Stripe's portal for card and invoices. One seat is sold, always on
+// (Paul, 2026-10-15); a `seat` is an operator's comp. An org is shown once
 // someone besides its admin is in it (a
 // seat, held or invited, or another admin): its admin alone, who pays for
 // themselves, sees only Payment and invoices, and asks for the org's seats
@@ -14,9 +15,14 @@
 // (`/welcome?checkout=…`), a credit pack's here (`/settings?pack=…`,
 // `returning`). Every value is text, never markup.
 
-const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "$200 always-on seat" };
-// The one seat sold (decision 25; docs/ledger.md, Plans), as a guest takes it.
-const PLAN = ["seat_always_on", "$200 a month, always on", "Your agents, on a computer of their own that stays awake (its time is not metered), apps of your own, and $100 of credit included each month."];
+const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "Always-on seat" };
+// an offer's amount, in whole dollars where it is whole ($200, not $200.00)
+const price = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 0 });
+
+/** What a seat gives a guest, at its price (`offer`: `GET /api/seat`'s). */
+export function seatGives(offer) {
+  return `A seat, ${price(offer.seatMicros)} a month, gives you agents of your own, the always-on computer they run on, apps of your own, and ${price(offer.includedMicros)} of credit a month.`;
+}
 
 /**
  * The shell's helpers this module uses: `{api, el}` for the welcome, and
@@ -79,7 +85,9 @@ export async function returning(helpers) {
 export function seatOffer(helpers, mine, trial) {
   h = helpers;
   const { el } = h;
-  if (mine?.org && !mine.admin) return [el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
+  if (!mine) return [el("p", "form-error", "The seat could not be read: reload to try again.")];
+  if (mine.org && !mine.admin) return [el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
+  const { offer } = mine;
   const said = el("p", "form-error");
   said.hidden = true;
   const plans = el("div", "plans");
@@ -108,12 +116,15 @@ export function seatOffer(helpers, mine, trial) {
       for (const b of choices) b.disabled = false;
     }
   };
-  const [kind, title, what] = PLAN;
+  // the one seat sold (decision 25; docs/ledger.md, Plans), as a guest takes it
   const b = el("button", "plan");
   b.type = "button";
-  b.dataset.plan = kind;
-  b.append(el("strong", null, title), el("span", null, what));
-  b.onclick = () => go({ kind });
+  b.dataset.plan = offer.kind;
+  b.append(
+    el("strong", null, `${price(offer.seatMicros)} a month, always on`),
+    el("span", null, `Your agents, on a computer of their own that stays awake (its time is not metered), apps of your own, and ${price(offer.includedMicros)} of credit included each month.`),
+  );
+  b.onclick = () => go({ kind: offer.kind });
   plans.append(b);
   form.onsubmit = (e) => {
     e.preventDefault();
@@ -123,16 +134,16 @@ export function seatOffer(helpers, mine, trial) {
     plans,
     form,
     said,
-    el("p", "muted", "Monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel. With a seat, more credit is $25 a pack, kept until spent."),
+    el("p", "muted", `Monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel. With a seat, more credit is ${price(offer.packMicros)} a pack, kept until spent.`),
   ];
 }
 
-/** The Billing section, and an admin's Org section. */
-export async function billingSections(helpers, ledger, back) {
+/** The Billing section, and an admin's Org section (`mine`: `GET /api/seat`'s). */
+export async function billingSections(helpers, ledger, mine, back) {
   h = helpers;
   const { el, section, line, actionLine, usd } = h;
-  const mine = await h.api("GET", "/api/seat").catch(() => null);
   if (!mine) return [section("Billing", el("p", "muted", "Your seat could not be read."))];
+  const { offer } = mine;
   const billing = section("Billing");
   if (back?.said) billing.append(el("p", "settings-line", back.said));
   // an admin's org, and whether they are alone in it
@@ -140,7 +151,7 @@ export async function billingSections(helpers, ledger, back) {
   const alone = org?.members?.length === 1;
   const seat = mine.seat;
   if (seat) {
-    const kind = KIND[seat.kind] + (seat.comped ? " (given)" : "");
+    const kind = KIND[seat.kind] + (seat.comped ? " (given)" : seat.kind === offer.kind ? `, ${price(offer.seatMicros)} a month` : "");
     billing.append(line("Seat", kind));
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
@@ -165,29 +176,30 @@ export async function billingSections(helpers, ledger, back) {
       label.append(sleeps, " Let my computer sleep when nothing is open");
       billing.append(label);
     }
-  } else if (!mine.org || mine.admin) {
-    billing.append(el("p", "muted", "You are a guest: you see and edit what is shared with you. A seat, $200 a month, gives you agents of your own, the always-on computer they run on, apps of your own, and $100 of credit a month."));
+  } else if (mine.guest) {
+    billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${seatGives(offer)}`));
     // the seats and a trial code are the welcome's, as a new person's are
     const get = el("a", "quiet", "Get a seat");
     get.href = "/welcome";
     billing.append(actionLine("Seat", get));
   } else {
-    billing.append(el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`));
+    // no seat of theirs: the deployment's plan gives everyone one
+    billing.append(line("Seat", `${KIND[ledger?.plan] ?? "A seat"}, given to everyone here`));
   }
-  for (const o of mine.offered) billing.append(el("p", "muted", `${o.org.name} offered you a ${KIND[o.kind]}; you are in another org.`));
+  for (const o of mine.offered) billing.append(el("p", "muted", `${o.org.name} offered you a ${KIND[o.kind].toLowerCase()}; you are in another org.`));
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
-  if (ledger && (seat || ledger.plan !== "guest")) {
-    const topUp = seat?.good ? button("Buy $25 of credit", async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
+  if (ledger && !mine.guest) {
+    const topUp = seat?.good ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
     billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`, topUp));
   }
-  if (!alone) return org ? [billing, orgSection(org)] : [billing];
+  if (!alone) return org ? [billing, orgSection(org, offer)] : [billing];
   const more = el("div", "settings-actions");
   const others = el("button", "quiet", "Add seats for others");
   others.type = "button";
   others.onclick = () => {
     more.closest(".settings-action-line")?.remove();
-    billing.after(orgSection(org));
+    billing.after(orgSection(org, offer));
   };
   more.append(...(seat?.comped ? [] : [portal()]), others);
   billing.append(actionLine("Organization", more));
@@ -199,8 +211,8 @@ function portal() {
   return button("Payment and invoices", async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url));
 }
 
-/** An admin's org (`GET /api/org`'s): its seats and admins, and Stripe's portal. */
-function orgSection(org) {
+/** An admin's org (`GET /api/org`'s): its seats and admins, and Stripe's portal; `offer`, what a seat added costs. */
+function orgSection(org, offer) {
   const { el, section, actionLine } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
@@ -266,6 +278,6 @@ function orgSection(org) {
   };
   const pay = el("div", "settings-actions");
   pay.append(portal());
-  box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", "A seat added, $200 a month and always on, bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices."), actionLine("Payment", pay));
+  box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", `A seat added, ${price(offer.seatMicros)} a month and always on, bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices.`), actionLine("Payment", pay));
   return box;
 }
