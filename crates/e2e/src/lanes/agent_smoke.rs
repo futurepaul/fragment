@@ -88,7 +88,7 @@ const TITLE: &str = "Novatron DX";
 const FIRST_CHAT: &str = "Your first chat";
 
 fn first_soul(owner: &str) -> String {
-    format!("You are {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
+    format!("You are {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. You keep their other agents, so they never have to (the agents-finite skill): when a job would be better as an agent of its own, set one up and tell them; when it would be better as an app, offer to make it. Keep their private things from any agent on another provider. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
 }
 
 fn mins(d: Duration) -> String {

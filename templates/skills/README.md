@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills. Six are Fragment platform contracts:
+Thirteen skills. Seven are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -46,6 +46,7 @@ Twelve skills. Six are Fragment platform contracts:
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
+| agents-finite | A person's default agent keeps their other agents (`fragment agent --new`), picks their models, and keeps private things from teammates on another provider (decision 62, proposed) |
 
 And six are integrations Paul retains:
 

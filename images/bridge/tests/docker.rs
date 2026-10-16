@@ -266,6 +266,7 @@ async fn the_hermes_image() {
             ("skills/grill-me/SKILL.md", "---\nname: grill-me\ndescription: The managed grilling.\n---\n# Grill\n"),
             ("skills/software-development/apps-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/apps-finite/SKILL.md")),
             ("skills/software-development/git-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/git-finite/SKILL.md")),
+            ("skills/autonomous-ai-agents/agents-finite/SKILL.md", include_str!("../../../templates/skills/skills/autonomous-ai-agents/agents-finite/SKILL.md")),
             ("skills/research/brain-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/brain-finite/SKILL.md")),
             ("skills/productivity/google-workspace-finite/SKILL.md", include_str!("../../../templates/skills/skills/productivity/google-workspace-finite/SKILL.md")),
             ("skills/image-editing/image-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/image-editing/image-generation-finite/SKILL.md")),
@@ -424,7 +425,7 @@ async fn the_hermes_image() {
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
-    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
+    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "agents-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
     for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {

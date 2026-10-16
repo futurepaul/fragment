@@ -2750,7 +2750,9 @@ function setupChanged(change) {
 // Its job (its SOUL.md, written once: an agent already set up keeps its
 // own), never its name: that is its agent fragment's title alone, which a
 // rename changes (Paul, 2026-10-16: renamed, its job still said the old one).
-const firstSoul = (owner) => `You are ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+// It keeps the person's other agents (decision 62, proposed: the managed
+// agents-finite skill), so the person never has to.
+const firstSoul = (owner) => `You are ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. You keep their other agents, so they never have to (the agents-finite skill): when a job would be better as an agent of its own, set one up and tell them; when it would be better as an app, offer to make it. Keep their private things from any agent on another provider. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
 // Its chat's own title (Paul, 2026-10-16), never the agent's name, which the
 // sidebar shows above it.
 const FIRST_CHAT = "Your first chat";
