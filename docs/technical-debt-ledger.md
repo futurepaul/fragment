@@ -515,7 +515,7 @@ fragment.club until cutover (decisions 34–35).
   byte-hours since the last sample (its app's database: the entry "An
   app's database answers to the app's own code alone"). Its
   code.storage repository is not sampled (code.storage publishes no size
-  or price to us), and a computer's backups do not exist yet.
+  or price to us). A computer's saves are the next entry's.
 - **Risk:** git storage is free to its owner; a fragment that grows and
   shrinks within a day is billed at the day's sample.
 - **First proof:** a repository at code.storage larger than a fragment's
@@ -523,6 +523,25 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** code.storage reports a repository's size (or we host
   git), sampled as `Storage { class: git }`, and samples run hourly from
   a cron the plan named (docs/ledger.md).
+
+## A computer's saves are not metered
+
+- **Observed:** 2026-10-16, writing the platform explainer. A computer
+  keeps its newest three saves of `/data` in R2
+  (`computers/<id>/backups/`, `fragment_core::computer::SAVES_KEPT`;
+  docs/computers.md, "Saves and what a wake restores"). The Computer DO meters only awake time and operator keys
+  (`Usage::Awake`, `Usage::Key` in cell/src/computer.rs); no meter
+  samples its saves, so docs/ledger.md had said they bill its owner when
+  nothing did.
+- **Risk:** a computer's storage is free to its owner and paid by the
+  platform: three saves of a `/data` that grows large cost R2's rate
+  three times over, with no cap or notice.
+- **First proof:** a computer whose saves in R2 cost more a month than
+  its owner's credit covers.
+- **Delete when:** the Computer DO samples its saves' bytes (the
+  records it keeps, `DirectoryBackup`'s archives) as
+  `Storage { class: r2 }` to its owner on a schedule, as the Fragment DO
+  samples its blobs, with a test that a save's bytes reach the ledger.
 
 ## A run in flight and the platform's own writes go on past the overdraft
 

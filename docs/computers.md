@@ -1938,6 +1938,8 @@ for a host) and finds the same `HOME`, `~` and modes.
   operator key always has a price (its own or
   the price book's list price). A connection's call and an own key's are
   counted, never charged; every call is in the computer's `uses`.
+- Its saves in R2 are not metered: the platform pays for them for now
+  (docs/technical-debt-ledger.md, "A computer's saves are not metered").
 - At zero credit, or with agents stopped, no wake starts (decision 27):
   the owner's wake is refused with the ledger's reason (402
   `budget_used_up` at zero credit or a canceled seat; 403 for a guest,

@@ -1,7 +1,10 @@
 # Billing, organizations and the operator's admin
 
-Status: **decided, not built** (Paul, 2026-10-08: "I agree with your
-recommendations, please proceed"). This is the design of record, as
+Status: **decided, and built through slice 9** (Paul, 2026-10-08: "I
+agree with your recommendations, please proceed"). "Build order" marks
+slices 4 to 9 built on 2026-10-08 (cell/src/billing.rs, stripe.rs,
+orgs.rs, registry/admin.rs, cell/shell/billing.js); going live, slice 10,
+is Paul's. This is the design of record, as
 docs/ledger.md is for the ledger; its decisions are 51 to 59 in
 docs/cloudflare-v1.md ("Decided", below, maps them). It stands on
 decisions 45 to 50 (people are npubs found by email). The build follows
@@ -27,7 +30,10 @@ billing for their org and add and upgrade seats (and remove seats)". An
 admin dashboard "that lets us list all our users, invite new users,
 create trial codes, etc." The Stripe account is finite-mono's.
 
-## What is there today
+## What was there before it (2026-10-08)
+
+The starting point the slices were built from, kept as the record of what
+they changed; "Build order" says what is there now.
 
 - **Plans exist; nothing sells them.** `guest`, `seat` ($100: $50 of
   credit a month, a computer that sleeps) and `seat_always_on` ($200:

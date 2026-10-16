@@ -36,7 +36,8 @@ it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 ## Use it
 
 Production will be https://finite.chat (its fragments at
-`*.finite.place`); a preview is its own `<branch>` copy. To start, tell
+`*.finite.place`; Paul, 2026-10-16); a preview is its own `<branch>`
+copy, master's at https://preview.finite.build. To start, tell
 your coding agent (Claude Code, Codex), naming the platform you use:
 
 ```

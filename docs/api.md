@@ -251,7 +251,7 @@ turns: Ledger, below). The same table is in cli/GUIDE.md, so
 
 | | call operations | read or write records | use models | decide | share and invite | deploy |
 |---|---|---|---|---|---|---|
-| **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | through their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: a template from the shell's catalog is live as it is made; the rest is an agent's |
+| **the person, in a browser** (a session: the shell, a fragment's pages) | `__op` and the socket, from a page (`fragment.call`), at their role; `public` ones signed out too | `__live`: the channels their role reads; a post where a channel's `post` role admits them | through their agents and their apps' jobs | through their apps' jobs | the owner, from the share sheet: members, invites by email, visibility, the share link | no route: what the shell makes (an agent, its chats, a skills fragment) is a blessed template, live as it is made; an app is an agent's (the shell's Add suggests what to ask for, `APP_PROMPTS` in cell/shell/shell.js) |
 | **their agent, on its computer** (signed by its computer's egress, `for` its owner) | `POST /api/f/{name}/ops/{op}` (`fragment call`), at its own grants, or `for` its owner at the lower of theirs and its cap (at most `editor`) | channels and posts at that role; its chats are records (docs/chat-records.md) | the model route (Models), on its tier or its owner's own model, paid by its owner | the decision route (Decisions: `POST /api/models/v1/decide`, `/v1/decide` on its intercept), its media inline, paid by its owner | `for` its owner, on what its owner owns (above): members, invites, visibility, rotation; never a delete or a cap | `files` and `deploy` at that role: an editor's; what it creates is its owner's |
 | **an app's own jobs** (a run of a fragment's job, or a triggered run) | its own operations (`job.call`), as the run's principal: the caller, or the fragment (an editor) for a triggered run | `job.publish` to its own channels, and a text step's draft to them as it streams (no `post` role needed); a channel trigger hands it the record | `job.ai.text` (with tools, run by the job), `job.ai.image` (AI, below) | `job.ai.decide`, about text, JSON and the fragment's blobs (Decisions, below) | none | none: `job.files.write` writes `main`, which a deploy puts live |
 | **a coding agent, with the CLI** (a key a person approved: `fragment login`) | `fragment call`, as that person | `fragment channel [--follow]`, `fragment post` | its own; the platform's only through the jobs it calls | only through the jobs it calls | `fragment members`, `invite`, `visibility`, `rotate`: the owner's | `fragment sync`, `write`, `deploy`, `rollback`: an editor's |
@@ -1011,7 +1011,7 @@ title opening its share sheet.
 | `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}`. Leaving `members` (for `link` or `public`) makes a new share link: one that stopped working when it was restricted stays dead (the event's `newLink`) |
 | `POST /api/f/{name}/rotate` | owner, or their agent for them | `{scopes?: [inbox, view]}` → `{inboxToken, viewToken, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md) |
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
@@ -1032,7 +1032,6 @@ title opening its share sheet.
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent: an agent's owner reads as a viewer, and an agent acts at most as an editor) | its app's database, as the platform code in its facet reads it (`__dump`, cell/platform.mjs), for an export (Export, below). With no `table`, `{schema: [{type, name, table, sql}], tables}`: each table's, index's, view's and trigger's statement in the order SQLite made them, a virtual table's shadow tables and the platform's operation ledger (`_fragment_ops`) left out, and the tables whose rows it holds. With one, `{table, offset, rows, next}`: at most 1000 of its rows from `offset`, each a JSON object of its columns (a blob `{"$base64"}`), about 4 MiB of their JSON at most (the first whatever its size), `next` the offset after them or `null` at the end; a table not in the schema is 404. Without app code, 404 `no_code`. It loads the app's code, as a query does (its dynamic worker, metered) |
 | `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
-
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
@@ -1048,8 +1047,9 @@ and `app.mjs` (with `applib/**.mjs|js`, at most 64 modules and 4 MiB in
 all) from the live commit. A live commit with an invalid `fragment.json`
 keeps the last good code and says why in `status.code.error`.
 
-A fragment on a blessed template (`chat`, `agent`, `brain`: docs/cloudflare-v1.md,
-decision 40) names it in `fragment.json` (`template`) and runs the
+A fragment on a blessed template (`agent`, `chat`, `brain`, `skills`:
+`fragment_templates::blessed::BLESSED`; docs/cloudflare-v1.md, decision
+40) names it in `fragment.json` (`template`) and runs the
 platform release's manifest (with its own `meta` over the template's),
 site, and code: the template's `app.mjs` and `applib/`, when it carries
 any (a chat's push: docs/chat-records.md), held to an app's limits and

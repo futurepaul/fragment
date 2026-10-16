@@ -294,8 +294,10 @@ prebuilt bundle is in the debt ledger).
   images' manifest or lock, or the workflow (its `changes` job reads what
   changed), and on a run by hand. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
-- Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
-  zone `finite.place` in Paul's account, and production only at cutover.
+- Master deploys to Cloudflare (`xtask deploy`): branch copies on a dev
+  zone (master's preview is `preview.finite.build`), and production
+  (`finite.chat`, its fragments on `*.finite.place`, in Finite's
+  production account: Paul, 2026-10-16) only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
