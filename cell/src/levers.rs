@@ -35,7 +35,7 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
-use crate::{ask_registry, check_name, json_answer, ledger, read_body, routed};
+use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, routed};
 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
@@ -238,11 +238,4 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
 async fn is_e2e(env: &Env, identity: &str) -> CellResult<bool> {
     let answer = ask_registry(env, &calls::TestHook::E2eIs(identity.to_string())).await?;
     answer["e2e"].as_bool().ok_or_else(|| CellError::host(format!("the registry's answer to who is an e2e person: {answer}")))
-}
-
-/// The 404 every lever answers a request without the fleet's secret: the
-/// router's own for a route it does not have (lib.rs, its last arm), word
-/// for word.
-pub fn no_route(path: &str) -> CellError {
-    CellError::new(fragment_proto::ErrorCode::NotFound, format!("no route {path}"))
 }

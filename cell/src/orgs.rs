@@ -110,22 +110,29 @@ pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, 
                 Err(e) => Err(e),
             }
         }
-        Caller::Session(token) => {
-            let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: By::Session(token) }).await?;
-            if cfg.is_operator(None, &view.id)? {
-                return Ok(view.id);
+        Caller::Session(token) => session_operator(env, cfg, token).await?.ok_or_else(refused),
+    }
+}
+
+/// The operator a platform session is (decision 59): an identity the
+/// deployment lists, or a person who holds a key it lists. Answers their
+/// identity, or `None` for anyone else; a session that is not live is the
+/// registry's 401. `operator` holds the shell's session to it, and
+/// `GET /admin` the page's (shell.rs `admin_page`).
+pub(crate) async fn session_operator(env: &Env, cfg: &Config, token: String) -> CellResult<Option<String>> {
+    let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: By::Session(token) }).await?;
+    if cfg.is_operator(None, &view.id)? {
+        return Ok(Some(view.id));
+    }
+    // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
+    for k in view.keys.iter().filter(|k| k.revoked_at.is_none()) {
+        if let Some(hex) = fragment_core::npub::parse(&k.npub) {
+            if cfg.is_operator(Some(&hex), "")? {
+                return Ok(Some(view.id));
             }
-            // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
-            for k in view.keys.iter().filter(|k| k.revoked_at.is_none()) {
-                if let Some(hex) = fragment_core::npub::parse(&k.npub) {
-                    if cfg.is_operator(Some(&hex), "")? {
-                        return Ok(view.id);
-                    }
-                }
-            }
-            Err(refused())
         }
     }
+    Ok(None)
 }
 
 /// A query parameter, once.

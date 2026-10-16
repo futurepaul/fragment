@@ -386,8 +386,8 @@ and a computer's host label, `<24 hex>--computer--<branch>`, fits too.
 ## Operators: the admin (docs/billing.md; decision 59)
 
 The deployment's operators run it from `/admin` (a platform page, plain
-like the shell: it holds nothing, and its API answers only operators),
-from `fragment operator people|person|pin|orgs|comp|uncomp|trials|health|log`,
+like the shell, that holds nothing), from
+`fragment operator people|person|pin|orgs|comp|uncomp|trials|health|log`,
 or over `/api/admin/*`. An operator is: a key the deployment's
 `operators` lists, held by anyone or no one (no registry is asked of one
 no one holds, as a wipe's); an identity it lists, signed or through the
@@ -395,6 +395,13 @@ shell's session; or a person who holds a key it lists, through their
 session too (it acts as that key may). The operators' ledger commands
 (Ledger) take the same. An operator is named by their identity, or a key
 no one holds by its npub: a grant's `by`, and the log's.
+
+`GET /admin` answers the page only to an operator's platform session,
+by the rule above (an identity the deployment lists, or a person who
+holds a key it lists). To anyone else, signed out, signed in, or with a
+session that ended, it is the 404 any missing route is, word for word
+(`{"error":"not_found","message":"no route /admin"}`), so no one else
+learns the page is there. Its API decides again on every call.
 
 | method & path | who | body → answer |
 | --- | --- | --- |

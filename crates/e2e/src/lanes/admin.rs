@@ -3,13 +3,15 @@
 //! ledger and computer; their computer pinned to another image and back
 //! (a canary: docs/computers.md, "Stable and canary"); billing's health; a
 //! trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
-//! wipe's does; no one else. Valid and invalid.
+//! wipe's does; no one else. Its page, `/admin`, is an operator's session's
+//! alone: to anyone else it is the 404 of a path that is not there. Valid
+//! and invalid.
 
 use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use crate::api::Api;
+use crate::api::{Api, Call, Reply};
 use crate::{Need, Suite};
 
 pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
@@ -186,13 +188,37 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
         refused.iter().all(|r| r.status == 403) && unsigned.status == 401,
         json!([refused.iter().map(|r| r.status).collect::<Vec<_>>(), unsigned.status]),
     );
+
+    // ---- its page, an operator's session's alone (shell.rs `admin_page`)
+    let page = |path: &str, session: Option<&str>| api.call(Call { method: "GET", url: format!("{}{path}", api.base), cookie: session.map(|t| format!("fragment_session={t}")), ..Call::default() });
+    let missing = page("/no-such-page", None)?;
+    // the router's 404 names the path it has no route for
+    let as_missing = |r: &Reply| r.status == 404 && r.header("content-type") == missing.header("content-type") && r.text == missing.text.replace("/no-such-page", "/admin");
+    let stranger_session = api.sign_in(&Api::email_of(&stranger))?;
+    let not_live = "0".repeat(64);
+    let others = [page("/admin", None)?, page("/admin", Some(&stranger_session))?, page("/admin", Some(&not_live))?];
+    s.ok(
+        "to anyone but an operator, `/admin` is the 404 a path that is not there is, word for word: signed out, signed in, or with a session that is not live",
+        missing.status == 404 && missing.text.contains("/no-such-page") && others.iter().all(as_missing),
+        format!("{} / {missing}", others.iter().map(Reply::to_string).collect::<Vec<_>>().join(" / ")),
+    );
+    let theirs = page("/admin", Some(&op_session))?;
+    s.ok(
+        "an operator's session gets the page, never framed",
+        theirs.status == 200
+            && theirs.header("content-type").starts_with("text/html")
+            && theirs.text.contains("<title>fragment admin</title>")
+            && theirs.header("content-security-policy").contains("frame-ancestors 'none'")
+            && theirs.header("x-frame-options") == "DENY",
+        &theirs,
+    );
     Ok(())
 }
 
 /// The admin's page (`/admin`) in Chrome, with an operator's own session:
 /// a person who holds a key the deployment lists (decision 59). It lists
 /// people and comps a seat, makes a trial code, shows the orgs, billing's
-/// health and the log; to anyone else it says why it shows nothing.
+/// health and the log; to anyone else `/admin` is a 404, and nothing of it.
 pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("admin-page", &[Need::Chrome, Need::Deployment]) {
         return Ok(());
@@ -238,8 +264,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let other = api.sign_in(&format!("admin-page-stranger-{}@e2e.test", crate::api::now_s()))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &other)?;
     let theirs = b.open(&format!("{}/admin", api.base))?;
-    let refused = b.until(&theirs, "document.getElementById('status').className === 'bad' && /operators/.test(document.getElementById('status').textContent)", wait);
-    let rows = b.eval(&theirs, "document.querySelectorAll('#people-rows tr').length")?;
-    s.ok("to anyone else it shows nothing, and says only operators may", refused && rows == 0, b.eval(&theirs, "document.getElementById('status').textContent")?);
+    let missing = b.until(&theirs, "document.readyState === 'complete' && !document.getElementById('status') && document.body.innerText.includes('no route /admin')", wait);
+    s.ok("to anyone else it is the 404 of a path that is not there: nothing of the page", missing, b.eval(&theirs, "document.body.innerText")?);
     Ok(())
 }

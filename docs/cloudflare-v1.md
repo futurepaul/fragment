@@ -937,7 +937,8 @@ Paul's (its slice 10).
 59. **The operator's admin** (`/admin`) acts through an operator's
     browser session: people, invites, trial codes, orgs, billing
     health, and an audit log of every write. The wipe stays a signed
-    CLI call.
+    CLI call. To anyone else `/admin` is the 404 of a path that is not
+    there (Paul, 2026-10-16).
 
 ### A person's own models (Paul, 2026-10-08)
 

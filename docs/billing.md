@@ -399,7 +399,10 @@ Checked against finite-mono's code (2026-10-08):
   through the operator's platform session. The wipe still takes a
   signed CLI call, as today.
 - **Where:**
-  - `/admin`: a shell path, plain JS like the shell;
+  - `/admin`: a shell path, plain JS like the shell, served to an
+    operator's session alone; to anyone else, signed in or not, the 404
+    any missing path is (Paul, 2026-10-16: "currently anyone can visit
+    the `/admin` url");
   - `/api/admin/*`;
   - `fragment admin …` in the CLI;
   - a row in SPECIAL-CASE-INVENTORY.md (security: it acts on every

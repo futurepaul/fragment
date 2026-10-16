@@ -1,9 +1,11 @@
 // The operators' admin page (docs/billing.md, "The operator's admin";
 // decision 59): people, orgs, trial codes, billing's health and the log
 // of what operators did, through `/api/admin/*` with the operator's own
-// platform session (`x-fragment-shell`, same-origin only). The API
-// decides who may: anyone else is answered 403 and sees only that. Every
-// value reaches the page as text, never as markup.
+// platform session (`x-fragment-shell`, same-origin only). The page is
+// served to an operator's session alone (anyone else gets the 404 of a
+// missing path), and the API decides again: anyone else is answered 403
+// and sees only that. Every value reaches the page as text, never as
+// markup.
 
 const $ = (id) => document.getElementById(id);
 const status = $("status");
