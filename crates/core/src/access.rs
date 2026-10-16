@@ -38,6 +38,14 @@
 //! fragment and its money cap stay the owner's own: never an agent's,
 //! whomever it acts for. What an agent shares is recorded as the agent's,
 //! for its owner, so its owner sees it did.
+//!
+//! Running its owner's agents is the same lent authority on the owner's
+//! computer (decision 62, proposed): an agent that acts for its own owner,
+//! unheld, starts one of its owner's agents on its owner's computer and
+//! stops one (`agent_may_run`), so a person's default agent keeps the
+//! others. It never starts or stops itself, and every other computer
+//! route (making it, waking, restarting, its image, connections, ports, its
+//! uses) stays its owner's own.
 
 use fragment_proto::{Role, Visibility};
 
@@ -239,6 +247,69 @@ pub fn agent_shares(sharer: Sharer, owner: Option<Role>) -> Result<Role, ShareRe
         return Err(ShareRefusal::NotOwner);
     }
     Ok(Role::Owner)
+}
+
+/// Why an agent's request to its owner's computer (`/api/computers/…`)
+/// carries no owner's authority (403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunRefusal {
+    /// Any computer route but starting and stopping an agent: its owner's
+    /// own.
+    PeopleOnly,
+    /// It acts as itself, or for someone other than its owner.
+    NotForOwner,
+    /// Its owner holds it below them, and running agents is above every
+    /// hold.
+    Held,
+    /// It names its own agent fragment: its owner starts and stops it.
+    Itself,
+}
+
+impl RunRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            RunRefusal::PeopleOnly => "computers are people's: an agent runs on its owner's, and only starts or stops its owner's other agents there",
+            RunRefusal::NotForOwner => "an agent starts or stops an agent only acting for its own owner (`for=<its owner>`), never as itself or for anyone else",
+            RunRefusal::Held => "an agent its owner holds below them starts and stops no agent",
+            RunRefusal::Itself => "an agent never starts or stops itself: its owner does",
+        }
+    }
+}
+
+/// Whether a computer route (`method`, and its path under
+/// `/api/computers`) starts or stops an agent: `PUT` or `DELETE
+/// <computer>/agents/<fragment>`. Its `connections` are not that: narrowing
+/// an agent stays its owner's (decision 44).
+pub fn runs_an_agent(method: &str, rest: &[&str]) -> bool {
+    matches!((method, rest), ("PUT" | "DELETE", [_, "agents", _]))
+}
+
+/// Whether an agent may ask its owner's computer `method rest` (decision
+/// 62, proposed): only to start or stop an agent, acting for its own
+/// owner, unheld. The router decides this from who the agent is; the
+/// agent fragment decides `Itself` (it knows its own identity) and that its
+/// owner is the computer's, as for its owner.
+pub fn agent_may_run(method: &str, rest: &[&str], sharer: Sharer) -> Result<(), RunRefusal> {
+    if !runs_an_agent(method, rest) {
+        return Err(RunRefusal::PeopleOnly);
+    }
+    if !sharer.for_owner {
+        return Err(RunRefusal::NotForOwner);
+    }
+    match sharer.held {
+        Some(_) => Err(RunRefusal::Held),
+        None => Ok(()),
+    }
+}
+
+/// The agent fragment's half: whether `asker` (an agent starting or
+/// stopping it; `None`, its owner) is the agent it runs (`agent`, its
+/// identity once its computer took it).
+pub fn agent_runs_itself(asker: Option<&str>, agent: Option<&str>) -> Result<(), RunRefusal> {
+    match (asker, agent) {
+        (Some(asker), Some(agent)) if asker == agent => Err(RunRefusal::Itself),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +574,62 @@ mod tests {
         let first = refuse_set_role(Some(Owner), None, Viewer);
         let again = refuse_set_role(Some(Owner), Some(Viewer), Viewer);
         assert_eq!((first, again), (None, None));
+    }
+
+    /// Goal: decision 62 (proposed): a person's agent starts and stops
+    /// their other agents on their computer, so their default agent keeps
+    /// the rest, and does nothing else there. Method: the router's half
+    /// (`agent_may_run`, from the route and who the agent is) over every
+    /// computer route and each kind of asker, then the agent fragment's
+    /// (`agent_runs_itself`).
+    #[test]
+    fn an_agent_runs_its_owners_agents() {
+        let for_owner = Sharer { for_owner: true, held: None };
+        let start = ("PUT", &["c0ffee", "agents", "maple--k3x9"][..]);
+        let stop = ("DELETE", &["c0ffee", "agents", "maple--k3x9"][..]);
+        // valid: acting for its own owner, unheld, it starts and stops one
+        for (method, rest) in [start, stop] {
+            assert!(runs_an_agent(method, rest), "{method} {rest:?}");
+            assert_eq!(agent_may_run(method, rest, for_owner), Ok(()), "{method} {rest:?}");
+        }
+        // ...any of its owner's agents but itself, which its owner runs
+        assert_eq!(agent_runs_itself(Some("npub1juniper"), Some("npub1maple")), Ok(()));
+        assert_eq!(agent_runs_itself(Some("npub1juniper"), None), Ok(()), "a fragment no computer took yet is no one");
+        assert_eq!(agent_runs_itself(None, Some("npub1maple")), Ok(()), "its owner starts and stops any");
+        assert_eq!(agent_runs_itself(Some("npub1maple"), Some("npub1maple")), Err(RunRefusal::Itself));
+
+        // invalid: every other computer route stays its owner's, for whomever it acts
+        for (method, rest) in [
+            ("POST", &[][..]),
+            ("GET", &[][..]),
+            ("POST", &["c0ffee", "wake"][..]),
+            ("POST", &["c0ffee", "restart"][..]),
+            ("PUT", &["c0ffee", "image"][..]),
+            ("PUT", &["c0ffee", "agents", "maple--k3x9", "connections"][..]),
+            ("GET", &["c0ffee", "uses"][..]),
+            ("POST", &["c0ffee", "ports", "6080", "ticket"][..]),
+            ("GET", &["c0ffee", "agents", "maple--k3x9"][..]),
+            ("POST", &["c0ffee", "agents", "maple--k3x9"][..]),
+            ("PUT", &["c0ffee", "agents"][..]),
+        ] {
+            assert!(!runs_an_agent(method, rest), "{method} {rest:?}");
+            for sharer in [for_owner, Sharer { for_owner: false, held: None }, Sharer { for_owner: true, held: Some(Viewer) }] {
+                assert_eq!(agent_may_run(method, rest, sharer), Err(RunRefusal::PeopleOnly), "{method} {rest:?} {sharer:?}");
+            }
+        }
+        // ...as itself, or for anyone but its owner
+        let not_for_owner = Sharer { for_owner: false, held: None };
+        for (method, rest) in [start, stop] {
+            assert_eq!(agent_may_run(method, rest, not_for_owner), Err(RunRefusal::NotForOwner));
+            // ...and held below its owner, at any hold
+            for held in [Viewer, Editor] {
+                assert_eq!(agent_may_run(method, rest, Sharer { for_owner: true, held: Some(held) }), Err(RunRefusal::Held));
+            }
+        }
+
+        // replay: asked again, the same answer
+        assert_eq!(agent_may_run(start.0, start.1, for_owner), agent_may_run(start.0, start.1, for_owner));
+        assert_eq!(agent_runs_itself(Some("npub1maple"), Some("npub1maple")), agent_runs_itself(Some("npub1maple"), Some("npub1maple")));
     }
 
     #[test]
