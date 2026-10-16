@@ -1223,6 +1223,29 @@ these other providers."
       trusted is read from `agent.json` by convention (the ledger: "Which
       of an agent's teammates is trusted is read from its agent.json").
 
+    *Status, 2026-10-16 (Austin's local run, real models).* `cargo xtask
+    dev --hermes` with the tiers on GLM-5.3 Flash through OpenRouter
+    (`FRAGMENT_DEV_MODELS_FILE`, production's shape since 2026-10-15) and
+    the person's own OpenRouter key. Asked for "a separate agent just for
+    polishing my writing, running on Claude Sonnet 5.5", the default
+    agent made Polisher (`agent.json`'s model
+    `openrouter:anthropic/claude-sonnet-5.5`, its own chat, which it left),
+    briefed it with `fragment ask`, and Polisher answered on Sonnet
+    through the computer's swap (its key's spend rose, the route's calls
+    did not). Asked to have Polisher polish a note to a doctor, the
+    default agent sent it whole (a birth date, a member ID, an address, a
+    phone number, a medicine and its dose) and only then said so: it took
+    "have it polish this note" as its owner's consent. The skill now says
+    asking for a teammate's help is not consent, and makes the default
+    sending placeholders (`[NAME]`, `[DOB]`, …), the details put back by
+    the default agent; asked again, in a new chat, about a note to a
+    landlord (a bank account, an address, a phone number), it sent
+    Polisher placeholders alone, put the details back, and said so. One
+    run each, on one model: evidence, not proof (the hosted agent-smoke
+    lane's to repeat). Seen beside it: a person's own-key calls are never
+    counted in the computer's `uses` (`GET /api/computers/{id}/uses`
+    answered none), which docs/computers.md says they are.
+
     **For Paul to decide:**
     1. Whether an agent may start and stop its owner's agents at all
        (this decision), and whether it should tell its owner first.
