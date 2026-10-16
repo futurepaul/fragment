@@ -93,9 +93,10 @@ speaking Cloudflare's APIs) returns once this product works.
    `finite.chat` (the CLI's default host since 0.14.0: `DEFAULT_HOST`,
    cli/src/main.rs) and fragments on `<name>.finite.place`: a deployment
    of its own (`platform_host`, `fragment_suffix`: deploy/example.jsonc),
-   each host's route in its own zone. Paul moved `finite.place` from his
-   account to Finite's production account that day (decision 3), so it
-   is no longer the dev zone (decision 20's status). fragment.club and
+   each host's route in its own zone. `finite.place` was the dev zone
+   while Paul proved things in his own account; he moves it to Finite's
+   production account that day (decision 3), so it is no longer the dev
+   zone (decision 20's status). fragment.club and
    fragment.boats stay the celld fleet's until cutover, and nothing on
    them migrates (decisions 33 to 35).
 
