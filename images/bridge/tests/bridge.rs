@@ -526,6 +526,147 @@ async fn an_agent_that_just_joined_answers_its_mention() {
     bridge.stop().await;
 }
 
+/// The agent's fragments listed (`GET /api/fragments`), failed or not.
+fn listings(w: &World) -> usize {
+    w.calls.iter().filter(|c| *c == "GET /api/fragments").count()
+}
+
+/// Goal (docs/computers.md, "An agent added to a fragment wakes its
+/// computer": woken, it follows the new chat before anyone speaks there): a
+/// listing of the agent's fragments that fails (a 503, a call that went
+/// unanswered) is asked again within seconds, never left to the next
+/// cadence (`DISCOVER_EVERY_MS`, 5 minutes). At a start nothing is
+/// followed until one lists: its chats, and its `tasks`, so the `joined`
+/// that woke it too (canary round 4, 2026-10-16: woken by a join, a
+/// computer followed nothing for the lane's 300 s). Method: a life follows
+/// its chat and stops (a sleep); asleep, its agent joins a new chat; the
+/// next life's first two listings fail. Valid: it follows the new chat
+/// within the backoff's first waits, and answers there. Replay: each of its
+/// chats and its tasks once, one wake subscription on the new chat, and no
+/// listing past the failed two, its start's, and the join's.
+#[tokio::test]
+async fn woken_by_a_join_it_follows_through_a_failed_listing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.chat("talk", &["juniper"]);
+    let dir = support::dir("join-failed-listing");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    bridge.stop().await;
+    fake.until(WAIT, "the first life's sockets closed", |w| w.live_sockets() == 0).await;
+
+    let next = fake.chat("next", &[]);
+    fake.join(&next, "juniper");
+    let before = fake.with(|w| {
+        w.fail_lists = 2;
+        listings(w)
+    });
+    let t = Instant::now();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    // within the backoff's first waits (0.5-1.5 s, then 1-3 s), not the next cadence
+    fake.until(WAIT, "the new chat followed, through two failed listings", |w| w.live_sockets() == 3 && w.fragments[&next].subscriptions.len() == 1).await;
+    eprintln!("start to following the new chat, two listings failed: {} ms", t.elapsed().as_millis());
+    fake.until(WAIT, "the join's listing", |w| listings(w) == before + 4).await;
+    let said = fake.say(&next, &person("paul"), json!({ "text": "hello in the new chat" }));
+    fake.until(WAIT, "its reply there", |w| replies(w, &next).len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    fake.with(|w| {
+        assert_eq!(replies(w, &next), vec![json!({ "text": "echo: [paul] hello in the new chat", "turn": turn_of("juniper", &next, seq(&said)) })]);
+        assert_eq!(w.live_sockets(), 3, "its tasks and both chats, once each");
+        assert_eq!(w.fragments[&next].subscriptions.len(), 1);
+        assert_eq!(listings(w), before + 4, "two failed, its start's, the join's: no more");
+    });
+    bridge.stop().await;
+}
+
+/// Goal: awake, a `joined` is followed at once whatever one read of the
+/// platform answers: a read of the computer that fails, or a listing that
+/// does, never leaves the new chat to the next cadence. Method: a bridge
+/// following its chat; the next read of the computer and the next listing
+/// fail; its agent joins a new chat. It follows that chat within seconds,
+/// and answers there.
+#[tokio::test]
+async fn awake_a_join_is_followed_through_failed_reads() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.chat("talk", &["juniper"]);
+    let dir = support::dir("join-failed-reads");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| {
+        w.fail_computer_reads = 1;
+        w.fail_lists = 1;
+    });
+    let next = fake.chat("next", &[]);
+    fake.join(&next, "juniper");
+    // within the backoff's first wait (0.5-1.5 s), not the next cadence
+    fake.until(WAIT, "the new chat followed", |w| w.live_sockets() == 3).await;
+    fake.say(&next, &person("paul"), json!({ "text": "hello in the new chat" }));
+    fake.until(WAIT, "its reply there", |w| replies(w, &next).len() == 1).await;
+    bridge.stop().await;
+}
+
+/// Goal: one of the agent's fragments that keeps failing (its channels
+/// answer 500) keeps it from none of its other chats, nor its tasks; that
+/// one alone is asked again, on a growing backoff (not at every tick, and
+/// with no listing of the rest), and is followed once it answers. Method:
+/// an agent in two chats, the first it lists broken from the start, then
+/// healed.
+#[tokio::test]
+async fn a_broken_fragment_keeps_the_agent_from_no_other_chat() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let broken = fake.chat("broken", &["juniper"]);
+    let talk = fake.chat("talk", &["juniper"]);
+    fake.with(|w| w.broken.push(broken.clone()));
+    let dir = support::dir("broken-fragment");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    // backoff waits of 0.5-1.5 s, then 1-3 s, then 2-6 s: two to four reads in 4 s
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let path = format!("GET /api/f/{broken}/channels");
+    let (reads, listed) = fake.with(|w| (w.calls.iter().filter(|c| **c == path).count(), listings(w)));
+    assert!((2..=4).contains(&reads), "asked again on a backoff: {reads} reads in 4 s");
+    assert_eq!(listed, 1, "the broken fragment alone is asked again, not the list");
+    following(&fake, 2).await;
+    fake.say(&talk, &person("paul"), json!({ "text": "hi" }));
+    fake.until(WAIT, "a reply in the chat that answers", |w| replies(w, &talk).len() == 1).await;
+    fake.with(|w| w.broken.clear());
+    fake.until(WAIT * 3, "the healed chat followed", |w| w.live_sockets() == 3).await;
+    fake.say(&broken, &person("paul"), json!({ "text": "and here" }));
+    fake.until(WAIT, "a reply in the healed chat", |w| replies(w, &broken).len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    fake.with(|w| assert_eq!(w.live_sockets(), 3, "each once"));
+    bridge.stop().await;
+}
+
+/// Goal: an agent that leaves the computer (here, the image's ready file no
+/// longer names it) while its listing is still asked again is followed no
+/// more once the platform answers: its discovery goes with it. Method: two
+/// agents whose listings keep failing; one leaves the ready file; then the
+/// platform answers.
+#[tokio::test]
+async fn an_agent_that_left_is_not_followed_by_its_listing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "maple"]).await;
+    fake.chat("talk", &["juniper"]);
+    let grove = fake.chat("grove", &["maple"]);
+    let dir = support::dir("left-mid-listing");
+    let file = dir.join("agents.json");
+    write_ready(&file, &["juniper--k3x9", "maple--k3x9"]);
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.agents_file = Some(file.clone());
+    fake.with(|w| w.fail_lists = 1_000);
+    let bridge = support::start(cfg, support::script());
+    fake.until(WAIT, "both agents' listings asked", |w| listings(w) >= 2).await;
+    write_ready(&file, &["juniper--k3x9"]);
+    fake.until(WAIT, "the computer read again for the ready file", |w| w.calls.iter().filter(|c| *c == "GET /api/computer").count() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fake.with(|w| w.fail_lists = 0);
+    following(&fake, 2).await;
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    fake.with(|w| {
+        assert_eq!(w.live_sockets(), 2, "juniper's tasks and chat alone");
+        assert!(w.fragments[&grove].subscriptions.is_empty(), "maple subscribed to nothing");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (decision 8): in a group, the lead (the first agent added) answers
 /// a message naming no one; an `@mention` picks who answers; a reply that
 /// names another agent hands off to it.

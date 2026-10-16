@@ -224,7 +224,9 @@ pub const TASKS_BACKLOG_MS: u64 = 60 * 60 * 1000;
 pub const COMPUTER_EVERY_MS: u64 = 60 * 1000;
 
 /// The agent's fragments are listed again this often while awake (a new
-/// chat is also announced on its `tasks` channel, which is immediate).
+/// chat is also announced on its `tasks` channel, which is immediate). A
+/// listing a read of which failed is asked again on the reconnect backoff,
+/// never left to this.
 pub const DISCOVER_EVERY_MS: u64 = 5 * 60 * 1000;
 
 /// SIGTERM means stop now (docs/computers.md): the bridge is gone within

@@ -693,7 +693,9 @@ expires within 30 days. The container application is the deployment's
   include a postable `chat` (a chat), and `tasks` of the agent's own
   fragment (its routines, and `joined` when it is added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
-  as the agent, read again every 5 minutes and on `joined`; the agents
+  as the agent, read again every 5 minutes and on `joined`, and within
+  seconds when a read of it fails (the bridge's backoff, docs/bridge.md):
+  until a start's first listing, nothing is followed; the agents
   themselves from `GET /api/computer`, read again every minute (the
   bridge), or every 3 s (our Hermes image, below).
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:

@@ -75,7 +75,7 @@ Bodies are JSON. `api.rs` has one method for each.
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
-| `GET /api/fragments` | | `{fragments: [{name, role}]}` |
+| `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {email}}}`: what to call a writer (a member's email, which its agent, a member, is shown) |

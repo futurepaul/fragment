@@ -4,7 +4,8 @@
 //! another body), drafts fanned out on `__live`, `__live` paging from a
 //! cursor, wake subscriptions, members, `GET /api/computer`, the keepalive
 //! socket, blobs, and a fragment's files. Levers drop every socket (a
-//! deploy), take the API down, and fail posts.
+//! deploy), take the API down, fail posts, fail reads of the computer and of
+//! an agent's list, and break a fragment's channels.
 //!
 //! A request acts as the agent its `x-fragment-agent` names (the intercept's
 //! job, faked): one not assigned to the computer is refused.
@@ -87,6 +88,12 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// The next this many `GET /api/computer` and `GET /api/fragments`
+    /// answer 503, as a platform that failed one read does.
+    pub fail_computer_reads: u32,
+    pub fail_lists: u32,
+    /// Fragments whose `GET …/channels` answers 500, every time.
+    pub broken: Vec<String>,
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
@@ -390,7 +397,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
 
     // The computer's own routes take no agent.
     match (method.clone(), p.as_slice()) {
-        (Method::GET, ["api", "computer"]) => return answer(StatusCode::OK, world.lock().unwrap().computer.clone()),
+        (Method::GET, ["api", "computer"]) => {
+            let mut w = world.lock().unwrap();
+            if w.fail_computer_reads > 0 {
+                w.fail_computer_reads -= 1;
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed read, as asked");
+            }
+            return answer(StatusCode::OK, w.computer.clone());
+        }
         (Method::GET, ["api", "computer", "keepalive"]) => {
             let Some((response, socket)) = net::accept_ws(&mut req) else { return refuse(StatusCode::BAD_REQUEST, "a socket") };
             let world = world.clone();
@@ -461,7 +475,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     }
 
     if p.as_slice() == ["api", "fragments"] {
-        let w = world.lock().unwrap();
+        let mut w = world.lock().unwrap();
+        if w.fail_lists > 0 {
+            w.fail_lists -= 1;
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed list, as asked");
+        }
         // an agent's list `for` someone marks what that someone owns
         // (`owned`), as the platform's does: Hermes finds its owner's
         // skills fragment by it
@@ -485,6 +503,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         // what a status says of it that the image reads: its title (an
         // agent's name: hermes-boot's Bot Mode identity)
         (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title })),
+        (Method::GET, ["channels"]) if w.broken.contains(&fragment) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "a broken fragment, as asked"),
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();
             answer(StatusCode::OK, json!({ "channels": list }))
