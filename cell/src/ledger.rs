@@ -27,7 +27,7 @@ use std::cell::Cell;
 
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_core::price::PriceBook;
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -195,7 +195,11 @@ pub struct Status {}
 /// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
 /// stays as it is, 0 where there was none: each new reservation, a model
 /// call or an AI step, counts one, and one past `max` is refused as a
-/// ledger at zero refuses it; the hosted e2e's people are capped so).
+/// ledger at zero refuses it; the hosted e2e's people are capped so), or
+/// set its seat at an order of the lever's (`legacy-seat {seat, seq}`,
+/// answering its status), as an operator's `seat` command did before it
+/// went (2026-10-16): a ledger such a command left ahead of the
+/// registry's order.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -205,6 +209,7 @@ pub enum TestHook {
     Entries { prefix: String },
     Totals,
     PaidCalls { max: Option<u64> },
+    LegacySeat { seat: SeatState, seq: u64 },
 }
 
 impl Route for core::Reserve {
@@ -774,6 +779,11 @@ impl LedgerCell {
                 Ok(json!({ "entries": entries }))
             }
             TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
+            TestHook::LegacySeat { seat, seq } => {
+                let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
+                let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now))).await?;
+                Ok(serde_json::to_value(status).expect("a status serializes"))
+            }
         }
     }
 }

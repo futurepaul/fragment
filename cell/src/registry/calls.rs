@@ -434,6 +434,10 @@ impl Call for WipeStep {
 pub(crate) enum TestHook {
     /// Answer 503 to everything else (`true`), or answer again.
     Down(bool),
+    /// Answer 503 to the next `times` calls to one path (at most
+    /// `TEST_DOWN_FOR_MAX`; 0 answers them again), as `Down` does: a test
+    /// fails one call a request makes, and the rest go on.
+    DownFor(DownFor),
     /// How many calls the Registry has had since it started (`{calls:
     /// null}`): a test counts a request's round trips by the difference.
     Calls,
@@ -499,6 +503,17 @@ pub(crate) const E2E_PEOPLE_PAGE: u32 = 100;
 /// The longest `TestHook::Hold`.
 pub(crate) const TEST_HOLD_MAX_MS: u32 = 10_000;
 
+/// `TestHook::DownFor`: which call (a `Call`'s path), and how many times.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DownFor {
+    pub path: String,
+    pub times: u32,
+}
+
+/// The most calls one `TestHook::DownFor` fails.
+pub(crate) const TEST_DOWN_FOR_MAX: u32 = 100;
+
 /// The controls over sign-in's rows.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -523,7 +538,7 @@ pub(crate) struct SigninCounts {
 
 impl Call for TestHook {
     const PATH: &'static str = "/test";
-    /// The hook's setting, `{down}`, `{calls}`, or `{hold}`, or `SigninCounts`.
+    /// The hook's setting, `{down}`, `{downFor}`, `{calls}`, or `{hold}`, or `SigninCounts`.
     type Answer = serde_json::Value;
 }
 

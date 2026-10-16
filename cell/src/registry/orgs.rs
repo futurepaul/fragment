@@ -5,17 +5,22 @@
 //! with it verified (`claim_seats`, from sign-in's turn). A person is in at
 //! most one org (`person` is UNIQUE) and holds at most one seat.
 //!
-//! The registry is the one writer of a seat holder's plan. A change to a
-//! seat queues its holder in `plan_syncs`, in the change's own turn; the
-//! registry's alarm pushes what `fragment_core::org::desired` says to their
-//! ledger (`SetPlan`, `SetSeat` in its own order, `plan_seq`) and their
-//! computer (always-on), each push read fresh, so a late one never undoes a
-//! newer change. A push that fails is tried again on the alarm; one queued
-//! again meanwhile (`since`) stays queued.
+//! The registry is the one writer of a seat holder's plan and seat. A
+//! change to a seat queues its holder in `plan_syncs` (one row a person),
+//! in the change's own turn; the registry's alarm pushes what
+//! `fragment_core::org::desired` says to their ledger (`SetPlan`, then
+//! `SetSeat` in its own order, `plan_seq`) and their computer (always-on),
+//! one push at a time, each read fresh as it goes, so a late one never
+//! undoes a newer change. A push that fails is tried again on the alarm;
+//! one queued again meanwhile (`since`) stays queued. A ledger whose seat
+//! is at a later order than ours (one an operator's `seat` command set,
+//! before it went) refuses ours as stale, naming its own: ours moves past
+//! it and the seat is told again, so no push is dropped as done unapplied.
 //!
 //! Comped seats are an operator's (the router checked who asks). Paid
 //! seats, and an org's own admins changing them, come with Stripe.
 
+use fragment_core::ledger::Refused;
 use fragment_core::org::{self, Held, Status, OFFERS_PER_EMAIL_MAX, SEATS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
 use fragment_proto::ledger::{SetPlan, SetSeat};
 use fragment_proto::org::{CompSeat, Comped, MySeat, OfferedSeat, OrgMember, OrgRef, OrgView, SeatKind, SeatView};
@@ -121,7 +126,8 @@ impl Call for OrgOf {
 }
 
 /// `POST /orgs/sync`: a person's plan is pushed again, if they hold a seat
-/// (their computer was just made, and learns whether it stays awake).
+/// (their computer was just made, and learns whether it stays awake). Its
+/// maker answers its failure, so it is asked again (cell/src/orgs.rs).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SyncSeat {
     pub person: String,
@@ -550,26 +556,42 @@ impl RegistryCell {
         Ok(org::desired(held))
     }
 
-    /// The next place in the ledgers' seat order (`fragment_core::org::next_seq`).
-    fn take_seq(&self) -> CellResult<u64> {
+    /// The next place in the ledgers' seat order (`fragment_core::org::next_seq`),
+    /// past `past` too (a ledger's that refused ours as stale; 0: none).
+    fn take_seq(&self, past: u64) -> CellResult<u64> {
         let last = self.row::<SeqRow>("SELECT seq FROM plan_seq WHERE one = 1", vec![])?.map_or(0, |r| r.seq.max(0) as u64);
-        let seq = org::next_seq(js::now_ms(), last);
+        let seq = org::next_seq(js::now_ms(), last.max(past));
         let stored = i64::try_from(seq).map_err(|_| CellError::host("the plans' seq outgrew an i64"))?;
         self.exec("INSERT INTO plan_seq (one, seq) VALUES (1, ?) ON CONFLICT (one) DO UPDATE SET seq = excluded.seq", vec![SqlStorageValue::Integer(stored)])?;
         Ok(seq)
     }
 
     /// Tells `person`'s ledger and computer what `d` says. Each command's id
-    /// is its push's own, so a ledger keeps each once.
+    /// is its push's own, so a ledger keeps each once. A ledger whose seat is
+    /// at a later order than `seq` refuses it as stale: the order moves past
+    /// the ledger's and the seat is told again, once (a second refusal fails
+    /// the push, which the alarm tries again).
     async fn push(&self, person: &str, d: org::Desired, seq: u64) -> CellResult<()> {
         let refused = |e: crate::ledger::LedgerError| CellError::new(e.code, format!("{person}'s ledger: {}", e.message));
         if let Some(plan) = d.plan {
             crate::ledger::ask(&self.env, person, &SetPlan { id: format!("org:{seq}:plan"), plan }).await.map_err(refused)?;
         }
-        crate::ledger::ask(&self.env, person, &SetSeat { id: format!("org:{seq}:seat"), seat: d.seat, seq }).await.map_err(refused)?;
+        let seat = |seq: u64| SetSeat { id: format!("org:{seq}:seat"), seat: d.seat, seq };
+        match crate::ledger::ask(&self.env, person, &seat(seq)).await {
+            Err(crate::ledger::LedgerError { refused: Some(Refused::StaleSeat { current }), .. }) => {
+                let past = self.take_seq(current)?;
+                assert!(past > current, "the seat's next order is past the ledger's");
+                console_log!("{}", json!({ "plan-sync": person, "stale": seq, "ledger": current, "again": past }));
+                crate::ledger::ask(&self.env, person, &seat(past)).await.map_err(refused)?;
+            }
+            told => {
+                told.map_err(refused)?;
+            }
+        }
         let computer = fragment_core::computer::default_computer_of(person);
         match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": d.always_on })).await {
-            // no computer yet: it asks for a push when it is made
+            // no computer yet: its making asks for a push, and fails (to be
+            // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
             Err(e) if e.code == ErrorCode::NotFound => Ok(()),
             answered => answered.map(|_| ()),
         }
@@ -588,7 +610,7 @@ impl RegistryCell {
         // bounded: at most SYNC_BATCH pushes a run
         for r in due {
             let d = self.desired_of(&r.person)?;
-            let seq = self.take_seq()?;
+            let seq = self.take_seq(0)?;
             let since = SqlStorageValue::Integer(r.since);
             match self.push(&r.person, d, seq).await {
                 Ok(()) => self.exec("DELETE FROM plan_syncs WHERE person = ? AND since = ?", vec![r.person.as_str().into(), since])?,

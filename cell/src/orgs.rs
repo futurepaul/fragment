@@ -283,10 +283,12 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
 }
 
 /// A computer was made: its owner's seat is pushed to it again, so it
-/// learns whether it stays awake. The computer is made whatever this
-/// answers; a push not queued now is queued at the seat's next change.
-pub(crate) async fn computer_made(env: &Env, person: &str) {
-    if let Err(e) = ask_registry(env, &SyncSeat { person: person.to_string() }).await {
+/// learns whether it stays awake (a push before it was made found none, and
+/// counted as done). The computer is made whatever this answers; a push
+/// not queued fails the making, so its caller makes it again (the same
+/// one: `computer/init` is idempotent), which asks again.
+pub(crate) async fn computer_made(env: &Env, person: &str) -> CellResult<()> {
+    ask_registry(env, &SyncSeat { person: person.to_string() }).await.inspect_err(|e| {
         console_error!("{}", serde_json::json!({ "seat-sync": person, "failed": e.message }));
-    }
+    })
 }

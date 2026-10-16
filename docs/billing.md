@@ -149,8 +149,13 @@ the dashboard. Worth taking:
 
 ### What a seat does
 
-The registry is the one writer of a person's plan. It tells two
-objects, in its own order (the ledger's `seq`):
+The registry is the one writer of a person's plan and seat: an operator
+comps or ends a seat through it (the ledger's own `seat` command went on
+2026-10-16, its `seq` free to run ahead of the registry's and drop its
+pushes). It tells two objects, one queued push a person, one at a time,
+each read fresh as it goes, the seat in its own order (the ledger's
+`seq`: one older than the ledger's is refused as stale, naming the
+ledger's, which the registry's next order passes):
 
 - **The person's ledger:**
   - their plan: `seat` or `seat_always_on` while their seat is good;
@@ -161,7 +166,9 @@ objects, in its own order (the ledger's `seq`):
 - **Their computer:** `AlwaysOn` while their plan is
   `seat_always_on` and they have not chosen to let it sleep. "Up to
   always-on": a $200 seat may stay awake. Off otherwise, so a downgrade
-  lets it idle to sleep.
+  lets it idle to sleep. A push before they have a computer finds none;
+  the computer's making asks for a push, and a making that cannot ask
+  fails, so it is made again (the same one) and asks again.
 
 A removed, lapsed or downgraded person keeps everything they own. Paying
 again restores it. Nothing is deleted by billing; the wipe stays the

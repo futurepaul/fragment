@@ -496,20 +496,24 @@ fragment.club until cutover (decisions 34–35).
   `configured_book` reads, and each ledger takes the newer version at its
   next call (`take_book` already does), with a test of a book's change.
 
-## A plan has two writers: the registry, and an operator's ledger commands
+## A plan has two writers: the registry, and an operator's `plan` command
 
 - **Observed:** orgs and seats (docs/billing.md). The registry pushes a
-  seat holder's plan and seat to their ledger (registry/orgs.rs), and an
-  operator may still set either straight on the ledger (`POST
-  /api/ledger/{person}/plan|seat`), which the e2e uses to make a guest or
-  cancel a seat. The registry's next push for that person wins.
+  seat holder's plan to their ledger (registry/orgs.rs), and an operator
+  may still set a plan straight on the ledger (`POST
+  /api/ledger/{person}/plan`), which the e2e uses to make a guest. The
+  registry's next push for a seat holder wins. A seat's state has one
+  writer, the registry: the ledger's `seat` command went on 2026-10-16
+  (its `seq` could run ahead of the registry's, and every later push was
+  then answered as done and dropped), and a ledger it left ahead refuses
+  the registry's push as stale, naming its order, which the registry's
+  next passes.
 - **Risk:** an operator's override of a seat holder's plan is silently
-  undone at their seat's next change; a `seat` command whose `seq` runs
-  ahead of the clock holds the registry's pushes back until it catches up.
+  undone at their seat's next change.
 - **First proof:** an operator who set a plan by hand and finds it reverted.
 - **Delete when:** the ledger's monthly allowance (approved 2026-10-07)
-  replaces plans' and seats' rules: the two commands go, operators comp
-  or end seats instead, and the e2e makes guests and lapses through seats.
+  replaces plans' rules: the `plan` command goes, operators comp or end
+  seats instead, and the e2e makes guests through seats.
 
 ## A fragment's git repository is not metered, and storage is sampled daily
 
