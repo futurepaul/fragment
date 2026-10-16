@@ -350,10 +350,28 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     let base = route.base.trim_end_matches('/');
     let mut y = String::new();
     y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model or its name changes.\n", agent.fragment, main.name()));
-    // its name, at every turn; a text tier's one retry (below) beside it
+    // its name, at every turn; a tier's guidance and a text tier's one
+    // retry (below) beside it, in its one `agent` mapping
     y.push_str(&format!("agent:\n  system_prompt: {}\n", q(&told_name(name))));
-    if let MainModel::Tier(Tier::Cheap | Tier::Medium) = main {
-        y.push_str("  api_max_retries: 1\n");
+    // A tier agent's prompt is the one its tiers were validated on, named
+    // `cheap` and `medium` (canary rounds 1 to 4): Hermes adds guidance for
+    // a model's family by a substring of its name, and named by its id a
+    // GLM, DeepSeek or Qwen gets two blocks those names never did, its
+    // tool-use enforcement (`agent.tool_use_enforcement`, "auto": its
+    // `TOOL_USE_ENFORCEMENT_MODELS`) and its execution discipline
+    // (`agent.execution_guidance`, "auto": its `EXECUTION_GUIDANCE_MODELS`;
+    // v0.21.7's `agent/system_prompt.py`, `_guidance_parts`). Given both,
+    // canary round 5's GLM, on OpenRouter, ran every command through
+    // `execute_code`. Both are off, so the id changes what `/model` and the
+    // prompt's `Model:` line say, and no guidance: every model's own blocks
+    // (finishing the job, parallel calls) stand. Revisit after launch. An
+    // owner's own model was always named by its id: Hermes' choice for it
+    // stands.
+    if let MainModel::Tier(tier) = main {
+        y.push_str("  tool_use_enforcement: false\n  execution_guidance: false\n");
+        if matches!(tier, Tier::Cheap | Tier::Medium) {
+            y.push_str("  api_max_retries: 1\n");
+        }
     }
     match main {
         MainModel::Tier(tier) => {
@@ -1013,6 +1031,34 @@ mod tests {
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
     }
 
+    /// Goal: naming a tier's model by its id changes what Hermes says the
+    /// model is, not the prompt the tier was validated on (named `cheap`
+    /// and `medium`, which no family Hermes guides matched). Method: every
+    /// tier's profile turns both of Hermes' family gates off, in its one
+    /// `agent` section; an owner's own model, always named by its id,
+    /// leaves them Hermes' (`auto`), and the overlay, which would win over
+    /// it, names neither. (Run against the real Hermes in the bridge's
+    /// tests/docker.rs, `the_hermes_image`: a GLM's prompt with neither.)
+    #[test]
+    fn a_tiers_prompt_is_the_tiers_whatever_its_models_family() {
+        let creds = Path::new("/c.sh");
+        let off = format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n", q(&told_name("Juniper")));
+        for tier in [Tier::Cheap, Tier::Medium, Tier::High] {
+            let p = profile_config(&agent(), "Juniper", &tier.into(), &route("http://model.fragment.internal"), &[], creds);
+            assert!(p.contains(&off), "the {} tier's guidance is its tier's, beside its name: {p}", tier.name());
+            assert_eq!(p.matches("\nagent:\n").count(), 1, "one `agent` mapping: {p}");
+        }
+        let mut own = agent();
+        own.credentials.push(fragment_bridge::runtime::Credential { model_base: Some("https://openrouter.ai/api/v1".into()), ..credential("openrouter", &[], "fcx_openrouter_a1") });
+        let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "z-ai/glm-5.3".into() }));
+        let p = profile_config(&own, "Juniper", &own_main, &route("http://model.fragment.internal"), &[], creds);
+        assert!(matches!(own_main, MainModel::Own { .. }) && p.contains("  default: \"z-ai/glm-5.3\"\n"), "{p}");
+        assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told_name("Juniper")))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
+        assert!(!p.contains("tool_use_enforcement") && !p.contains("execution_guidance"), "an owner's own model's guidance is Hermes' to choose: {p}");
+        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert!(!m.contains("tool_use_enforcement") && !m.contains("execution_guidance"), "a profile's own, never the overlay's: {m}");
+    }
+
     /// An `agent.json` the platform answered for is a tier (none there is
     /// the cheap tier); one it did not answer for is none, never the
     /// default tier in its place.
@@ -1086,7 +1132,7 @@ mod tests {
         for (tier, id, config) in [("cheap", CHEAP_ID, &c), ("medium", MEDIUM_ID, &p)] {
             assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model, by its id: {config}");
             assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{id}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
-            assert!(config.contains(&format!("agent:\n  system_prompt: {}\n  api_max_retries: 1\n", q(&told_name("Juniper")))), "one retry, beside its name: {config}");
+            assert!(config.contains(&format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n", q(&told_name("Juniper")))), "one retry, beside its name and its guidance: {config}");
             assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
         }
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");

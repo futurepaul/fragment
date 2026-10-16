@@ -1018,13 +1018,17 @@ expires within 30 days. The container application is the deployment's
   (`models`) at boot and every 3 s after, a change rewriting each profile's
   config, which Hermes reads at the agent's next turn. So Hermes knows the
   model it runs: its owner's `/model` in the chat says `Current:
-  \`z-ai/glm-5.3-flash\` on Custom endpoint`, its prompt's `Model:` line
-  names it, and Hermes' guidance for the model's family is that model's
-  (its tool-use and execution guidance, which it gives GLM and DeepSeek
-  models and gave none named `cheap`). A view that names no ids (a
-  platform from before them) leaves the route's names. The Docker lane
-  reads the config, `/model`, and a change of the ids while it runs
-  (images/bridge/tests/docker.rs).
+  \`z-ai/glm-5.3-flash\` on Custom endpoint`, and its prompt's `Model:`
+  line names it. Its prompt is otherwise the one the tiers were validated
+  on, named `cheap` and `medium`: each tier's profile turns off the
+  guidance Hermes adds for a model's family by its name
+  (`agent.tool_use_enforcement: false` and `agent.execution_guidance:
+  false`; "auto" gives a GLM, DeepSeek or Qwen id both, and given them
+  canary round 5's GLM ran every command through `execute_code`), to be
+  revisited after launch. A view that names no ids (a platform from
+  before them) leaves the route's names. The Docker lane reads the
+  config, the prompt Hermes sends, `/model`, and a change of the ids
+  while it runs (images/bridge/tests/docker.rs).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).

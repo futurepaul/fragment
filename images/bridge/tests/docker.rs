@@ -338,9 +338,23 @@ async fn the_hermes_image() {
             format!("      \"{CHEAP_ID}\":\n        stale_timeout_seconds: 20\n"),
             format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal:{}/v1\"\n    model: \"{FALLBACK_ID}\"\n", model.addr.port()),
             "    model: \"vision\"\n".to_string(),
+            "\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n".to_string(),
         ] {
             assert!(config.contains(&want), "its config has {want:?}:\n{config}");
         }
+        assert_eq!(config.matches("\nagent:\n").count(), 1, "one `agent` mapping, its name, its guidance and its retry in it:\n{config}");
+        // and the prompt Hermes gives that model names it by its id, a
+        // GLM's, with none of the guidance Hermes gives its family (its
+        // `_guidance_parts`: tool-use enforcement, execution discipline),
+        // as when it was named `cheap`; every model's own blocks stand
+        // (hermes.rs, `profile_config`)
+        let prompts: Vec<String> = calls
+            .iter()
+            .flat_map(|c| c.body["messages"].as_array().into_iter().flatten().filter(|m| m["role"] == "system").map(content_text))
+            .filter(|p| p.contains(&format!("\nModel: {CHEAP_ID}")))
+            .collect();
+        assert!(prompts.iter().any(|p| p.contains("# Finishing the job") && p.contains("# Parallel tool calls")), "a turn's prompt names its model by its id, with every model's guidance: {prompts:?}");
+        assert!(prompts.iter().all(|p| !p.contains("# Tool-use enforcement") && !p.contains("# Execution discipline")), "none of its family's: {prompts:?}");
         assert!(c.logs().lines().any(|l| l.contains("\"boot.model_ids\"") && l.contains(CHEAP_ID)), "the boot says the ids its view named");
         // A fresh profile's first message carries no first-contact note of
         // Hermes' (v0.21.5 appended "This is the user's very first message
