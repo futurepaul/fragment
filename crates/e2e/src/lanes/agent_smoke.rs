@@ -80,13 +80,15 @@ const FOLLOW: Duration = Duration::from_secs(60);
 /// One look every few seconds: each is a request to the preview.
 const POLL: Duration = Duration::from_secs(3);
 
-/// The shell's agent colours and its first agent's soul (cell/shell/shell.js:
-/// `COLORS`, `colorOf`, `firstSoul`), so the agent is made as a person's is.
+/// The shell's agent colours, its first agent's soul (which never names it)
+/// and its first chat's title (cell/shell/shell.js: `COLORS`, `colorOf`,
+/// `firstSoul`, `FIRST_CHAT`), so the agent is made as a person's is.
 const COLORS: [&str; 6] = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
 const TITLE: &str = "Novatron DX";
+const FIRST_CHAT: &str = "Your first chat";
 
-fn first_soul(name: &str, owner: &str) -> String {
-    format!("You are {name}, {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
+fn first_soul(owner: &str) -> String {
+    format!("You are {owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n")
 }
 
 /// The shell's `colorOf`: FNV-1a over the identity's UTF-16 units.
@@ -407,10 +409,10 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let assigned = api.signed(&keys, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let agent_json = format!("{}\n", serde_json::to_string_pretty(&json!({ "tier": "medium", "color": color_of(&identity) }))?);
-    let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(TITLE, &email) }, { "path": "agent.json", "text": agent_json }] });
+    let files = json!({ "key": "agent-default", "message": "the default agent", "files": [{ "path": "SOUL.md", "text": first_soul(&email) }, { "path": "agent.json", "text": agent_json }] });
     let soul = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/files"), Some(&files))?;
     let deployed = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/deploy"), Some(&json!({})))?;
-    let chat_made = api.create_with(&keys, json!({ "label": format!("{agent_label}-chat"), "template": "chat", "title": TITLE }))?;
+    let chat_made = api.create_with(&keys, json!({ "label": format!("{agent_label}-chat"), "template": "chat", "title": FIRST_CHAT }))?;
     let chat_name = chat_made.body["name"].as_str().unwrap_or("").to_string();
     // adding it to its chat is what wakes the computer (the platform's `joined`)
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
