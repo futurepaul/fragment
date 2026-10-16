@@ -1891,6 +1891,16 @@ and how a runtime finds them, is the image's.
   egress signs. No key is in the container. `fragment sync` and `deploy`
   still reach code.storage directly, with the short-lived, repo-scoped
   token the platform mints for the agent.
+- **Hermes' own CLI** runs by name in an agent's terminal
+  (`hermes --version`, `hermes config`): `/usr/local/bin/hermes` runs
+  upstream's `/opt/hermes/bin/hermes`. Hermes runs a terminal's commands,
+  and a background process, from a login shell (`bash -l`, `bash -lic`),
+  where Debian's `/etc/profile` sets a user's PATH to
+  `/usr/local/bin:/usr/bin:/bin:…`, without the image's `/opt/hermes/bin`;
+  upstream links its other tools into `/usr/local/bin` (node, npm,
+  python3, rg, ffmpeg), not `hermes`. execute_code's scripts keep the
+  gateway's PATH. The Docker lane's `an_agent_runs_hermes_by_name` runs
+  it each way.
 - **Its credentials** (Connections and operator keys, above):
   `hermes-boot` writes each agent's placeholders into its profile's `.env`
   under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
