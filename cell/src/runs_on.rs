@@ -21,7 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
-use fragment_core::npub;
+use fragment_core::{access, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -71,6 +71,10 @@ fn passing(code: ErrorCode) -> bool {
 struct Assign {
     computer: String,
     owner: String,
+    /// The agent that asks, acting for its owner (decision 62, proposed);
+    /// none when its owner does.
+    #[serde(default)]
+    by: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +125,7 @@ impl FragmentCell {
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
                 }
+                access::agent_runs_itself(b.by.as_deref(), self.meta(MetaKey::AgentIdentity)?.as_deref()).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,
                     None => {
@@ -140,7 +145,16 @@ impl FragmentCell {
                     let as_owner = self.as_owner()?;
                     self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor }).await?;
                 }
-                self.event("computer.assigned", &format!("runs on {}", b.computer), json!({ "computer": b.computer, "identity": identity }));
+                // an agent that started it is named, as what an agent shares is
+                let mut data = json!({ "computer": b.computer, "identity": identity });
+                let summary = match &b.by {
+                    Some(by) => {
+                        data["by"] = json!(by);
+                        format!("runs on {} (started by {by}, an agent, for its owner)", b.computer)
+                    }
+                    None => format!("runs on {}", b.computer),
+                };
+                self.event("computer.assigned", &summary, data);
                 Ok(json!({ "identity": identity }))
             }
             "unassign" => {
@@ -148,9 +162,18 @@ impl FragmentCell {
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
                 }
+                access::agent_runs_itself(b.by.as_deref(), self.meta(MetaKey::AgentIdentity)?.as_deref()).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
                 if self.meta(MetaKey::Computer)?.as_deref() == Some(b.computer.as_str()) {
                     self.del_meta(MetaKey::Computer)?;
-                    self.event("computer.unassigned", &format!("no longer runs on {}", b.computer), json!({ "computer": b.computer }));
+                    let mut data = json!({ "computer": b.computer });
+                    let summary = match &b.by {
+                        Some(by) => {
+                            data["by"] = json!(by);
+                            format!("no longer runs on {} (stopped by {by}, an agent, for its owner)", b.computer)
+                        }
+                        None => format!("no longer runs on {}", b.computer),
+                    };
+                    self.event("computer.unassigned", &summary, data);
                 }
                 Ok(json!({ "ok": true }))
             }

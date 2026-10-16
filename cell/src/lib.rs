@@ -261,7 +261,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments, the model routes (/api/models/…) and starting or stopping an agent (/api/computers/<id>/agents/<fragment>) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -1146,9 +1146,14 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let who = signer(env, &req, &url, &body).await?;
+            // `for` is honored on starting and stopping an agent alone: an
+            // agent does that for its owner (decision 62, proposed)
+            let who = match access::runs_an_agent(method.as_ref(), rest) {
+                true => signer_for(env, &req, &url, &body).await?,
+                false => signer(env, &req, &url, &body).await?,
+            };
             let rest = rest.to_vec();
-            computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+            computer::route(env, &who, method, &rest, &body).await
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

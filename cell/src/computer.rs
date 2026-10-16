@@ -48,6 +48,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use fragment_core::access;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
     alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
@@ -69,6 +70,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
 use crate::js;
+use crate::routed::Signed;
 
 /// The marker an internal route's caller carries (routed.rs `marker`): the
 /// router never passes it.
@@ -2455,10 +2457,20 @@ pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
     v["image"].as_str().filter(|i| fragment_core::price::printable(i, 64)).map(str::to_string).ok_or_else(|| CellError::invalid("name an image"))
 }
 
-pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
-    if kind != IdentityKind::Person {
-        return Err(CellError::new(ErrorCode::Forbidden, "computers are people's: an agent runs on its owner's"));
-    }
+pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+    // A person's own computer, or their agent's starting or stopping one of
+    // their agents there, acting for them (decision 62, proposed): then the
+    // route acts as its owner, naming the agent that asks (`by`).
+    let (who, by) = match signed.kind {
+        IdentityKind::Person => (signed.id.as_str(), None),
+        _ => {
+            let for_owner = signed.acting_for.is_some() && signed.acting_for == signed.owner;
+            let sharer = access::Sharer { for_owner, held: signed.held };
+            access::agent_may_run(method.as_ref(), rest, sharer).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            let owner = signed.owner.as_deref().ok_or_else(|| CellError::host(format!("agent {} has no owner", signed.id)))?;
+            (owner, Some(signed.id.as_str()))
+        }
+    };
     match (method, rest) {
         (Method::Post, []) => {
             let id = fragment_core::computer::default_computer_of(who);
@@ -2510,8 +2522,9 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Put, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
             // the agent fragment takes the computer first (its owner must be the
-            // computer's), and its key becomes the agent's identity
-            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
+            // computer's, and an agent asking is not it), and its key becomes
+            // the agent's identity
+            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who, "by": by })).await?;
             let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
             let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
             json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
@@ -2547,7 +2560,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             // an agent fragment gone (deleted: its own delete unassigns it,
             // ended.rs) has nothing to say: its computer runs it no more
-            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await {
+            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who, "by": by })).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
                 _ => {}
             }
