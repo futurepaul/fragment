@@ -59,8 +59,9 @@ does what that needs when the computer sets:
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
 - `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
-  owner), named as `for` on a fragment's routes and the fragment list,
-  the routes that honor it. The agent then holds that person's role,
+  owner), named as `for` on a fragment's routes, the fragment list, and
+  starting or stopping an agent on its owner's computer, the routes that
+  honor it. The agent then holds that person's role,
   never above it (and never above an editor): `fragment list` lists their
   fragments, and what `fragment create` makes is theirs, the agent its
   editor.
@@ -797,6 +798,44 @@ Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
 
+### Making and keeping agents
+
+An agent acting for its owner makes, changes, starts and stops its
+owner's other agents as its owner would (docs: decision 62, proposed), so
+a person's default agent keeps the rest:
+
+```
+fragment agent --new maple --name Maple --job "You keep the garden's notes: …"   # made, running, its own chat
+fragment agent maple --job "…"                     # its job (its SOUL.md)
+fragment agent maple --tier medium                 # the platform's tier it runs on
+fragment agent maple --model openrouter:anthropic/claude-sonnet-5.5   # a model of a provider its owner connected
+fragment agent maple --no-model                    # its tier again
+fragment agent maple --stop                        # stopped: its fragment, job and memories kept
+fragment agent maple --start                       # running again
+fragment agent maple                               # its name, where its model calls go, whether it runs
+```
+
+`--new <label>` makes the agent fragment (titled `--name`), starts it on
+its owner's computer, writes its job and settings, puts them live, and
+makes its own chat with its owner (`<label>-chat`, its Bot Chat), with
+it in it. An agent that runs it is in that chat as its maker and leaves
+it once the new agent is in, so the new one leads its own chat. Run it
+again after a failure and it finishes what the first try made; a label
+whose agent already has another job is refused (409), never rewritten.
+Brief the new agent with `fragment ask <label> "…" --wait`: it answers
+in a chat its owner sees. A job is who the agent is and what it does, at
+most 8 KiB, and never its name (that is its title); its first line is
+what its teammates see of it.
+
+A model (`--model <provider>:<id>`) runs only while its owner has that
+provider connected (Settings, Connections); otherwise the agent runs on
+its tier. `fragment agent <agent> --json` says where its model calls go:
+`runsOn` is `{on: "platform", tier}` or `{on: "own", provider, id}`,
+its owner's own provider, outside the platform. An agent never starts or
+stops itself, and the platform refuses (403) every other computer route
+to an agent, starting or stopping acting for anyone but its owner, and
+any of it while its owner holds it below them.
+
 ## Secrets
 
 ```
@@ -861,7 +900,9 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
-fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
+fragment agent [<agent>] [--name N] [--picture FILE | --no-picture] [--job T]
+fragment agent [<agent>] [--tier cheap|medium] [--model PROVIDER:ID | --no-model] [--start | --stop]
+fragment agent --new <label> --name N --job T [--tier cheap|medium] [--model PROVIDER:ID]
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]

@@ -241,11 +241,15 @@ pub struct AgentMode {
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
 /// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`) and the fragment list; it refuses it
-/// on every other route (cell/src/lib.rs `signer`).
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and starting or
+/// stopping an agent on a computer; it refuses it on every other route
+/// (cell/src/lib.rs `signer`).
 pub fn honors_for(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments"
+    // starting or stopping an agent, which an agent does for its owner
+    // (decision 62, proposed)
+    let runs_an_agent = matches!(p.split('/').collect::<Vec<_>>()[..], ["", "api", "computers", _, "agents", _]);
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || runs_an_agent
 }
 
 impl From<Identity> for Signer {
@@ -783,11 +787,21 @@ mod tests {
     }
 
     #[test]
-    fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
+    fn for_is_named_on_a_fragments_routes_the_list_and_running_agents_only() {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/computers/c0ffee/agents/maple--k3x9"] {
             assert!(honors_for(yes), "{yes}");
         }
-        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
+        for no in [
+            "/api/identities/me",
+            "/api/ledger",
+            "/api/search?q=a",
+            "/api/fragments/x.paul/archived",
+            "/api/computers",
+            "/api/computers/c0ffee/restart",
+            "/api/computers/c0ffee/agents/maple--k3x9/connections",
+            "/api/computer",
+            "/api/fx",
+        ] {
             assert!(!honors_for(no), "{no}");
         }
     }
