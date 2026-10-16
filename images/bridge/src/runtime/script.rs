@@ -62,6 +62,14 @@
 //!   `<words>`, sent inline, is, on clef-omni. The reply is `decided:
 //!   <model id> snack <probability>`, or `decide refused: <status> <its
 //!   first 300 characters>`;
+//! - `browse <url>`: its owner's browser, through the computer
+//!   (`$FRAGMENT_BROWSER`, a CDP socket at `/devtools/browser`;
+//!   docs/explorations/owner-browser.md, a spike), as a browser tool drives
+//!   one: a new tab on `<url>`, attached, read once it has loaded. The
+//!   reply is `browsed <url>: <its title>`, or `browse failed: <why>`;
+//! - `tabs`: the titles of the tabs its owner's browser lets it use (the
+//!   extension's Access), `tabs: <title> | …`; `close-tab <title>`: that
+//!   tab closed, `closed <title>`, or either's `… failed: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -298,6 +306,98 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
         Ok::<_, String>((status, String::from_utf8_lossy(&body).into_owned()))
     };
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| format!("{url}: no answer"))?
+}
+
+/// One CDP socket to the owner's browser, its calls numbered.
+struct Cdp {
+    ws: crate::net::ClientWs,
+    next: u64,
+}
+
+impl Cdp {
+    /// A CDP socket to the owner's browser (`browser`, the computer's
+    /// `$FRAGMENT_BROWSER`).
+    async fn open(browser: &str) -> Result<Cdp, String> {
+        let base = crate::net::Base::parse(browser)?;
+        Ok(Cdp { ws: crate::net::connect_ws(&base, "/devtools/browser", &[]).await?, next: 0 })
+    }
+
+    /// The tabs the browser offers: `(targetId, title)`.
+    async fn pages(&mut self) -> Result<Vec<(String, String)>, String> {
+        let v = self.call("Target.getTargets", serde_json::json!({}), None).await?;
+        let infos = v["targetInfos"].as_array().ok_or("Target.getTargets answered no targetInfos")?;
+        Ok(infos.iter().filter(|t| t["type"] == "page").map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t["title"].as_str().unwrap_or("").to_string())).collect())
+    }
+
+    /// `method`'s answer (on the page `session`, or the browser's own),
+    /// the events before it passed over.
+    async fn call(&mut self, method: &str, params: serde_json::Value, session: Option<&str>) -> Result<serde_json::Value, String> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        self.next += 1;
+        let id = self.next;
+        let mut m = serde_json::json!({ "id": id, "method": method, "params": params });
+        if let Some(s) = session {
+            m["sessionId"] = serde_json::json!(s);
+        }
+        self.ws.send(Message::text(m.to_string())).await.map_err(|e| format!("{method}: {e}"))?;
+        let answer = async {
+            while let Some(frame) = self.ws.next().await {
+                let text = match frame.map_err(|e| format!("{method}: {e}"))? {
+                    Message::Text(t) => t,
+                    Message::Close(f) => return Err(format!("{method}: the browser's socket closed: {}", f.map(|f| f.reason.to_string()).unwrap_or_default())),
+                    _ => continue,
+                };
+                let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{method}: {e}"))?;
+                if v["id"] == id {
+                    return match v.get("error") {
+                        Some(e) => Err(format!("{method}: {e}")),
+                        None => Ok(v["result"].clone()),
+                    };
+                }
+            }
+            Err(format!("{method}: the browser's socket closed"))
+        };
+        tokio::time::timeout(Duration::from_millis(crate::limits::BROWSE_CALL_MS), answer).await.map_err(|_| format!("{method}: no answer in {} ms", crate::limits::BROWSE_CALL_MS))?
+    }
+}
+
+/// `browse`: a new tab on `url` in the owner's browser (`browser`, the
+/// computer's `$FRAGMENT_BROWSER`), its title once it has loaded.
+async fn browse(browser: &str, url: &str) -> Result<String, String> {
+    let mut cdp = Cdp::open(browser).await?;
+    let made = cdp.call("Target.createTarget", serde_json::json!({ "url": url }), None).await?;
+    let target = made["targetId"].as_str().ok_or("Target.createTarget answered no targetId")?.to_string();
+    let attached = cdp.call("Target.attachToTarget", serde_json::json!({ "targetId": target, "flatten": true }), None).await?;
+    let session = attached["sessionId"].as_str().ok_or("Target.attachToTarget answered no sessionId")?.to_string();
+    // a new tab is about:blank, complete, before what it was opened on commits
+    let loaded = "document.readyState === 'complete' && location.href !== 'about:blank' ? document.title : null";
+    for _ in 0..crate::limits::BROWSE_POLLS_MAX {
+        let v = cdp.call("Runtime.evaluate", serde_json::json!({ "expression": loaded, "returnByValue": true }), Some(&session)).await?;
+        if let Some(title) = v["result"]["value"].as_str() {
+            let _ = cdp.ws.close(None).await;
+            return Ok(title.to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(crate::limits::BROWSE_POLL_MS)).await;
+    }
+    Err(format!("{url} did not load in {} ms", u64::from(crate::limits::BROWSE_POLLS_MAX) * crate::limits::BROWSE_POLL_MS))
+}
+
+/// `tabs`: the titles of the tabs the owner's browser lets its agents use.
+async fn tabs(browser: &str) -> Result<Vec<String>, String> {
+    let mut cdp = Cdp::open(browser).await?;
+    let pages = cdp.pages().await?;
+    let _ = cdp.ws.close(None).await;
+    Ok(pages.into_iter().map(|(_, title)| title).collect())
+}
+
+/// `close-tab <title>`: the tab with that title closed, if the agent may use it.
+async fn close_tab(browser: &str, title: &str) -> Result<(), String> {
+    let mut cdp = Cdp::open(browser).await?;
+    let target = cdp.pages().await?.into_iter().find(|(_, t)| t == title).map(|(id, _)| id).ok_or_else(|| format!("no tab titled {title:?} among those it may use"))?;
+    cdp.call("Target.closeTarget", serde_json::json!({ "targetId": target }), None).await?;
+    let _ = cdp.ws.close(None).await;
+    Ok(())
 }
 
 /// One model call, `said` as the user's message, on `on` (a model's id or
@@ -590,6 +690,29 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("decide refused: {e}"),
         };
     }
+    if let Some(url) = ts.text.strip_prefix("browse ") {
+        let url = url.trim();
+        reply = match std::env::var("FRAGMENT_BROWSER") {
+            Ok(browser) => match browse(&browser, url).await {
+                Ok(title) => format!("browsed {url}: {title}"),
+                Err(e) => format!("browse failed: {e}"),
+            },
+            Err(_) => "browse failed: no FRAGMENT_BROWSER".to_string(),
+        };
+    }
+    if text.trim() == "tabs" || text.starts_with("close-tab ") {
+        let browser = std::env::var("FRAGMENT_BROWSER").map_err(|_| "no FRAGMENT_BROWSER".to_string());
+        reply = match ts.text.strip_prefix("close-tab ") {
+            None => match async { tabs(&browser?).await }.await {
+                Ok(titles) => format!("tabs: {}", titles.join(" | ")),
+                Err(e) => format!("tabs failed: {e}"),
+            },
+            Some(title) => match async { close_tab(&browser?, title.trim()).await }.await {
+                Ok(()) => format!("closed {}", title.trim()),
+                Err(e) => format!("close-tab failed: {e}"),
+            },
+        };
+    }
     if text.starts_with("fetch ") {
         reply = match fetch(&ts.agent.fragment, &ts.text).await {
             Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
@@ -759,5 +882,95 @@ mod tests {
         assert_eq!(read_data(&root, "notes/gone.txt").await, "read notes/gone.txt: none");
         assert!(write_data(&root, "../escape x").await.starts_with("write refused"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A browser on a local port that answers `browse`'s calls as a real
+    /// one does, an event before each answer, the page loaded on the second
+    /// read; the calls it heard, as `(method, sessionId)`.
+    async fn fake_browser() -> (String, tokio::task::JoinHandle<Vec<(String, Option<String>)>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let served = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let (mut heard, mut reads) = (vec![], 0);
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                let m: serde_json::Value = serde_json::from_str(&t).unwrap();
+                let method = m["method"].as_str().unwrap().to_string();
+                heard.push((method.clone(), m["sessionId"].as_str().map(str::to_string)));
+                let result = match method.as_str() {
+                    "Target.createTarget" => serde_json::json!({ "targetId": "T1" }),
+                    "Target.attachToTarget" => serde_json::json!({ "sessionId": "S1" }),
+                    "Runtime.evaluate" => {
+                        reads += 1;
+                        serde_json::json!({ "result": { "value": if reads < 2 { serde_json::Value::Null } else { serde_json::json!("A page") } } })
+                    }
+                    "Target.getTargets" => serde_json::json!({ "targetInfos": [
+                        { "targetId": "T1", "type": "page", "title": "A page" },
+                        { "targetId": "W1", "type": "service_worker", "title": "a worker" },
+                        { "targetId": "T2", "type": "page", "title": "Another page" },
+                    ] }),
+                    _ => serde_json::json!({}),
+                };
+                ws.send(Message::text(r#"{"method":"Target.targetInfoChanged","params":{}}"#)).await.unwrap();
+                ws.send(Message::text(serde_json::json!({ "id": m["id"], "result": result }).to_string())).await.unwrap();
+            }
+            heard
+        });
+        (base, served)
+    }
+
+    /// `browse` opens a tab, attaches to it, and reads its title once it
+    /// has loaded, each page call on the session it attached.
+    #[tokio::test]
+    async fn browse_opens_a_tab_and_reads_it_loaded() {
+        let (base, served) = fake_browser().await;
+        assert_eq!(browse(&base, "https://example.com").await.unwrap(), "A page");
+        let heard = served.await.unwrap();
+        let methods: Vec<&str> = heard.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["Target.createTarget", "Target.attachToTarget", "Runtime.evaluate", "Runtime.evaluate"]);
+        assert!(heard[2..].iter().all(|(_, s)| s.as_deref() == Some("S1")), "{heard:?}");
+    }
+
+    /// `tabs` lists the pages the browser offers (no worker), by title.
+    #[tokio::test]
+    async fn tabs_lists_the_pages_offered() {
+        let (base, served) = fake_browser().await;
+        assert_eq!(tabs(&base).await.unwrap(), ["A page", "Another page"]);
+        assert_eq!(served.await.unwrap(), [("Target.getTargets".to_string(), None)]);
+    }
+
+    /// `close-tab` closes the page with that title, by its target; a title
+    /// no page offered has is refused, saying so, and nothing is closed.
+    #[tokio::test]
+    async fn close_tab_closes_the_page_titled() {
+        let (base, served) = fake_browser().await;
+        close_tab(&base, "Another page").await.unwrap();
+        let methods: Vec<String> = served.await.unwrap().into_iter().map(|(m, _)| m).collect();
+        assert_eq!(methods, ["Target.getTargets", "Target.closeTarget"]);
+        let (base, served) = fake_browser().await;
+        let e = close_tab(&base, "Not open").await.unwrap_err();
+        assert!(e.contains("no tab titled \"Not open\""), "{e}");
+        assert_eq!(served.await.unwrap().len(), 1, "only the listing");
+    }
+
+    /// A browser the platform refuses (its owner's is not connected) says
+    /// why, in the platform's own words.
+    #[tokio::test]
+    async fn browse_refused_says_why() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = tcp.read(&mut buf).await;
+            let body = r#"{"error":"not_connected","message":"your owner's browser is not connected"}"#;
+            let _ = tcp.write_all(format!("HTTP/1.1 403 Forbidden\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
+        });
+        let e = browse(&base, "https://example.com").await.unwrap_err();
+        assert!(e.contains("403") && e.contains("your owner's browser is not connected"), "{e}");
     }
 }
