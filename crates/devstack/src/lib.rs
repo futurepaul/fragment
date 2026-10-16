@@ -163,8 +163,15 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// binds them in the account's, and its computer images built from
 /// Dockerfiles of its own (`containers::scope_images`), so that no other
 /// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !images.is_empty() {
+        let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container has images")?;
+        // bounded: the images a fleet names
+        for (name, image) in images {
+            anyhow::ensure!(named.insert(name.clone(), image.clone()).is_none(), "the image {name} is the config's own already");
+        }
+    }
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
@@ -318,8 +325,13 @@ pub struct Fleet {
     /// The e2e's, made per run; never dev's.
     pub test_secret: Option<String>,
     /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
-    /// `containers` images), and whether they sleep with a snapshot.
+    /// `containers` images, or in `images`), and whether they sleep with a
+    /// snapshot.
     pub computer_image: Option<String>,
+    /// Computer images beside the config's own (its stubs), by name, each
+    /// as its `containers` images name one (`dockerfile`, `build_context`):
+    /// dev's Hermes image, by choice (`cargo xtask dev --hermes`).
+    pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
@@ -392,7 +404,7 @@ impl Fleet {
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        write_local_config(project, &bound.cell(), &self.images)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![

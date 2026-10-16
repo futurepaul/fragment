@@ -205,13 +205,20 @@ prebuilt bundle is in the debt ledger).
   another run's fragment made beside it, then the whole one's, which
   spares it for its age. Running it against a preview spends test cents:
   Paul's or the coordinating session's to run.
-- `cargo xtask dev [--clean]`: the dev stack in the foreground under
+- `cargo xtask dev [--clean] [--hermes]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
   the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
-  image steps; dev never calls a real model), which spend their payer's
-  ledger (dev people are seats, with the month's included credit), the
+  image steps; dev calls no real model unless `FRAGMENT_DEV_MODELS_FILE`
+  names a `models` block as a deployment's config names it, checked as a
+  deploy checks one, whose slots on an OpenAI-compatible API call with the
+  one key `FRAGMENT_DEV_MODEL_KEY_FILE` holds: Finite Private's, or
+  OpenRouter's, paid by that key), which spend their payer's
+  ledger (dev people are seats, with the month's included credit),
+  people's own providers (deploy/example.jsonc's `own` rows: OpenRouter,
+  nothing called until a person sets their key), computers on the stub
+  image, or our Hermes image with `--hermes` (built from the tree), the
   code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
