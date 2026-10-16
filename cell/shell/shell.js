@@ -2657,10 +2657,20 @@ function firstRun(...children) {
 }
 const PITCH = "Agents that work for you, and the apps they make.";
 function signIn() {
-  const go = el("a", "primary", "Sign in");
   // back to this view, with what its address carries (a mailed trial's code)
-  go.href = `/auth/login?return=${encodeURIComponent(location.pathname + location.search)}`;
-  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go);
+  const back = encodeURIComponent(location.pathname + location.search);
+  const go = el("a", "primary", "Sign in");
+  go.href = `/auth/login?return=${back}`;
+  // WorkOS keeps its own sign-in in the browser (clearing this site's data
+  // leaves it), and Sign in comes back as that account without asking: a
+  // switch ends it there, so the next sign-in asks who is signing in
+  const other = el("form");
+  other.method = "post";
+  other.action = `/auth/switch?return=${back}`;
+  const use = el("button", "quiet", "Use another account");
+  use.type = "submit";
+  other.append(use);
+  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go, other);
 }
 // A new person's welcome (docs/billing.md, "The shell"): what this is, the
 // one seat and a trial code, then Stripe's Checkout, whose return comes

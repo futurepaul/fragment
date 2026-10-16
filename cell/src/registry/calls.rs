@@ -528,7 +528,8 @@ impl Call for Begin {
 }
 
 /// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
-/// sign-in finished.
+/// sign-in finished (`switching`: one `/auth/switch` began, to use another
+/// account).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Exchange {
@@ -536,14 +537,19 @@ pub(crate) struct Exchange {
     pub code: String,
     pub client_id: String,
     pub issuer: String,
+    pub switching: bool,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Exchanged {
-    /// The platform session's token.
-    pub token: String,
-    pub return_to: String,
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub(crate) enum Exchanged {
+    /// Someone signed in: the platform session's token, and where the
+    /// browser goes back to.
+    SignedIn { token: String, return_to: String },
+    /// A switch WorkOS answered from the session it already held in the
+    /// browser, which no one signed in to during it: that session's id, to
+    /// end at WorkOS. No one is signed in here.
+    Held { workos_sid: String },
 }
 
 impl Call for Exchange {

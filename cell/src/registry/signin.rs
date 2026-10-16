@@ -144,19 +144,27 @@ struct Refusal {
     message: Option<String>,
 }
 
-/// The claim of WorkOS's access token the sign-out needs.
-#[derive(Deserialize)]
+/// The claims of WorkOS's access token sign-in reads: its session (`sid`,
+/// which the sign-out ends at WorkOS), and when its person last actively
+/// authenticated (`auth_time`, seconds; an answer from a session WorkOS
+/// already held does not advance it: docs/api.md, Sign-in).
+#[derive(Deserialize, Default)]
 struct Claims {
     sid: Option<String>,
+    auth_time: Option<i64>,
 }
 
-/// The `sid` claim of an access token WorkOS answered the exchange with
-/// (read, not trusted from a browser: it came from WorkOS over TLS).
-fn sid_of(access_token: &str) -> Option<String> {
+/// The claims of an access token WorkOS answered the exchange with (read,
+/// not trusted from a browser: it came from WorkOS over TLS).
+fn claims_of(access_token: &str) -> Option<Claims> {
     use base64::Engine;
     let payload = access_token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    serde_json::from_slice::<Claims>(&bytes).ok()?.sid
+    serde_json::from_slice::<Claims>(&bytes).ok()
+}
+
+fn stale_login() -> CellError {
+    CellError::invalid("this sign-in expired or was used; start again")
 }
 
 /// A live session's row, with whether its parent is live, its identity,
@@ -423,18 +431,44 @@ impl RegistryCell {
             .ok()
             .filter(|a| !a.user.id.is_empty())
             .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
+        let claims = signed_in.access_token.as_deref().and_then(claims_of).unwrap_or_default();
+        if let Some(sid) = claims.sid.as_deref().filter(|_| b.switching) {
+            if self.spent_if_held(&b.state, claims.auth_time)? {
+                return Ok(Exchanged::Held { workos_sid: sid.to_string() });
+            }
+        }
         let raw = signed_in.user.email.unwrap_or_default();
         let Some(email) = email_of(&raw).filter(|_| signed_in.user.email_verified) else {
             return Err(CellError::new(ErrorCode::Forbidden, format!("WorkOS has not verified the email {raw:?}: verify it there, then sign in again")));
         };
         let key = PersonKey::make(&self.env).await?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
-        let sid = signed_in.access_token.as_deref().and_then(sid_of);
-        let done = self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)?;
+        let done = self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, claims.sid.as_deref(), key)?;
         let person = self.person_by_email(&email)?.ok_or_else(|| CellError::host("a sign-in's email names no one after it"))?;
         self.meet_invites(&email, &person).await?;
         self.arm_syncs().await?;
         Ok(done)
+    }
+
+    /// A switch's sign-in, spent when WorkOS answered it from the session
+    /// it already held in the browser: one whose person last actively
+    /// authenticated (`auth_time`) before this sign-in began, or that does
+    /// not say when. No one signed in during it, so that session is the one
+    /// to end. One a person signed in to meanwhile is left to finish.
+    fn spent_if_held(&self, state: &str, auth_time_s: Option<i64>) -> CellResult<bool> {
+        #[derive(Deserialize)]
+        struct Started {
+            created_at: i64,
+        }
+        let started = self
+            .row::<Started>("SELECT created_at FROM logins WHERE state = ? AND created_at > ?", vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)])?
+            .ok_or_else(stale_login)?
+            .created_at;
+        if auth_time_s.is_some_and(|t| t >= started.div_euclid(1000)) {
+            return Ok(false);
+        }
+        self.exec("DELETE FROM logins WHERE state = ?", vec![sha(state).into()])?;
+        Ok(true)
     }
 
     fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>, key: PersonKey) -> CellResult<Exchanged> {
@@ -446,11 +480,11 @@ impl RegistryCell {
                 "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to, link_to",
                 vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
             )?
-            .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
+            .ok_or_else(stale_login)?;
         let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref(), key)?;
         self.claim_seats(&id, email)?;
         let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
-        Ok(Exchanged { token, return_to: login.return_to })
+        Ok(Exchanged::SignedIn { token, return_to: login.return_to })
     }
 
     /// The person a verified `(issuer, subject)` signs in as: the one it is

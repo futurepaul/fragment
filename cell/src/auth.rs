@@ -9,7 +9,12 @@
 //!                                 sign-up is off: WorkOS's "User invitation URL" points here)
 //!   GET  /auth/link?return=       the same, adding a second sign-in to the signed-in person
 //!   GET  /auth/callback           WorkOS → the code exchanged here → a session cookie
-//!   GET  /auth/logout             a button; POST ends the session (and its site sessions)
+//!   GET  /auth/logout             a button; POST ends the session (and its site sessions), and
+//!                                 WorkOS's, which it was signed in with
+//!   POST /auth/switch?return=     "Use another account": the sign-in again, where WorkOS's
+//!                                 answer from the session it already holds in the browser
+//!                                 (its own cookie, on its own domain) ends that session
+//!                                 instead, so the next sign-in asks who is signing in
 //!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin; for
 //!                                 a fragment that is not theirs, nor shared with them, a
 //!                                 question first ("Continue to X as you?"), asked once
@@ -74,6 +79,8 @@ pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
 const LOGIN_COOKIE: &str = "fragment_login";
+/// A switch's state cookie, in the sign-in's stead (`/auth/switch`).
+const SWITCH_COOKIE: &str = "fragment_switch";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
 /// How long an approval link's proof is good.
@@ -257,7 +264,15 @@ pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
     redirect(&format!("{platform}/auth/login?return={}", enc(back)), &[])
 }
 
-async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
+/// Where WorkOS ends its session `sid` (the access token's), then sends
+/// the browser to the platform's root: the environment's Sign-out URI.
+fn workos_logout(api: &str, sid: &str, platform: &str) -> String {
+    format!("{api}/user_management/sessions/logout?session_id={}&return_to={}", enc(sid), enc(&format!("{platform}/")))
+}
+
+/// A sign-in starts at WorkOS, its state bound to this browser by
+/// `cookie`: the sign-in's, or a switch's.
+async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, cookie: &str) -> CellResult<Response> {
     let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
@@ -277,7 +292,7 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     if let Some(token) = token {
         to += &format!("&invitation_token={token}");
     }
-    redirect(&to, &[set_cookie(LOGIN_COOKIE, &state, "/", 600, secure(url))])
+    redirect(&to, &[set_cookie(cookie, &state, "/", 600, secure(url))])
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
@@ -287,14 +302,19 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
     }
     let state = query(url, "state").unwrap_or_default();
-    let bound = cookie_of(req, LOGIN_COOKIE, secure(url), "/")?;
-    if state.is_empty() || bound.as_deref() != Some(state.as_str()) {
-        return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
-    }
+    let bound = |cookie: &str| Ok::<_, CellError>(!state.is_empty() && cookie_of(req, cookie, secure(url), "/")?.as_deref() == Some(state.as_str()));
+    let switching = match (bound(LOGIN_COOKIE)?, bound(SWITCH_COOKIE)?) {
+        (true, _) => false,
+        (false, true) => true,
+        (false, false) => {
+            return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
+        }
+    };
+    let spent = set_cookie(if switching { SWITCH_COOKIE } else { LOGIN_COOKIE }, "", "/", 0, secure(url));
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
     let issuer = workos.issuer();
-    let done = match ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await {
+    let done = match ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer, switching }).await {
         Ok(done) => done,
         // a sign-in the registry refuses for who it is (an email WorkOS has
         // not verified, or another person's; a person being wiped): said on
@@ -304,13 +324,15 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         }
         Err(e) => return Err(e),
     };
-    redirect(
-        &back_to(&format!("{}/", cfg.platform()), Some(&done.return_to))?,
-        &[
-            set_cookie(SESSION_COOKIE, &done.token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
-            set_cookie(LOGIN_COOKIE, "", "/", 0, secure(url)),
-        ],
-    )
+    match done {
+        calls::Exchanged::SignedIn { token, return_to } => redirect(
+            &back_to(&format!("{}/", cfg.platform()), Some(&return_to))?,
+            &[set_cookie(SESSION_COOKIE, &token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)), spent],
+        ),
+        // WorkOS signed the browser in again as whoever it last was: that
+        // session ends there, and the next sign-in asks who is signing in
+        calls::Exchanged::Held { workos_sid } => redirect(&workos_logout(workos.api, &workos_sid, &cfg.platform()), &[spent]),
+    }
 }
 
 /// Sign-in's routes on the platform origin (the router sends only these).
@@ -319,10 +341,10 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
     let platform = cfg.platform();
     {
         match (method, segments) {
-            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
+            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None, LOGIN_COOKIE).await,
             // the registry checks the session is live as the sign-in begins
             (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
-                Some(token) => match begin(env, cfg, url, Some(token)).await {
+                Some(token) => match begin(env, cfg, url, Some(token), LOGIN_COOKIE).await {
                     Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/auth/link"),
                     begun => begun,
                 },
@@ -340,12 +362,23 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return Err(e),
                 };
                 match (sid, cfg.workos()) {
-                    (Some(sid), Ok(w)) => redirect(
-                        &format!("{}/user_management/sessions/logout?session_id={}&return_to={}", w.api, enc(&sid), enc(&format!("{platform}/"))),
-                        &[clear],
-                    ),
+                    (Some(sid), Ok(w)) => redirect(&workos_logout(&w.api, &sid, &platform), &[clear]),
                     _ => redirect("/", &[clear]),
                 }
+            }
+            // another account: not this browser's session here either (one
+            // a tab signed in to since), then the sign-in, as a switch
+            (Method::Post, ["auth", "switch"]) => {
+                same_origin(&req, &platform)?;
+                if let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
+                    match ask_registry(env, &calls::Logout { token }).await {
+                        Err(e) if e.code != ErrorCode::Unauthenticated => return Err(e),
+                        _ => {}
+                    }
+                }
+                let mut begun = begin(env, cfg, url, None, SWITCH_COOKIE).await?;
+                begun.headers_mut().append("set-cookie", &set_cookie(SESSION_COOKIE, "", "/", 0, secure(url)))?;
+                Ok(begun)
             }
             (Method::Get, ["auth", "fragment"]) => {
                 let (name, back) = fragment_asked(url)?;

@@ -218,6 +218,98 @@ fn both(api: &Api, name: &str, method: &str, path: &str, body: Option<&Value>, c
     Ok((browser, cli))
 }
 
+/// The platform session a sign-in's callback answered set, if it set one.
+fn session_set(r: &Reply) -> Option<String> {
+    r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").filter(|v| !v.is_empty()).map(str::to_string))
+}
+
+/// `POST /auth/switch?return=<back>` from the platform's own page, with
+/// the browser's cookies.
+fn switch(api: &Api, back: &str, cookie: Option<String>) -> Result<Reply> {
+    api.call(Call { method: "POST", url: format!("{}/auth/switch?return={}", api.base, url_enc(back)), cookie, extra: vec![("origin", api.base.clone())], ..Call::default() })
+}
+
+/// AuthKit keeps its own session in the browser (a cookie on its own
+/// domain, which clearing the platform's site data leaves) and answers a
+/// sign-in from it without asking anyone (Alex, on finite.chat, 2026-10-16:
+/// "even when clearing browser storage, the sign in button auto logs me
+/// in"). Signing out ends it at WorkOS with the session id WorkOS signed the
+/// browser in with; "Use another account" (`/auth/switch`) ends it when the
+/// platform knows no session of the browser's.
+fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
+    let workos = s.workos.url.clone();
+    let to_logout = |sid: &str| format!("{workos}/user_management/sessions/logout?session_id={sid}&return_to={}", url_enc(&format!("{}/", api.base)));
+    let home = format!("{}/", api.base);
+
+    // Sign in, with WorkOS holding a session in the browser: no one is asked
+    let held = s.workos.hold("switch-a@e2e.test", 3600);
+    let start = api.unsigned("GET", "/auth/login?return=/", None)?;
+    let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login="));
+    let back = api.external(&start.header("location"))?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let again = session_set(&done).context("the sign-in WorkOS answered from its session sets one")?;
+    let r = who(api, &again)?;
+    s.ok("WorkOS answers a sign-in from the session it holds in the browser, asking no one: Sign in is that account again", back.status == 302 && r["email"] == "switch-a@e2e.test", &r);
+
+    // Sign out: WorkOS's logout, with that session's id
+    let r = api.call(Call { method: "POST", url: format!("{}/auth/logout", api.base), cookie: Some(format!("fragment_session={again}")), extra: vec![("origin", api.base.clone())], ..Call::default() })?;
+    let to = r.header("location");
+    let out = api.external(&to)?;
+    s.ok(
+        "signing out sends the browser to WorkOS's logout with the session WorkOS signed it in with, which ends it there, and back to the platform",
+        r.status == 302 && to == to_logout(&held) && out.status == 302 && out.header("location") == home && s.workos.held().is_none() && s.workos.ended().contains(&held),
+        format!("{} {to} / {}", r.status, out.header("location")),
+    );
+    let start = api.unsigned("GET", "/auth/login?return=/", None)?;
+    let asks = api.external(&start.header("location"))?;
+    s.ok("then a sign-in asks who is signing in (WorkOS's form)", asks.status == 200 && asks.text.contains("sign in as"), &asks);
+
+    // Use another account, from a browser the platform knows no session of
+    // (its site data cleared) while WorkOS still holds one
+    let held = s.workos.hold("switch-a@e2e.test", 3600);
+    let r = switch(api, "/settings", None)?;
+    let to = r.header("location");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_switch="));
+    let line = cookie_line(&r, "fragment_switch");
+    s.ok(
+        "Use another account starts a sign-in at WorkOS, its state bound to the browser by a cookie of its own (HttpOnly, SameSite=Lax)",
+        r.status == 302 && to.contains("/user_management/authorize?") && !to.contains("login_hint") && line.contains("HttpOnly") && line.contains("SameSite=Lax") && cookie_line(&r, "fragment_login").is_empty(),
+        &r,
+    );
+    let back = api.external(&to)?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let ends = done.header("location");
+    s.ok(
+        "WorkOS answering it from the session it holds, it signs no one in, and sends the browser to end that session at WorkOS",
+        done.status == 302 && ends == to_logout(&held) && session_set(&done).is_none() && cookie_line(&done, "fragment_switch").contains("Max-Age=0"),
+        &done,
+    );
+    let out = api.external(&ends)?;
+    s.ok("which ends it, and comes back to the platform", out.status == 302 && out.header("location") == home && s.workos.held().is_none(), &out);
+
+    // with none held, WorkOS asks, and whoever signs in is signed in
+    let r = switch(api, "/settings", None)?;
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_switch="));
+    let asks = api.external(&r.header("location"))?;
+    let back = api.external(&format!("{}&login_hint=switch-b@e2e.test", r.header("location")))?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let b = session_set(&done).context("a switch someone signed in to sets a session")?;
+    let r = who(api, &b)?;
+    s.ok(
+        "with no session held, WorkOS asks who is signing in, and whoever signs in is signed in, back where they began",
+        asks.status == 200 && asks.text.contains("sign in as") && done.status == 302 && done.header("location").ends_with("/settings") && r["email"] == "switch-b@e2e.test",
+        &r,
+    );
+
+    // a switch from a browser signed in here ends that session too
+    let r = switch(api, "/", Some(format!("fragment_session={b}")))?;
+    let after = who(api, &b)?;
+    s.ok("a switch from a browser signed in here ends that session too", r.status == 302 && cookie_line(&r, "fragment_session").contains("Max-Age=0") && after.is_null(), &r);
+    let r = api.call(Call { method: "POST", url: format!("{}/auth/switch?return=/", api.base), extra: vec![("origin", "https://evil.example".into())], ..Call::default() })?;
+    s.ok("and a switch posted from another site is refused (403)", r.status == 403 && cookie_line(&r, "fragment_switch").is_empty(), &r);
+    Ok(())
+}
+
 pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("signin", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
@@ -375,6 +467,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let back = api.external(&format!("{}&login_hint=paul@renamed.test.example", r.header("location")))?;
     let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
     s.ok("a sign-in that is someone else's cannot be linked", r.status == 409, &r);
+
+    switch_cases(s, api)?;
 
     // a CLI key: its link carries its own proof; approving it adds it at once
     let cli = Keys::generate();
@@ -730,6 +824,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let member_on_g = site_cookie(api, &member_session, &g)?;
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;
     s.ok("(the member still reads the other fragment)", r.status == 200, &r);
+    let ended = s.workos.ended().len();
     let r = api.call(Call {
         method: "POST",
         url: format!("{}/auth/logout", api.base),
@@ -742,7 +837,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let back = api.external(&to)?;
     s.ok(
         "signing out ends the session, and sends the browser to end WorkOS's",
-        status == 302 && to.contains("/user_management/sessions/logout?session_id=") && cleared.contains("Max-Age=0") && back.status == 302 && s.workos.ended().len() == 1,
+        status == 302 && to.contains("/user_management/sessions/logout?session_id=") && cleared.contains("Max-Age=0") && back.status == 302 && s.workos.ended().len() == ended + 1,
         format!("{status} {to} {cleared}"),
     );
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;

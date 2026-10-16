@@ -2,9 +2,17 @@
 //! the authorize redirect, the code exchange, and the logout redirect
 //! (https://workos.com/docs/reference/authkit). Users are made on demand:
 //! an authorize with `login_hint` signs in as that email (a new user the
-//! first time); without one, a browser gets a one-field form (dev), and a
-//! test sets who comes next. Levers: change a user's email, fail the next
-//! authorize, the codes and sessions it handed out.
+//! first time, authenticated now: the access token's `auth_time`); without
+//! one, a browser gets a one-field form (dev), and a test sets who comes
+//! next. Levers: change a user's email, fail the next authorize, the codes
+//! and sessions it handed out.
+//!
+//! And the session AuthKit keeps in a browser (its own cookie, on its own
+//! domain), which answers an authorize without asking anyone: the fake
+//! sees no cookies, so it holds one such session, for the one browser a
+//! test drives, only when the test says so (`hold`). While it is held, an
+//! authorize without `login_hint` is answered from it (its session id and
+//! its `auth_time`, from when it was authenticated); its logout ends it.
 //!
 //! And Pipes' access tokens (https://workos.com/docs/reference/pipes/access-token):
 //! a user's account at a provider is connected by the test (`connect`), or
@@ -35,9 +43,12 @@ pub struct User {
 #[derive(Default)]
 struct State {
     users: Vec<User>,
-    /// code → (user id, session id), each used once.
-    codes: HashMap<String, (String, String)>,
+    /// code → (user id, session id, `auth_time`), each used once.
+    codes: HashMap<String, (String, String, i64)>,
     ended: Vec<String>,
+    /// The session the browser holds (`hold`): user id, session id, and
+    /// when it was authenticated (seconds).
+    held: Option<(String, String, i64)>,
     next_error: Option<String>,
     counter: u64,
     /// (user id, provider) → whether the account is still authorized.
@@ -96,15 +107,19 @@ fn enc(s: &str) -> String {
 }
 
 /// An access token shaped like AuthKit's (a JWT); the platform reads its
-/// `sid` from the exchange's answer and never trusts it from a browser, so
-/// the fake does not sign it.
-fn access_token(user: &str, sid: &str, client_id: &str) -> String {
+/// `sid` and `auth_time` from the exchange's answer and never trusts them
+/// from a browser, so the fake does not sign it.
+fn access_token(user: &str, sid: &str, auth_time: i64, client_id: &str) -> String {
     let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
     format!(
         "{}.{}.fake",
         b64(json!({ "alg": "none", "typ": "JWT" })),
-        b64(json!({ "iss": "https://api.workos.com", "sub": user, "sid": sid, "client_id": client_id }))
+        b64(json!({ "iss": "https://api.workos.com", "sub": user, "sid": sid, "auth_time": auth_time, "client_id": client_id }))
     )
+}
+
+fn now_s() -> i64 {
+    crate::codestorage::now_ms() / 1000
 }
 
 impl WorkOs {
@@ -135,6 +150,12 @@ impl WorkOs {
                         return redirect(&with_query(&back, &[("error", &error), ("error_description", "a failure the test asked for"), ("state", &q("state"))]));
                     }
                     let email = q("login_hint");
+                    // the browser's session answers, asking no one
+                    if let Some((user, sid, auth_time)) = s.held.clone().filter(|_| email.is_empty()) {
+                        let code = s.next("code");
+                        s.codes.insert(code.clone(), (user, sid, auth_time));
+                        return redirect(&with_query(&back, &[("code", &code), ("state", &q("state"))]));
+                    }
                     if email.is_empty() {
                         // a person at a browser: who are you?
                         let fields: String = ["client_id", "redirect_uri", "response_type", "provider", "state"]
@@ -149,7 +170,7 @@ impl WorkOs {
                     }
                     let user = s.user_for(&email);
                     let (code, sid) = (s.next("code"), s.next("session"));
-                    s.codes.insert(code.clone(), (user.id, sid));
+                    s.codes.insert(code.clone(), (user.id, sid, now_s()));
                     redirect(&with_query(&back, &[("code", &code), ("state", &q("state"))]))
                 }
                 ("POST", "/user_management/authenticate") => {
@@ -161,7 +182,7 @@ impl WorkOs {
                         return problem(400, "unsupported_grant_type", "authorization_code only");
                     }
                     let code = body["code"].as_str().unwrap_or("");
-                    let Some((uid, sid)) = s.codes.remove(code) else {
+                    let Some((uid, sid, auth_time)) = s.codes.remove(code) else {
                         return problem(400, "invalid_grant", "the code is invalid or was used");
                     };
                     let user = s.users.iter().find(|u| u.id == uid).cloned().expect("a code names a user");
@@ -174,7 +195,7 @@ impl WorkOs {
                                 "created_at": "2026-09-24T00:00:00.000Z", "updated_at": "2026-09-24T00:00:00.000Z",
                             },
                             "organization_id": null,
-                            "access_token": access_token(&user.id, &sid, &client),
+                            "access_token": access_token(&user.id, &sid, auth_time, &client),
                             "refresh_token": format!("refresh_{sid}"),
                             "authentication_method": "Password",
                         }),
@@ -184,6 +205,9 @@ impl WorkOs {
                     let sid = q("session_id");
                     if sid.is_empty() {
                         return problem(400, "invalid_request", "session_id");
+                    }
+                    if s.held.as_ref().is_some_and(|(_, held, _)| *held == sid) {
+                        s.held = None;
                     }
                     s.ended.push(sid);
                     match q("return_to") {
@@ -311,5 +335,20 @@ impl WorkOs {
     /// Sessions ended through the logout URL.
     pub fn ended(&self) -> Vec<String> {
         self.state.lock().expect("workos state").ended.clone()
+    }
+
+    /// The browser holds a session as `email` (made the first time),
+    /// authenticated `age_s` ago: an authorize without `login_hint` is
+    /// answered from it until its logout. Answers its id.
+    pub fn hold(&self, email: &str, age_s: i64) -> String {
+        let mut s = self.state.lock().expect("workos state");
+        let (user, sid) = (s.user_for(email), s.next("session"));
+        s.held = Some((user.id, sid.clone(), now_s() - age_s));
+        sid
+    }
+
+    /// The id of the session the browser holds, while it does.
+    pub fn held(&self) -> Option<String> {
+        self.state.lock().expect("workos state").held.as_ref().map(|(_, sid, _)| sid.clone())
     }
 }
