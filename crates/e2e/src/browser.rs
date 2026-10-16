@@ -192,6 +192,10 @@ impl Browser {
                 // a chat's voice memo (the chat section) records from it
                 "--use-fake-device-for-media-stream",
                 "--use-fake-ui-for-media-stream",
+                // macOS: the login keychain asks before Chrome opens its
+                // Safe Storage, and headless no one answers, so its DevTools
+                // never come up (elsewhere the flag means nothing)
+                "--use-mock-keychain",
                 "about:blank",
             ])
             .stdin(Stdio::null())
