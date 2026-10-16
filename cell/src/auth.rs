@@ -270,6 +270,18 @@ fn workos_logout(api: &str, sid: &str, platform: &str) -> String {
     format!("{api}/user_management/sessions/logout?session_id={}&return_to={}", enc(sid), enc(&format!("{platform}/")))
 }
 
+// Commit a page before leaving: Chromium applies the shell's
+// form-action 'self' to a POST's HTTP redirects.
+fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response> {
+    let mut resp = page(200, title, &format!("<p><a href=\"{}\">Continue</a></p>", esc(to)))?;
+    resp.headers_mut().set("refresh", &format!("0; url={to}"))?;
+    resp.headers_mut().set("referrer-policy", "no-referrer")?;
+    for cookie in cookies {
+        resp.headers_mut().append("set-cookie", cookie)?;
+    }
+    Ok(resp)
+}
+
 /// A sign-in starts at WorkOS, its state bound to this browser by
 /// `cookie`: the sign-in's, or a switch's.
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, cookie: &str) -> CellResult<Response> {
@@ -292,7 +304,12 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, cookie:
     if let Some(token) = token {
         to += &format!("&invitation_token={token}");
     }
-    redirect(&to, &[set_cookie(cookie, &state, "/", 600, secure(url))])
+    let cookies = [set_cookie(cookie, &state, "/", 600, secure(url))];
+    if cookie == SWITCH_COOKIE {
+        leave_form(&to, "Switching accounts", &cookies)
+    } else {
+        redirect(&to, &cookies)
+    }
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
@@ -362,7 +379,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return Err(e),
                 };
                 match (sid, cfg.workos()) {
-                    (Some(sid), Ok(w)) => redirect(&workos_logout(&w.api, &sid, &platform), &[clear]),
+                    (Some(sid), Ok(w)) => leave_form(&workos_logout(&w.api, &sid, &platform), "Signing out", &[clear]),
                     _ => redirect("/", &[clear]),
                 }
             }

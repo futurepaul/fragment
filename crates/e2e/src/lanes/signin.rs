@@ -223,6 +223,10 @@ fn session_set(r: &Reply) -> Option<String> {
     r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").filter(|v| !v.is_empty()).map(str::to_string))
 }
 
+fn form_destination(r: &Reply) -> Result<String> {
+    r.header("refresh").strip_prefix("0; url=").map(str::to_string).context("the form's page navigates to WorkOS")
+}
+
 /// `POST /auth/switch?return=<back>` from the platform's own page, with
 /// the browser's cookies.
 fn switch(api: &Api, back: &str, cookie: Option<String>) -> Result<Reply> {
@@ -253,11 +257,11 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
 
     // Sign out: WorkOS's logout, with that session's id
     let r = api.call(Call { method: "POST", url: format!("{}/auth/logout", api.base), cookie: Some(format!("fragment_session={again}")), extra: vec![("origin", api.base.clone())], ..Call::default() })?;
-    let to = r.header("location");
+    let to = form_destination(&r)?;
     let out = api.external(&to)?;
     s.ok(
         "signing out sends the browser to WorkOS's logout with the session WorkOS signed it in with, which ends it there, and back to the platform",
-        r.status == 302 && to == to_logout(&held) && out.status == 302 && out.header("location") == home && s.workos.held().is_none() && s.workos.ended().contains(&held),
+        r.status == 200 && to == to_logout(&held) && out.status == 302 && out.header("location") == home && s.workos.held().is_none() && s.workos.ended().contains(&held),
         format!("{} {to} / {}", r.status, out.header("location")),
     );
     let start = api.unsigned("GET", "/auth/login?return=/", None)?;
@@ -268,12 +272,12 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
     // (its site data cleared) while WorkOS still holds one
     let held = s.workos.hold("switch-a@e2e.test", 3600);
     let r = switch(api, "/settings", None)?;
-    let to = r.header("location");
+    let to = form_destination(&r)?;
     let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_switch="));
     let line = cookie_line(&r, "fragment_switch");
     s.ok(
         "Use another account starts a sign-in at WorkOS, its state bound to the browser by a cookie of its own (HttpOnly, SameSite=Lax)",
-        r.status == 302 && to.contains("/user_management/authorize?") && !to.contains("login_hint") && line.contains("HttpOnly") && line.contains("SameSite=Lax") && cookie_line(&r, "fragment_login").is_empty(),
+        r.status == 200 && to.contains("/user_management/authorize?") && !to.contains("login_hint") && line.contains("HttpOnly") && line.contains("SameSite=Lax") && cookie_line(&r, "fragment_login").is_empty(),
         &r,
     );
     let back = api.external(&to)?;
@@ -290,8 +294,8 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
     // with none held, WorkOS asks, and whoever signs in is signed in
     let r = switch(api, "/settings", None)?;
     let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_switch="));
-    let asks = api.external(&r.header("location"))?;
-    let back = api.external(&format!("{}&login_hint=switch-b@e2e.test", r.header("location")))?;
+    let asks = api.external(&form_destination(&r)?)?;
+    let back = api.external(&format!("{}&login_hint=switch-b@e2e.test", form_destination(&r)?))?;
     let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
     let b = session_set(&done).context("a switch someone signed in to sets a session")?;
     let r = who(api, &b)?;
@@ -304,14 +308,14 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
     // a switch from a browser signed in here ends that session too
     let r = switch(api, "/", Some(format!("fragment_session={b}")))?;
     let after = who(api, &b)?;
-    s.ok("a switch from a browser signed in here ends that session too", r.status == 302 && cookie_line(&r, "fragment_session").contains("Max-Age=0") && after.is_null(), &r);
+    s.ok("a switch from a browser signed in here ends that session too", r.status == 200 && cookie_line(&r, "fragment_session").contains("Max-Age=0") && after.is_null(), &r);
     let r = api.call(Call { method: "POST", url: format!("{}/auth/switch?return=/", api.base), extra: vec![("origin", "https://evil.example".into())], ..Call::default() })?;
     s.ok("and a switch posted from another site is refused (403)", r.status == 403 && cookie_line(&r, "fragment_switch").is_empty(), &r);
     Ok(())
 }
 
 pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("signin", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
+    if !s.section("signin", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers, crate::Need::Chrome]) {
         return Ok(());
     }
 
@@ -829,21 +833,46 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         method: "POST",
         url: format!("{}/auth/logout", api.base),
         cookie: Some(format!("fragment_session={member_session}")),
+        extra: vec![("origin", A_FRAGMENTS_PAGE.into())],
+        ..Call::default()
+    })?;
+    s.ok("another origin cannot sign the browser out", r.status == 403 && !who(api, &member_session)?.is_null(), &r);
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/auth/logout", api.base),
+        cookie: Some(format!("fragment_session={member_session}")),
         extra: vec![("origin", api.base.clone())],
         ..Call::default()
     })?;
-    let to = r.header("location");
+    let to = form_destination(&r)?;
     let (status, cleared) = (r.status, cookie_line(&r, "fragment_session"));
     let back = api.external(&to)?;
     s.ok(
-        "signing out ends the session, and sends the browser to end WorkOS's",
-        status == 302 && to.contains("/user_management/sessions/logout?session_id=") && cleared.contains("Max-Age=0") && back.status == 302 && s.workos.ended().len() == ended + 1,
+        "signing out ends the session, and a non-cacheable, unframed page sends the browser to end WorkOS's",
+        status == 200
+            && r.header("cache-control") == "no-store"
+            && unframed(&r)
+            && r.header("referrer-policy") == "no-referrer"
+            && to.contains("/user_management/sessions/logout?session_id=")
+            && r.text.contains(">Continue</a>")
+            && cleared.contains("Max-Age=0")
+            && back.status == 302
+            && s.workos.ended().len() == ended + 1,
         format!("{status} {to} {cleared}"),
     );
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;
     s.ok("and every fragment session made from it", r.status == 401, &r);
     let r = who(api, &member_session)?;
     s.ok("the platform no longer knows the browser", r.is_null(), &r);
+    for (label, cookie) in [("repeated", Some(format!("fragment_session={member_session}"))), ("already signed out", None)] {
+        let r = api.call(Call { method: "POST", url: format!("{}/auth/logout", api.base), cookie, extra: vec![("origin", api.base.clone())], ..Call::default() })?;
+        s.ok(
+            &format!("logout {label} clears the cookie and returns home"),
+            r.status == 302 && r.header("location") == "/" && cookie_line(&r, "fragment_session").contains("Max-Age=0"),
+            &r,
+        );
+    }
+    browser_logout(s, api)?;
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     // (paul is not in f: he says yes to it once, and its redemptions follow)
@@ -986,5 +1015,74 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
         format!("{r} {members}"),
     );
+    Ok(())
+}
+
+/// Chromium applies a form's CSP to HTTP redirects too. Drive the shell's
+/// real button so a successful POST alone cannot hide a blocked WorkOS logout.
+fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
+    let Some(mut browser) = s.browser()? else {
+        s.ok("Chrome is installed for sign-out (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let emails = ["logout-first@e2e.test", "logout-second@e2e.test"];
+    let mut sessions = Vec::new();
+    for email in emails {
+        let session = api.sign_in(email)?;
+        let person = who(api, &session)?;
+        let id = person["id"].as_str().context("a signed-in person")?;
+        let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": email, "plan": "guest" })))?;
+        anyhow::ensure!(r.status == 200, "making a guest: {r}");
+        sessions.push(session);
+    }
+    let wait = Duration::from_secs(15);
+    let policy = api.unsigned("GET", "/welcome", None)?.header("content-security-policy");
+    s.ok("the shell still restricts forms to its own origin", policy.split(';').any(|p| p.trim() == "form-action 'self'"), &policy);
+    browser.set_cookie(&format!("{}/", api.base), "fragment_session", &sessions[0])?;
+    let page = browser.open(&format!("{}/welcome", api.base))?;
+    let form = "form[action='/auth/logout'] button";
+    anyhow::ensure!(
+        browser.until(&page, &format!("document.querySelector({}) && document.body.innerText.includes({})", json!(form), json!(emails[0])), wait),
+        "the first account's welcome loads"
+    );
+    let ended = s.workos.ended().len();
+    browser.click(&page, form)?;
+    let signed_out = browser.until(&page, "document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'", wait);
+    s.ok(
+        "the shell's Sign out button reaches WorkOS and returns signed out under its CSP",
+        signed_out && s.workos.ended().len() == ended + 1,
+        format!("returned: {signed_out}, provider logouts: {}", s.workos.ended().len() - ended),
+    );
+    s.ok(
+        "the browser's platform cookie is cleared and its old session is revoked",
+        !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session") && who(api, &sessions[0])?.is_null(),
+        "",
+    );
+    if !signed_out {
+        return Ok(());
+    }
+    let held = s.workos.hold(emails[0], 3600);
+    browser.eval(&page, "window.__beforeSwitch = true")?;
+    browser.click(&page, "form[action^='/auth/switch'] button")?;
+    let switched_out = browser.until(
+        &page,
+        "!window.__beforeSwitch && document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'",
+        wait,
+    );
+    s.ok(
+        "Use another account reaches WorkOS under the shell's CSP and ends its held session",
+        switched_out && s.workos.held().is_none() && s.workos.ended().contains(&held) && !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session"),
+        format!("returned: {switched_out}"),
+    );
+    if !switched_out {
+        return Ok(());
+    }
+    browser.click(&page, "#first-run-card a.primary")?;
+    anyhow::ensure!(browser.until(&page, "!!document.querySelector('input[name=login_hint]')", wait), "WorkOS asks who to sign in as");
+    browser.eval(&page, &format!("document.querySelector('input[name=login_hint]').value = {}; true", json!(emails[1])))?;
+    browser.click(&page, "button")?;
+    let switched = browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(emails[1])), wait);
+    s.ok("the same browser can sign in as a different email after signing out", switched, "");
+    browser.close(page)?;
     Ok(())
 }
