@@ -51,20 +51,36 @@ const CURRENT = "shell.chat.v1";
 // How to ask an agent for an app (Paul, 2026-10-14: "rather than spawning
 // generic apps we teach the user how to prompt for new apps"): each says
 // who it is for and what it does, `…` the part to make their own. The
-// dock's Add lists them, an empty desktop its first three; pressed, one
-// goes into their chat's composer, theirs to change and send
-// (`composeApp`). Suggestions, not data: nothing is made or sent, and
-// nothing pretends to exist. Change them here.
+// dock's Add and an empty desktop show three of them at a time, and a die
+// deals three more (`promptDeck`); pressed, one goes into their chat's
+// composer, theirs to change and send (`composeApp`). Suggestions, not
+// data: nothing is made or sent, and nothing pretends to exist. Paul's
+// twelve (2026-10-16), in his order; change them here, in threes.
 const APP_PROMPTS = [
   "Make a shared grocery list my family can add to from their phones",
+  "Tell me on my phone as soon as … comes back in stock or drops in price",
+  "Every morning, read these sites and send me a short summary: …",
+  "Make a page for our trip to … where we log who paid for what and it shows who owes whom",
   "Build a habit tracker that shows my weekly streak for: …",
   "Make an RSVP page for my dinner on Saturday that tells me who's coming",
-  "Make a dashboard that checks the price of … every morning and charts it",
   "Make a reading list where I paste a link and it keeps the title and a one-line summary",
   "Build a chore chart for our house that rotates the jobs each week between: …",
   "Make a page where my team votes on … and everyone sees the results live",
+  "Make a page where friends pick which evenings work for …, and it shows the best night",
+  "Make a status board that pings me when a build or deploy fails for …",
   "Make a trip planner for … that my friends can add ideas and dates to",
 ];
+// The ways to ask on screen, three of APP_PROMPTS' (Paul, 2026-10-16: "we
+// shouldn't overwhelm people with prompts. we could even just show three
+// at a time, and then have a 'dice roll' button that reveals a fresh set
+// of 3"): one hand a page load, wherever it shows, the first three first.
+// The die deals the next three off a deck of the rest, shuffled; dealt
+// out, the next deck is every one shuffled again, none of the hand on
+// screen in its first three. So a deal never repeats what shows, and every
+// way shows once before any shows again. Not kept: a reload deals 1–3.
+const PROMPT_HAND = 3;
+if (APP_PROMPTS.length < 2 * PROMPT_HAND || APP_PROMPTS.length % PROMPT_HAND) throw new Error(`APP_PROMPTS holds whole hands of ${PROMPT_HAND}, at least two: ${APP_PROMPTS.length}`);
+const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), deck: shuffled(APP_PROMPTS.map((_, i) => i).slice(PROMPT_HAND)) };
 
 // me: the signed-in person; guest: whether their plan is a guest's, who
 // makes nothing (decision 49); fragments: their list (name, role, kind,
@@ -922,7 +938,7 @@ function renderApps() {
   renderDesktopEmpty(empty);
 }
 // A desktop with no apps says what lands there. A seat's also offers the
-// first few ways to ask their agent for one (APP_PROMPTS), each put in
+// hand of ways to ask their agent for one (`promptHand`), each put in
 // their chat's composer as the dock's Add's are.
 function renderDesktopEmpty(empty) {
   const box = $("desktop-empty");
@@ -937,14 +953,7 @@ function renderDesktopEmpty(empty) {
   box.append(el("p", "desktop-empty-title", state.guest ? "Apps shared with you land here" : "Your apps land here"));
   if (!asks) return;
   box.append(el("p", "desktop-empty-text", `Ask ${titleOf(primary.fragment)} for one:`));
-  const list = el("div", "desktop-suggestions");
-  for (const text of APP_PROMPTS.slice(0, 3)) {
-    const b = el("button", "desktop-suggestion", text);
-    b.type = "button";
-    b.onclick = () => composeApp(text);
-    list.append(b);
-  }
-  box.append(list);
+  box.append(...promptHand("desktop-suggestions", "desktop-suggestion"));
 }
 // An app's window, at `path` (a link's, from a chat). One its row has not
 // reached yet (an agent's app, just made) opens all the same, by its name:
@@ -1155,18 +1164,53 @@ async function titleFromFirst(name) {
 // (APP_PROMPTS). An app is a message to the person's agent like any other;
 // one pressed goes into their chat's composer, to change and send. The
 // templates stay the CLI's and the agents' (`fragment create --template`).
+function shuffled(items) {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+// The hand on screen, in a list (its buttons `cls`), and the die that
+// deals the next one to every list showing it.
+function promptHand(listCls, cls) {
+  const list = el("div", listCls);
+  list.dataset.prompts = cls;
+  list.setAttribute("aria-live", "polite");
+  dealTo(list);
+  const die = el("button", "prompt-dice", "🎲");
+  die.type = "button";
+  die.title = "Show three more ideas";
+  die.setAttribute("aria-label", die.title);
+  die.onclick = rollPrompts;
+  return [list, die];
+}
+function dealTo(list) {
+  list.replaceChildren(...promptDeck.hand.map((i) => {
+    const b = el("button", list.dataset.prompts, APP_PROMPTS[i]);
+    b.type = "button";
+    b.onclick = () => composeApp(APP_PROMPTS[i]);
+    return b;
+  }));
+}
+function rollPrompts() {
+  if (!promptDeck.deck.length) {
+    const deck = shuffled(APP_PROMPTS.map((_, i) => i).filter((i) => !promptDeck.hand.includes(i)));
+    for (const i of promptDeck.hand) deck.splice(PROMPT_HAND + Math.floor(Math.random() * (deck.length - PROMPT_HAND + 1)), 0, i);
+    promptDeck.deck = deck;
+  }
+  promptDeck.hand = promptDeck.deck.splice(0, PROMPT_HAND);
+  for (const list of document.querySelectorAll("[data-prompts]")) {
+    list.classList.add("dealt");
+    dealTo(list);
+  }
+}
 function showPrompts() {
   const primary = primaryAgent();
   const box = el("div", "app-prompts");
   box.append(el("p", "app-prompts-lede", `${primary ? titleOf(primary.fragment) : "Your agent"} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`));
-  const list = el("div", "app-prompt-list");
-  for (const text of APP_PROMPTS) {
-    const b = el("button", "app-prompt", text);
-    b.type = "button";
-    b.onclick = () => composeApp(text);
-    list.append(b);
-  }
-  box.append(list);
+  box.append(...promptHand("app-prompt-list", "app-prompt"));
   show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
 }
 // The chat a prompt goes to: the open one when it is the person's own;

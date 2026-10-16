@@ -221,6 +221,16 @@ body.reordering iframe { pointer-events: none; }
 .app-prompt-list { display: flex; flex-direction: column; gap: 8px; }
 .app-prompt { width: 100%; padding: 11px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; transition: background-color .15s, border-color .15s; }
 .app-prompt:hover, .app-prompt:focus-visible { border-color: var(--border-strong); background: var(--bg-hover); outline: none; }
+/* the die under a hand of them, which deals three more (shell.js rollPrompts),
+   and the hand it dealt coming in */
+.prompt-dice { display: grid; place-items: center; align-self: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-card); font-size: 20px; line-height: 1; transition: background-color .15s, border-color .15s, transform .2s ease-out; }
+.prompt-dice:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.prompt-dice:active { transform: rotate(-40deg) scale(.92); }
+[data-prompts].dealt > * { animation: prompt-dealt .2s ease-out both; }
+[data-prompts].dealt > :nth-child(2) { animation-delay: 40ms; }
+[data-prompts].dealt > :nth-child(3) { animation-delay: 80ms; }
+@keyframes prompt-dealt { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .prompt-dice { transition: none; } .prompt-dice:active { transform: none; } [data-prompts].dealt > * { animation: none; } }
 
 /* ---- narrow: the sides become overlays over the chat ---- */
 .scrim { display: none; }
@@ -627,4 +637,6 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .desktop-suggestions { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 4px; }
 .desktop-suggestion { max-width: 100%; min-height: 36px; padding: 7px 16px; border: 1px solid rgba(255,255,255,.28); border-radius: 999px; background: rgba(20,20,20,.38); color: #fff; font-size: 13px; text-shadow: none; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); transition: background .15s; }
 .desktop-suggestion:hover, .desktop-suggestion:focus-visible { background: rgba(20,20,20,.56); }
+.desktop-empty .prompt-dice { border-color: rgba(255,255,255,.28); background: rgba(20,20,20,.38); text-shadow: none; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.desktop-empty .prompt-dice:hover { background: rgba(20,20,20,.56); }
 @media (max-width: 760px) { .desktop-dock { margin-bottom: max(8px, env(safe-area-inset-bottom)); } }
