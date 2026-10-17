@@ -487,9 +487,7 @@ managed skill (below, "Decided").
   the 57 characters of its description Hermes' index shows.
 - `cargo test -p fragment-templates
   the_skills_template_is_the_managed_set`: the managed set is thirteen,
-  `owner-browser-finite` among them; and in `images/`,
-  `the_platform_skill_is_the_clis_after_the_computers_page`: the
-  computer's page names it, and the platform skill still fits its 16 KiB.
+  `owner-browser-finite` among them.
 - `cargo test -p fragment-bridge --lib browse` (in `images/`): `browse`
   against an in-process browser (an event before each answer, the page
   loaded on the second read), and a refusal that says why in the
@@ -553,9 +551,11 @@ managed skill (below, "Decided").
   description in the model's skills index, the same every turn, and its
   body only when loaded. `owner-browser-finite` (templates/skills) sits
   beside `google-workspace-finite`, the other connection of its owner's
-  an agent uses, and the computer's page points to it in a line, as it
-  does to that one (the platform skill itself has 69 bytes left of its
-  16 KiB). The agent checks the browser is connected when it needs it.
+  an agent uses. The computer's page does not point to it, as it does to
+  that one: its own line in the index is what the model reads each turn,
+  and the platform skill has 58 bytes left of its 16 KiB on master
+  (2026-10-17), fewer than a line. The agent checks the browser is
+  connected when it needs it.
   Cut: the bridge's line (`relay::browser_told`), its `/json/version`
   before each turn (`TurnStart::browser`), and the stub's echo of it.
 
