@@ -1044,8 +1044,8 @@ title opening its share sheet.
 | `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}`. Leaving `members` (for `link` or `public`) makes a new share link: one that stopped working when it was restricted stays dead (the event's `newLink`) |
 | `POST /api/f/{name}/rotate` | owner, or their agent for them | `{scopes?: [inbox, view]}` → `{inboxToken, viewToken, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md) |
-| `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts, over https (`fragment_core::secrets::may_fill`). Its hosts change only with its value, so no editor widens where a value goes without holding it. A secret set before secrets named hosts fills nowhere until set again |
+| `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
@@ -1059,7 +1059,7 @@ title opening its share sheet.
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
-| `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output` |
+| `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output`. A channel's run (`via: channel`) holds the record that started it, so its `input` is absent for a role that may not read that channel (`channel_read_role`), and for everyone once the channel is no longer declared |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
@@ -2002,7 +2002,10 @@ and the AI steps (`job.ai.*`), all above:
 - `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
   text(), json()}`: the app's one way out. `{{NAME}}` in a header value
   is the fragment's secret `NAME`, added by the platform at the egress
-  point; the app never holds it. http(s) only; loopback, private, and
+  point; the app never holds it. It is filled only toward one of the
+  hosts the secret names, over https (a dev fleet's local fakes over
+  http too); a fetch elsewhere fails its step, naming the secret and
+  the host. http(s) only; loopback, private, and
   `.internal` addresses are refused (and a Worker's fetch reaches only
   the public internet: a name with no public address fails the step); redirects are answered, not
   followed; a body of at most 256 KiB, a response of at most 1 MiB, 120

@@ -16,7 +16,7 @@ use super::ai_tools;
 use super::app::ship;
 use super::jobs;
 use super::signin::{site_cookie, who};
-use crate::api::{Api, Call};
+use crate::api::Api;
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
@@ -93,7 +93,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // a fragment with code, triggers, and a channel
     let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |m| m["operations"]["save"]["description"] = json!("Save texts to the feed."))?;
     // a sealed secret its job fetches with, and a channel with records in it
-    let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{stored}/secrets/API_KEY", api.base), body: Some(SECRET.as_bytes().to_vec()), keys: Some(&owner), ..Call::default() })?;
+    let r = jobs::set_secret(&api, &owner, &stored, SECRET, &["127.0.0.1"])?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let r = api.op(&owner, &stored, "save", "before", json!({ "texts": ["one", "two"], "source": "restart" }))?;
     let seq_before = jobs::records(&api, &owner, &stored, "feed").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);

@@ -7,7 +7,7 @@ use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::api::{self, Api};
 use crate::Suite;
@@ -430,32 +430,48 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
     let value = "sk-or-v1-e2e-never-shown-again";
-    let put = |keys: &Keys, key: &str, body: &[u8]| {
-        api.call(crate::api::Call {
-            method: "PUT",
-            url: format!("{}/api/f/{name}/secrets/{key}", api.base),
-            body: Some(body.to_vec()),
-            keys: Some(keys),
-            ..Default::default()
-        })
-    };
-    let r = put(&owner, "OPENROUTER_API_KEY", value.as_bytes())?;
-    s.ok("an editor sets a secret", r.status == 200 && !r.text.contains(value), &r);
+    let put = |keys: &Keys, key: &str, body: Value| api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&body));
+    let r = put(&owner, "OPENROUTER_API_KEY", json!({ "value": value, "hosts": ["OpenRouter.ai"] }))?;
+    s.ok("an editor sets a secret, with the hosts it may go to", r.status == 200 && r.body["hosts"] == json!(["openrouter.ai"]) && !r.text.contains(value), &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
-    s.ok("secrets list by name only", r.body["names"] == json!(["OPENROUTER_API_KEY"]) && !r.text.contains(value), &r);
+    s.ok(
+        "secrets list by name and hosts only",
+        r.body["secrets"] == json!([{ "name": "OPENROUTER_API_KEY", "hosts": ["openrouter.ai"] }]) && !r.text.contains(value),
+        &r,
+    );
     let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     let status = api.status(&owner, &name)?;
     s.ok("the value is in no answer", !events.text.contains(value) && !status.text.contains(value), "events or status held it");
-    let r = put(&owner, "lower_case", b"v")?;
+    // a secret goes somewhere it names, and its hosts change only with its value
+    let refused = [
+        ("no hosts", json!({ "value": "v" })),
+        ("an empty list of hosts", json!({ "value": "v", "hosts": [] })),
+        ("a URL for a host", json!({ "value": "v", "hosts": ["https://openrouter.ai/api"] })),
+        ("a wildcard", json!({ "value": "v", "hosts": ["*.openrouter.ai"] })),
+        ("more hosts than the limit", json!({ "value": "v", "hosts": (0..=limits::SECRET_HOSTS_MAX).map(|i| format!("h{i}.example.com")).collect::<Vec<_>>() })),
+        ("hosts without the value", json!({ "hosts": ["evil.example"] })),
+        ("a field it does not know", json!({ "value": "v", "hosts": ["openrouter.ai"], "also": 1 })),
+    ];
+    for (what, body) in refused {
+        let r = put(&owner, "OPENROUTER_API_KEY", body)?;
+        s.ok(&format!("a secret with {what} is 400"), r.status == 400, &r);
+    }
+    let r = api.call(crate::api::Call { method: "PUT", url: format!("{}/api/f/{name}/secrets/RAW", api.base), body: Some(value.as_bytes().to_vec()), keys: Some(&owner), ..Default::default() })?;
+    s.ok("a raw value (no hosts) is 400", r.status == 400, &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok("and none of them changed where it goes", r.body["secrets"] == json!([{ "name": "OPENROUTER_API_KEY", "hosts": ["openrouter.ai"] }]), &r);
+    let r = put(&owner, "OPENROUTER_API_KEY", json!({ "value": value, "hosts": ["openrouter.ai", "eu.openrouter.ai", "openrouter.ai"] }))?;
+    s.ok("set again, value and all, its hosts are the new ones, once each", r.status == 200 && r.body["hosts"] == json!(["eu.openrouter.ai", "openrouter.ai"]), &r);
+    let r = put(&owner, "lower_case", json!({ "value": "v", "hosts": ["openrouter.ai"] }))?;
     s.ok("a lower-case name is 400", r.status == 400, &r);
-    let r = put(&owner, "EMPTY", b"")?;
+    let r = put(&owner, "EMPTY", json!({ "value": "", "hosts": ["openrouter.ai"] }))?;
     s.ok("an empty value is 400", r.status == 400, &r);
-    let edge = put(&owner, "EDGE", &vec![b'x'; limits::SECRET_MAX_BYTES])?;
-    let r = put(&owner, "HUGE", &vec![b'x'; limits::SECRET_MAX_BYTES + 1])?;
+    let edge = put(&owner, "EDGE", json!({ "value": "x".repeat(limits::SECRET_MAX_BYTES), "hosts": ["openrouter.ai"] }))?;
+    let r = put(&owner, "HUGE", json!({ "value": "x".repeat(limits::SECRET_MAX_BYTES + 1), "hosts": ["openrouter.ai"] }))?;
     s.ok("a value of exactly the limit is set, and a byte over it is 413", edge.status == 200 && r.code() == Some(ErrorCode::TooLarge), format!("{edge} {r}"));
     let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok("a viewer cannot list secrets", r.status == 403, &r);
-    let r = put(&viewer, "X", b"v")?;
+    let r = put(&viewer, "X", json!({ "value": "v", "hosts": ["openrouter.ai"] }))?;
     s.ok("a viewer cannot set secrets", r.status == 403, &r);
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}/secrets/OPENROUTER_API_KEY"), None)?;
     s.ok("an editor deletes a secret", r.status == 200 && r.body["removed"] == true, &r);

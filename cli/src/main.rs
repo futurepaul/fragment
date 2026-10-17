@@ -21,8 +21,8 @@ use clap::{Parser, Subcommand};
 use fragment_core::price::{dollars, USD};
 use fragment_proto::ledger::{LedgerStatus, Standing};
 use fragment_proto::{
-    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, InviteList, Member, MemberList, Shared, OpResult, Posted, Rotated, Run, RunList,
-    Visibility,
+    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, InviteList, Member, MemberList, Shared, OpResult, Posted, PutSecret, Rotated, Run,
+    RunList, SecretList, Visibility,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -234,7 +234,8 @@ enum Cmd {
         #[arg(long)]
         view: bool,
     },
-    /// Manage secrets (values via env var of same name, or stdin)
+    /// Manage secrets: each names the hosts it may go to; values come from
+    /// the environment or stdin, never the command line
     Secret {
         #[command(subcommand)]
         sub: SecretCmd,
@@ -356,11 +357,11 @@ enum Cmd {
         #[arg(long)]
         message: Option<String>,
     },
-    /// Post to a fragment's inbox (webhook-style, token auth)
+    /// Post to a fragment's inbox (webhook-style, token auth). The token is
+    /// read from FRAGMENT_INBOX_TOKEN, else stdin, never the command line
+    /// (`ps` and shell history keep it), and sent in a header
     Inbox {
         name: String,
-        #[arg(long)]
-        token: String,
         #[arg(long)]
         payload: String,
         #[arg(long, default_value = "fragment-cli")]
@@ -608,10 +609,44 @@ enum InviteCmd {
 
 #[derive(Subcommand)]
 enum SecretCmd {
-    /// Set: value from argv, else env var of the same name, else stdin
-    Set { name: String, key: String, value: Option<String> },
+    /// Set a secret and the hosts it may go to, over https. The value is
+    /// read from the environment variable of the same name, else stdin,
+    /// never the command line (`ps` and shell history keep it). Changing
+    /// its hosts sets its value again
+    Set {
+        name: String,
+        key: String,
+        /// A host the secret may be sent to (repeat for more), as a URL
+        /// names it: `api.example.com`, no scheme, port, or path. (Not
+        /// `--host`: that names the fragment host)
+        #[arg(long = "to", required = true, value_name = "HOST")]
+        hosts: Vec<String>,
+    },
     List { name: String },
     Rm { name: String, key: String },
+}
+
+/// Where `fragment inbox` reads its token, before stdin.
+const INBOX_TOKEN_ENV: &str = "FRAGMENT_INBOX_TOKEN";
+/// The header the inbox reads its token from (cell/src/fragment.rs).
+const INBOX_TOKEN_HEADER: &str = "x-fragment-inbox-token";
+
+/// A secret the CLI is handed: the environment variable `var`, else
+/// stdin, trimmed. Never argv, which `ps` and shell history keep.
+fn from_env_or_stdin(var: &str, what: &str) -> Result<String> {
+    let value = match std::env::var(var) {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprint!("{what} ({var} is unset; reading stdin): ");
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf.trim().to_string()
+        }
+    };
+    if value.is_empty() {
+        return Err(usage(format!("empty {what}: set {var} or pipe it on stdin")));
+    }
+    Ok(value)
 }
 
 struct Config {
@@ -1696,33 +1731,21 @@ fn run(cli: Cli) -> Result<()> {
             println!("New share link: {}", share_link(&st.urls.canonical, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
-            SecretCmd::Set { name, key, value: argv_value } => {
-                let value = match argv_value {
-                    Some(v) if !v.is_empty() => v,
-                    None => match std::env::var(&key) {
-                        Ok(v) if !v.is_empty() => v,
-                        _ => {
-                            eprint!("value for {key} (stdin): ");
-                            let mut buf = String::new();
-                            std::io::stdin().read_to_string(&mut buf)?;
-                            buf.trim().to_string()
-                        }
-                    },
-                    Some(_) => String::new(),
-                };
-                if value.is_empty() {
-                    return Err(usage("empty secret value"));
-                }
-                c.call(c.put_bytes(&format!("/api/f/{name}/secrets/{key}"), value.into_bytes())?)?;
-                // names only — values never travel back
-                json_exit(j, &json!({ "name": name, "key": key, "set": true }));
-                println!("secret {key} set on {name}");
+            SecretCmd::Set { name, key, hosts } => {
+                let value = from_env_or_stdin(&key, &format!("value for {key}"))?;
+                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts })?)?;
+                // names and hosts only — values never travel back
+                json_exit(j, &json!({ "name": name, "key": key, "set": true, "hosts": set["hosts"] }));
+                println!("secret {key} set on {name}, for {}", set["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
             }
             SecretCmd::List { name } => {
-                let v = c.call(c.get(&format!("/api/f/{name}/secrets"))?)?;
+                let v: SecretList = c.call_as(c.get(&format!("/api/f/{name}/secrets"))?)?;
                 json_exit(j, &v);
-                for n in v["names"].as_array().cloned().unwrap_or_default() {
-                    println!("{}", n.as_str().unwrap_or(""));
+                for s in &v.secrets {
+                    match s.hosts.is_empty() {
+                        true => println!("{}  (no host: it fills nowhere until set again with --to)", s.name),
+                        false => println!("{}  {}", s.name, s.hosts.join(" ")),
+                    }
                 }
             }
             SecretCmd::Rm { name, key } => {
@@ -1731,12 +1754,14 @@ fn run(cli: Cli) -> Result<()> {
                 println!("secret {key} removed");
             }
         },
-        Cmd::Inbox { name, token, payload, source } => {
+        Cmd::Inbox { name, payload, source } => {
+            let token = from_env_or_stdin(INBOX_TOKEN_ENV, "inbox token")?;
             let payload_v: Value = serde_json::from_str(&payload).unwrap_or(Value::String(payload));
-            // inbox is token-gated, no nostr signature
-            let url = format!("{}/api/f/{}/inbox?t={}", c.host, name, token);
+            // inbox is token-gated, no nostr signature; the token goes in a
+            // header, out of the URL a log or proxy keeps
+            let url = format!("{}/api/f/{}/inbox", c.host, name);
             let body = serde_json::to_vec(&json!({ "source": source, "payload": payload_v }))?;
-            let mut req = reqwest::blocking::Client::new().post(&url).body(body).header("content-type", "application/json");
+            let mut req = reqwest::blocking::Client::new().post(&url).body(body).header("content-type", "application/json").header(INBOX_TOKEN_HEADER, token);
             // a computer's egress answers only a request that names its agent
             if let Some(mode) = c.agent() {
                 req = req.header(api::AGENT_HEADER, &mode.agent);
@@ -2353,6 +2378,21 @@ mod tests {
     /// long flag of its own is in one of its entries (`--host`, `--json`
     /// and `-v`, global, are listed under the block). Invalid: an entry
     /// for no command.
+    /// Goal: a secret's value and an inbox token never come from argv,
+    /// and a secret is never set without the hosts it may go to (the
+    /// audit's M3). Method: the command lines clap takes and refuses.
+    #[test]
+    fn secrets_and_tokens_never_come_from_argv() {
+        let parses = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).is_ok();
+        assert!(parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "--to", "api.example.com"]));
+        assert!(parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "--to", "api.example.com", "--to", "eu.example.com"]));
+        assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY"]), "a secret names its hosts");
+        assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value", "--to", "api.example.com"]), "no value on argv");
+        assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value"]));
+        assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
+        assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
+    }
+
     #[test]
     fn the_guide_lists_every_command_and_flag() {
         use clap::CommandFactory;

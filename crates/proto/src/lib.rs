@@ -70,6 +70,10 @@ pub mod limits {
     pub const APP_DB_MAX_BYTES: u64 = 16 * 1024 * 1024;
     /// Secrets per fragment.
     pub const SECRETS_MAX: usize = 100;
+    /// Hosts one secret may go to (`fragment_core::secrets::may_fill`).
+    pub const SECRET_HOSTS_MAX: usize = 8;
+    /// A host a secret names: a DNS name's most.
+    pub const SECRET_HOST_MAX_BYTES: usize = 253;
     /// Members per fragment.
     pub const MEMBERS_MAX: usize = 1000;
     /// Invites waiting per fragment.
@@ -1269,6 +1273,33 @@ pub struct Rotated {
     pub view_token: String,
     /// The scopes renewed: `inbox`, `view`.
     pub rotated: Vec<String>,
+}
+
+/// `PUT /api/f/<name>/secrets/<KEY>` (editor): a secret's value and the
+/// hosts it may go to, always together. Its hosts change only with its
+/// value, so no editor widens where a value goes without holding it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutSecret {
+    pub value: String,
+    /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
+    /// (`fragment_core::secrets::secret_host`).
+    pub hosts: Vec<String>,
+}
+
+/// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
+/// where it may go. Values never leave.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretInfo {
+    pub name: String,
+    /// Empty for one set before secrets named hosts: it fills nowhere.
+    pub hosts: Vec<String>,
+}
+
+/// `GET /api/f/<name>/secrets` (editor), by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretList {
+    pub secrets: Vec<SecretInfo>,
 }
 
 /// `PUT /api/f/<name>/visibility` (owner)

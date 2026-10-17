@@ -92,6 +92,11 @@ pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit
     Ok((name, c))
 }
 
+/// Sets the fixture's `API_KEY` to `value`, for `hosts`.
+pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts: &[&str]) -> Result<Reply> {
+    api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
+}
+
 fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs/{id}"), None)
 }
@@ -189,13 +194,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
-    api.call(Call {
-        method: "PUT",
-        url: format!("{}/api/f/{name}/secrets/API_KEY", api.base),
-        body: Some(SECRET.as_bytes().to_vec()),
-        keys: Some(&owner),
-        ..Call::default()
-    })?;
+    let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
+    anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
 
     // a job is started by a call, and a second call with its id is the same run
@@ -228,6 +228,26 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let everything = format!("{done}{}{}", json!(feed), json!(events(api, &owner, &name)));
     s.ok("the secret appears in no run, record, or event", !everything.contains(SECRET), "the secret leaked");
+    // a secret goes only to the hosts it names, over https (a local fleet's
+    // fakes over http): the same fake by another name is another host,
+    // and a public host over http is refused before anything is sent
+    let other = upstream.url("/data").replace("127.0.0.1", "localhost");
+    let r = api.op(&owner, &name, "digest", "d-other-host", json!({ "url": other }))?;
+    let elsewhere = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host the secret does not name fills nothing, and fails its step",
+        elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("may go to 127.0.0.1, not localhost")) && upstream.hits("/data").len() == 1,
+        &elsewhere,
+    );
+    let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1", "example.com"])?;
+    anyhow::ensure!(r.status == 200, "secret hosts: {r}");
+    let r = api.op(&owner, &name, "digest", "d-cleartext", json!({ "url": "http://example.com/data" }))?;
+    let cleartext = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host it names, over http, fills nothing, and fails its step",
+        cleartext["status"] == "held" && cleartext["error"].as_str().is_some_and(|e| e.contains("https only")),
+        &cleartext,
+    );
     let ops = records(api, &owner, &name, "ops");
     s.ok("the step's mutation is ledgered under the run's step id", ops.iter().any(|o| o["body"] == json!({ "op": "save", "id": format!("job:{id}:1") })), json!(ops));
 
@@ -419,7 +439,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &files);
     s.deploy(&c);
     let token = c["inboxToken"].as_str().unwrap_or("").to_string();
-    s.cli(api, &home, &["inbox", &tpl, "--token", &token, "--payload", r#"{"text":"hello from the cli"}"#]);
+    let sent = s.cli_with_env(api, &home, &["inbox", &tpl, "--payload", r#"{"text":"hello from the cli"}"#], &[("FRAGMENT_INBOX_TOKEN", &token)]);
+    s.ok("fragment inbox takes its token from the environment", sent.status.success(), String::from_utf8_lossy(&sent.stderr));
     inbox(api, &tpl, &token, &json!({ "source": "e2e", "payload": { "url": upstream.url("/page") } }), None)?;
     let mut list = Value::Null;
     let arrived = s.eventually(long, || {

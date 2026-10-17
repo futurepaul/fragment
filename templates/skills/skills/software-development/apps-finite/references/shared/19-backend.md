@@ -84,9 +84,11 @@ fragment replay garden <run>                # after fixing the code
 
 ## Secrets
 
-- `fragment secret set garden API_KEY` (the value from the human, or from
-  stdin), then `{{API_KEY}}` in a `job.fetch` header: the platform fills it
-  outside your code. Never write a secret into a file or a page.
+- `fragment secret set garden API_KEY --to api.example.com` (the value
+  from the human, in `$API_KEY` or on stdin, never the command line),
+  then `{{API_KEY}}` in a `job.fetch` header: the platform fills it
+  outside your code, toward the hosts it names over https alone. Never
+  write a secret into a file or a page.
 
 ## LLM And Media Features
 

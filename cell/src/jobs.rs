@@ -208,6 +208,13 @@ fn stored_json(r: &Value, column: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
 }
 
+/// A secret's row: its sealed value, and the hosts it may go to (none for
+/// one set before secrets named hosts, which fills nowhere).
+pub(crate) struct StoredSecret {
+    sealed: String,
+    pub(crate) hosts: Vec<String>,
+}
+
 /// A run as `GET runs` shows it; `detail` is its input (when the reader
 /// may see it) and output, when one run is read.
 fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Option<Value>, Option<Value>)>) -> Run {
@@ -937,11 +944,14 @@ impl FragmentCell {
                 if !valid_secret_name(name) {
                     return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
                 }
-                let secret = self
-                    .open_secret(name)
-                    .await
+                // its hosts and its sealed value read in one statement, so
+                // the value opened is the one those hosts were set with
+                let stored = self
+                    .stored_secret(name)
                     .map_err(|e| StepFail::Retry(e.message))?
-                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set`)")))?;
+                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to {}`)", url.host_str().unwrap_or(""))))?;
+                fragment_core::secrets::may_fill(name, &stored.hosts, &url, self.cfg.egress_local).map_err(permanent)?;
+                let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
                 let secret = String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
             }
@@ -1366,17 +1376,24 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }
 
-    /// A secret's value, for the egress point only (it opens in this cell
-    /// alone). A value sealed under a previous host secret comes back
-    /// resealed and is stored so.
-    pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
-        let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
+    /// A secret as it is stored: sealed, and the hosts it may go to.
+    pub(crate) fn stored_secret(&self, name: &str) -> CellResult<Option<StoredSecret>> {
+        let rows = self.rows("SELECT s.sealed, h.host FROM secrets s LEFT JOIN secret_hosts h ON h.name = s.name WHERE s.name = ? ORDER BY h.host", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let opened = keys::open(&self.env, &self.scope(), &sealed).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        let hosts: Vec<String> = rows.iter().filter_map(|r| r["host"].as_str().map(str::to_string)).collect();
+        assert!(hosts.len() <= limits::SECRET_HOSTS_MAX, "a secret's hosts are bounded at its put");
+        Ok(Some(StoredSecret { sealed, hosts }))
+    }
+
+    /// A secret's value, for the egress point only (it opens in this cell
+    /// alone). A value sealed under a previous host secret is stored
+    /// resealed.
+    pub(crate) async fn open_secret(&self, name: &str, sealed: &str) -> CellResult<Vec<u8>> {
+        let opened = keys::open(&self.env, &self.scope(), sealed).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));
         }
-        Ok(Some(opened.plaintext))
+        Ok(opened.plaintext)
     }
 }

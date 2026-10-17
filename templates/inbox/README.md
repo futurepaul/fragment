@@ -22,6 +22,8 @@ webhook sender: `POST /api/f/<name>/inbox` with the token in
 any JSON as the payload).
 
 A job reaches the network only through `job.fetch`; to call an API with
-a key, store it (`fragment secret set <name> API_KEY`) and write
+a key, store it with the host it may go to (`fragment secret set <name>
+API_KEY --to api.example.com`) and write
 `headers: { authorization: "Bearer {{API_KEY}}" }`: the platform adds
-it on the way out, and the app never holds it.
+it on the way out, toward that host over https alone, and the app never
+holds it.

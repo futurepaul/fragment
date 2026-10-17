@@ -40,8 +40,8 @@ use fragment_core::access;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
-    Shared, Sharing, Visibility,
+    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
+    SecretList, SetRole, SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
 use serde_json::{json, Value};
@@ -846,20 +846,25 @@ impl FragmentCell {
         })
     }
 
-    pub(crate) async fn put_secret(&self, caller: &Caller, key: &str, value: Vec<u8>) -> CellResult<Response> {
+    /// `PUT secrets/<KEY>` `{value, hosts}`: the value sealed, and the
+    /// hosts it may go to put in place of the ones before (`may_fill`).
+    /// Both come together, so the hosts of a value change only with it.
+    pub(crate) async fn put_secret(&self, caller: &Caller, key: &str, body: Vec<u8>) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
-        if value.is_empty() {
-            return Err(CellError::invalid("a secret's value is the request body; it is empty"));
+        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}}: {e}")))?;
+        if put.value.is_empty() {
+            return Err(CellError::invalid("a secret's value is empty"));
         }
-        if value.len() > limits::SECRET_MAX_BYTES {
-            return Err(CellError::too_large("a secret", value.len(), limits::SECRET_MAX_BYTES));
+        if put.value.len() > limits::SECRET_MAX_BYTES {
+            return Err(CellError::too_large("a secret", put.value.len(), limits::SECRET_MAX_BYTES));
         }
+        let hosts = secret_hosts(&put.hosts)?;
         // sealed first (reading the host secret may yield): the checks and
         // the write below share one turn
-        let sealed = crate::keys::seal(&self.env, &self.scope(), &value).await?;
+        let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
         self.require(caller, false, Role::Editor)?;
         let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
         if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
@@ -871,25 +876,65 @@ impl FragmentCell {
              ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, set_by = excluded.set_by, set_at = excluded.set_at",
             vec![key.into(), sealed.into(), by.into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        self.event("secret.set", &format!("secret {key} set by {}", npub::display(by)), json!({ "name": key }));
-        json_response(&json!({ "ok": true, "name": key }))
+        self.exec("DELETE FROM secret_hosts WHERE name = ?", vec![key.into()])?;
+        for host in &hosts {
+            self.exec("INSERT INTO secret_hosts (name, host) VALUES (?, ?)", vec![key.into(), host.as_str().into()])?;
+        }
+        let stored = self.stored_secret(key)?.map(|s| s.hosts);
+        assert_eq!(stored.as_ref(), Some(&hosts), "a secret's hosts are the ones just set");
+        self.event("secret.set", &format!("secret {key} set by {} for {}", npub::display(by), hosts.join(", ")), json!({ "name": key, "hosts": hosts }));
+        json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
     }
 
     pub(crate) fn list_secrets(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        let names: Vec<Value> = self.rows("SELECT name FROM secrets ORDER BY name", vec![])?.into_iter().map(|r| r["name"].clone()).collect();
-        json_response(&json!({ "names": names }))
+        let mut secrets: Vec<SecretInfo> = vec![];
+        // at most SECRETS_MAX secrets of SECRET_HOSTS_MAX hosts each
+        for r in self.rows("SELECT s.name, h.host FROM secrets s LEFT JOIN secret_hosts h ON h.name = s.name ORDER BY s.name, h.host", vec![])? {
+            let name = r["name"].as_str().expect("secrets.name is TEXT NOT NULL");
+            if secrets.last().is_none_or(|s| s.name != name) {
+                secrets.push(SecretInfo { name: name.to_string(), hosts: vec![] });
+            }
+            if let Some(host) = r["host"].as_str() {
+                secrets.last_mut().expect("pushed above").hosts.push(host.to_string());
+            }
+        }
+        json_response(&SecretList { secrets })
     }
 
     pub(crate) fn delete_secret(&self, caller: &Caller, key: &str) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
         self.exec("DELETE FROM secrets WHERE name = ?", vec![key.into()])?;
+        self.exec("DELETE FROM secret_hosts WHERE name = ?", vec![key.into()])?;
         if removed {
             self.event("secret.removed", &format!("secret {key} removed"), json!({ "name": key }));
         }
         json_response(&json!({ "ok": true, "removed": removed }))
     }
+}
+
+/// The hosts a `PUT secrets` names, each as a URL names it, without
+/// repeats: at least one (a secret that may go nowhere is no use), and at
+/// most `SECRET_HOSTS_MAX`.
+fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
+    if given.is_empty() {
+        return Err(CellError::invalid("a secret names the hosts it may go to (hosts: [\"api.example.com\"]; the CLI's --to)"));
+    }
+    if given.len() > limits::SECRET_HOSTS_MAX {
+        return Err(CellError::invalid(format!("a secret goes to at most {} hosts", limits::SECRET_HOSTS_MAX)));
+    }
+    let mut hosts = Vec::with_capacity(given.len());
+    for g in given {
+        let host = fragment_core::secrets::secret_host(g)
+            .ok_or_else(|| CellError::invalid(format!("{g:?} is not a host as a URL names it (api.example.com: no scheme, port, path, or wildcard)")))?;
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts.sort();
+    assert!(!hosts.is_empty() && hosts.len() <= limits::SECRET_HOSTS_MAX, "a secret's hosts are within their bounds");
+    Ok(hosts)
 }
 
 /// A fragment's face as its members' lists keep it (`MetaKey::Face`): an

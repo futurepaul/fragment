@@ -592,15 +592,20 @@ A page should look made for its job, by someone who cared.
 
 ## The inbox (webhooks in)
 
-Every fragment has an inbox URL: `POST {{platform}}/api/f/<name>/inbox?t=<inbox
-token>` (or the token in `x-fragment-inbox-token`), a JSON body of at
-most 64 KiB. Each delivery is a record on the `inbox` channel; a trigger
+Every fragment has an inbox URL: `POST {{platform}}/api/f/<name>/inbox`
+with the token in `x-fragment-inbox-token` (or `?t=<inbox token>` for a
+sender that cannot set a header), a JSON body of at most 64 KiB. Each
+delivery is a record on the `inbox` channel; a trigger
 `{"channel": "inbox", "run": "<op>"}` handles it.
 
 ```
-fragment inbox my-thing --token <inbox token> --payload '{"url":"https://example.com"}'
+FRAGMENT_INBOX_TOKEN=<inbox token> fragment inbox my-thing --payload '{"url":"https://example.com"}'
 fragment rotate my-thing --inbox        # a new inbox token (the old one stops working)
 ```
+
+`fragment inbox` reads the token from `FRAGMENT_INBOX_TOKEN`, else
+stdin, never its command line (`ps` and shell history keep that), and
+sends it in the header.
 
 ## Runs: when something goes wrong
 
@@ -790,13 +795,21 @@ them to rename it.
 ## Secrets
 
 ```
-fragment secret set my-thing API_KEY         # value from argv, else $API_KEY, else stdin
-fragment secret list my-thing                # names only; values never come back
+fragment secret set my-thing API_KEY --to api.example.com   # value from $API_KEY, else stdin
+fragment secret list my-thing                # names and hosts; values never come back
 fragment secret rm my-thing API_KEY
 ```
 
 Your code never holds a secret: `job.fetch` fills `{{API_KEY}}` in a
-header at the way out. Never write secret values into files.
+header at the way out, and only toward a host the secret names, over
+https (`--to`, once per host, at most 8; a host is exact:
+`api.example.com` is not `eu.api.example.com`). A fetch elsewhere, or
+over `http:`, fails its step, so no editor's code sends a secret where
+its setter did not mean it to go. The hosts change only with the value:
+set it again, value and all. The value comes from the environment
+variable of its name, else stdin, never the command line. A secret set
+before secrets named hosts fills nowhere until it is set again with
+`--to`. Never write secret values into files.
 
 ## Rules of the road
 
@@ -822,7 +835,7 @@ fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
-fragment inbox <name> --token T --payload JSON [--source S]
+fragment inbox <name> --payload JSON [--source S]   # the token from $FRAGMENT_INBOX_TOKEN, else stdin
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|rm|leave ...
@@ -832,7 +845,8 @@ fragment members role <name> <email|npub> viewer|editor
 fragment manifest <name>                 fragment invite list|revoke ...
 fragment access                          # who can open what you own
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
-fragment verify <name> [--dir D]         fragment secret set|list|rm ...
+fragment verify <name> [--dir D]         fragment secret list|rm ...
+fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
 fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>

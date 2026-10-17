@@ -1688,7 +1688,7 @@ impl PrincipalCell {
             Err(e) => skip_meta(&mut meta, "invites", &e),
         }
         match self.read_json(person, name, "secrets", "").await? {
-            Ok(n) => meta.secrets = n["names"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect(),
+            Ok(n) => meta.secrets = n["secrets"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().map(str::to_string)).collect(),
             Err(e) => skip_meta(&mut meta, "secrets", &e),
         }
         match self.read_json(person, name, "channels", "").await? {

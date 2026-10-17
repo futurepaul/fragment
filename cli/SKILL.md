@@ -118,7 +118,8 @@ shadows.
   `inbox` takes webhooks, `events` is the log.
 - **Triggers**: a cron, a record on a channel, a change to files.
 - **Job steps**: `job.fetch` (a secret `{{NAME}}` in a header is filled
-  outside your code), `job.sleep`, `job.files`, `job.push`, and AI,
+  outside your code, toward the hosts it names: `fragment secret set
+  <name> NAME --to api.example.com`), `job.sleep`, `job.files`, `job.push`, and AI,
   which the fragment's owner pays for: `job.ai.text` (text on the
   platform's model tiers, `cheap` or `medium`; with OpenAI's `tools` the
   model asks for calls your job runs, a tool loop with no computer, and

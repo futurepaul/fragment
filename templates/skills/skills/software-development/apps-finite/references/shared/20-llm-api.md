@@ -124,8 +124,11 @@ const r = await job.fetch("https://api.example.com/v1/search", {
 ```
 
 ```sh
-fragment secret set garden EXAMPLE_KEY      # the human gives the value; it never comes back
+EXAMPLE_KEY=… fragment secret set garden EXAMPLE_KEY --to api.example.com   # the human gives the value; it never comes back
 ```
+
+A secret is filled only toward the hosts it names, over https: name each
+host the key is for (`--to`, once each), and a fetch anywhere else fails.
 
 The placeholders in your computer's environment (`PERPLEXITY_API_KEY=fck_…`,
 which its swap fills) are for your own calls from your computer, and work

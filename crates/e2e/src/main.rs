@@ -753,6 +753,14 @@ impl Suite {
         self.cli_command(api, home, args).output().expect("run the fragment CLI")
     }
 
+    /// `cli` with variables of its own (a token, a secret's value), which
+    /// never go on its command line.
+    pub fn cli_with_env(&self, api: &Api, home: &Path, args: &[&str], vars: &[(&str, &str)]) -> Output {
+        let mut c = self.cli_command(api, home, args);
+        c.envs(vars.iter().copied());
+        c.output().expect("run the fragment CLI")
+    }
+
     /// The CLI as a lane spawns it itself (a watcher, a piped input): its
     /// config under the HOME the lane sets, on every system.
     pub fn bare_cli(&self) -> Command {
