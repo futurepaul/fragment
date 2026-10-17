@@ -10,7 +10,10 @@
 //!   extension says is what its owner sees, connected. The guest's CDP
 //!   reaches it, each frame named by the guest socket it came on, and the
 //!   answers go back (the agent's reply reads the page's title); the
-//!   guest socket's end is told to it. In a Chrome that loads the extension
+//!   guest socket's end is told to it. While it is connected, its owner's
+//!   turn is told so first, by the bridge (the browser's name and its
+//!   socket, which the computer answers at `/json/version`; the stub
+//!   echoes it, and Hermes hands it to its model). In a Chrome that loads the extension
 //!   (`extension/`), Settings connects this browser and lists it by name
 //!   (and another person signed in there is offered Connect, not told it
 //!   is theirs), the agent opens a tab in it and reads it, and what it may
@@ -21,16 +24,17 @@
 //!   socket from a page (no extension's origin), or naming no ticket, is
 //!   refused, and so is a link's ticket asked from a page or with a link
 //!   the computer never made; with no browser connected the guest is told
-//!   so, in the platform's words.
+//!   so, in the platform's words, and its owner's turns nothing of one.
 //! - **Replay:** a ticket is spent once; a forgotten browser's link is
 //!   refused.
 //! - **Restart:** with its link a browser comes back on its own: a fake
 //!   one asks for a ticket of its own and replaces the socket before it
 //!   (told not to come back); the real extension, its connection dropped
-//!   (a lever), comes back by itself, and reloaded, it does too (the
-//!   Settings page open from before, its script cut off, says to load it
-//!   again). Forgotten (by its owner, from anywhere; in Settings), it does
-//!   not.
+//!   (a lever), comes back by itself; its worker stopped, as Chrome stops
+//!   an idle one, it comes back once woken, still knowing the agent's tab;
+//!   and reloaded, it does too (the Settings page open from before, its
+//!   script cut off, says to load it again). Forgotten (by its owner, from
+//!   anywhere; in Settings), it does not.
 //! - **Replaced:** one that disconnects mid-call ends the guest's socket,
 //!   which says so.
 
@@ -65,21 +69,31 @@ const PAGE_TITLE: &str = "Opened by the agent";
 const PERSON_PAGE: &str = "data:text/html,%3Ctitle%3EA%20tab%20of%20the%20person%3C%2Ftitle%3E";
 const PERSON_TITLE: &str = "A tab of the person";
 const SHELL_TITLE: &str = "Finite.Computer";
-const REAL: [&str; 13] = [
+/// What the stub echoes it was told before its owner's message while
+/// their browser is connected (the bridge asks the computer first), after
+/// its reply.
+const TOLD: &str = "\n\n(told: its owner's browser, ";
+const REAL: [&str; 14] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
     "another person signed in to this browser is offered Connect, not told it is connected",
     "Settings lists this browser by the name its extension gave, connected",
     "the agent opens a tab in it and reads it, in this browser",
     "a dropped connection comes back on its own, with the extension's link",
+    "its worker stopped, as Chrome stops an idle one: woken, it comes back with its link, and the agent's own tab is still its own",
     "at \"Only the tabs they open\" (the default), the agent lists its own tab and none of the person's",
     "at \"Those, and tabs I choose\", the popup lists the person's tabs, and the one switched on joins the agent's",
     "at \"All my tabs and windows\", the agent lists every tab, and closes one of the person's",
     "back at \"Only the tabs they open\", the person's tabs leave the agent's list",
     "the extension reloaded: Settings, open from before, says to load it again, and loaded again shows this browser back on its own, with its link",
     "Forget, in Settings, ends it: it does not come back, and Settings offers to connect again",
-    "then the agent is told its owner's browser is not connected",
+    "then the agent is told its owner's browser is not connected, and its owner's turns nothing of it",
 ];
+
+/// A stub's reply less what it echoes it was told.
+fn answer(reply: &str) -> &str {
+    reply.split(TOLD).next().unwrap_or(reply)
+}
 
 /// The chat the agent is in, said to by its owner, one reply a message.
 struct Chat<'a> {
@@ -256,6 +270,7 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     chat.say("browse https://example.test/one")?;
     let reply = chat.reply(s);
     s.ok("with no browser connected, the guest is told so, in the platform's words", reply.starts_with("browse failed") && reply.contains("your owner's browser is not connected"), &reply);
+    s.ok("and its owner's turns are told nothing of a browser", !reply.contains(TOLD), &reply);
 
     // valid: an extension's first connection makes the browser a link, and
     // carries the guest's CDP, named
@@ -282,7 +297,9 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
         heard == ["Target.createTarget", "Target.attachToTarget", "Runtime.evaluate"] && sockets.len() == 1 && sockets.iter().all(|k| fragment_core::owner_browser::valid_socket(k)),
         format!("{served:?}"),
     );
-    s.ok("and the browser's answers reach the guest: the agent reads the page's title", reply == "browsed https://example.test/one: A page", &reply);
+    s.ok("and the browser's answers reach the guest: the agent reads the page's title", answer(&reply) == "browsed https://example.test/one: A page", &reply);
+    let socket = format!("ws://{}{}", fragment_core::owner_browser::GUEST_HOST, fragment_core::owner_browser::GUEST_PATH);
+    s.ok("while it is connected, its owner's turn is told so first: the browser's name, and its socket", reply.ends_with(&format!("{TOLD}An e2e browser, at {socket})")), &reply);
     s.ok("the guest socket's end is told to the browser", served.is_ok(), format!("{served:?}"));
 
     // invalid: a page's socket, one with no ticket, a link from a page or
@@ -362,7 +379,7 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = chat.reply(s);
     let pages = b.pages()?;
     let opened = pages.iter().any(|(_, url)| url.starts_with("data:text/html"));
-    s.ok(REAL[4], reply == format!("browsed {PAGE}: {PAGE_TITLE}") && opened, format!("{reply} / {pages:?}"));
+    s.ok(REAL[4], answer(&reply) == format!("browsed {PAGE}: {PAGE_TITLE}") && opened, format!("{reply} / {pages:?}"));
     // a dropped connection (the lever drops it as a network would): the
     // extension comes back on its own, with its link
     let r = super::computers::lever(api, &id, "drop-browser")?;
@@ -370,12 +387,21 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let came_back = s.eventually(wait, || browsers(api, &owner, &id).first().is_some_and(|b| b["connected"] == true && b["id"] == mine.as_str()));
     let works = chat.ask(s, "tabs")?;
     s.ok(REAL[5], dropped && came_back && works.contains(PAGE_TITLE), format!("{r} / {} / {works}", json!(browsers(api, &owner, &id))));
+    // its worker stopped, as Chrome stops one idle past its socket's end (a
+    // laptop's sleep, a long outage): the platform's page wakes it, its
+    // link brings it back, and it still knows the tab the agent opened
+    let stopped = b.stop_extension_worker(&format!("chrome-extension://{ext_id}/"))?;
+    let gone = s.eventually(wait, || browsers(api, &owner, &id).first().is_some_and(|b| b["connected"] == false));
+    b.reload(&settings)?;
+    let woke = s.eventually(wait, || browsers(api, &owner, &id).first().is_some_and(|b| b["connected"] == true && b["id"] == mine.as_str()));
+    let kept = chat.ask(s, "tabs")?;
+    s.ok(REAL[6], stopped && gone && woke && kept.contains(PAGE_TITLE), format!("{stopped} {gone} {woke} / {kept}"));
     // what the agent may use is the person's choice, in the extension's
     // popup (its settings): the stub's `tabs` lists it, as a browser tool's
     // `tab list` would
     b.open(PERSON_PAGE)?;
     let own = chat.ask(s, "tabs")?;
-    s.ok(REAL[6], own.contains(PAGE_TITLE) && !own.contains(PERSON_TITLE) && !own.contains(SHELL_TITLE), &own);
+    s.ok(REAL[7], own.contains(PAGE_TITLE) && !own.contains(PERSON_TITLE) && !own.contains(SHELL_TITLE), &own);
     let popup = b.open(&format!("chrome-extension://{ext_id}/popup.html"))?;
     let person_box = format!("input[data-title=\"{PERSON_TITLE}\"]");
     let at = |level: &str| format!("document.querySelector('input[value={level}]')?.checked === true");
@@ -386,17 +412,17 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&popup, &person_box)?;
     b.until(&popup, &format!("document.querySelector('{person_box}')?.checked === true"), wait);
     let chosen = chat.ask(s, "tabs")?;
-    s.ok(REAL[7], listed && chosen.contains(PAGE_TITLE) && chosen.contains(PERSON_TITLE) && !chosen.contains(SHELL_TITLE), &chosen);
+    s.ok(REAL[8], listed && chosen.contains(PAGE_TITLE) && chosen.contains(PERSON_TITLE) && !chosen.contains(SHELL_TITLE), &chosen);
     b.click(&popup, "input[value=all]")?;
     b.until(&popup, &at("all"), wait);
     let all = chat.ask(s, "tabs")?;
     let closed = chat.ask(s, &format!("close-tab {PERSON_TITLE}"))?;
     let gone = s.eventually(Duration::from_secs(10), || b.pages().is_ok_and(|p| !p.iter().any(|(_, url)| url == PERSON_PAGE)));
-    s.ok(REAL[8], all.contains(PERSON_TITLE) && all.contains(SHELL_TITLE) && closed == format!("closed {PERSON_TITLE}") && gone, format!("{all} / {closed}"));
+    s.ok(REAL[9], all.contains(PERSON_TITLE) && all.contains(SHELL_TITLE) && answer(&closed) == format!("closed {PERSON_TITLE}") && gone, format!("{all} / {closed}"));
     b.click(&popup, "input[value=own]")?;
     b.until(&popup, &at("own"), wait);
     let back = chat.ask(s, "tabs")?;
-    s.ok(REAL[9], back.contains(PAGE_TITLE) && !back.contains(SHELL_TITLE), &back);
+    s.ok(REAL[10], back.contains(PAGE_TITLE) && !back.contains(SHELL_TITLE), &back);
     b.close(popup)?;
     // the extension reloaded, as its owner's Reload in chrome://extensions
     // does it (an unpacked one stays on only in developer mode): its script
@@ -413,16 +439,16 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let back = b.until(&settings, &format!("document.querySelector('{row}')?.innerText.includes('(this browser): connected') === true"), wait);
     let linked = browsers(api, &owner, &id);
     let one = linked.len() == 1 && linked[0]["id"] == mine.as_str() && linked[0]["connected"] == true;
-    s.ok(REAL[10], reloaded == true && cut_off && back && one, format!("{said} / {} / {}", b.eval(&settings, LINE)?, json!(linked)));
+    s.ok(REAL[11], reloaded == true && cut_off && back && one, format!("{said} / {} / {}", b.eval(&settings, LINE)?, json!(linked)));
     // forgotten in Settings: the extension hears it must not come back (its
     // link let go, its status says so), and Settings offers Connect again
     b.click(&settings, &format!("{row} [data-action=browser-forget]"))?;
     let told = format!("!document.querySelector('{row}') && !!document.querySelector('[data-action=browser-connect]') && document.getElementById('settings-browser').innerText.includes('your owner forgot this browser')");
     let off = b.until(&settings, &told, wait);
-    s.ok(REAL[11], off && browsers(api, &owner, &id).is_empty(), b.eval(&settings, LINE)?);
+    s.ok(REAL[12], off && browsers(api, &owner, &id).is_empty(), b.eval(&settings, LINE)?);
     chat.say(&format!("browse {PAGE}"))?;
     let reply = chat.reply(s);
-    s.ok(REAL[12], reply.contains("your owner's browser is not connected"), &reply);
+    s.ok(REAL[13], reply.contains("your owner's browser is not connected") && !reply.contains(TOLD), &reply);
     Ok(())
 }
 
@@ -435,11 +461,12 @@ pub const HERMES_SECTION: &str = "owner-browser-hermes";
 /// A Hermes start, and one of its turns (hermes.rs's bounds).
 const HERMES_WAKE: Duration = Duration::from_secs(300);
 const HERMES_TURN: Duration = Duration::from_secs(180);
-const HERMES: [&str; 4] = [
+const HERMES: [&str; 5] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
     "Hermes' terminal runs agent-browser against it, and the agent's tab opens in this browser",
     "the tool's answer reads the page's title",
+    "the model is handed its owner's browser before their message: connected, and how its terminal reaches it",
 ];
 
 pub fn owner_browser_hermes(s: &mut Suite, api: &Api) -> Result<()> {
@@ -492,6 +519,12 @@ fn hermes_run(s: &mut Suite, api: &Api) -> Result<()> {
     let pages = b.pages()?;
     s.ok(HERMES[2], pages.iter().any(|(_, url)| *url == page), format!("{pages:?}"));
     s.ok(HERMES[3], reply.contains(SHELL_TITLE), &reply);
+    let chats = s.ai.chats();
+    let handed = chats.iter().any(|c| {
+        let c = c.to_string();
+        c.contains("Your owner's browser is connected: ") && c.contains("--cdp ws://browser.fragment.internal/devtools/browser")
+    });
+    s.ok(HERMES[4], handed, chats.last().map(|c| c.to_string().chars().take(600).collect::<String>()).unwrap_or_default());
     Ok(())
 }
 

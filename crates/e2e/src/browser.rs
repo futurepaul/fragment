@@ -344,6 +344,17 @@ impl Browser {
             .collect())
     }
 
+    /// Stops the worker of the extension whose URLs begin `prefix`
+    /// (`chrome-extension://<id>/`), as Chrome stops an idle one: whether
+    /// one was running.
+    pub fn stop_extension_worker(&mut self, prefix: &str) -> Result<bool> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let worker = v["targetInfos"].as_array().into_iter().flatten().find(|t| t["type"] == "service_worker" && t["url"].as_str().is_some_and(|u| u.starts_with(prefix)));
+        let Some(id) = worker.and_then(|t| t["targetId"].as_str()).map(str::to_string) else { return Ok(false) };
+        self.send("Target.closeTarget", json!({ "targetId": id }), None)?;
+        Ok(true)
+    }
+
     /// Evaluates `expr` in the page (awaiting a promise) and returns its value.
     pub fn eval(&mut self, page: &Page, expr: &str) -> Result<Value> {
         let r = self.send("Runtime.evaluate", json!({ "expression": expr, "awaitPromise": true, "returnByValue": true }), Some(&page.session))?;
