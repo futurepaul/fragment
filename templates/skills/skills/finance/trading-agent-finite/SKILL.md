@@ -1,8 +1,13 @@
 ---
 name: trading-agent-finite
-description: "Build sourced stock/crypto/macro comparisons and Plotly market charts with yfinance, CCXT and public FRED data. Analysis only; no order execution."
+description: "Build sourced stock/crypto/macro comparisons and Plotly market charts with yfinance, CCXT and public FRED data. Analysis only; no order execution. A toolkit, not an agent; a standing analyst is an agent (agents-finite)."
 tags: [finance, trading, charts, macro, crypto, stocks, polymarket]
 ---
+
+**A toolkit, not an agent.** When your owner asks for a stock or crypto
+bot, an analyst or a trader they can talk to, make it an agent first
+(`agents-finite`), with this skill named in its job, and brief it. Use
+this skill yourself for a question you answer now.
 
 ## Deployment prerequisites
 

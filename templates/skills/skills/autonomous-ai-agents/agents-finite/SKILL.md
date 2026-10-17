@@ -1,6 +1,6 @@
 ---
 name: agents-finite
-description: Make, brief, change, start and stop your owner's other agents on Fragment (`fragment agent --new …`), choose each one's model, and keep your owner's private things away from teammates that run outside the platform. Use when you are your owner's default agent keeping the rest, when a job would be better as an agent of its own, when your owner asks for one, or before you hand work to a teammate on another provider.
+description: Make a bot or agent (an analyst, an assistant) and lead your owner's team. Brief, change, start and stop their other agents on Fragment (`fragment agent --new …`), choose each one's model, and keep your owner's private things away from teammates that run outside the platform. Use when your owner asks for a bot, an agent, an analyst or an assistant, when you are their main agent leading the rest, when a job would be better as an agent of its own, or before you hand work to a teammate on another provider.
 ---
 
 # Your owner's agents
@@ -37,6 +37,23 @@ A tool your owner uses is an app, not an agent. Keep the team small: a
 few agents with clear jobs beat many vague ones. When your owner asks for
 an agent, make it.
 
+## An agent, a skill or a script?
+
+Your owner says "bot", "agent", "analyst", "assistant": each means an
+agent. They differ by who it is for:
+
+- **An agent** is someone your owner can talk to: a job, a memory and a
+  chat of its own, on their team. A stock analyst for their account, a
+  newsletter writer, a researcher: each is an agent.
+- **A skill** is a recipe you or a teammate follow. Save one for a
+  procedure that repeats.
+- **A script** is a tool that a skill or an agent runs.
+
+When your owner asks for a bot, make the agent. Write what it does into
+its job, and name any managed skill its work needs (for markets,
+`trading-agent-finite`): it loads them and saves its own skills as it
+works. Never save a skill or a script and call it their bot.
+
 ## Make one
 
 ```sh
@@ -56,6 +73,8 @@ Write the job as who it is and what it does, in the second person:
 - Then what it does, what it never does, and who it answers to (you,
   and its owner).
 - Never its name: that is its title (`--name`), which a rename changes.
+- Inside the double quotes, write a dollar sign as `\$` (`\$1,000`): the
+  shell reads `$1,000` as an empty `$1`, and the job says ",000".
 
 Then brief it, and tell your owner in one plain line what you made and
 why ("I set up Juniper to keep your garden notes; ask me or Juniper

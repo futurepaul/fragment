@@ -1208,8 +1208,10 @@ these other providers."
       go-between, capable on its own, so most work is its own; and the
       lead of their team, which gives a job an agent of its own when that
       is better (lasting work with its own context, long work that runs
-      beside it, a model the person asks for), makes teammates on the
-      same platform models it runs on unless the person asks otherwise,
+      beside it, a model the person asks for; a "bot", an analyst or an
+      assistant asked for is an agent, never a skill or a script), makes
+      teammates on the same platform models it runs on unless the person
+      asks otherwise,
       briefs them, checks what comes back, and says who did what. The
       managed `agents-finite` skill (templates/skills) says how: the
       commands, how to write a job and brief one, the placeholders, and
@@ -1302,6 +1304,37 @@ these other providers."
     the agent fragment's cron (decision 38), which no command or skill
     yet teaches an agent to make: the computers lane writes one by hand
     (`routine_app`).
+
+    Then Austin's own run (2026-10-17, the job before this one): asked to
+    "create a stock analyst bot" for a $1,000 swing account, the default
+    agent loaded the managed `trading-agent-finite` skill ("exactly what
+    it's for"), did the analysis itself, and saved it as a skill of its
+    own, which it called the bot; it never opened `agents-finite`. The
+    same words under the new job built a Python script and called that
+    the bot. Why: Hermes' skill index shows the first 57 characters of a
+    description (`SKILL_PROMPT_DESC_LIMIT`, 60 with its ellipsis);
+    `agents-finite`'s began "Make, brief, change, start and stop your
+    owner's other a…", with no "bot", and the trading skill's began
+    "Build sourced stock/crypto/macro…", with "agent" in its name. Now the
+    job says a bot, an analyst or an assistant is an agent and a skill
+    or a script is not; `agents-finite`'s description opens "Make a bot or
+    agent (an analyst, an assistant)…", with a section on an agent, a
+    skill or a script; and `trading-agent-finite` says it is a toolkit,
+    not an agent. Seen beside it, local only: the default agent's
+    computer, up 14 hours, reached no host outside (`pip`, `curl`: a TLS
+    EOF at the dev stack's egress) where a computer woken that day did,
+    and the agent wrote the outage into its new skill as a standing fact
+    ("the shell has NO outbound internet"), as it had called code.storage
+    "down" (the debt ledger's "An agent's sync and deploy reach
+    code.storage directly"). Asked the same again under the new job and
+    skills, it opened `agents-finite` first, made Signal (`fragment agent
+    --new stocks`, on the platform's tier), briefed it, and Signal did
+    the analysis in their chat; its job said ",000" for "$1,000" (the
+    shell's `$1` in a double-quoted `--job`), which the skill now warns
+    of. Its reply to its owner never reached the chat: the bridge took
+    the 1,804-character reply as the narration of a step, since its
+    draft had begun before one (images/bridge/src/runtime/relay/mod.rs,
+    `drafting`), and posted only its chart, which Hermes had sent apart.
 
     **For Paul to decide:**
     1. Whether an agent may start and stop its owner's agents at all
