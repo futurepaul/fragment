@@ -39,11 +39,13 @@
 //!                    input, or a file once), make a host secret, or list names
 //!                    and times; --local <state dir> for wrangler's local store
 //!                    instead (xtask/src/secret.rs)
-//!   deploy --config <file> [--branch <name>]
+//!   deploy --config <file> [--branch <name>] [--pinned-only]
 //!                    build and deploy to Cloudflare from a deployment's config
 //!                    (deploy/example.jsonc), once its secrets are all in the
 //!                    store: a branch gets a complete copy of its own at
-//!                    <branch>.<zone> (xtask/src/deploy.rs)
+//!                    <branch>.<zone> (xtask/src/deploy.rs); --pinned-only
+//!                    (CI's) refuses a config that builds a computer image
+//!                    rather than keeping it at its digest
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
@@ -449,7 +451,7 @@ fn main() -> Result<()> {
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>"),
     }
 }
 

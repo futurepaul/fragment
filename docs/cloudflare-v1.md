@@ -71,6 +71,19 @@ speaking Cloudflare's APIs) returns once this product works.
    from a clean configuration, the way a stranger would. WorkOS'
    staging environment serves dev and previews; its production
    environment serves production (`finite.chat`, decision 5).
+
+   *Status (Paul, 2026-10-16).* CI deploys on a green push
+   (.github/workflows/ci.yml, `deploy`): master's to the preview
+   (`preview.finite.build`), and the `production` branch's to
+   production. Only Paul updates `production`: his push, or the pull
+   request he merges into it, is a production deploy's approval. Each
+   deploys from a GitHub environment (`preview`, `production`) that only
+   its branch may use, holding its config whole (the secret
+   `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out
+   of the public repo's logs) and its
+   Cloudflare token; its images are pinned by digest (`xtask deploy
+   --pinned-only`), and one is built by a deploy by hand
+   (docs/computers.md, "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
@@ -355,8 +368,10 @@ speaking Cloudflare's APIs) returns once this product works.
 
     *Status (2026-10-13).* Stable and canary are two names of a
     deployment's images: the default kept at a digest, the canary built
-    at every deploy; a promotion moves the default's digest, a rollback
-    pins back (docs/computers.md, "Stable and canary"). The point-in-time
+    at every deploy (since 2026-10-16, by a deploy by hand: CI's build
+    no image, decision 3's status); a promotion moves the default's
+    digest, a rollback pins back (docs/computers.md, "Stable and
+    canary"). The point-in-time
     restore is not built: three rotating saves keep none from before a
     canary, so a Hermes release is forward only for now (Paul, 2026-10-13;
     docs/technical-debt-ledger.md, "A Hermes release has no rollback").
@@ -376,8 +391,8 @@ speaking Cloudflare's APIs) returns once this product works.
     *Status (2026-10-16).* `finite.place` is production's now (decision
     5's status). The master preview is the branch `preview` on the zone
     `finite.build`: `preview.finite.build`, its fragments
-    `<name>--preview.finite.build`, master deployed continuously
-    (docs/computers.md, "One round"). The phases' evidence below, from
+    `<name>--preview.finite.build`, master's, which CI deploys at every
+    green push (decision 3's status; docs/computers.md, "One round"). The phases' evidence below, from
     `p5.finite.place` and `e2e.finite.place`, is from before the move,
     and deploy/e2e.jsonc still names that zone.
 
@@ -1953,7 +1968,8 @@ Each one needs a test in the phase that ports its feature.
 ## Escalations (ask Paul)
 
 - Product semantics, pricing, privacy posture.
-- Production deploys.
+- Production deploys (a push to `production`, Paul's alone: decision
+  3's status).
 - Zone and DNS moves.
 - Every teardown or delete.
 - New vendor accounts and secrets.

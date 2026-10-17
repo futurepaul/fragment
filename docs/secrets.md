@@ -140,6 +140,29 @@ store secrets:
   makes the endpoint) is uploaded as the Worker secret
   `FRAGMENT_STRIPE_WEBHOOK` (decision 58). Never printed.
 
+**On CI's deploy** (.github/workflows/ci.yml, `deploy`) the deploying
+machine is a runner, which holds no file of its own. Its GitHub
+environment (`preview` or `production`) holds the secrets
+`CLOUDFLARE_API_TOKEN`, which wrangler deploys with and which the job
+also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
+DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
+`~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
+job alone. The config it deploys from is the secret `DEPLOY_CONFIG`, though
+it holds names and paths alone: the repo is public, and a variable is
+shown in its job's log. It names those two paths, and no
+`stripe.key_file`, which a runner lacks; a secret is never read back, so
+it is set from a file kept beside the config a deploy by hand takes, as
+one line of base64 (`base64 -w0 < <file> | gh secret set DEPLOY_CONFIG
+--env <environment>`), which the job decodes, refusing one that is no
+base64 of a file with something in it. One line, as the runner masks
+each line of a secret as well as the whole: a config's lines of `{` or
+`}` alone would mask every brace in the job's logs.
+`CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
+masked: the runner masks each secret its job names wherever it appears
+in the job's logs, so the account id in wrangler's and xtask's output
+(registry paths, URLs) is `***`. The job runs without it. Paul sets them
+in the repository's settings.
+
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a

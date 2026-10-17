@@ -6,6 +6,14 @@
 // one, `secret gen <name>` makes a host secret, `secret list` shows them.
 // A deploy checks the store holds every one named here before it changes
 // anything.
+//
+// CI deploys (.github/workflows/ci.yml, `deploy`: master's green push to
+// its preview, production's to production) from this file, held whole in
+// its GitHub environment's secret DEPLOY_CONFIG, in base64 (`base64 -w0 <
+// <file> | gh secret set DEPLOY_CONFIG --env <environment>`; never read
+// back, so keep the file). There, `dns_token_file` and `test_secret_file`
+// are the paths the job writes them to, below, and every computer image
+// is pinned by digest (`--pinned-only`).
 {
   // Your Cloudflare account (`wrangler whoami`), and a branch deployment's
   // zone: `--branch <b>` deploys at <b>.<zone>, its fragments at
@@ -23,7 +31,9 @@
   // A Cloudflare API token with Zone · DNS · Edit on the zone (or both):
   // with it, a deploy makes the records its routes need when they are
   // missing. Without it, make them by hand. A file: it is the deploying
-  // machine's own, which no Worker reads.
+  // machine's own, which no Worker reads. CI's job writes its environment's
+  // CLOUDFLARE_API_TOKEN to ~/.config/fragment/secrets/cloudflare-api-token:
+  // a config CI deploys from names that.
   // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
   // A deployment of its own names its hosts instead of a zone (a `zone`
   // beside them is refused), each a zone's own name on the account: the
@@ -228,6 +238,7 @@
   // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A
   // --branch deploy only: a deployment of its own is refused. A file, not
   // a store secret: the hosted e2e sends its value, and a store gives none back.
+  // CI's job writes the preview environment's PREVIEW_TEST_SECRET to this path.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
   // (fragment_core::price::DEFAULT_BOOK_VERSION, 7 since OpenRouter's

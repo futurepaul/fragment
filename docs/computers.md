@@ -323,10 +323,18 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   it builds anything, a reference that is no digest in its own account's
   registry. It changes only when its line does, so a deploy tells the
   computers on it nothing. New computers start on it.
-- **The canary** is built from the tree at every deploy (on the preview,
-  master's). A computer pinned to it is on the canary: every deploy that
-  changes its image tells it an update is ready, as any deploy that
-  changes an image tells (above).
+- **The canary** is built from the tree by a deploy by hand, where Docker
+  runs and keeps its layer cache (on the preview, of master's tree). A
+  computer pinned to it is on the canary: every deploy that changes its
+  image tells it an update is ready, as any deploy that changes an image
+  tells (above).
+- **CI's deploys build no image** (`--pinned-only`; ci.yml's `deploy`):
+  every image of the config it deploys from (its environment's secret
+  `DEPLOY_CONFIG`, set from a file, as a secret is never read back) is
+  kept at a digest, the canary's too, as a runner, with no layer cache,
+  would make a new digest at every deploy (below). So a canary built by
+  hand is pinned there next, at the digest that deploy names, or
+  master's next deploy puts the canary back where the secret has it.
 - **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
   frontend, that don't change the hermes image shouldn't require a hermes
   image rollout"). The image's inputs are what it runs, and no more:
@@ -403,19 +411,26 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   holds none of the preview's digests (the deploy refuses another
   account's). Its first deploy builds `hermes` from the release commit;
   its line is then pinned to the digest that deploy names, and its own
-  canary group goes ahead of it as the preview's does.
+  canary group goes ahead of it as the preview's does. CI deploys it from
+  the `production` branch, its images pinned as the preview's are: one
+  reaches its registry by a deploy by hand (Paul's), and its digest then
+  its line in production's `DEPLOY_CONFIG`.
 
 ### One round
 
-On the preview (`preview.finite.build`, master deployed continuously),
-with the operators' key (`--key-file`, or `FRAGMENT_OPERATOR_KEY_FILE`)
-and `FRAGMENT_HOST` naming it. Once: stable's line is the digest its
-computers run (`references.running` of one awake on it), the canary's is
-the build, and the canary group is pinned to `hermes-canary`.
+On the preview (`preview.finite.build`, master's, which CI deploys at
+every green push), with the operators' key (`--key-file`, or
+`FRAGMENT_OPERATOR_KEY_FILE`) and `FRAGMENT_HOST` naming it. Once:
+stable's line is the digest its computers run (`references.running` of
+one awake on it), the canary's is the build in the config a deploy by
+hand takes and a digest in CI's (`DEPLOY_CONFIG`), and the canary group
+is pinned to `hermes-canary`.
 
-1. **The change lands** on master; its deploy rebuilds the canary. Its
-   version: `fragment operator person <npub> --json | jq -r .computer.latest`
-   for one of the group.
+1. **The change lands** on master, and a deploy by hand of it, where
+   Docker runs, builds the canary; the digest that deploy names becomes
+   the canary's `image` in the preview's `DEPLOY_CONFIG`, so CI's next
+   deploy keeps it. Its version: `fragment operator person <npub> --json |
+   jq -r .computer.latest` for one of the group.
 2. **The group takes it**: awake, each is told an update is ready and
    presses Restart (the path under test); asleep, its next wake takes it.
    Each checks, on their own computer: an old chat goes on where it was;
@@ -446,8 +461,9 @@ the build, and the canary group is pinned to `hermes-canary`.
 6. **Promote**: the reference a watched canary computer runs
    (`fragment operator person <npub> --json | jq -r .references.running`,
    its first 12 hex digits the version step 1 named) becomes `hermes`'s
-   `image` in the preview's config, the old line kept commented; deploy.
-   One computer on stable awake is told; one asleep wakes onto it.
+   `image` in the preview's configs (`DEPLOY_CONFIG`, and the one a
+   deploy by hand takes), the old line kept commented; deploy. One
+   computer on stable awake is told; one asleep wakes onto it.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
    the commented line back, and a deploy.
