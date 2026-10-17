@@ -280,35 +280,51 @@ fragment.club until cutover (decisions 34–35).
 
 - **Observed:** the 2026-10-16 security audit's round-trip work (H3).
   Every round trip that comes back to the platform now finishes only in
-  the browser that began it (`fragment_core::roundtrip`). A connection's
-  does not come back: `POST /api/connections/{provider}/authorize` asks
-  WorkOS Pipes for a consent URL for the person's WorkOS user
-  (`POST /data-integrations/{provider}/authorize {user_id}`, spike S5),
-  the shell opens it, and WorkOS finishes the provider's OAuth itself.
-  WorkOS's docs (the Pipes guide, the authorize reference, the OpenAPI
-  spec, workos-node) do not say its consent page checks who completes
-  it. Its own Pipes widget binds the flow to the opener's browser with a
-  handoff token (an internal GraphQL mutation, `requireHandoff: true`)
-  that the REST endpoint does not offer.
-- **Shortcut:** none in our code: we cannot bind what never comes back
-  to us. Binding it ourselves (a `return_to` with a secret only WorkOS
-  sees, a cookie, and a "pending until confirmed" state the swap honors)
-  rests on behaviour WorkOS does not document: whether `return_to` stays
-  hidden from whoever began the consent, and what it appends on success.
-- **Risk:** someone who can connect accounts sends a victim their own
-  consent URL; the victim approves at Google; the victim's account is
-  connected to the sender's WorkOS user, and the sender's agents read it
-  through their swap. Deleting the connected account at WorkOS does not
-  revoke it at Google.
-- **First proof:** a consent URL minted for one WorkOS user and
-  completed in a browser signed in as another, on staging (Paul's to
-  run: it touches the real Google client).
-- **Delete when:** WorkOS answers these (Paul's to ask its support: does
-  `authorize-redirect` check the browser's AuthKit session against
-  `user_id`; can the REST `authorize` take `require_handoff`, and how is
-  its handoff token delivered; what is appended to `return_to`, and is it
-  allowlisted), and either it binds consent itself or we bind it the same
-  way as our own round trips, with a test.
+  the browser that began it (`auth::trip_bound`). A connection's does not
+  come back: `POST /api/connections/{provider}/authorize` asks WorkOS
+  Pipes for a consent URL for the person's WorkOS user (`POST
+  /data-integrations/{provider}/authorize {user_id}`, spike S5), the shell
+  opens it, and WorkOS finishes the provider's OAuth itself. WorkOS's docs
+  (the Pipes guide, the authorize reference, the OpenAPI spec,
+  workos-node) say nothing of who may complete it; its own Pipes widget
+  binds the flow to the opener's browser with a handoff token (an
+  internal GraphQL mutation, `requireHandoff: true`) that the REST
+  endpoint does not offer. Paul's test, 2026-10-17, settled it: in the old
+  WorkOS "Fragment" project's Staging environment
+  (environment_01M39VWAVVQ05KTFQ9VR22GAQV), a REST consent link for user A
+  (user_01M3ZQ6R42PT5581BTPT4VHE85: an `/authorize-redirect` URL, no
+  `return_to`), opened in an Incognito window signed in to nothing but a
+  different Google account, showed Google's consent; Allow completed it,
+  and WorkOS emitted `pipes.connected_account.connected`
+  (event_01M551YAQEBPM4EBX8AJJVGJYN, 13:48:39Z), attaching the other
+  person's Google to user A, with `established_by_user_id` = user A. The
+  REST consent is bound to no one.
+- **Shortcut:** none in our code: we cannot bind what never comes back to
+  us, and a `return_to` of our own would bind it only if WorkOS gave back
+  something the beginner cannot know, which it does not document. Nothing
+  is exposed today: the preview's WorkOS project has no Google Pipes
+  provider yet, and no deployment offers a connection whose consent is
+  unbound. The binding must exist before Google (or any connection) is
+  enabled in a deployment's WorkOS project.
+- **Risk:** confirmed, not hypothetical. Whoever holds a consent link gets
+  the account of whoever approves it: someone who can connect accounts
+  sends another person their own link, that person approves at Google,
+  and their Google (Paul's test granted gmail.modify and gmail.send,
+  Drive, Calendar, Docs, Sheets and Contacts) is attached to the sender's
+  WorkOS user, which the sender's agents then read and write through
+  their swap. Deleting the connected account at WorkOS does not revoke it
+  at Google.
+- **First proof:** done, Paul's test above (2026-10-17). Any deployment
+  that enables a connection provider reproduces it with one link.
+- **Delete when:** either WorkOS offers a bound REST flow (`require_handoff`
+  on `authorize`, with its token delivered to the browser that began it;
+  or a verifiable one-time code appended to `return_to` that our `Bound`
+  helper checks against the beginner's cookie and session before the
+  connection may be used), or the platform runs the provider's OAuth
+  itself under the `Bound` helper as it does an own key's; in either case
+  with the H3-style e2e (the link opened in another browser, as another
+  person, connects nothing for anyone), and before any deployment enables
+  the provider.
 
 ## An own key's sign-in finishes at the person's one computer
 
