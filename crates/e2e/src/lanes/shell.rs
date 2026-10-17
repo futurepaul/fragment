@@ -920,19 +920,19 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // another agent of theirs, made elsewhere (the CLI, or an agent): the
     // sidebar keeps one agent (Paul, 2026-10-13), and the others are its
-    // team, a face each under it (decision 62, proposed), their own chats
+    // team, a row each under it (decision 62, proposed), their own chats
     // out of the person's list
     let first_title = row.as_str().unwrap_or("").to_string();
     let (_, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
     let reader_row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}")))));
-    let reader_face = team_face(&reader_id);
+    let reader_team = team_row(&reader_id);
     let one = b.until(
         &page,
-        &format!("document.querySelectorAll('#primary-agent .sidebar-agent').length === 1 && document.querySelector('#sidebar-agent .title')?.textContent === {} && !!document.querySelector({}) && !{reader_row}", js(&first_title), js(&reader_face)),
+        &format!("document.querySelectorAll('#primary-agent .sidebar-agent').length === 1 && document.querySelector('#sidebar-agent .title')?.textContent === {} && !!document.querySelector({}) && !{reader_row}", js(&first_title), js(&reader_team)),
         agent_wait,
     );
     s.ok(
-        "another agent of theirs is their one agent's team: the sidebar shows the one agent (the first), the other a face under it, its own chat out of their chats",
+        "another agent of theirs is their one agent's team: the sidebar shows the one agent (the first), the other a row under it, its own chat out of their chats",
         one,
         b.eval(&page, "({ agent: document.getElementById('primary-agent').innerText, team: document.getElementById('team').innerText, chats: document.getElementById('chats').innerText })")?,
     );
@@ -943,9 +943,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // hello shown once it is open: no frame of it before)
     let first_title = row.as_str().unwrap_or("").to_string();
     let me = Person { session: &session, first: &first_label, first_title: &first_title };
-    let opened = open_team_chat(&mut b, &page, &reader_id, "Reader")?;
-    let titled = b.until(&page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
-    s.ok("its face's menu opens its own chat with the person", opened && titled, b.eval(&page, "document.getElementById('chat-title').textContent")?);
+    let opened = open_team_chat(&mut b, &page, &reader_id)?;
+    let titled = b.until(&page, &format!("document.getElementById('chat-title').textContent === 'Reader' && document.querySelector({})?.getAttribute('aria-current') === 'page'", js(&reader_team)), wait);
+    s.ok("its row opens its own chat with the person, and is marked while it is open", opened && titled, b.eval(&page, "({ title: document.getElementById('chat-title').textContent, team: document.getElementById('team').innerText })")?);
+    // "Your team" folds the rows away, the open chat's teammate kept, and
+    // unfolds them
+    b.click(&page, "#team .team-head")?;
+    let folded = b.until(&page, &format!("document.querySelector('#team .team-head').getAttribute('aria-expanded') === 'false' && document.querySelectorAll('#team .team-row').length === 1 && !!document.querySelector({})", js(&reader_team)), wait);
+    b.click(&page, "#team .team-head")?;
+    let unfolded = b.until(&page, "document.querySelector('#team .team-head').getAttribute('aria-expanded') === 'true'", wait);
+    s.ok("\"Your team\" folds the team away but the open chat's teammate, and unfolds it", folded && unfolded, b.eval(&page, "document.getElementById('team').innerText")?);
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -2060,24 +2067,24 @@ fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bo
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, &landed, "location.search").ok() == Some(json!(format!("?agent={agent}"))))
 }
 
-/// Clicks the open menu's item named `text` (a script's click: a menu's
-/// button needs no gesture). Answers whether there was one.
-/// A teammate's face under the person's one agent (decision 62, proposed).
-fn team_face(identity: &str) -> String {
-    format!("#team .team-face[data-key^={}]", js(&format!("team:{identity}:")))
+/// A teammate's row under the person's one agent (decision 62, proposed):
+/// the button that opens its own chat.
+fn team_row(identity: &str) -> String {
+    format!("#team .team-row[data-key={}] .team-open", js(&format!("team:{identity}")))
 }
 
-/// Opens a teammate's own chat as its person does: its face, then "Chat
-/// with <title>" in its menu.
-fn open_team_chat(b: &mut Browser, page: &Page, identity: &str, title: &str) -> Result<bool> {
+/// Opens a teammate's own chat as its person does: its row.
+fn open_team_chat(b: &mut Browser, page: &Page, identity: &str) -> Result<bool> {
     let wait = std::time::Duration::from_secs(30);
-    if !b.until(page, &format!("!!document.querySelector({})", js(&team_face(identity))), wait) {
+    if !b.until(page, &format!("!!document.querySelector({})", js(&team_row(identity))), wait) {
         return Ok(false);
     }
-    b.click(page, &team_face(identity))?;
-    menu_item(b, page, &format!("Chat with {title}"))
+    b.click(page, &team_row(identity))?;
+    Ok(true)
 }
 
+/// Clicks the open menu's item named `text` (a script's click: a menu's
+/// button needs no gesture). Answers whether there was one.
 fn menu_item(b: &mut Browser, page: &Page, text: &str) -> Result<bool> {
     let clicked = b.eval(page, &format!("(() => {{ const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === {}); i?.click(); return !!i; }})()", js(text)))?;
     Ok(clicked == true)
@@ -2199,7 +2206,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 
     // the phone's picture below is of the Reader's chat, opened from its face
     let reader = agent_ids(api, me.session, &["reader"])?;
-    open_team_chat(b, page, &reader[0], "Reader")?;
+    open_team_chat(b, page, &reader[0])?;
     Ok(())
 }
 
@@ -2263,7 +2270,7 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("the chat open, on screen, counts nothing as its messages come (marked seen again)", sent && answered && shown && none, json!({ "unread": unread_of(api, me.session, &first) }));
     // the Reader is their one agent's team: its chat opens from its face
     let reader_id = agent_ids(api, me.session, &["reader"])?.remove(0);
-    open_team_chat(b, page, &reader_id, "Reader")?;
+    open_team_chat(b, page, &reader_id)?;
     b.until(page, &format!("document.getElementById('chat-title').textContent === 'Reader' && {}", js(reader_chat) + " === [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment"), wait);
     Ok(())
 }
@@ -2343,7 +2350,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
     // the Reader is their one agent's team: its chat opens from its face
     let reader_id = agent_ids(api, me.session, &["reader"])?.remove(0);
-    open_team_chat(b, page, &reader_id, "Reader")?;
+    open_team_chat(b, page, &reader_id)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     b.click(page, "#sidebar-agent")?;
     let again = menu_item(b, page, "New chat")? && b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
@@ -2357,7 +2364,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
     // the Reader is their one agent's team: its chat opens from its face
     let reader_id = agent_ids(api, me.session, &["reader"])?.remove(0);
-    open_team_chat(b, page, &reader_id, "Reader")?;
+    open_team_chat(b, page, &reader_id)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     Ok(())
 }
@@ -2371,8 +2378,11 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
 fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, app: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
-    let host = open_chat(b, page);
+    // in the Reader's own chat (a way to ask for an app left it for the one agent's)
     let ids = agent_ids(api, me.session, &["reader"])?;
+    open_team_chat(b, page, &ids[0])?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let host = open_chat(b, page);
     let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key={}]", js(&format!("app:{app}")))));
     // its window closed first, so Open is what opens it
     b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
@@ -2497,7 +2507,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let (reader, first) = (ids[0].clone(), ids[1].clone());
     let chat = own_named(api, me.session, "reader-chat")?;
     let host = chat.clone();
-    open_team_chat(b, page, &reader, "Reader")?;
+    open_team_chat(b, page, &reader)?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
     let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
@@ -2627,7 +2637,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         json!({ "listed": listed, "after": still }),
     );
     // back to the Reader's own chat, from its face
-    open_team_chat(b, page, &reader, "Reader")?;
+    open_team_chat(b, page, &reader)?;
     Ok(())
 }
 
@@ -2685,24 +2695,37 @@ fn strings(v: &Value) -> Vec<String> {
 /// is sent (the chat's records stay as they were). The die deals three
 /// more: never one showing, all twelve in four hands before any again,
 /// the empty desktop's the same hand; one it dealt goes into the composer
-/// as the first did. The chat it went to.
+/// as the first did. The chat it went to. Asked from a teammate's chat
+/// (the Reader's, open when it starts), it goes to their one agent's chat
+/// instead, which opens (decision 62, proposed): apps are the one agent's.
 fn app_prompts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, asks: &Value, shots: &std::path::Path) -> Result<String> {
     let wait = std::time::Duration::from_secs(30);
-    let open = open_chat(b, page);
-    anyhow::ensure!(own_named(api, session, label_of(&open)).is_ok_and(|n| n == open), "the open chat is theirs: {open}");
-    let chat = open.as_str();
-    let _ = s.eventually(wait, || b.eval_in_frame(page, chat, "!!document.getElementById('text') && !document.getElementById('text').disabled").ok() == Some(Value::Bool(true)));
-    let before = chat_count(api, session, chat);
+    let from = open_chat(b, page);
+    let held = chat_count(api, session, &from);
     let first = asks[0].as_str().unwrap_or("").to_string();
     b.eval(page, "(document.querySelector('#desktop-empty .desktop-suggestion')?.click(), true)")?;
+    let mut open = String::new();
+    let moved = s.eventually(wait, || {
+        open = open_chat(b, page);
+        !open.is_empty() && open != from
+    });
+    anyhow::ensure!(own_named(api, session, label_of(&open)).is_ok_and(|n| n == open), "the open chat is theirs: {open}");
+    let chat = open.as_str();
+    let listed = b.eval(page, &format!("!!document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))))? == true;
     let filled = s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER).ok().is_some_and(|v| v["value"] == first.as_str() && v["focused"] == true));
+    let before = chat_count(api, session, chat);
     std::thread::sleep(std::time::Duration::from_secs(2));
     let after = chat_count(api, session, chat);
     s.ok(
-        "a way to ask on the empty desktop goes into the open chat's composer, focused, and nothing is sent",
-        !first.is_empty() && filled && after == before,
-        json!({ "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after] }),
+        "a way to ask on the empty desktop, from a teammate's chat, goes into their one agent's chat (one of their own chats), which opens: in its composer, focused, and nothing is sent, there or in the teammate's",
+        !first.is_empty() && moved && listed && filled && after == before && chat_count(api, session, &from) == held,
+        json!({ "from": from, "to": chat, "listed": listed, "composer": b.eval_in_frame(page, chat, COMPOSER).unwrap_or(Value::Null), "records": [before, after] }),
     );
+    // a reply to quote below: the one agent answers there (its newest chat
+    // may be one with nothing said yet)
+    let said = say_in(s, b, page, chat, "Hello again");
+    let answered = s.eventually(std::time::Duration::from_secs(120), || b.eval_in_frame(page, chat, "!!document.querySelector('.msg.agent:not(.streaming) .actions .reply')").ok() == Some(Value::Bool(true)));
+    anyhow::ensure!(said && answered, "the one agent's answer in {chat}");
 
     // the dock's Add
     b.click(page, "#add-app")?;

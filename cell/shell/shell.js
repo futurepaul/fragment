@@ -41,6 +41,7 @@ const ICON = {
   external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   team: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
   newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
@@ -521,6 +522,8 @@ function cancelMenuMotion() {
 function finishMenuClose() {
   cancelMenuMotion();
   if (!menuFor) return;
+  // a teammate's ⋯ may have been drawn again while its menu was open
+  const team = !!menuFor.button.dataset.team;
   menuFor.button.setAttribute("aria-expanded", "false");
   menuFor = null;
   menu.hidden = true;
@@ -531,6 +534,7 @@ function finishMenuClose() {
   menu.style.removeProperty("width");
   menu.style.removeProperty("max-height");
   updateSidebarEdge();
+  if (team) renderTeam();
 }
 function animateMenu(opening) {
   const current = menuParts.map(({ node }) => ({ opacity: getComputedStyle(node).opacity, transform: getComputedStyle(node).transform }));
@@ -663,10 +667,10 @@ function primaryAgent() {
   return f ? { fragment: f.name, identity: null } : null;
 }
 // ---- the team (decision 62, proposed): the person's other agents, which
-// their one agent keeps. They show one level down, a face each under it,
-// ringed while one works; their chats (each one's own chat with the person,
-// and the hand-offs among the person's agents: `fragment ask`'s pairs) list
-// under them, never among the person's chats, which stay the one agent's.
+// their one agent keeps. They show one level down, a row each under it
+// (`renderTeam`); their chats (each one's own chat with the person, and the
+// hand-offs among the person's agents: `fragment ask`'s pairs) list under
+// them, never among the person's chats, which stay the one agent's.
 function teamAgents() {
   const primary = primaryAgent();
   return [...state.agents.values()].filter((a) => a.identity !== primary?.identity && byName(a.fragment)?.role === "owner");
@@ -779,42 +783,136 @@ const namesOf = (agents) => {
   const names = agents.map((a) => titleOf(a.fragment));
   return names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
 };
-// The team's faces under the one agent, and a line that says who works.
+// The team under the one agent, a step down from it: indented under it, a
+// smaller row each, quieter than the person's chats. A row opens that
+// agent's own chat with the person, and says when it works, its new
+// messages, and when its model runs outside the platform; its ⋯ says
+// where, and offers its hand-offs, a change asked of the one agent, and
+// its profile. The open chat's teammate (its own chat, or a hand-off it is
+// in) is marked, its hand-offs listed under it. TEAM_SHOWN rows show at
+// first (the open one's always), the rest behind "Show all"; "Your team"
+// folds them away (the open one's stays), saying who works.
+const TEAM_SHOWN = 4;
+const TEAM_FOLDED = "shell.team.folded.v1";
+let teamAll = false;
 function renderTeam() {
   const team = state.guest ? [] : teamAgents();
   const box = $("team");
   box.hidden = !team.length;
   if (!team.length) return patch(box, []);
+  const folded = store.get(TEAM_FOLDED, false) === true;
+  const open = state.page ? null : byName(state.current);
+  const here = teammateOf(open);
   const busy = team.filter(isWorking);
-  const faces = team.map((a) => {
-    const working = isWorking(a);
-    const unread = teamChats(a).some((f) => (f.unread ?? 0) > 0);
-    const b = el("button", `team-face${working ? " working" : ""}`);
-    b.type = "button";
-    b.dataset.key = `team:${a.identity}:${working}:${unread}`;
-    const label = `${titleOf(a.fragment)}${working ? ", working" : ""}${unread ? ", new messages" : ""}`;
-    b.setAttribute("aria-label", label);
-    b.setAttribute("aria-haspopup", "menu");
-    b.dataset.tooltip = label;
-    b.append(avatar(agentFace(a.fragment, a.identity), "small"));
-    if (unread) b.append(el("span", "team-unread"));
-    b.onclick = () => openTeamMenu(a, b);
-    return b;
-  });
-  const status = el("span", `team-status${busy.length ? " busy" : ""}`, busy.length ? `${namesOf(busy)} ${busy.length === 1 ? "is" : "are"} working…` : "Your team");
-  status.dataset.key = `team-status:${status.textContent}`;
-  patch(box, [...faces, status]);
+  const head = el("button", "team-head");
+  head.type = "button";
+  head.dataset.key = "team-head";
+  head.setAttribute("aria-expanded", String(!folded));
+  head.innerHTML = svg("chevron");
+  head.append(el("span", "team-head-label", "Your team"));
+  if (folded && busy.length) head.append(el("span", "team-head-busy", `${namesOf(busy)} ${busy.length === 1 ? "is" : "are"} working…`));
+  else if (folded) head.append(el("span", "team-head-count", String(team.length)));
+  if (folded && team.some((a) => teamUnread(a) > 0)) head.append(el("span", "team-dot"));
+  head.onclick = () => { store.set(TEAM_FOLDED, !folded); renderTeam(); };
+  // folded, the open chat's teammate still shows: where the person is
+  if (folded) return patch(box, [head, ...(here ? teamRow(here, true, open) : [])]);
+  const cut = !teamAll && team.length > TEAM_SHOWN + 1;
+  const listed = cut ? team.filter((a, i) => i < TEAM_SHOWN || a.identity === here?.identity) : team;
+  const rows = listed.flatMap((a) => teamRow(a, a.identity === here?.identity, open));
+  if (team.length > TEAM_SHOWN + 1) {
+    const more = el("button", "team-more-rows", cut ? `Show all ${team.length}` : "Show fewer");
+    more.type = "button";
+    more.dataset.key = "team-more-rows";
+    more.onclick = () => { teamAll = cut; renderTeam(); };
+    rows.push(more);
+  }
+  patch(box, [head, ...rows]);
 }
-// A teammate's own menu: who it is and where its model runs, its chat with
-// the person, the hand-offs it was given, and its profile.
+// What a teammate said to the person and they have not yet seen: its own
+// chat's unread (none while it is open). Its hand-offs are its agents'
+// talk, which the one agent reports: they count for nothing.
+function teamUnread(a) {
+  const f = agentsOwnChat(a.fragment);
+  return !f || (f.name === state.current && !state.page) ? 0 : f.unread ?? 0;
+}
+// The agent, of the person's, that hand-off chat `f` of `a` is with
+function askerOf(f, a) {
+  const label = labelOf(f.name);
+  return [...state.agents.values()].find((b) => b.identity !== a.identity && byName(b.fragment)?.role === "owner" && label === pairLabel(a.fragment, b.fragment)) ?? null;
+}
+function teamRow(a, active, open) {
+  const title = titleOf(a.fragment);
+  const working = isWorking(a);
+  const where = runsOn.get(a.fragment);
+  const unread = teamUnread(a);
+  const itsChat = agentsOwnChat(a.fragment);
+  // its own chat open: the row is; a hand-off of it open: the row is where
+  // the person is, the hand-off's row the one open
+  const mine = active && !!itsChat && open?.name === itsChat.name;
+  const row = el("div", `team-row${mine ? " active" : active ? " here" : ""}`);
+  row.dataset.key = `team:${a.identity}`;
+  const go = el("button", `team-open${working ? " working" : ""}`);
+  go.type = "button";
+  go.setAttribute("aria-current", mine ? "page" : "false");
+  const face = el("span", "team-face");
+  face.append(avatar(agentFace(a.fragment, a.identity), "small"));
+  go.append(face, el("span", "label", title));
+  const said = [title];
+  if (where?.on === "own") {
+    const out = el("span", "team-outside");
+    out.innerHTML = svg("globe");
+    out.title = `${where.model} · outside the platform`;
+    go.append(out);
+    said.push(`on ${where.model}, outside the platform`);
+  }
+  if (working) {
+    go.append(el("span", "team-working", "Working"));
+    said.push("working");
+  } else if (unread) {
+    const n = el("span", "unread", unread >= UNREAD_MAX ? "99+" : String(unread));
+    n.setAttribute("aria-hidden", "true");
+    go.append(n);
+  }
+  if (unread) said.push(unread >= UNREAD_MAX ? "more than 99 unread" : `${unread} unread`);
+  go.setAttribute("aria-label", said.join(", "));
+  go.onclick = () => { itsChat ? openChat(itsChat.name) : newChat(a.identity); leaveSidebar(); };
+  const more = el("button", "icon-button team-more");
+  more.type = "button";
+  more.innerHTML = svg("more");
+  more.setAttribute("aria-label", `${title}: more`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.setAttribute("aria-controls", "menu");
+  more.setAttribute("aria-expanded", String(!!menuFor && !menuClosing && menuFor.button.dataset.team === a.identity));
+  more.dataset.team = a.identity;
+  more.dataset.tooltip = "More";
+  more.onclick = () => openTeamMenu(a, more);
+  row.append(go, more);
+  if (!active) return [row];
+  const handoffs = handoffsTo(a).map((f) => {
+    const by = askerOf(f, a);
+    const on = f.name === open?.name;
+    const sub = el("button", `row team-handoff${on ? " active" : ""}`);
+    sub.type = "button";
+    sub.dataset.key = `team-handoff:${f.name}`;
+    sub.setAttribute("aria-current", on ? "page" : "false");
+    sub.append(el("span", "label", by ? `Hand-offs from ${titleOf(by.fragment)}` : titleOf(f.name)));
+    sub.onclick = () => { openChat(f.name); leaveSidebar(); };
+    return sub;
+  });
+  return [row, ...handoffs];
+}
+// A teammate's ⋯: who it is and where its model runs, the hand-offs it was
+// given, a change asked of the one agent (into its chat's composer, sent
+// by the person), and its profile.
 function openTeamMenu(a, trigger) {
   const primary = primaryAgent();
-  const ownChat = agentsOwnChat(a.fragment);
+  const title = titleOf(a.fragment);
   const handoffs = handoffsTo(a);
+  const by = handoffs[0] && askerOf(handoffs[0], a);
   openMenu(trigger, [
-    { heading: titleOf(a.fragment), note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
-    { icon: "newChat", text: `Chat with ${titleOf(a.fragment)}`, onClick: () => (ownChat ? openChat(ownChat.name) : newChat(a.identity)) },
-    ...(handoffs.length ? [{ icon: "team", text: primary ? `Hand-offs from ${titleOf(primary.fragment)}` : "Its hand-offs", onClick: () => openApp(handoffs[0].name) }] : []),
+    { heading: title, note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
+    ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
+    ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     { icon: "agent", text: "Its profile", onClick: () => openApp(a.fragment) },
   ]);
 }
@@ -1372,14 +1470,15 @@ function showPrompts() {
   box.append(...promptHand("app-prompt-list", "app-prompt"));
   show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
 }
-// The chat a prompt goes to: the open one when it is the person's own;
-// else their agent's newest, or a new chat with it (`newChat`).
+// The chat a prompt goes to: the open one when it is the person's own (not
+// their team's); else their agent's newest, or a new chat with it
+// (`newChat`).
 async function promptChat() {
   const open = !state.page && byName(state.current);
-  if (open && open.kind === "chat" && own(open)) return open.name;
+  if (open && open.kind === "chat" && own(open) && !teammateOf(open)) return open.name;
   const primary = primaryAgent();
   if (!primary?.identity) return null;
-  const theirs = shown(chats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newest)[0];
+  const theirs = shown(yourChats()).filter((f) => own(f) && agentsOf(f.name).includes(primary.identity)).sort(newest)[0];
   return theirs?.name ?? (await newChat(primary.identity, { quiet: true })) ?? null;
 }
 // A prompt waiting for its chat's page to ask `agents?` (a frame just

@@ -2476,16 +2476,23 @@ said yet above them all), less the ones they archived (`PUT
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, then Add, open beside the chat on a
 desktop's width, a sheet from the bottom on a phone. **Their other
-agents are the one agent's team** (decision 62, proposed): a face each,
-one level down under it (`#team`), ringed while one works, with a line
-that says who ("Polisher is working…"); each face's menu says where its
-model runs (its `agent.json`: the platform's models, or "<model> ·
-outside the platform") and opens its own chat with the person, the
-hand-offs it was given (beside the chat), and its profile. Their chats
-(a teammate's own chat, `<label>-chat`, and the hand-offs among the
-person's agents, `fragment ask`'s pairs, by their labels) list under it
-and never in the person's list, and their unread mark its face, not that
-list; search still finds them. Who works the shell reads from those
+agents are the one agent's team** (decision 62, proposed): a row each,
+one level down under it (`#team`: indented, smaller and quieter than the
+person's chats), under "Your team", which folds them away (the open
+chat's teammate kept) and says who works while folded; past five, four
+show and "Show all" the rest. A row opens that agent's own chat with the
+person, is marked while it or a hand-off of it is open (that row's
+hand-offs, `fragment ask`'s pairs, listed under it, "Hand-offs from
+<agent>"), says when it works, its own chat's unread (its hand-offs
+count none: its agents' talk, which the one agent reports), and a globe
+when its model runs outside the platform (its `agent.json`: the
+platform's models, or "<model> · outside the platform"); its ⋯ says
+where, and offers its hand-offs, "Ask <agent> to change it" (put in the
+one agent's chat's composer, not sent), and its profile. Their chats (a
+teammate's own chat, `<label>-chat`, and the hand-offs) never list in
+the person's list; search still finds them. A prompt the shell puts in a
+composer goes to the open chat when it is the person's own, never a
+teammate's. Who works the shell reads from those
 chats' `work` (a turn started and not ended), every 4 s while shown, at
 most 12 chats. New chats, Enter and the launcher stay the one agent's.
 **Add teaches
