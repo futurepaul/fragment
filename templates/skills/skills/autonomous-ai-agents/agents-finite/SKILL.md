@@ -135,11 +135,10 @@ An agent on another provider is **fenced** (`--model` fences it, and
 `fragment agent <agent> --json` says `"fenced": true`): it acts as itself
 alone. It reaches its own chats and memories and what is shared with it,
 never the rest of your owner's (their files, apps, brain, chats, mail),
-and it gets no connection. Its commands run in a sandbox of its own with
-no network: it works on what you send it, with its own web tools. Only
-your owner lifts a fence; never ask them to unless they want the
-teammate to see their things. To hand it a file, put the file in the
-chat you ask it in.
+and it gets no connection. It keeps the internet and its own tools, and
+works on what you send it. Only your owner lifts a fence; never ask them
+to unless they want the teammate to see their things. To hand it a file,
+put the file in the chat you ask it in.
 
 ## Protecting your owner from untrusted teammates
 

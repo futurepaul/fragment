@@ -843,7 +843,7 @@ it runs another turn, and `--fence` fences any. A fenced agent acts as
 itself alone: the platform refuses its `for` (403), so it reaches what is
 its own (its agent fragment, its chats) and what anyone shares with it,
 never the rest of its owner's; its computer gives it no connection and
-runs its commands as a user of its own, in a sandbox with no network.
+names no one for it to act for (its terminal has no `FRAGMENT_FOR`).
 `--no-model` lifts nothing: only its owner lets it go (`--no-fence`, or
 the shell's team menu). `fragment agent <agent> --json` says `fenced`.
 

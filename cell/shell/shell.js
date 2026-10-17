@@ -963,7 +963,7 @@ function openTeamMenu(a, trigger) {
 // ---- a teammate's fence (decision 63, proposed): fenced, it acts as
 // itself alone, seeing only what it is sent and what is shared with it;
 // its owner puts one up or lets it go, which the shell asks about first ----
-const FENCED_SAYS = "Fenced: it sees only what it's sent and what's shared with it, never your other things";
+const FENCED_SAYS = "Fenced: it can't act for you, so it sees only what it's sent and what's shared with it";
 async function setFence(a, fenced) {
   try {
     await api("PUT", `/api/identities/${seg(a.identity)}/fenced`, { fenced });

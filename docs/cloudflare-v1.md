@@ -1369,7 +1369,8 @@ native boundary that we can leverage here?"
     on decision 62's branch, `claude/orchestrator`, not merged). It
     answers decision 62's third question with a wall that costs no
     computer: the agent stays on its owner's computer, in its own Hermes
-    profile, and reaches only what is its own or is handed to it.
+    profile, and on the platform reaches only what is its own or is
+    handed to it.
     - **On the platform, it acts as itself alone.** A fenced agent (the
       registry's `identities.fenced`) never acts `for` anyone: a request
       naming `for` is 403 where the signature is resolved, wherever `for`
@@ -1389,22 +1390,19 @@ native boundary that we can leverage here?"
       the default agent fences each teammate it puts on another provider
       before it runs (`fragment agent --new … --model <provider>:<id>`,
       `fragment agent <agent> --model …`), and only the person lifts it.
-    - **On its computer, a user and a sandbox of its own**
-      (docs/computers.md, "A fenced agent"). Its profile's commands, file
-      tools and code run as a Linux user of its own, through Hermes' own
-      `ssh` terminal backend to the computer's loopback sshd, whose
-      `ForceCommand` puts every session in the agent's sandbox: one user,
-      network and mount namespace per agent, held open while it runs, with
-      its own loopback and no route off it (not the platform, not the
-      internet, not the computer's services or another agent's browser),
-      and its own `/tmp`. Its work directory is its user's (the gateway's
-      group shares it); every other agent's, and Hermes' home with each
-      profile's `.env`, are closed to it. Hermes' tools that read files in
-      the gateway's own process (vision of a local path, the browser, the
-      desktop) are off for it, and so is Bot Mode, whose `message_agent`
-      acts for its owner: it is reached by its chats. Its web is Hermes'
-      web tools, which refuse private and internal addresses (Hermes'
-      `tools/url_safety.py`: `api.fragment.internal` among them).
+    - **On its computer, any agent's profile, naming no one.** The fence
+      is the platform's (docs/computers.md, "A fenced agent in our Hermes
+      image"). Its profile is any agent's: the same tools, the internet,
+      its own work directory, run as the `hermes` user beside the rest.
+      Its terminal is given no owner to act for (no `FRAGMENT_FOR` in its
+      `.env`, written again within seconds when the fence changes, read
+      at its next command), and it is in no Bot Mode roster, whose
+      `message_agent` acts for its owner: it is reached by its chats. The
+      computer does not enforce the fence: its commands can read the
+      other agents' work and Hermes' home, and the computer's egress, which
+      signs as whichever of its agents a request names, would sign as
+      another (docs/technical-debt-ledger.md, "A fenced agent's fence is
+      the platform's alone").
     - **What it does not change.** Decision 62's care stands: its
       provider reads all it is sent, so the default agent still sends it
       placeholders. Decision 44 stands for every unfenced agent.
@@ -1422,29 +1420,34 @@ native boundary that we can leverage here?"
     platform and the computer's own services were unreachable, `su` and
     `sudo` failed, and sshd refused a tunnel.
 
-    *Status, 2026-10-17 (built, local).* The platform's fence (the
-    registry, the router, the CLI's `--fence` and `--no-fence`, the
-    shell's menu and its dialog), the image's (a user and sandbox per
-    fenced agent, its profile's `ssh` terminal and tools), and a fence
-    put up or let go while the computer is awake: Hermes keeps a session's
-    terminal for the session's life, so the image's
-    `fragment-terminal-follows` plugin ends the one its profile no longer
-    names before the next tool runs (docs/computers.md). Tested by the
-    orchestrator and shell-ui lanes, the images' Docker lane
-    (`a_fenced_agent_runs_in_its_sandbox`, `a_fence_follows_an_awake_agent`)
+    *Status, 2026-10-17 (built, local; its box cut).* The platform's
+    fence (the registry, the router, the CLI's `--fence` and
+    `--no-fence`, the shell's menu and its dialog) and the spike's box
+    were built: a user and sandbox per fenced agent, its profile's `ssh`
+    terminal, the tools that read in the gateway's process off, and a
+    plugin that moved a session's kept terminal when the fence changed
+    while awake. The real-Hermes lane saw a fenced teammate's turns run
+    as its own user, offline, reading neither the lead's work nor any
+    `.env`. Austin, trying it: "That fencing is too aggressive it
+    seems... I didnt want it to have no internet?", and of a box with
+    the internet through a filter, a lighter fence with the full
+    internet, or the box as it was, chose the lighter fence. The box went
+    (in git history: the commits "images: a fenced agent runs as its own
+    user, in a sandbox of its own" and "images: a fence put up or let go
+    while awake holds from the next command"); the fence is the
+    platform's, its computer naming no one for it, as above. Tested by the orchestrator and shell-ui lanes,
+    the images' Docker lane (`a_fenced_agent_names_no_one_to_act_for`)
     and the real-Hermes lane, where the lead fences a teammate from its
-    terminal and the teammate's next turns run as its own user, offline,
-    reading neither the lead's work nor any `.env`. Not yet on a preview
-    (question 2).
+    terminal, the teammate's next turns name no one, and the platform
+    refuses it its owner given by hand. Not yet on a preview.
 
     **For Paul to decide:**
     1. Whether a teammate on another provider is fenced, and by default
        (decision 62's third question).
-    2. Whether Cloudflare's containers allow unprivileged user and
-       network namespaces as `wrangler dev`'s do (a preview's to show).
-    3. Whether a fenced agent's shell gets the internet (a userspace
-       network that never reaches the computer's own loopback), at the
-       cost of what it could then send anywhere.
+    2. Whether the computer enforces the fence too: the box again, with
+       the internet through a filter that refuses the computer's own
+       services and its egress (Hermes' terminal over `ssh` to the
+       agent's user, as built), or the egress telling its agents apart.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
