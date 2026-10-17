@@ -48,6 +48,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use fragment_core::access;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
     alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
@@ -69,6 +70,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
 use crate::js;
+use crate::routed::Signed;
 
 /// The marker an internal route's caller carries (routed.rs `marker`): the
 /// router never passes it.
@@ -99,7 +101,7 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 /// provider, its verifier sealed, until it expires or is finished, once.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
+CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null', fenced INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -374,6 +376,8 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Computer schema applies");
+        // decision 63 (proposed): a computer made before the fence gains it
+        crate::columns::add_if_missing(&sql, "agents", "fenced", "INTEGER NOT NULL DEFAULT 0");
         sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
         let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
         let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
@@ -475,6 +479,17 @@ struct Assign {
     fragment: String,
     identity: String,
     owner: String,
+    /// Whether the registry has the agent fenced (decision 63, proposed),
+    /// read by the router as it assigns it.
+    fenced: bool,
+}
+
+/// `computer/fenced`'s body: an agent of this computer's fenced or let go,
+/// as the registry has it now.
+#[derive(Deserialize)]
+struct FencedBody {
+    identity: String,
+    fenced: bool,
 }
 
 /// `computer/unassign`'s body: the agent fragment it runs no more, and,
@@ -1503,7 +1518,7 @@ impl ComputerCell {
     }
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
-        let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
+        let rows = self.rows("SELECT fragment, identity, owner, connections, fenced FROM agents ORDER BY added_at", vec![])?;
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
         let mut agents = Vec::with_capacity(rows.len());
         for r in rows {
@@ -1517,6 +1532,7 @@ impl ComputerCell {
                 fragment,
                 name,
                 connections,
+                fenced: r["fenced"].as_i64().unwrap_or(0) != 0,
                 credentials: vec![],
             });
         }
@@ -1543,7 +1559,8 @@ impl ComputerCell {
         let own = self.own_key_names()?;
         for agent in &mut view.agents {
             for p in catalog.providers() {
-                if !may_use(&agent.connections, &p.name) {
+                // a fenced agent is given no connection (decision 63, proposed)
+                if !may_use(&agent.connections, &p.name) || !catalog::fenced_may_use(p.kind, agent.fenced) {
                     continue;
                 }
                 let available = match p.kind {
@@ -2081,9 +2098,17 @@ impl ComputerCell {
                 // a new agent may use every connection its owner has (decision
                 // 44); assigned again, it keeps what its owner narrowed it to
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
-                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into()],
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections, fenced) VALUES (?, ?, ?, ?, 'null', ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity, fenced = excluded.fenced",
+                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into(), i64::from(b.fenced).into()],
                 )?;
+                json_response(&self.view()?)
+            }
+            // an agent of its fenced or let go (decision 63, proposed), as the
+            // registry has it now; one it does not run, nothing
+            "computer/fenced" => {
+                let b: FencedBody = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                self.exec("UPDATE agents SET fenced = ? WHERE identity = ?", vec![i64::from(b.fenced).into(), b.identity.as_str().into()])?;
                 json_response(&self.view()?)
             }
             "computer/pin" => {
@@ -2428,6 +2453,18 @@ impl ComputerCell {
 }
 
 /// The internal call `path` with `body` on computer `id`.
+/// Tells `owner`'s computer that their agent `identity` is fenced or let go
+/// (decision 63, proposed), as the registry has it now: a computer not made
+/// yet reads it as it assigns the agent.
+pub(crate) async fn agent_fenced(env: &Env, owner: &str, identity: &str, fenced: bool) -> CellResult<()> {
+    let id = fragment_core::computer::default_computer_of(owner);
+    match ask(env, &id, "computer/fenced", &json!({ "identity": identity, "fenced": fenced })).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
 }
@@ -2455,10 +2492,20 @@ pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
     v["image"].as_str().filter(|i| fragment_core::price::printable(i, 64)).map(str::to_string).ok_or_else(|| CellError::invalid("name an image"))
 }
 
-pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
-    if kind != IdentityKind::Person {
-        return Err(CellError::new(ErrorCode::Forbidden, "computers are people's: an agent runs on its owner's"));
-    }
+pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+    // A person's own computer, or their agent's starting or stopping one of
+    // their agents there, acting for them (decision 62, proposed): then the
+    // route acts as its owner, naming the agent that asks (`by`).
+    let (who, by) = match signed.kind {
+        IdentityKind::Person => (signed.id.as_str(), None),
+        _ => {
+            let for_owner = signed.acting_for.is_some() && signed.acting_for == signed.owner;
+            let sharer = access::Sharer { for_owner, held: signed.held };
+            access::agent_may_run(method.as_ref(), rest, sharer).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            let owner = signed.owner.as_deref().ok_or_else(|| CellError::host(format!("agent {} has no owner", signed.id)))?;
+            (owner, Some(signed.id.as_str()))
+        }
+    };
     match (method, rest) {
         (Method::Post, []) => {
             let id = fragment_core::computer::default_computer_of(who);
@@ -2510,10 +2557,14 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Put, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
             // the agent fragment takes the computer first (its owner must be the
-            // computer's), and its key becomes the agent's identity
-            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
+            // computer's, and an agent asking is not it), and its key becomes
+            // the agent's identity
+            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who, "by": by })).await?;
             let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-            let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
+            // fenced or not, as the registry has it now (decision 63, proposed):
+            // a fenced agent's computer runs it fenced from its first turn
+            let seen = crate::ask_registry(env, &crate::registry::calls::View { identity: Some(identity.to_string()), by: crate::registry::calls::By::Identity(who.to_string()) }).await?;
+            let body = json!({ "fragment": fragment, "identity": identity, "owner": who, "fenced": seen.fenced });
             json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
@@ -2547,7 +2598,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             // an agent fragment gone (deleted: its own delete unassigns it,
             // ended.rs) has nothing to say: its computer runs it no more
-            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await {
+            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who, "by": by })).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
                 _ => {}
             }

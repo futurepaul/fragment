@@ -235,6 +235,14 @@ type SlotKeys = Vec<(String, String)>;
 /// (`fragment_core::models::Models::parse`), on no local address.
 fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     let Some(models) = &d.models else { return Ok((None, vec![])) };
+    let (cell, keys) = models_cell(models)?;
+    Ok((Some(cell), keys))
+}
+
+/// A `models` block as a deployment's config names it (each slot on an
+/// OpenAI-compatible API with its key's name): the cell's, checked, and
+/// the slots' keys. `cargo xtask dev` reads one too (`FRAGMENT_DEV_MODELS_FILE`).
+pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -260,7 +268,7 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }
-    Ok((Some(cell), keys))
+    Ok((cell, keys))
 }
 
 /// A Workers variable's largest value: 5 KB (developers.cloudflare.com/

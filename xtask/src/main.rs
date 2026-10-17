@@ -110,6 +110,48 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// Real models in dev, by choice (`FRAGMENT_DEV_MODELS_FILE`): the
+/// cell's `models` (`FRAGMENT_MODELS`), the slots on an OpenAI-compatible
+/// API, and the key they call with (`FRAGMENT_DEV_MODEL_KEY_FILE`).
+struct RealModels {
+    cell: String,
+    slots: Vec<String>,
+    key: String,
+}
+
+/// `FRAGMENT_DEV_MODELS_FILE`'s models block, as a deployment's config
+/// names it (deploy/example.jsonc's: Finite Private's, or OpenRouter's),
+/// checked as a deploy checks one, and `FRAGMENT_DEV_MODEL_KEY_FILE`'s key
+/// for its slots on an OpenAI-compatible API: dev binds one model key, so
+/// they name one. Its Workers AI slots stay the fake. `read` reads the
+/// file a variable names.
+fn real_models(read: impl Fn(&str) -> Result<Option<String>>) -> Result<Option<RealModels>> {
+    let Some(text) = read("FRAGMENT_DEV_MODELS_FILE")? else { return Ok(None) };
+    let models: serde_json::Value = serde_json::from_str(&devstack::strip_comments(&text)).context("FRAGMENT_DEV_MODELS_FILE holds a models block, as a deployment's config names it")?;
+    let (cell, keys) = deploy::models_cell(&models)?;
+    let mut names: Vec<&str> = keys.iter().map(|(_, k)| k.as_str()).collect();
+    names.dedup();
+    if names.len() > 1 {
+        bail!("dev binds one model key: FRAGMENT_DEV_MODELS_FILE's slots on OpenAI-compatible APIs name one key, not {names:?}");
+    }
+    let key = match keys.is_empty() {
+        true => String::new(),
+        false => read("FRAGMENT_DEV_MODEL_KEY_FILE")?.context("FRAGMENT_DEV_MODEL_KEY_FILE names the file holding the key FRAGMENT_DEV_MODELS_FILE's slots call with")?,
+    };
+    Ok(Some(RealModels { cell: cell.to_string(), slots: keys.into_iter().map(|(slot, _)| slot).collect(), key }))
+}
+
+/// The people's own providers dev offers: deploy/example.jsonc's (`kind`
+/// `own`: OpenRouter's), each person's key their own to set.
+fn own_providers() -> Result<String> {
+    let text = std::fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).context("reading deploy/example.jsonc")?;
+    let config: serde_json::Value = serde_json::from_str(&devstack::strip_comments(&text)).context("deploy/example.jsonc parses")?;
+    let own: Vec<serde_json::Value> = config["providers"].as_array().into_iter().flatten().filter(|r| r["kind"] == "own").cloned().collect();
+    let rows = serde_json::Value::Array(own).to_string();
+    fragment_core::catalog::Catalog::parse(&rows).map_err(|e| anyhow::anyhow!("deploy/example.jsonc's own providers: {e}"))?;
+    Ok(rows)
+}
+
 /// cell/ for wasm32 (build.rs).
 fn build() -> Result<()> {
     build::cell()
@@ -150,6 +192,10 @@ fn dev(args: &[String]) -> Result<()> {
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
+    // real models and our Hermes image, by choice: dev's tiers are the
+    // Workers AI fake, and its computers the stub, otherwise
+    let real = real_models(read)?;
+    let hermes = args.iter().any(|a| a == "--hermes");
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
@@ -170,13 +216,13 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        // text and images: the Workers AI fake (dev never calls a real model),
-        // every tier on it
+        // text and images: the Workers AI fake, every slot on it, unless
+        // FRAGMENT_DEV_MODELS_FILE puts some on a real model's API
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: None,
-        model_key_slots: vec![],
-        model_key_value: None,
+        models: real.as_ref().map(|r| r.cell.clone()),
+        model_key_slots: real.as_ref().map(|r| r.slots.clone()).unwrap_or_default(),
+        model_key_value: real.as_ref().filter(|r| !r.slots.is_empty()).map(|r| r.key.clone()),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),
@@ -196,12 +242,19 @@ fn dev(args: &[String]) -> Result<()> {
         operators: None,
         signins_pending_max: None,
         test_secret: None,
-        computer_image: Some("stub".into()),
+        computer_image: Some(if hermes { "hermes" } else { "stub" }.into()),
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
-        providers: None,
+        // people's own providers (OpenRouter's): nothing is called until a
+        // person sets their key
+        providers: Some(own_providers()?),
         operator_key_values: vec![],
         swap_upstream: None,
+        images: match hermes {
+            // built from the repo's root: it carries the fragment CLI
+            true => vec![("hermes".into(), serde_json::json!({ "dockerfile": devstack::repo_root().join("images/hermes/Dockerfile"), "build_context": devstack::repo_root() }))],
+            false => vec![],
+        },
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
@@ -219,7 +272,11 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
-    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    match &real {
+        Some(r) => println!("  models:       {} (FRAGMENT_DEV_MODELS_FILE: real models, paid by its key), the rest on the Workers AI fake at {}", r.slots.join(", "), ai.url),
+        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
+    }
+    println!("  computers:    {}", if hermes { "our Hermes image (--hermes; its first build takes a while)" } else { "the stub image (--hermes runs ours)" });
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
@@ -455,6 +512,61 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
+    /// The files dev reads by the variables naming them, for `real_models`.
+    fn files(models: Option<&str>, key: Option<&str>) -> impl Fn(&str) -> Result<Option<String>> {
+        let (models, key) = (models.map(str::to_string), key.map(str::to_string));
+        move |var: &str| {
+            Ok(match var {
+                "FRAGMENT_DEV_MODELS_FILE" => models.clone(),
+                "FRAGMENT_DEV_MODEL_KEY_FILE" => key.clone(),
+                other => panic!("dev reads no {other} for its models"),
+            })
+        }
+    }
+
+    /// Goal: dev calls a real model only by choice, and only as a deploy
+    /// would. Method: no file, a deployment's two shapes (OpenRouter's,
+    /// Finite Private's, comments and all), and what a deploy refuses.
+    #[test]
+    fn dev_runs_real_models_by_choice_and_as_a_deploy_would() {
+        assert!(super::real_models(files(None, None)).unwrap().is_none(), "no file: the fake");
+        let routed = r#"{ // OpenRouter's, as example.jsonc has it
+            "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash" },
+            "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash" } }"#;
+        let r = super::real_models(files(Some(routed), Some("sk-or-test"))).unwrap().expect("its models");
+        assert_eq!((r.slots, r.key.as_str()), (vec!["cheap".to_string(), "medium".into()], "sk-or-test"));
+        assert!(!r.cell.contains("fragment-openrouter-key"), "the cell's models name no key: {}", r.cell);
+        let private = r#"{ "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "key": "fragment-finite-private-key", "model": "glm-5-3-flash" } }"#;
+        let r = super::real_models(files(Some(private), Some("fpk_live_test"))).unwrap().expect("its models");
+        assert_eq!(r.slots, ["cheap"]);
+        // Workers AI slots alone name no key, and dev reads none
+        let flash = r#"{ "cheap": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" } }"#;
+        assert!(super::real_models(files(Some(flash), None)).unwrap().is_some_and(|r| r.slots.is_empty() && r.key.is_empty()));
+
+        // invalid: two keys (dev binds one), a key not given, a deploy's refusals, no JSON
+        let two = r#"{ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "key": "k1", "model": "glm-5-3-flash" },
+                       "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "key": "k2", "model": "z-ai/glm-5.3-flash" } }"#;
+        assert!(super::real_models(files(Some(two), Some("x"))).err().is_some_and(|e| e.to_string().contains("one model key")));
+        assert!(super::real_models(files(Some(private), None)).err().is_some_and(|e| e.to_string().contains("FRAGMENT_DEV_MODEL_KEY_FILE")));
+        let high = r#"{ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }"#;
+        let unpriced = r#"{ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "key": "k", "model": "no-such-model" } }"#;
+        for bad in [high, unpriced, "{ not json", "[]"] {
+            assert!(super::real_models(files(Some(bad), Some("k"))).is_err(), "{bad}");
+        }
+    }
+
+    /// Dev offers people's own providers, example.jsonc's: OpenRouter's,
+    /// with its sign-in and models, and no operator key (dev holds none).
+    #[test]
+    fn dev_offers_peoples_own_providers() {
+        let rows: serde_json::Value = serde_json::from_str(&super::own_providers().unwrap()).unwrap();
+        let rows = rows.as_array().expect("a catalog");
+        assert!(rows.iter().all(|r| r["kind"] == "own"), "{rows:?}");
+        assert!(rows.iter().any(|r| r["name"] == "openrouter" && r["models"]["base_url"] == "https://openrouter.ai/api/v1"), "{rows:?}");
+    }
+
     /// Git's markers, the diff3 base's included, are caught at a line's
     /// start; text that only mentions one, or a longer rule, is not.
     #[test]

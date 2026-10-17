@@ -1141,6 +1141,10 @@ pub struct Identity {
     /// anywhere. `None`: as its owner would.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Role>,
+    /// A fenced agent (decision 63, proposed): it acts as itself alone,
+    /// never `for` anyone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fenced: bool,
 }
 
 /// One of a person's sign-ins, as their identity shows it: the email is an
@@ -1221,6 +1225,9 @@ pub struct IdentityView {
     /// A person's sign-ins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<Subject>,
+    /// An agent its owner, or their agent, fenced (decision 63, proposed).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fenced: bool,
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,

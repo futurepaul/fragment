@@ -580,6 +580,7 @@ impl Suite {
             providers: Some(swap_providers(Some(self.openrouter.node().oauth()))?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
+            images: vec![],
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)

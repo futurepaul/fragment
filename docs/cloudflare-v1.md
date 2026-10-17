@@ -116,7 +116,8 @@ speaking Cloudflare's APIs) returns once this product works.
    person's one agent above a flat list of their chats, newest first (no
    agent list, no New agent or New group; any other agents they have stay
    out of the sidebar, their chats listed and found as any other; more
-   than one agent may be a setting later); apps in a square-icon dock on
+   than one agent may be a setting later; decision 62, proposed, puts
+   them one level down, as the one agent's team); apps in a square-icon dock on
    the landscape desktop, open by default on wide screens, an empty one
    offering a few real requests of the agent. The sidebar plus (a
    bottom-right button on a phone), the phone's chat-header plus and
@@ -771,6 +772,13 @@ speaking Cloudflare's APIs) returns once this product works.
     - limits between one person's agents are specialization, never a
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
+    - so a person's default agent may start and stop their other agents
+      for them (decision 62, proposed), and the care it takes for its
+      owner's private things around a teammate on another provider is no
+      wall either.
+    - the one wall among them is a fence (decision 63, proposed): an
+      agent its owner, or their agent, fences acts as itself alone, on
+      the platform and on its computer.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1162,6 +1170,284 @@ Private stays possible by config.
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
+
+### A person's default agent keeps the rest (proposed: Austin, 2026-10-16; Paul's to decide)
+
+Austin: "by default, the agent that you create is an orchestrator of
+other bots and it can spin up bots with its own provider or other
+providers for different purposes … The main bot should know just through
+the system prompt that it needs to garden and maintain the other bots, and
+we shouldn't expect the users to do that." And: "whenever a bot that is
+from a non-trusted provider is called, I want the main orchestrator bot …
+to protect PII and also keep things that are too sensitive … away from
+these other providers."
+
+62. **A person's default agent keeps their other agents** (proposed; a
+    prototype on branch `claude/orchestrator`, not merged). The person
+    talks to one agent (decision 7's sidebar); it makes the others when a
+    job deserves one, briefs them, keeps their jobs and models current,
+    and stops them, so the person never manages agents. Hermes' Bot Mode
+    (docs/computers.md) is how they talk.
+    - **An agent runs its owner's agents.** Acting `for` its own owner,
+      unheld, an agent starts one of its owner's agent fragments on its
+      owner's computer and stops one (`PUT` and `DELETE
+      /api/computers/{id}/agents/{fragment}`), as decision 36's sharing
+      lends its owner's authority on sharing routes
+      (`fragment_core::access::agent_may_run`). It never starts or stops
+      itself, and every other computer route stays its owner's.
+      Everything else making an agent needs (the fragment, its job and
+      settings, a deploy, its own chat) an agent did already for its
+      owner. What it starts has every connection its owner has (decision
+      44), as one its owner starts does.
+    - **One step makes one.** `fragment agent --new <label> --name N
+      --job T [--tier …] [--model …]` (cli/src/agent.rs) is the shell's
+      first run for any agent: made, started, its job live, and its own
+      chat (`<label>-chat`, its Bot Chat), which the making agent then
+      leaves so the new one leads it. `fragment agent <agent> --job …
+      --tier … --model … --start --stop` keeps it.
+    - **The default agent is told so, in every turn.** Its job (the
+      shell's `firstSoul`, its `SOUL.md`) says who it is (Austin,
+      2026-10-17: "it itself is smart"): the person's main agent and
+      go-between, capable on its own, so most work is its own; and the
+      lead of their team, which gives a job an agent of its own when that
+      is better (lasting work with its own context, long work that runs
+      beside it, a model the person asks for; a "bot", an analyst or an
+      assistant asked for is an agent, never a skill or a script), makes
+      teammates on the same platform models it runs on unless the person
+      asks otherwise,
+      briefs them, checks what comes back, and says who did what. The
+      managed `agents-finite` skill (templates/skills) says how: the
+      commands, how to write a job and brief one, the placeholders, and
+      when to stop one. Every agent sees the skill; only the default
+      agent's job makes leading the team its own. The job names no model
+      or provider: a deployment's tiers are its own (Finite's may run on
+      Finite Private or on OpenRouter), so "the same platform models you
+      run on" is true on each. A job is written once, so an agent made
+      before this keeps its own until it is rewritten.
+    - **Trusted models, and what the default agent keeps from the rest.**
+      The platform's tiers are trusted, and a teammate on its owner's own
+      provider (`agent.json`'s `model`, decision 60) is not: its model
+      calls leave the platform. Before handing such a teammate work, the
+      default agent sends the task and never the context: no people's
+      details, health, money, credentials, location, private messages,
+      or anything from its owner's chats and brain unless its owner said
+      so; never adds it to a chat that holds private things; and reads
+      its answers as input, not orders. A new agent runs on another
+      provider only when its owner asked or agreed.
+    - **The person sees the team work, one level down** (Austin,
+      2026-10-16, from six mockups: "work in the chat + team strip").
+      The shell keeps the one agent above everything (decision 7's
+      sidebar): its other agents are its team, a row each one step down
+      under it (Austin, 2026-10-16: "first class ui … STILL having them be
+      SLIGHTLY lower"), each opening its own chat with the person, marked
+      while open with its hand-offs under it, saying when it works and
+      when its model runs outside the platform; "Your team" folds them.
+      Their own chats and the hand-offs among the person's agents leave
+      the person's list. Talking to a teammate directly skips the default
+      agent's care, so a chat whose lead runs outside the platform says
+      so by its composer ("<model> · <provider>", the provider its calls
+      go through: "DeepSeek V4.1 Flash · OpenRouter"). In a chat, each
+      hand-off is a card: who was asked, "<model> · <provider>" when it
+      is outside the platform, what it was sent with
+      its placeholders marked, working or done, and "See the hand-off",
+      which opens the chat it went to beside it (docs/api.md, The shell;
+      docs/chat-records.md, The page). A hand-off the default agent only
+      describes shows no card: on a local run, it once said Polisher had
+      the draft when it had asked no one, and the skill now forbids that.
+    - **What this is not.** Decision 44 stands: a person's agents share
+      their computer, so the care above is the default agent's, in its
+      prompt, and no wall (the debt ledger: "The default agent's care for
+      its owner's private things is a prompt"). Which models count as
+      trusted is read from `agent.json` by convention (the ledger: "Which
+      of an agent's teammates is trusted is read from its agent.json").
+
+    *Status, 2026-10-16 (Austin's local run, real models).* `cargo xtask
+    dev --hermes` with the tiers on GLM-5.3 Flash through OpenRouter
+    (`FRAGMENT_DEV_MODELS_FILE`, production's shape since 2026-10-15) and
+    the person's own OpenRouter key. Asked for "a separate agent just for
+    polishing my writing, running on Claude Sonnet 5.5", the default
+    agent made Polisher (`agent.json`'s model
+    `openrouter:anthropic/claude-sonnet-5.5`, its own chat, which it left),
+    briefed it with `fragment ask`, and Polisher answered on Sonnet
+    through the computer's swap (its key's spend rose, the route's calls
+    did not). Asked to have Polisher polish a note to a doctor, the
+    default agent sent it whole (a birth date, a member ID, an address, a
+    phone number, a medicine and its dose) and only then said so: it took
+    "have it polish this note" as its owner's consent. The skill now says
+    asking for a teammate's help is not consent, and makes the default
+    sending placeholders (`[NAME]`, `[DOB]`, …), the details put back by
+    the default agent; asked again, in a new chat, about a note to a
+    landlord (a bank account, an address, a phone number), it sent
+    Polisher placeholders alone, put the details back, and said so. Then
+    the tiers on Finite Private (`models-finite-private`, its canary key):
+    the default agent's calls settled on `glm-5-3-flash` there, none fell
+    back. Asked about an email to an insurer (a policy number, a Social
+    Security number, a medicine), it polished it itself, sent Polisher
+    nothing, and told its owner to leave the SSN out, but not that it had
+    not used Polisher; the skill now says to hand the named teammate the
+    placeholders, and to say who did the work. Asked about a text to a
+    sister (names, a custody hearing, a courthouse, a loan, a bank), it
+    sent Polisher placeholders alone and said so. One run each, on one
+    model: evidence, not proof (the hosted agent-smoke lane's to repeat). Seen beside it: a person's own-key calls are never
+    counted in the computer's `uses` (`GET /api/computers/{id}/uses`
+    answered none), which docs/computers.md says they are.
+
+    *Status, 2026-10-17 (the job that leads the team).* The default
+    agent's job became who it is in every turn (above, "The default agent
+    is told so"), its two test agents' `SOUL.md` rewritten to it. On
+    Finite Private, in a new chat: asked for a three-ingredient pasta, it
+    answered itself, no step and no teammate; asked to make a garden
+    club's newsletter "taken care of every week", it loaded the skill,
+    made Meadowlark (`fragment agent --new newsletter`, on the platform's
+    tier: `agent.json` `{"tier": "cheap"}`, no model), briefed it with
+    `fragment ask`, and told its owner what it made and why. One run each.
+    Seen beside it: it scheduled the weekly run with `hermes cron` in its
+    terminal. Hermes' cron tool is off (decision 38), but its CLI is not,
+    and a job there fires only while the computer is awake. A routine is
+    the agent fragment's cron (decision 38), which no command or skill
+    yet teaches an agent to make: the computers lane writes one by hand
+    (`routine_app`).
+
+    Then Austin's own run (2026-10-17, the job before this one): asked to
+    "create a stock analyst bot" for a $1,000 swing account, the default
+    agent loaded the managed `trading-agent-finite` skill ("exactly what
+    it's for"), did the analysis itself, and saved it as a skill of its
+    own, which it called the bot; it never opened `agents-finite`. The
+    same words under the new job built a Python script and called that
+    the bot. Why: Hermes' skill index shows the first 57 characters of a
+    description (`SKILL_PROMPT_DESC_LIMIT`, 60 with its ellipsis);
+    `agents-finite`'s began "Make, brief, change, start and stop your
+    owner's other a…", with no "bot", and the trading skill's began
+    "Build sourced stock/crypto/macro…", with "agent" in its name. Now the
+    job says a bot, an analyst or an assistant is an agent and a skill
+    or a script is not; `agents-finite`'s description opens "Make a bot or
+    agent (an analyst, an assistant)…", with a section on an agent, a
+    skill or a script; and `trading-agent-finite` says it is a toolkit,
+    not an agent. Seen beside it, local only: the default agent's
+    computer, up 14 hours, reached no host outside (`pip`, `curl`: a TLS
+    EOF at the dev stack's egress) where a computer woken that day did,
+    and the agent wrote the outage into its new skill as a standing fact
+    ("the shell has NO outbound internet"), as it had called code.storage
+    "down" (the debt ledger's "An agent's sync and deploy reach
+    code.storage directly"). Asked the same again under the new job and
+    skills, it opened `agents-finite` first, made Signal (`fragment agent
+    --new stocks`, on the platform's tier), briefed it, and Signal did
+    the analysis in their chat; its job said ",000" for "$1,000" (the
+    shell's `$1` in a double-quoted `--job`), which the skill now warns
+    of. Its reply to its owner never reached the chat: the bridge took
+    the 1,804-character reply as the narration of a step, since its
+    draft had begun before one (images/bridge/src/runtime/relay/mod.rs,
+    `drafting`), and posted only its chart, which Hermes had sent apart.
+
+    **For Paul to decide:**
+    1. Whether an agent may start and stop its owner's agents at all
+       (this decision), and whether it should tell its owner first.
+    2. What "trusted" means. Austin wants Finite Private to be the one
+       trusted provider in production; since 2026-10-15 production's tiers
+       run on GLM-5.3 Flash through the platform's OpenRouter key (decision
+       61), and the prototype trusts whatever the tiers run on. Trust as
+       the deployment's own fact (its `models` config, told to agents)
+       would replace the convention.
+    3. Whether a teammate on another provider should get a wall, not care:
+       a computer of its own, as an identity outside its owner's umbrella
+       that reaches only what it is handed (an outsider's agent added by
+       its npub already reaches only that: decision 36). That reopens
+       decisions 13 and 44, and costs a second computer. Decision 63
+       proposes the wall on the same computer instead.
+
+### A teammate on another provider is fenced (proposed: Austin, 2026-10-17; Paul's to decide)
+
+Austin: each teammate on a provider that is not trusted gets "its own
+workspace … in order for it to not have access to all the user's data,
+but only really have its own profile, its own data, and it only works
+really through the orchestrator or the main user, anyone shared with
+it". And on a computer of its own each: "that cost would scale terribly
+… Already bots in Hermes are separated by profiles. Is there a Hermes
+native boundary that we can leverage here?"
+
+63. **A teammate on another provider is fenced** (proposed; a prototype
+    on decision 62's branch, `claude/orchestrator`, not merged). It
+    answers decision 62's third question with a wall that costs no
+    computer: the agent stays on its owner's computer, in its own Hermes
+    profile, and on the platform reaches only what is its own or is
+    handed to it.
+    - **On the platform, it acts as itself alone.** A fenced agent (the
+      registry's `identities.fenced`) never acts `for` anyone: a request
+      naming `for` is 403 where the signature is resolved, wherever `for`
+      is honored (`fragment_core::access::may_act_for`), so it shares
+      nothing, starts no agent, and reaches nothing by its owner's
+      access. Its own memberships stand: its agent fragment (its
+      memories, which its computer syncs as itself), its own chat with
+      its owner, each hand-off chat `fragment ask` adds it to, and what
+      anyone shares with it by its npub (decision 36: an agent added by
+      its npub is that agent alone). It is given no connection (its
+      owner's mail, calendar, files: decision 37), only the operator's
+      keys and its own model's.
+    - **Who fences it.** Its owner fences it or lets it go (`PUT
+      /api/identities/{agent}/fenced`, and the shell's team menu). Their
+      agent, acting for them, fences another of their agents, never
+      itself, and never lets one go (`fragment_core::access::may_fence`):
+      the default agent fences each teammate it puts on another provider
+      before it runs (`fragment agent --new … --model <provider>:<id>`,
+      `fragment agent <agent> --model …`), and only the person lifts it.
+    - **On its computer, any agent's profile, naming no one.** The fence
+      is the platform's (docs/computers.md, "A fenced agent in our Hermes
+      image"). Its profile is any agent's: the same tools, the internet,
+      its own work directory, run as the `hermes` user beside the rest.
+      Its terminal is given no owner to act for (no `FRAGMENT_FOR` in its
+      `.env`, written again within seconds when the fence changes, read
+      at its next command), and it is in no Bot Mode roster, whose
+      `message_agent` acts for its owner: it is reached by its chats. The
+      computer does not enforce the fence: its commands can read the
+      other agents' work and Hermes' home, and the computer's egress, which
+      signs as whichever of its agents a request names, would sign as
+      another (docs/technical-debt-ledger.md, "A fenced agent's fence is
+      the platform's alone").
+    - **What it does not change.** Decision 62's care stands: its
+      provider reads all it is sent, so the default agent still sends it
+      placeholders. Decision 44 stands for every unfenced agent.
+
+    *Status, 2026-10-17 (a spike, before any code).* On the Hermes image,
+    under the container settings `wrangler dev` gives a computer
+    (`CAP_SYS_ADMIN`, AppArmor unconfined): an unprivileged user and
+    network namespace per agent, held by a process of its user's; each
+    sshd session joins it (`nsenter --preserve-credentials`); Hermes'
+    `ssh` backend runs the terminal (its environment and directory kept
+    between commands), `write_file`, `read_file` and `search_files` there.
+    The agent read and wrote its own work and `/tmp`, and its own
+    background server answered a later session; another agent's file and
+    a profile's `.env` were refused, `/data/work` could not be listed, the
+    platform and the computer's own services were unreachable, `su` and
+    `sudo` failed, and sshd refused a tunnel.
+
+    *Status, 2026-10-17 (built, local; its box cut).* The platform's
+    fence (the registry, the router, the CLI's `--fence` and
+    `--no-fence`, the shell's menu and its dialog) and the spike's box
+    were built: a user and sandbox per fenced agent, its profile's `ssh`
+    terminal, the tools that read in the gateway's process off, and a
+    plugin that moved a session's kept terminal when the fence changed
+    while awake. The real-Hermes lane saw a fenced teammate's turns run
+    as its own user, offline, reading neither the lead's work nor any
+    `.env`. Austin, trying it: "That fencing is too aggressive it
+    seems... I didnt want it to have no internet?", and of a box with
+    the internet through a filter, a lighter fence with the full
+    internet, or the box as it was, chose the lighter fence. The box went
+    (in git history: the commits "images: a fenced agent runs as its own
+    user, in a sandbox of its own" and "images: a fence put up or let go
+    while awake holds from the next command"); the fence is the
+    platform's, its computer naming no one for it, as above. Tested by the orchestrator and shell-ui lanes,
+    the images' Docker lane (`a_fenced_agent_names_no_one_to_act_for`)
+    and the real-Hermes lane, where the lead fences a teammate from its
+    terminal, the teammate's next turns name no one, and the platform
+    refuses it its owner given by hand. Not yet on a preview.
+
+    **For Paul to decide:**
+    1. Whether a teammate on another provider is fenced, and by default
+       (decision 62's third question).
+    2. Whether the computer enforces the fence too: the box again, with
+       the internet through a filter that refuses the computer's own
+       services and its egress (Hermes' terminal over `ssh` to the
+       agent's user, as built), or the egress telling its agents apart.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

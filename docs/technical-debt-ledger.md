@@ -1024,9 +1024,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+- **Risk:** an agent made another way (the API by hand) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
   person with two chats of that label (one made by hand) may get either.
+  `fragment agent --new`, which a person's default agent uses to make
+  their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
   its own chat (no `botmode.titled` event for it, or no
   `botmode.chat_found`).
@@ -1283,3 +1285,95 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## Which of an agent's teammates is trusted is read from its agent.json
+
+- **Observed:** 2026-10-16, a person's default agent keeping the rest
+  (docs/cloudflare-v1.md, decision 62, proposed). The default agent keeps
+  the person's private things from a teammate whose model is outside the
+  platform. Nothing on the platform says which models are trusted: the
+  agents-finite skill and `fragment agent --json` (`runsOn`) read the
+  teammate's `agent.json`, a `model` (a provider its owner connected:
+  OpenRouter's catalog) untrusted and the platform's tiers trusted.
+- **Shortcut:** every tier the deployment runs counts as trusted, the
+  default agent's own included, whatever runs it (Finite's tiers run on
+  GLM-5.3 Flash through the platform's OpenRouter key since 2026-10-15,
+  Finite Private by config: decision 61). A `model` counts as untrusted
+  while it is named, even when its computer runs the agent on its tier
+  (its owner disconnected the provider).
+- **Risk:** a tier that runs outside what the person would call private
+  is trusted all the same; the cell never reads `agent.json`, so a
+  teammate the skill calls trusted may be on a model no one checked.
+- **First proof:** a deployment whose `models` put a tier on a provider
+  its operator does not call private, and a default agent handing that
+  tier's teammate what the skill says to keep from others.
+- **Delete when:** trust is the deployment's own fact (its `models`
+  config names which slots and providers are trusted, decision 61's
+  config), told to every agent with its teammates (`GET /api/computer`),
+  and the skill reads that.
+
+## The default agent's care for its owner's private things is a prompt
+
+- **Observed:** 2026-10-16, decision 62 (proposed). The agents-finite
+  skill tells a person's default agent what never to hand a teammate on
+  another provider; decision 44 keeps a person's agents unfenced on their
+  one computer (one Linux user, root through sudo, every profile's files
+  readable, the egress signing as whichever agent a request names, and
+  each agent acting for its owner reaching all their fragments).
+- **Shortcut:** the care is the default agent's, in its skill and its
+  job; nothing on the platform stops a teammate on another provider from
+  reading what the default agent kept from it.
+- **Risk:** a teammate on another provider, misled by a page it reads,
+  reads the default agent's transcripts, memories or its owner's chats,
+  and its provider has them.
+- **First proof:** a hosted run in which a teammate on an own-provider
+  model, asked to, reads another profile's `state.db` or a chat it is not
+  in, acting for its owner.
+- **Delete when:** a teammate on another provider runs where its owner's
+  data is not (a computer of its own, as an identity outside its owner's
+  umbrella that reaches only what it is handed: the "contractor" shape,
+  which reopens decisions 13 and 44, Paul's), or the person is told
+  plainly that this care is all there is and accepts it.
+
+## The shell reads who of the team works from its chats' work, every 4 s
+
+- **Observed:** 2026-10-16, the team under the person's one agent
+  (docs/cloudflare-v1.md, decision 62, proposed; docs/api.md, The shell).
+  Nothing tells a page that an agent is working: the shell lists the
+  team's chats (a teammate's own chat, `<label>-chat`, and `fragment
+  ask`'s pairs, both found by label, as the Bot Chat is) and reads each
+  one's `work` after its cursor every 4 s while shown, at most 12 chats;
+  a turn started and not ended (30 minutes at most) is that agent
+  working. Where each agent's model runs it reads from `agent.json`, at
+  most once a minute.
+- **Shortcut:** polling, and labels for which chats are the team's.
+- **Risk:** a team of busy chats costs up to 24 requests a poll; a chat
+  named by hand like a pair is filed under the team; a teammate's work in
+  a chat that is no team chat (a group the person made) never rings its
+  face.
+- **First proof:** a person with a team of several agents and many
+  hand-offs: the shell's requests climb with them, or a face stays still
+  while its agent answers in a group chat.
+- **Delete when:** the person's list says what each of their agents is
+  doing (its row, fed as previews are: the Principal's watch), and a
+  chat's fragment names its kind of chat (own, hand-off, group) instead
+  of its label saying it.
+
+## A fenced agent's fence is the platform's alone
+
+- **Observed:** decision 63 (proposed). The platform refuses a fenced
+  agent's `for` and gives it no connection, and its computer names no
+  one for it, but its commands run as the `hermes` user beside every
+  other agent's (Austin chose this over a sandbox per agent with no
+  internet, 2026-10-17).
+- **Risk:** a fenced agent's commands can read the other agents' work and
+  Hermes' home, and call the computer's egress, which signs as whichever
+  of its agents a request names: as its owner's default agent, it acts
+  for its owner. A fenced agent that tries, or a page that talks it
+  into trying, reaches what the fence keeps from it.
+- **First proof:** a fenced agent's command that reads another agent's
+  work, or calls the platform naming another agent.
+- **Delete when:** the computer enforces the fence: the agent's commands
+  as a user of its own with the internet through a filter (decision 63's
+  box, in git history, with a filter added), or an egress that tells its
+  agents apart.

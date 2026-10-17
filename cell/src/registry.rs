@@ -53,7 +53,7 @@ pub(crate) mod trials;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Fence, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -64,7 +64,7 @@ pub const NAME: &str = "registry";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS identities (
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT);
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT, fenced INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS identities_owner ON identities (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS keys (
   key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
@@ -106,6 +106,8 @@ pub struct RegistryCell {
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
+        // decision 63 (proposed): a Registry made before the fence gains it
+        crate::columns::add_if_missing(&state.storage().sql(), "identities", "fenced", "INTEGER NOT NULL DEFAULT 0");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
         state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
@@ -163,6 +165,7 @@ struct IdentityRow {
     kind: IdentityKind,
     owner: Option<String>,
     held: Option<Role>,
+    fenced: i64,
 }
 
 #[derive(Deserialize)]
@@ -180,14 +183,15 @@ struct KeyHolderRow {
     kind: Option<IdentityKind>,
     owner: Option<String>,
     held: Option<Role>,
+    fenced: Option<i64>,
 }
 
 /// The identity a joined row names (a key's holder, a session's): its
 /// `identities` columns missing, the rows contradict each other, a host
 /// fault.
-fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, held: Option<Role>, named_by: &str) -> CellResult<Identity> {
+fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, held: Option<Role>, fenced: Option<i64>, named_by: &str) -> CellResult<Identity> {
     match kind {
-        Some(kind) => Ok(Identity { id, kind, owner, held }),
+        Some(kind) => Ok(Identity { id, kind, owner, held, fenced: fenced.unwrap_or(0) != 0 }),
         None => Err(CellError::host(format!("{named_by} names a missing identity {id}"))),
     }
 }
@@ -286,8 +290,8 @@ impl RegistryCell {
     }
 
     fn identity(&self, id: &str) -> CellResult<Option<Identity>> {
-        let row = self.row::<IdentityRow>("SELECT kind, owner, held FROM identities WHERE id = ?", vec![id.into()])?;
-        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, held: r.held }))
+        let row = self.row::<IdentityRow>("SELECT kind, owner, held, fenced FROM identities WHERE id = ?", vec![id.into()])?;
+        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, held: r.held, fenced: r.fenced != 0 }))
     }
 
     /// An identity a request names: missing, it is 404.
@@ -358,7 +362,7 @@ impl RegistryCell {
     /// The identity holding a key, in one statement: the key's row joined
     /// with its holder.
     fn key_holder(&self, key: &str) -> CellResult<Identity> {
-        const Q: &str = "SELECT k.identity, k.revoked_at, i.kind, i.owner, i.held FROM keys k LEFT JOIN identities i ON i.id = k.identity WHERE k.key = ?";
+        const Q: &str = "SELECT k.identity, k.revoked_at, i.kind, i.owner, i.held, i.fenced FROM keys k LEFT JOIN identities i ON i.id = k.identity WHERE k.key = ?";
         check_key(key)?;
         match self.row::<KeyHolderRow>(Q, vec![key.into()])? {
             None => Err(unauthenticated(format!(
@@ -366,7 +370,7 @@ impl RegistryCell {
                 npub::encode(key)
             ))),
             Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.held, &format!("the key {key}")),
+            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.held, row.fenced, &format!("the key {key}")),
         }
     }
 
@@ -471,6 +475,7 @@ impl RegistryCell {
             keys,
             agents,
             subjects: self.subjects_of(&who.id)?,
+            fenced: who.fenced,
             created,
         })
     }
@@ -491,7 +496,7 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
-        Ok(Identity { id, kind, owner: owner.map(str::to_string), held: None })
+        Ok(Identity { id, kind, owner: owner.map(str::to_string), held: None, fenced: false })
     }
 
     fn register_agent(&self, b: RegisterAgent) -> CellResult<IdentityView> {
@@ -563,6 +568,36 @@ impl RegistryCell {
         let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec("UPDATE identities SET held = ? WHERE id = ?", vec![held, agent.id.as_str().into()])?;
         self.view(&self.named_identity(&agent.id)?, Some(false))
+    }
+
+    /// Fences an agent, or lets it go (decision 63, proposed): its owner
+    /// either way; their agent, acting for them (the router names whom a
+    /// request acts for), fences another of theirs and lets none go
+    /// (`fragment_core::access::may_fence`). The same again is answered
+    /// again.
+    fn fence(&self, b: Fence) -> CellResult<IdentityView> {
+        use fragment_core::access::{may_act_for, may_fence, Fencer};
+        let by = self.by(&b.by)?;
+        if b.acting_for.is_some() {
+            may_act_for(by.kind, by.owner.as_deref(), by.fenced).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+        }
+        let agent = self.named_identity(&b.agent)?;
+        if agent.kind != IdentityKind::Agent {
+            return Err(CellError::invalid("only an agent is fenced"));
+        }
+        let owner = agent.owner.as_deref().ok_or_else(|| CellError::host(format!("the agent {} has no owner", agent.id)))?;
+        let fencer = match (by.kind, b.acting_for.as_deref()) {
+            (IdentityKind::Person, None) if by.id == owner => Fencer::Owner,
+            (IdentityKind::Agent, Some(asker)) if asker == owner && by.owner.as_deref() == Some(owner) => {
+                Fencer::AgentForOwner { held: by.held.is_some(), itself: by.id == agent.id }
+            }
+            _ => Fencer::Anyone,
+        };
+        may_fence(fencer, b.fenced).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+        self.exec("UPDATE identities SET fenced = ? WHERE id = ?", vec![i64::from(b.fenced).into(), agent.id.as_str().into()])?;
+        let now = self.named_identity(&agent.id)?;
+        assert_eq!(now.fenced, b.fenced, "the fence is as it was set");
+        self.view(&now, Some(false))
     }
 
     /// The identity a call names (`None`: the asker's own).
@@ -773,6 +808,7 @@ impl RegistryCell {
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             ForgetAgent::PATH => reply::<ForgetAgent>(self.forget_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
+            Fence::PATH => reply::<Fence>(self.fence(body(&bytes)?)),
             SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),
             AddKey::PATH => reply::<AddKey>(self.add_key(body(&bytes)?)),

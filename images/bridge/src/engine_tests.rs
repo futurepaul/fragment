@@ -17,7 +17,7 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![] }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], fenced: false }
 }
 
 /// A fresh engine whose runtime can take turns.

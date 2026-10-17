@@ -266,6 +266,7 @@ async fn the_hermes_image() {
             ("skills/grill-me/SKILL.md", "---\nname: grill-me\ndescription: The managed grilling.\n---\n# Grill\n"),
             ("skills/software-development/apps-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/apps-finite/SKILL.md")),
             ("skills/software-development/git-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/git-finite/SKILL.md")),
+            ("skills/autonomous-ai-agents/agents-finite/SKILL.md", include_str!("../../../templates/skills/skills/autonomous-ai-agents/agents-finite/SKILL.md")),
             ("skills/research/brain-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/brain-finite/SKILL.md")),
             ("skills/productivity/google-workspace-finite/SKILL.md", include_str!("../../../templates/skills/skills/productivity/google-workspace-finite/SKILL.md")),
             ("skills/image-editing/image-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/image-editing/image-generation-finite/SKILL.md")),
@@ -424,7 +425,7 @@ async fn the_hermes_image() {
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
-    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
+    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "agents-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
     for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {
@@ -1703,6 +1704,48 @@ async fn a_tools_temp_files_are_its_work() {
         let sent = w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.clone());
         assert_eq!(sent.as_deref(), Some(&b"temp-sent\n"[..]), "the temp file Hermes sent is the one in its work: {reply}");
     });
+}
+
+/// Goal (decision 63, proposed; docs/computers.md, "A fenced agent in our
+/// Hermes image"): a fence is the platform's, and the computer follows it
+/// while awake, nothing restarted. Juniper's terminal names its owner to act
+/// for; fenced, its next commands name no one (the platform would refuse it
+/// a `for` either way), still as the hermes user, as any agent's; let go,
+/// they name its owner again.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_fenced_agent_names_no_one_to_act_for() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("fence", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let ask = "run: echo for-${FRAGMENT_FOR:-none} uid-$(id -u)";
+    let before = tool_said(&fake, &chat, &c, ask).await;
+    assert!(before.contains("for-npub1") && before.contains("uid-10000"), "unfenced, it acts for its owner: {before}");
+    // the boot reads its agents every 3 s and writes the profile's `.env`
+    // again; bounded: ten tries
+    let follows = |want: &'static str| {
+        let (fake, chat, c) = (&fake, &chat, &c);
+        async move {
+            let mut said = String::new();
+            for _ in 0..10 {
+                said = tool_said(fake, chat, c, ask).await;
+                if said.contains(want) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            said
+        }
+    };
+    fake.fence("juniper", true);
+    let fenced = follows("for-none").await;
+    assert!(fenced.contains("for-none") && fenced.contains("uid-10000"), "fenced while awake, its next commands name no one, as any agent's: {fenced}\n{}", c.logs().lines().filter(|l| l.contains("fence")).collect::<Vec<_>>().join("\n"));
+    fake.fence("juniper", false);
+    let let_go = follows("for-npub1").await;
+    assert!(let_go.contains("for-npub1"), "let go, its owner again: {let_go}");
 }
 
 /// Goal (Paul on preview, 2026-10-16: asked its version, an agent read

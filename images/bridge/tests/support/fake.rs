@@ -279,6 +279,17 @@ impl Fake {
         });
     }
 
+    /// Fences the agent `label` (decision 63, proposed), or lets it go, as
+    /// the computer's view says it after `PUT /api/identities/{agent}/fenced`.
+    pub fn fence(&self, label: &str, fenced: bool) {
+        let fragment = format!("{label}--k3x9");
+        self.with(|w| {
+            let agents = w.computer["agents"].as_array_mut().expect("the computer's agents");
+            let a = agents.iter_mut().find(|a| a["fragment"] == fragment.as_str()).expect("the agent is on the computer");
+            a["fenced"] = json!(fenced);
+        });
+    }
+
     /// Unassigns the agent `label` from the computer.
     pub fn remove_agent(&self, label: &str) {
         let fragment = format!("{label}--k3x9");

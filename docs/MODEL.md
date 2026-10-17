@@ -230,7 +230,9 @@ whose bridge turns the records of the channels it follows into turns
 docs/chat-records.md). It acts on fragments through the platform's API
 as their member, for whoever asked: every call names them (`for`), and
 acts with the lower of their role and the agent's cap
-(docs/cloudflare-v1.md, R17). The in-fragment goose agent (a loop in a Durable Object of its own,
+(docs/cloudflare-v1.md, R17). Acting for its owner it also starts and
+stops its owner's other agents on their computer, so a person's default
+agent keeps the rest (decision 62, proposed). The in-fragment goose agent (a loop in a Durable Object of its own,
 a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
 #156): one runtime, with one set of turn semantics.
 
@@ -266,6 +268,7 @@ Every change is checked against this table.
 | An agent's colour | its identity, through one function (templates/agent/site/agent-color.js, which the chat template and the shell link to) | none: never stored (`agent.json` names none) |
 | An agent's model (its tier, and a model of a provider its owner connected: `model: {provider, id}`) | the agent fragment's `agent.json` in git (docs/computers.md, "An agent's own model") | its computer's profile config, rewritten from it within seconds while awake and at each boot; used only while the agent's credentials hold that provider (else its tier) |
 | The model route's models (each slot's model, and where it runs) | the deployment's config's `models` (`FRAGMENT_MODELS`, a Workers variable; docs/computers.md, Models) | their ids only, by slot, in each computer's guest view (`models`), which our Hermes image reads every 3 s and writes into each profile's config; `GET /v1/models` and the route's refusal of an unknown id list the same ids, read from the config at each request |
+| Whether an agent is fenced (decision 63, proposed: it acts as itself alone) | the registry's `identities.fenced` (`PUT /api/identities/{agent}/fenced`) | its computer's row of the agent (`agents.fenced`), told by the route at each change and read from the registry as the agent is assigned; the guest view says it, and the image fences the agent's profile from it (docs/computers.md, "A fenced agent in our Hermes image") |
 | A computer's agents (which agent fragments it runs) | the Computer DO's `agents`, assigned and unassigned by its owner (docs/computers.md) | the agent fragment's own `computer` (whom it signs for) and the registry's name of its agent (`agent_fragments`); they follow the fragment: its delete unassigns it from its computer and drops the registry's row, that life's agent alone, retried until done (cell/src/ended.rs) |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | A job's paid AI answer (text, decision, image), including a rejected decision answer | the fragment supervisor's `paid` receipts, keyed by incarnation, run and step (docs/api.md, AI) | retries and replays settle and reuse the receipt; no provider call once a receipt exists |

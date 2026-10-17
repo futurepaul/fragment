@@ -754,10 +754,12 @@ pub fn credential_vars(agent: &Agent) -> Vec<(String, String)> {
 pub fn profile_env(agent: &Agent) -> String {
     let line_safe = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\'' && b != b'\\' && b != b'#');
     assert!(line_safe(&agent.fragment) && line_safe(&agent.owner), "an agent's fragment and owner are names: {agent:?}");
-    let mut e = format!(
-        "# The profile of {}; the computer holds no credential, only placeholders.\n{}={}\n{}={}\n",
-        agent.fragment, PROFILE_ENV[0], agent.fragment, PROFILE_ENV[1], agent.owner
-    );
+    let mut e = format!("# The profile of {}; the computer holds no credential, only placeholders.\n{}={}\n", agent.fragment, PROFILE_ENV[0], agent.fragment);
+    // a fenced agent acts for no one (decision 63, proposed): its terminal
+    // names no one, and the platform refuses it a `for` either way
+    if !agent.fenced {
+        e.push_str(&format!("{}={}\n", PROFILE_ENV[1], agent.owner));
+    }
     for (name, placeholder) in credential_vars(agent) {
         e.push_str(&format!("{name}={placeholder}\n"));
     }
@@ -953,7 +955,7 @@ mod tests {
     }
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], fenced: false }
     }
 
     /// The tiers' models as Finite's names them, but for a medium tier of
@@ -1029,6 +1031,22 @@ mod tests {
         let named = Route::new("http://model.fragment.internal", None);
         let config = profile_config(&agent(), "Juniper", &tier.into(), &named, &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
+    }
+
+    /// Decision 63 (proposed): a fenced agent's fence is the platform's. On
+    /// its computer its profile is any agent's (its tools, its terminal, the
+    /// internet), but its terminal names no one to act for; let go, it names
+    /// its owner again.
+    #[test]
+    fn a_fenced_agents_terminal_names_no_one_to_act_for() {
+        let fenced = Agent { fenced: true, ..agent() };
+        let e = profile_env(&fenced);
+        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper--k3x9\n") && !e.contains("FRAGMENT_FOR"), "it names no one to act for: {e}");
+        assert!(profile_env(&agent()).contains("\nFRAGMENT_FOR=npub1paul\n"), "let go, its owner");
+        let creds = Path::new("/c.sh");
+        for main in [Tier::Cheap.into(), Tier::Medium.into(), Tier::High.into()] {
+            assert_eq!(profile_config(&fenced, "Juniper", &main, &route("http://m"), &[], creds), profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds), "its tools and terminal are any agent's");
+        }
     }
 
     /// Goal: naming a tier's model by its id changes what Hermes says the

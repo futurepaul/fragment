@@ -38,6 +38,21 @@
 //! fragment and its money cap stay the owner's own: never an agent's,
 //! whomever it acts for. What an agent shares is recorded as the agent's,
 //! for its owner, so its owner sees it did.
+//!
+//! Running its owner's agents is the same lent authority on the owner's
+//! computer (decision 62, proposed): an agent that acts for its own owner,
+//! unheld, starts one of its owner's agents on its owner's computer and
+//! stops one (`agent_may_run`), so a person's default agent keeps the
+//! others. It never starts or stops itself, and every other computer
+//! route (making it, waking, restarting, its image, connections, ports, its
+//! uses) stays its owner's own.
+//!
+//! A fenced agent (decision 63, proposed) acts as itself alone: a request
+//! of its naming `for` is refused before any fragment is asked
+//! (`may_act_for`), so it reaches nothing by its owner's access, shares
+//! nothing and starts no agent, while its own memberships stand. Its owner
+//! fences it or lets it go; their agent, acting for them, fences another of
+//! their agents and lets none go (`may_fence`).
 
 use fragment_proto::{Role, Visibility};
 
@@ -239,6 +254,152 @@ pub fn agent_shares(sharer: Sharer, owner: Option<Role>) -> Result<Role, ShareRe
         return Err(ShareRefusal::NotOwner);
     }
     Ok(Role::Owner)
+}
+
+/// Why an agent's request to its owner's computer (`/api/computers/…`)
+/// carries no owner's authority (403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunRefusal {
+    /// Any computer route but starting and stopping an agent: its owner's
+    /// own.
+    PeopleOnly,
+    /// It acts as itself, or for someone other than its owner.
+    NotForOwner,
+    /// Its owner holds it below them, and running agents is above every
+    /// hold.
+    Held,
+    /// It names its own agent fragment: its owner starts and stops it.
+    Itself,
+}
+
+impl RunRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            RunRefusal::PeopleOnly => "computers are people's: an agent runs on its owner's, and only starts or stops its owner's other agents there",
+            RunRefusal::NotForOwner => "an agent starts or stops an agent only acting for its own owner (`for=<its owner>`), never as itself or for anyone else",
+            RunRefusal::Held => "an agent its owner holds below them starts and stops no agent",
+            RunRefusal::Itself => "an agent never starts or stops itself: its owner does",
+        }
+    }
+}
+
+/// Whether a computer route (`method`, and its path under
+/// `/api/computers`) starts or stops an agent: `PUT` or `DELETE
+/// <computer>/agents/<fragment>`. Its `connections` are not that: narrowing
+/// an agent stays its owner's (decision 44).
+pub fn runs_an_agent(method: &str, rest: &[&str]) -> bool {
+    matches!((method, rest), ("PUT" | "DELETE", [_, "agents", _]))
+}
+
+/// Whether an agent may ask its owner's computer `method rest` (decision
+/// 62, proposed): only to start or stop an agent, acting for its own
+/// owner, unheld. The router decides this from who the agent is; the
+/// agent fragment decides `Itself` (it knows its own identity) and that its
+/// owner is the computer's, as for its owner.
+pub fn agent_may_run(method: &str, rest: &[&str], sharer: Sharer) -> Result<(), RunRefusal> {
+    if !runs_an_agent(method, rest) {
+        return Err(RunRefusal::PeopleOnly);
+    }
+    if !sharer.for_owner {
+        return Err(RunRefusal::NotForOwner);
+    }
+    match sharer.held {
+        Some(_) => Err(RunRefusal::Held),
+        None => Ok(()),
+    }
+}
+
+/// The agent fragment's half: whether `asker` (an agent starting or
+/// stopping it; `None`, its owner) is the agent it runs (`agent`, its
+/// identity once its computer took it).
+pub fn agent_runs_itself(asker: Option<&str>, agent: Option<&str>) -> Result<(), RunRefusal> {
+    match (asker, agent) {
+        (Some(asker), Some(agent)) if asker == agent => Err(RunRefusal::Itself),
+        _ => Ok(()),
+    }
+}
+
+/// Why a request naming `for` acts for no one (403), decided where its
+/// signer is resolved, before any fragment is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForRefusal {
+    /// A person, or an agent with no owner: only an agent acts for someone.
+    PeopleOnly,
+    /// A fenced agent (decision 63, proposed): it acts as itself alone.
+    Fenced,
+}
+
+impl ForRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            ForRefusal::PeopleOnly => "only an agent acts for someone (`for`); a person acts as themselves",
+            ForRefusal::Fenced => "a fenced agent acts as itself alone (`for` is refused): it reaches what is its own and what is shared with it",
+        }
+    }
+}
+
+/// Whether a signer may act for someone (`for`): an agent with an owner,
+/// not fenced. The fragment then caps what it does (`effective_role`).
+pub fn may_act_for(kind: fragment_proto::IdentityKind, owner: Option<&str>, fenced: bool) -> Result<(), ForRefusal> {
+    if kind != fragment_proto::IdentityKind::Agent || owner.is_none() {
+        return Err(ForRefusal::PeopleOnly);
+    }
+    if fenced {
+        return Err(ForRefusal::Fenced);
+    }
+    Ok(())
+}
+
+/// Who asks to fence an agent, or to let it go (`may_fence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fencer {
+    /// The agent's owner, a person.
+    Owner,
+    /// An agent acting for the agent's owner (`for=<its owner>`): held below
+    /// them or not, and whether it names itself.
+    AgentForOwner { held: bool, itself: bool },
+    /// Anyone else: another person, an agent acting as itself or for
+    /// anyone else.
+    Anyone,
+}
+
+/// Why a fence is not set or lifted (403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceRefusal {
+    /// Not the agent's owner, nor their agent acting for them.
+    NotTheirs,
+    /// An agent held below its owner fences no one.
+    Held,
+    /// An agent never fences itself: its owner does.
+    Itself,
+    /// Only the owner lets an agent go.
+    OwnerLetsGo,
+}
+
+impl FenceRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            FenceRefusal::NotTheirs => "only an agent's owner, or their agent acting for them (`for=<its owner>`), fences it",
+            FenceRefusal::Held => "an agent its owner holds below them fences no one",
+            FenceRefusal::Itself => "an agent never fences itself: its owner does",
+            FenceRefusal::OwnerLetsGo => "only an agent's owner lets it go: their agent fences, and never unfences",
+        }
+    }
+}
+
+/// Whether `fencer` may set `fenced` on one of the owner's agents: its owner
+/// either way; their unheld agent, acting for them, fencing another of
+/// theirs (the default agent fences each teammate it puts on another
+/// provider), never lifting one.
+pub fn may_fence(fencer: Fencer, fenced: bool) -> Result<(), FenceRefusal> {
+    match fencer {
+        Fencer::Owner => Ok(()),
+        Fencer::Anyone => Err(FenceRefusal::NotTheirs),
+        Fencer::AgentForOwner { held: true, .. } => Err(FenceRefusal::Held),
+        Fencer::AgentForOwner { itself: true, .. } => Err(FenceRefusal::Itself),
+        Fencer::AgentForOwner { .. } if !fenced => Err(FenceRefusal::OwnerLetsGo),
+        Fencer::AgentForOwner { .. } => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +664,101 @@ mod tests {
         let first = refuse_set_role(Some(Owner), None, Viewer);
         let again = refuse_set_role(Some(Owner), Some(Viewer), Viewer);
         assert_eq!((first, again), (None, None));
+    }
+
+    /// Goal: decision 62 (proposed): a person's agent starts and stops
+    /// their other agents on their computer, so their default agent keeps
+    /// the rest, and does nothing else there. Method: the router's half
+    /// (`agent_may_run`, from the route and who the agent is) over every
+    /// computer route and each kind of asker, then the agent fragment's
+    /// (`agent_runs_itself`).
+    #[test]
+    fn an_agent_runs_its_owners_agents() {
+        let for_owner = Sharer { for_owner: true, held: None };
+        let start = ("PUT", &["c0ffee", "agents", "maple--k3x9"][..]);
+        let stop = ("DELETE", &["c0ffee", "agents", "maple--k3x9"][..]);
+        // valid: acting for its own owner, unheld, it starts and stops one
+        for (method, rest) in [start, stop] {
+            assert!(runs_an_agent(method, rest), "{method} {rest:?}");
+            assert_eq!(agent_may_run(method, rest, for_owner), Ok(()), "{method} {rest:?}");
+        }
+        // ...any of its owner's agents but itself, which its owner runs
+        assert_eq!(agent_runs_itself(Some("npub1juniper"), Some("npub1maple")), Ok(()));
+        assert_eq!(agent_runs_itself(Some("npub1juniper"), None), Ok(()), "a fragment no computer took yet is no one");
+        assert_eq!(agent_runs_itself(None, Some("npub1maple")), Ok(()), "its owner starts and stops any");
+        assert_eq!(agent_runs_itself(Some("npub1maple"), Some("npub1maple")), Err(RunRefusal::Itself));
+
+        // invalid: every other computer route stays its owner's, for whomever it acts
+        for (method, rest) in [
+            ("POST", &[][..]),
+            ("GET", &[][..]),
+            ("POST", &["c0ffee", "wake"][..]),
+            ("POST", &["c0ffee", "restart"][..]),
+            ("PUT", &["c0ffee", "image"][..]),
+            ("PUT", &["c0ffee", "agents", "maple--k3x9", "connections"][..]),
+            ("GET", &["c0ffee", "uses"][..]),
+            ("POST", &["c0ffee", "ports", "6080", "ticket"][..]),
+            ("GET", &["c0ffee", "agents", "maple--k3x9"][..]),
+            ("POST", &["c0ffee", "agents", "maple--k3x9"][..]),
+            ("PUT", &["c0ffee", "agents"][..]),
+        ] {
+            assert!(!runs_an_agent(method, rest), "{method} {rest:?}");
+            for sharer in [for_owner, Sharer { for_owner: false, held: None }, Sharer { for_owner: true, held: Some(Viewer) }] {
+                assert_eq!(agent_may_run(method, rest, sharer), Err(RunRefusal::PeopleOnly), "{method} {rest:?} {sharer:?}");
+            }
+        }
+        // ...as itself, or for anyone but its owner
+        let not_for_owner = Sharer { for_owner: false, held: None };
+        for (method, rest) in [start, stop] {
+            assert_eq!(agent_may_run(method, rest, not_for_owner), Err(RunRefusal::NotForOwner));
+            // ...and held below its owner, at any hold
+            for held in [Viewer, Editor] {
+                assert_eq!(agent_may_run(method, rest, Sharer { for_owner: true, held: Some(held) }), Err(RunRefusal::Held));
+            }
+        }
+
+        // replay: asked again, the same answer
+        assert_eq!(agent_may_run(start.0, start.1, for_owner), agent_may_run(start.0, start.1, for_owner));
+        assert_eq!(agent_runs_itself(Some("npub1maple"), Some("npub1maple")), agent_runs_itself(Some("npub1maple"), Some("npub1maple")));
+    }
+
+    /// Goal: a fenced agent acts as itself alone, and only its owner lifts
+    /// a fence (decision 63, proposed). Method: `may_act_for` over each
+    /// kind of signer, and `may_fence` over each asker, both ways.
+    #[test]
+    fn a_fenced_agent_acts_as_itself_alone() {
+        use fragment_proto::IdentityKind::{Agent, Person};
+        // valid: an owned, unfenced agent acts for someone
+        assert_eq!(may_act_for(Agent, Some("npub1paul"), false), Ok(()));
+        // invalid: fenced, it acts for no one, its owner included
+        assert_eq!(may_act_for(Agent, Some("npub1paul"), true), Err(ForRefusal::Fenced));
+        // ...nor does a person, or an agent with no owner, fenced or not
+        for fenced in [false, true] {
+            assert_eq!(may_act_for(Person, None, fenced), Err(ForRefusal::PeopleOnly));
+            assert_eq!(may_act_for(Agent, None, fenced), Err(ForRefusal::PeopleOnly));
+        }
+
+        // valid: its owner fences and lets go; their agent fences another
+        for fenced in [true, false] {
+            assert_eq!(may_fence(Fencer::Owner, fenced), Ok(()));
+        }
+        assert_eq!(may_fence(Fencer::AgentForOwner { held: false, itself: false }, true), Ok(()));
+        // invalid: their agent lets none go, fences not itself, held fences no one
+        assert_eq!(may_fence(Fencer::AgentForOwner { held: false, itself: false }, false), Err(FenceRefusal::OwnerLetsGo));
+        assert_eq!(may_fence(Fencer::AgentForOwner { held: false, itself: true }, true), Err(FenceRefusal::Itself));
+        for itself in [false, true] {
+            for fenced in [false, true] {
+                assert_eq!(may_fence(Fencer::AgentForOwner { held: true, itself }, fenced), Err(FenceRefusal::Held));
+            }
+        }
+        // ...and anyone else, either way
+        for fenced in [false, true] {
+            assert_eq!(may_fence(Fencer::Anyone, fenced), Err(FenceRefusal::NotTheirs));
+        }
+
+        // replay: asked again, the same answer
+        assert_eq!(may_fence(Fencer::AgentForOwner { held: false, itself: false }, true), may_fence(Fencer::AgentForOwner { held: false, itself: false }, true));
+        assert_eq!(may_act_for(Agent, Some("npub1paul"), true), may_act_for(Agent, Some("npub1paul"), true));
     }
 
     #[test]

@@ -1306,7 +1306,11 @@ offered (decision 60 says why, with the vendors' words).
   is written to the agent fragment's `agent.json`: `"model": {"provider":
   "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
   "Workers AI" removes `model`. Any model the provider serves may be named
-  by hand; settings offers the catalog's `offer`.
+  by hand; settings offers the catalog's `offer`. A person's agent picks
+  one for another of their agents the same way, `fragment agent <agent>
+  --model openrouter:<id>` (and `--no-model`), when its owner asked or
+  agreed (decision 62, proposed: the agents-finite skill, which treats a
+  teammate on its owner's own provider as outside the platform).
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1363,7 +1367,8 @@ container from outside. By convention the screen is a page on port 6080
 `/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
 …/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
 ("Its screen" in the chat's menu), or with the agent picked from a group
-chat's menu ("<name>'s screen"), or from settings. The platform carries
+chat's menu ("<name>'s screen"), or from a teammate's ⋯ in the shell's
+team ("Its screen"), or from settings. The platform carries
 the query and reads nothing in it: which desktop is that agent's, and
 the refusal of an agent the computer does not run, are the image's. The
 page is served at the port's root and reaches its sockets by relative
@@ -1734,6 +1739,11 @@ same; its owner, or the agent, may take the name out of its job.
 Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
 Hermes' teammate roster (each other agent of the computer, by name and
 role) and its `message_agent` tool, with which it messages another agent.
+A person's default agent makes and keeps the others (decision 62,
+proposed): `fragment agent --new` starts one and makes its Bot Chat as
+the shell does, and the new teammate is on the image's roster within
+seconds (on a bot's own roster from its next session: Hermes builds a
+session's prompt once).
 Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
 `tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
 titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
@@ -2046,7 +2056,9 @@ persisted)".
   install -g` are how an agent installs software. The computer is one
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
-  opens nothing of anyone else's.
+  opens nothing of anyone else's. A fenced agent (decision 63, proposed)
+  runs as the `hermes` user too: its fence is the platform's ("A fenced
+  agent in our Hermes image", below).
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot
@@ -2072,6 +2084,35 @@ persisted)".
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer
   needs an apt mirror (and PyPI's and npm's) named in the image.
+
+### A fenced agent in our Hermes image
+
+Decision 63 (proposed): an agent its owner, or their agent, fences acts
+as itself alone. The fence is the platform's: it refuses the agent's
+`for` (docs/api.md), and its computer's guest view says `fenced` and
+gives it no connection. On the computer it is any agent's profile under
+the same gateway, as the `hermes` user, with the same tools and the
+internet; its computer only names no one for it.
+
+- **Its terminal names no one to act for.** Its profile's `.env` has
+  no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
+  agent alone; told its owner by hand, the platform refuses it (403).
+- **No Bot Mode.** It is in no Bot Mode roster (bots.rs), whose
+  `message_agent` acts for its owner, and the boot looks up no Bot Chat
+  for it: it is reached by its chats.
+- **Fenced or let go while awake.** The boot reads the change with its
+  agents (every 3 s) and writes the profile again; nothing restarts.
+  Hermes reads a profile's `.env` at each turn and passes it to each
+  command (`terminal.env_passthrough`), so its next command names no one,
+  or its owner again; the Docker lane's
+  `a_fenced_agent_names_no_one_to_act_for` checks it.
+- **What the computer does not enforce.** Its commands run as the
+  `hermes` user, so they can read the other agents' work and Hermes' home
+  (each profile's `.env`: placeholders, never a credential), reach the
+  computer's own services (another agent's browser, Hermes' API), and
+  call the computer's egress, which signs as whichever of its agents a
+  request names (docs/technical-debt-ledger.md, "A fenced agent's fence
+  is the platform's alone").
 
 ### Hermes' container guesses
 
@@ -2298,8 +2339,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on
   the computer, 404, and for no name, 400: the image's answers); the
-  `shell-ui` lane's chat menus (a direct chat's "Its screen", a group's
-  screen per agent), each frame landing on `?agent=<that agent>`. The
+  `shell-ui` lane's menus (a direct chat's "Its screen", a group's
+  screen per agent, a teammate's ⋯), each frame landing on
+  `?agent=<that agent>`. The
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.

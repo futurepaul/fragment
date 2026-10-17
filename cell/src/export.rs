@@ -1190,7 +1190,7 @@ impl PrincipalCell {
     /// decides what they may read.
     async fn as_person(&self, person: &str, name: &str, method: Method, path: &str, query: &str, range: Option<&str>) -> CellResult<Response> {
         let cfg = Config::from_env(&self.env);
-        let identity = Identity { id: person.to_string(), kind: IdentityKind::Person, owner: None, held: None };
+        let identity = Identity { id: person.to_string(), kind: IdentityKind::Person, owner: None, held: None, fenced: false };
         let (inner, url) = match path.strip_prefix("serve/") {
             // a site route, on the fragment's own origin
             Some(site) => (format!("/serve/{site}"), format!("{}{site}{query}", cfg.canonical(&Url::parse(&cfg.platform()).map_err(|e| CellError::host(e.to_string()))?, name))),

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::computers::{agent_replies, newest_save, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
+use crate::{Keys, Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
 
 pub const SECTION: &str = "hermes";
 
@@ -595,6 +595,41 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent its owner holds at viewer edits nothing", status_of(&held).as_deref() == Some("403"), json!(reply_of(&held)));
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": null })))?;
 
+    // decision 62 (proposed): the lead keeps the rest. In its terminal it
+    // makes a teammate in one step, acting for its owner (`fragment agent
+    // --new`, the agents-finite skill's): made, started on this computer,
+    // its job live, and its own chat with its owner, which the lead made
+    // and left, so the new one leads it and answers there. It never stops
+    // itself; it stops the teammate. Ids h140 to h142.
+    let oak = s.name("oak");
+    let made = run(s, 140, &format!("fragment agent --new {oak} --name Oak --job 'You keep the oak grove for your owner.' --json | grep -c '\"leftChat\":true' | sed 's/^/made-/'"))?;
+    let (oak_name, oak_chat) = (owner_name(&oak), owner_name(&format!("{oak}-chat")));
+    let view = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body;
+    let oak_id = view["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == oak_name.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let oak_members = api.signed(&owner, "GET", &format!("/api/f/{oak_chat}/members"), None)?.body["members"].clone();
+    let oak_agents: Vec<&Value> = oak_members.as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").collect();
+    s.ok(
+        "the lead makes a teammate from its terminal (`fragment agent --new`): running on its computer, its own chat its owner's, the teammate alone of the agents there (the lead made it and left)",
+        said(&made, "made-1") && fragment_core::npub::is_identity(&oak_id) && oak_agents.len() == 1 && oak_agents[0]["principal"] == oak_id.as_str(),
+        json!({ "reply": made, "agent": oak_name, "chat": oak_chat, "members": oak_members }),
+    );
+    let r = api.signed(&owner, "POST", &format!("/api/f/{oak_chat}/channels/chat"), Some(&json!({ "id": "o1", "body": { "text": "hello oak" } })))?;
+    let greeted = turn_of(&oak_name, &oak_chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let oak_reply = || agent_replies(&records(api, &owner, &oak_chat, "chat"), &oak_id).into_iter().find(|r| r["body"]["turn"] == greeted.as_str()).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
+    let answered = s.eventually(NEW_AGENT, || oak_reply().is_some());
+    s.ok("and the teammate answers its owner in its own chat, as itself", answered && oak_reply().is_some_and(|t| t.contains("hello oak")), json!(oak_reply()));
+    fenced_teammate(s, api, &owner, &oak, &oak_name, &oak_chat, &oak_id, &|s: &Suite, n: u32, cmd: &str| run(s, n, cmd))?;
+    let itself = run(s, 141, "fragment agent --stop --json | grep -c 'never starts or stops itself' | sed 's/^/itself-/'")?;
+    s.ok("the lead never stops itself (the platform refuses)", said(&itself, "itself-1"), json!(itself));
+    let stopped = run(s, 142, &format!("fragment agent {oak} --stop --json | grep -c '\"running\":false' | sed 's/^/stopped-/'"))?;
+    let view = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body;
+    let still: Vec<&str> = view["agents"].as_array().into_iter().flatten().filter_map(|a| a["fragment"].as_str()).collect();
+    s.ok(
+        "it stops the teammate (its fragment kept), and runs on itself",
+        said(&stopped, "stopped-1") && !still.contains(&oak_name.as_str()) && still.contains(&agent_name.as_str()),
+        json!({ "reply": stopped, "agents": still }),
+    );
+
     // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
     // in our Hermes image"): Hermes' user runs anything as root with sudo,
     // here offline (a package it builds, through apt; a program into
@@ -798,3 +833,65 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
     Ok(())
 }
+
+/// The lead's terminal: what one of its turns runs (`run: <command>`), and
+/// what its reply says.
+type Run<'a> = dyn Fn(&Suite, u32, &str) -> Result<Option<String>> + 'a;
+
+/// Decision 63 (proposed): a teammate fenced acts as itself alone, a fence
+/// the platform keeps. The lead fences Oak from its terminal (`fragment
+/// agent --fence`). Oak's next turns, on the real Hermes, name no one to act
+/// for (its computer follows the fence while awake), still as the hermes
+/// user, as any agent's; told its owner by hand, the platform refuses it.
+/// The lead lets it go no more than it may (403); its owner does, and Oak's
+/// terminal names its owner again. Ids h143 to h144; Oak's posts f1 and on.
+#[allow(clippy::too_many_arguments)]
+fn fenced_teammate(s: &mut Suite, api: &Api, owner: &Keys, oak: &str, oak_name: &str, oak_chat: &str, oak_id: &str, run: &Run) -> Result<()> {
+    let said = |reply: &Option<String>, mark: &str| reply.as_deref().is_some_and(|t| t.contains(mark));
+    let owner_id = api.identity(owner)?;
+    let fenced = run(s, 143, &format!("fragment agent {oak} --fence --json | grep -c '\"fenced\":true' | sed 's/^/fenced-/'"))?;
+    s.ok("the lead fences its teammate from its terminal, acting for its owner", said(&fenced, "fenced-1"), json!(fenced));
+
+    // Oak's own turns, in its own chat: `run:` on the scripted model
+    let n = std::cell::Cell::new(0u32);
+    let oak_run = |s: &Suite, cmd: &str| -> Result<Option<String>> {
+        n.set(n.get() + 1);
+        let r = api.signed(owner, "POST", &format!("/api/f/{oak_chat}/channels/chat"), Some(&json!({ "id": format!("f{}", n.get()), "body": { "text": format!("run: {cmd}") } })))?;
+        anyhow::ensure!(r.status == 200, "posting to Oak: {r}");
+        let turn = turn_of(oak_name, oak_chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let reply = || agent_replies(&records(api, owner, oak_chat, "chat"), oak_id).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
+        s.eventually(TURN, || reply().is_some());
+        Ok(reply())
+    };
+    // its computer follows the fence within seconds (its `.env` written
+    // again): bounded, six tries
+    let ask = "echo for-${FRAGMENT_FOR:-none} uid-$(id -u)";
+    let follows = |s: &Suite, want: &str| -> Result<Option<String>> {
+        let mut said = None;
+        for _ in 0..6 {
+            said = oak_run(s, ask)?;
+            if said.as_deref().is_some_and(|t| t.contains(want)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        Ok(said)
+    };
+    let named = follows(s, "for-none")?;
+    let forced = oak_run(s, &format!("FRAGMENT_FOR={owner_id} fragment list 2>&1 | grep -c 'acts as itself alone' | sed 's/^/refused-/'"))?;
+    s.ok(
+        "fenced, its terminal names no one to act for, as the hermes user still (a fence the platform keeps), and told its owner by hand, the platform refuses it",
+        said(&named, "for-none") && said(&named, "uid-10000") && said(&forced, "refused-1"),
+        json!({ "named": named, "forced": forced }),
+    );
+
+    // the lead lets it go no more than it may; its owner does
+    let lift = run(s, 144, &format!("fragment agent {oak} --no-fence --json 2>&1 | grep -c \"only an agent's owner lets it go\" | sed 's/^/kept-/'"))?;
+    s.ok("the lead never lets a teammate go (the platform refuses: its owner does)", said(&lift, "kept-1"), json!(lift));
+    let r = api.signed(owner, "PUT", &format!("/api/identities/{oak_id}/fenced"), Some(&json!({ "fenced": false })))?;
+    anyhow::ensure!(r.status == 200, "its owner lets Oak go: {r}");
+    let again = follows(s, &format!("for-{owner_id}"))?;
+    s.ok("let go by its owner, its terminal names its owner again", said(&again, &format!("for-{owner_id}")), json!(again));
+    Ok(())
+}
+

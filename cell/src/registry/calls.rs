@@ -177,6 +177,22 @@ impl Call for Hold {
     type Answer = IdentityView;
 }
 
+/// `POST /fenced`: an agent fenced, or let go, by its owner, or fenced by
+/// their agent acting for them (decision 63, proposed): `acting_for` is
+/// whom the request named in `for`, as the router read it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Fence {
+    pub agent: String,
+    pub fenced: bool,
+    pub acting_for: Option<String>,
+    pub by: By,
+}
+
+impl Call for Fence {
+    const PATH: &'static str = "/fenced";
+    type Answer = IdentityView;
+}
+
 /// `POST /subject`: the subject a person first signed in as with
 /// `issuer` (their WorkOS user, whose connections a computer swaps in), or
 /// none.

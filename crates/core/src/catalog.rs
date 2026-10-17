@@ -56,6 +56,14 @@ pub const MODEL_NAME_MAX_BYTES: usize = 64;
 /// The wire type is proto's.
 pub use fragment_proto::computer::ProviderKind as Kind;
 
+/// Whether an agent may be given a provider of `kind` (its owner's narrowing
+/// aside): a fenced agent (decision 63, proposed) is given no connection,
+/// which acts as its owner (their mail, calendar, files: decision 37), only
+/// the operator's keys and its owner's own keys (its model's among them).
+pub fn fenced_may_use(kind: Kind, fenced: bool) -> bool {
+    !(fenced && kind == Kind::Connection)
+}
+
 /// Which half of HTTP basic auth (`user:password`) holds the credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -535,6 +543,18 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
+
+    /// Goal: a fenced agent is given no connection, and every other kind
+    /// as an unfenced one is (decision 63, proposed).
+    #[test]
+    fn a_fenced_agent_is_given_no_connection() {
+        for kind in [Kind::Connection, Kind::Operator, Kind::Own] {
+            assert!(fenced_may_use(kind, false), "{kind:?} unfenced");
+        }
+        assert!(!fenced_may_use(Kind::Connection, true));
+        assert!(fenced_may_use(Kind::Operator, true) && fenced_may_use(Kind::Own, true));
+    }
+
     use super::*;
     use serde_json::json;
 

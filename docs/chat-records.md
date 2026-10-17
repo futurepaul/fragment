@@ -585,6 +585,32 @@ sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
 only from its focused, listed fragment iframe with the expected origin.
 Standalone chats leave the shortcut to the browser.
 
+**A hand-off is a card** (decision 62, proposed). A step that asks
+another of the owner's agents (`fragment ask <agent> …` in a terminal,
+or Hermes' `message_agent`) is its own card, out of its turn's steps
+card: "Asked <name>", where its model runs when the shell's roster says
+(`runsOn`: "<model> · <provider>", its title saying that is outside
+the platform and what it is sent goes there, or "On the platform"),
+what the step says it was sent (cut where its arguments were; each
+`[PLACEHOLDER]` marked), and how it goes: working while the step runs,
+or while the roster says that agent works and this is the chat's newest
+hand-off to it; done after; "didn't go through" when the step failed.
+Framed, "See the hand-off" asks the shell to open the chat it went to
+(`{fragment: "open-handoff", identity, via}`, `via` "ask" or
+"message": docs/api.md). A step that names no agent
+the roster has stays an ordinary step: a card never says something was
+done that asked no one. An underscore opens or closes emphasis only at a
+word's edge, so `[SISTER_NAME]` and `snake_case` read as written.
+
+**A chat led outside the platform says so.** When the shell's roster
+says the chat's lead runs on its owner's own provider (`runsOn: {on:
+"own", model, provider}`), the composer's note reads "<model> ·
+<provider>", its title saying what goes there: what the person sends in
+this chat goes to that provider, outside the platform, with no agent of
+theirs taking their
+private things out first (decision 62, proposed). Only on a note no
+other line holds (signing in, read-only, setup).
+
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
 frame of a fragment its person owns (docs/api.md, The shell), so in its

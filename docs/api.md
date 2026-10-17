@@ -233,11 +233,16 @@ but an operation it calls `for` someone tells the app so: `call.principal`
 is them and `call.agent` the agent, so what it does for them is theirs.
 `for` is honored on a fragment's routes (`/api/f/{name}/…`), on `GET`
 and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
-403: what an agent makes is its owner's), and on the model routes
-(`/api/models/v1/…`: Models, below); on any other route it is 400.
+403: what an agent makes is its owner's), on the model routes
+(`/api/models/v1/…`: Models, below), and on starting and stopping an
+agent (`PUT` and `DELETE /api/computers/{id}/agents/{fragment}`: below),
+and on fencing one (`PUT /api/identities/{agent}/fenced`: below); on any
+other route it is 400.
 A person's request naming `for` is 403, as is more than one `for` (400)
-or one that is not an identity (400). A call without `for` acts as the
-agent's own membership. A site request's query is its app's: `for`
+or one that is not an identity (400), and so is a fenced agent's, saying
+so, wherever `for` is honored (decision 63, proposed: a fenced agent acts
+as itself alone). A call without `for` acts as the agent's own
+membership. A site request's query is its app's: `for`
 there means nothing to the platform.
 
 An agent shares for its owner (Paul, 2026-10-04: "your agent can share
@@ -257,6 +262,21 @@ the agent, and each change's event (`member.set`, `member.removed`,
 carries `by` (who made it) and, for an agent, `for` (its owner), and its
 summary says "(an agent, for …)", so the owner sees what their agent
 shared.
+
+An agent runs its owner's agents (decision 62, proposed: a person's
+default agent keeps the rest; `fragment_core::access::agent_may_run`).
+An agent acting `for` its own owner, and not held below them, starts one
+of its owner's agent fragments on its owner's computer and stops one
+(`PUT` and `DELETE /api/computers/{id}/agents/{fragment}`), as its owner
+would. It never starts or stops itself (403), and every other computer
+route stays its owner's own (403, `for` or not): making the computer,
+waking, restarting, its image, an agent's connections, ports, its uses.
+One acting as itself or for anyone else, and one its owner holds (at any
+hold), is 403, saying why. The agent fragment's `computer.assigned` and
+`computer.unassigned` events carry `by` (the agent) and say "(started
+by …, an agent, for its owner)", so the owner sees it did. What it starts
+runs with every connection its owner has (decision 44), as one its owner
+starts does.
 
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
@@ -305,6 +325,7 @@ the new key and meant it for this signer.
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
+| `PUT /api/identities/{agent}/fenced` | the agent's owner; their agent, `for` them | `{fenced: true \| false}` → the agent (its `fenced`): fenced (decision 63, proposed), it acts as itself alone: any request of its naming `for` is 403, so it reaches nothing by its owner's access, shares nothing and starts no agent, while its own memberships (its agent fragment, its chats, what is shared with it by its npub) stand; its computer is told at once (a computer's agents' `fenced`, below), and gives it no connection and names no one for it to act for (docs/computers.md, "A fenced agent in our Hermes image"). An agent acting `for` its own owner, unheld and unfenced, fences another of its owner's agents, never itself; it lets none go (403, saying why), nor does an agent acting as itself or for anyone else; anyone else 403. The same again is answered again. A body without `fenced` is 400 |
 | `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
 | `PUT /api/identities/me/picture` | a person | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/identities/{npub}/picture` | anyone | the picture's bytes, `public, max-age=300`: a person's (the identity's view names it, `picture`), or an agent's (An agent's name and picture, below); one with none, 404 |
@@ -2458,9 +2479,34 @@ said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, then Add, open beside the chat on a
-desktop's width, a sheet from the bottom on a phone. Any other agents of
-theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. **Add teaches
+desktop's width, a sheet from the bottom on a phone. **Their other
+agents are the one agent's team** (decision 62, proposed): a row each,
+one level down under it (`#team`: indented, smaller and quieter than the
+person's chats), under "Your team", which folds them away (the open
+chat's teammate kept) and says who works while folded; past five, four
+show and "Show all" the rest. A row opens that agent's own chat with the
+person (else its newest other chat with them, else a new one), chosen
+as pressed; it is marked while one of its chats is open, those listed
+under it: its other chats with the person (any chat of theirs with it
+alone), then its hand-offs (`fragment ask`'s pairs, "Hand-offs from
+<agent>"). It says when it works, its unread with the person (its
+hand-offs count none: its agents' talk, which the one agent reports),
+and a globe
+when its model runs outside the platform (its `agent.json`: the
+platform's models, or "<model> · <provider>, outside the platform"); its ⋯ says
+where, and offers its hand-offs, "Ask <agent> to change it" (put in the
+one agent's chat's composer, not sent), its screen, its fence ("Fence
+it", or, fenced, "Let it see your things…", which asks its person first,
+in the shell's own dialog, saying what it would reach: decision 63,
+proposed; a fenced row shows a lock), and its profile. Their chats (a
+teammate's own chat, `<label>-chat`, any other of the person's with it
+alone, and the hand-offs) never list in the person's list; search still
+finds them. A prompt the shell puts in a
+composer goes to the open chat when it is the person's own, never a
+teammate's. Who works the shell reads from those
+chats' `work` (a turn started and not ended), every 4 s while shown, at
+most 12 chats. New chats, Enter and the launcher stay the one agent's.
+**Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
@@ -2534,12 +2580,22 @@ a message in it, unless it was renamed first.
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that
 frame, at that fragment's own origin only (its status's canonical URL),
-`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?}]}`: the
+`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, runsOn?, working?}]}`: the
 agents its person's computer runs, `name` the label that `@mentions`
 each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
 `starting`, `awake`, `sleeping` or `wont_wake`; absent before the shell
-has read it). It sends the list again when any of it changes, its
+has read it); `runsOn` where its model calls go, `{on: "platform"}` or
+`{on: "own", model, provider}` (a model of its owner's own provider,
+outside the platform, as its `agent.json` says; `model` and `provider`
+by their names for people: "DeepSeek V4.1 Flash", "OpenRouter"), and
+`working: true` while it works
+(decision 62, proposed). A frame may ask `{fragment: "open-handoff",
+identity, via}` for one of them: the shell opens the chat a hand-off to
+it went to beside the frame, and answers nothing. `via: "ask"` (`fragment
+ask`'s) went to its chat with the agent that asked, the frame's chat's own
+(its teammate's, else the person's default agent), else its newest
+hand-off; `via: "message"` (`message_agent`'s) to its own chat. It sends the list again when any of it changes, its
 computer's phase too (the list's socket tells the shell, which reads the
 computer again). The frame may then ask
 `{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
@@ -2697,7 +2753,10 @@ chat's page has no way to be told one yet.
 A person's computer runs an image (pinned per computer) and the agent
 fragments assigned to it; the Computer Durable Object (`cell/src/computer.rs`)
 is the only thing that talks to its container. What a guest may rely on
-is docs/computers.md; the routes here are its owner's.
+is docs/computers.md; the routes here are its owner's, but for starting
+and stopping an agent, which their agent also does for them (Principals
+and access, above: decision 62, proposed). Any other route an agent asks
+is 403.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -2710,9 +2769,9 @@ is docs/computers.md; the routes here are its owner's.
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view: its owner saw the `went_back` notice of the start `life` lost, which is told no more (nor any loss before it); again, the same. A `life` past the newest loss told, or 0, is 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view: its owner put off the update to `version` (an `update` notice's, the view's `latest`), which is told no more; a version other than it is told again. Again, the same. A version its next start does not run, or that is no version (12 hex digits), is 400 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; awake on another, its owner is told an update is ready (`update`); an image the deployment lacks is 400 |
-| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
-| `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
-| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both, or their agent for them (not the fragment's own agent) | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
+| `DELETE /api/computers/{id}/agents/{fragment}` | the same (an agent never stops itself) | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A fenced agent (decision 63, proposed; each of the view's `agents` says `fenced`) is given no connection whatever its list says: only operator keys and its owner's own keys. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |

@@ -880,7 +880,8 @@ type BotChats = BTreeMap<String, String>;
 /// agent, and a computer runs at most `AGENTS_MAX` of them.
 async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bool {
     let mut found = false;
-    let missing: Vec<&Agent> = agents.iter().filter(|a| !chats.contains_key(&a.fragment)).collect();
+    // a fenced agent is in no Bot Mode roster, and lists nothing for its owner
+    let missing: Vec<&Agent> = agents.iter().filter(|a| !a.fenced && !chats.contains_key(&a.fragment)).collect();
     for a in missing {
         match api.fragments_for(&a.fragment, &a.owner).await {
             Ok(list) => {
@@ -1000,7 +1001,7 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
-    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
+    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "fenced": names(&change.fenced), "agents": now.len() });
     for a in &change.added {
         write_profile(api, a, home, ids, route, credential_env).await;
     }
@@ -1013,6 +1014,12 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
         let title = read_title(api, a).await;
         write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title).await;
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
+    }
+    // fenced or let go (decision 63, proposed): its `.env` again, naming its
+    // owner or no one, read at its next turn; its Bot Mode roster below
+    for a in &change.fenced {
+        write_profile(api, a, home, ids, route, credential_env).await;
+        ev!("profile.fenced", { "agent": a.fragment, "fenced": a.fenced });
     }
     if !change.added.is_empty() {
         let asked = Instant::now();
