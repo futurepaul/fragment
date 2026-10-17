@@ -53,6 +53,9 @@ const GUESTS_MAX: usize = 2 * AGENTS_MAX as usize;
 const LINKS_MAX: u64 = 8;
 /// A browser's name until its extension says one.
 const UNNAMED: &str = "A browser";
+/// Names tried for a new guest socket (four random bytes each, among at
+/// most `GUESTS_MAX` open): a clash is retried, never looped on.
+const SOCKET_NAMES_TRIED: usize = 8;
 
 /// `computer/browser-ticket`'s and `computer/browser-forget`'s bodies: who
 /// asks (the router's signer), and the link forgotten.
@@ -82,21 +85,37 @@ impl ComputerCell {
         if b.identity != self.must(MetaKey::Owner)? {
             return Err(CellError::new(ErrorCode::Forbidden, "only the computer's owner connects their browser"));
         }
-        let token = js::random_hex::<24>();
-        let expires = js::now_ms() + TICKET_TTL_MS;
-        self.exec("INSERT INTO browser_tickets (hash, identity, expires_at) VALUES (?, ?, ?)", vec![sha_hex(&token).into(), b.identity.as_str().into(), expires.into()])?;
-        self.trim("browser_tickets", TICKETS_MAX)?;
-        Ok(json!({ "ticket": token, "expiresAt": expires }))
+        self.mint("browser_tickets", &b.identity)
     }
 
     /// A ticket a linked browser asks for itself, to come back with.
     async fn link_ticket(&self, req: &Request) -> CellResult<Response> {
         let link = self.link_by_secret(req)?;
+        json_response(&self.mint("link_tickets", &link)?)
+    }
+
+    /// A one-time ticket in `table`, for `whose`: its owner's
+    /// (`browser_tickets`, to connect a browser) or a linked browser's
+    /// (`link_tickets`, to come back). The token is given once, kept hashed.
+    fn mint(&self, table: &str, whose: &str) -> CellResult<Value> {
+        let column = match table {
+            "browser_tickets" => "identity",
+            "link_tickets" => "link",
+            t => unreachable!("a ticket table of this file's: {t}"),
+        };
         let token = js::random_hex::<24>();
         let expires = js::now_ms() + TICKET_TTL_MS;
-        self.exec("INSERT INTO link_tickets (hash, link, expires_at) VALUES (?, ?, ?)", vec![sha_hex(&token).into(), link.as_str().into(), expires.into()])?;
-        self.trim("link_tickets", TICKETS_MAX)?;
-        json_response(&json!({ "ticket": token, "expiresAt": expires }))
+        self.exec(&format!("INSERT INTO {table} (hash, {column}, expires_at) VALUES (?, ?, ?)"), vec![sha_hex(&token).into(), whose.into(), expires.into()])?;
+        self.trim(table, TICKETS_MAX)?;
+        Ok(json!({ "ticket": token, "expiresAt": expires }))
+    }
+
+    /// Every guest socket ends (`1001`, `why`): the browser that carried
+    /// them is gone.
+    fn end_guests(&self, why: &str) {
+        for guest in self.state.get_websockets_with_tag(GUEST_TAG) {
+            let _ = guest.close(Some(1001), Some(why));
+        }
     }
 
     /// The link whose secret a browser's request carries.
@@ -136,9 +155,7 @@ impl ComputerCell {
             (None, Some(link)) if !self.rows("SELECT id FROM browser_links WHERE id = ?", vec![link.into()])?.is_empty() => (link.to_string(), None),
             _ => return Err(CellError::new(ErrorCode::Unauthenticated, "this connection's ticket was used or is too old: connect your browser again from Settings")),
         };
-        for guest in self.state.get_websockets_with_tag(GUEST_TAG) {
-            let _ = guest.close(Some(1001), Some("your owner connected another browser"));
-        }
+        self.end_guests("your owner connected another browser");
         for owner in self.state.get_websockets_with_tag(OWNER_TAG) {
             let _ = owner.close(Some(REPLACED), Some("another browser connected"));
         }
@@ -192,13 +209,9 @@ impl ComputerCell {
         if self.state.get_websockets_with_tag(GUEST_TAG).len() >= GUESTS_MAX {
             return Err(CellError::new(ErrorCode::RateLimited, format!("at most {GUESTS_MAX} sockets to the owner's browser at once")));
         }
-        // a name no open socket has (four random bytes: a clash is retried)
-        let socket = loop {
-            let s = js::random_hex::<4>();
-            if self.guest(&s).is_none() {
-                break s;
-            }
-        };
+        // a name no open socket has
+        let socket = (0..SOCKET_NAMES_TRIED).map(|_| js::random_hex::<4>()).find(|s| self.guest(s).is_none());
+        let Some(socket) = socket else { return Err(CellError::host("no free name for a guest socket")) };
         let pair = WebSocketPair::new()?;
         self.state.accept_websocket_with_tags(&pair.server, &[GUEST_TAG, &format!("cdp-{socket}")]);
         Ok(Response::from_websocket(pair.client)?)
@@ -279,14 +292,16 @@ impl ComputerCell {
         if tags.iter().any(|t| t == OWNER_TAG) {
             let current = self.meta(MetaKey::BrowserOwner).ok().flatten().map(|conn| format!("owner-{conn}"));
             if current.is_some_and(|c| tags.contains(&c)) {
-                let _ = self.delete_meta(MetaKey::BrowserOwner);
-                for guest in self.state.get_websockets_with_tag(GUEST_TAG) {
-                    let _ = guest.close(Some(1001), Some("your owner's browser disconnected"));
+                let link = link_of(tags);
+                let noted = self.delete_meta(MetaKey::BrowserOwner).and_then(|_| match &link {
+                    Some(l) => self.exec("UPDATE browser_links SET seen_at = ? WHERE id = ?", vec![js::now_ms().into(), l.as_str().into()]),
+                    None => Ok(()),
+                });
+                if let Err(e) = noted {
+                    console_error!("{}", json!({ "computer": "browser-disconnected", "link": link, "error": e.message }));
                 }
-                if let Some(link) = link_of(tags) {
-                    let _ = self.exec("UPDATE browser_links SET seen_at = ? WHERE id = ?", vec![js::now_ms().into(), link.into()]);
-                }
-                console_log!("{}", json!({ "computer": "browser", "disconnected": true }));
+                self.end_guests("your owner's browser disconnected");
+                console_log!("{}", json!({ "computer": "browser", "disconnected": link }));
                 self.tell_owner().await;
             }
             return true;
@@ -318,9 +333,7 @@ impl ComputerCell {
         for ws in self.state.get_websockets_with_tag(OWNER_TAG) {
             let _ = ws.close(Some(WIPED), Some("its owner was wiped"));
         }
-        for ws in self.state.get_websockets_with_tag(GUEST_TAG) {
-            let _ = ws.close(Some(1001), Some("its owner was wiped"));
-        }
+        self.end_guests("its owner was wiped");
     }
 
     /// The test lever `drop-browser`: the connected browser's socket ends as
@@ -361,10 +374,7 @@ pub(super) async fn api_route(env: &Env, who: &str, method: Method, id: &str, re
     match (method, rest) {
         (Method::Post, ["ticket"]) => {
             let t = ask(env, id, "computer/browser-ticket", &json!({ "identity": who })).await?;
-            let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
-            // the computer's own origin, as a socket: its extension connects there
-            let socket = v.origin.replacen("http", "ws", 1);
-            json_response(&BrowserTicket { url: format!("{socket}/__browser?t={ticket}"), expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
+            json_response(&ticket_on(&v.origin, &t)?)
         }
         (Method::Delete, ["links", link]) => json_response(&ask(env, id, "computer/browser-forget", &json!({ "identity": who, "link": link })).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{id}/browser/{}", m.as_ref(), rest.join("/")))),
@@ -393,6 +403,13 @@ pub(super) async fn host_route(mut req: Request, env: &Env, url: &Url, id: &str)
     }
 }
 
+/// A ticket the Computer DO minted (`t`), as the socket its browser opens
+/// on the computer's own origin (`origin`, http or https).
+fn ticket_on(origin: &str, t: &Value) -> CellResult<BrowserTicket> {
+    let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
+    Ok(BrowserTicket { url: format!("{}/__browser?t={ticket}", origin.replacen("http", "ws", 1)), expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
+}
+
 /// A linked browser's own ask: a ticket to come back with, or its link
 /// forgotten.
 async fn link_route(env: &Env, url: &Url, id: &str, link: &str) -> CellResult<Response> {
@@ -403,8 +420,7 @@ async fn link_route(env: &Env, url: &Url, id: &str, link: &str) -> CellResult<Re
                 return Ok(answer);
             }
             let t: Value = answer.json().await?;
-            let socket = url.origin().ascii_serialization().replacen("http", "ws", 1);
-            json_response(&BrowserTicket { url: format!("{socket}/__browser?t={}", t["ticket"].as_str().unwrap_or("")), expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
+            json_response(&ticket_on(&url.origin().ascii_serialization(), &t)?)
         }
         "/__browser/forget" => to_computer(env, id, object_request("browser-link-forget", &[(LINK_HEADER, link)])?).await,
         p => Err(CellError::new(ErrorCode::NotFound, format!("no route POST {p}"))),
