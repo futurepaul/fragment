@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CellError, CellResult};
 
 /// A call to the Registry: `PATH` names its route, the implementing type is
-/// its body, and `Answer` is what a 200 carries.
-pub(crate) trait Call: Serialize + DeserializeOwned {
+/// its body, and `Answer` is what a 200 carries. A body is `Deserialize` as
+/// the Registry decodes it (`RegistryCell::route`), but for a finished round
+/// trip's (`Exchange`), which no one but `Exchange::of` makes: its route
+/// decodes a type of its own.
+pub(crate) trait Call: Serialize {
     const PATH: &'static str;
     type Answer: Serialize + DeserializeOwned;
 
@@ -534,6 +537,9 @@ pub(crate) struct SigninCounts {
     pub logins: u64,
     pub redemptions: u64,
     pub sessions: u64,
+    /// CLI codes waiting to be typed, and the people with wrong ones counted.
+    pub cli_codes: u64,
+    pub cli_misses: u64,
 }
 
 impl Call for TestHook {
@@ -565,15 +571,39 @@ impl Call for Begin {
 
 /// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
 /// sign-in finished (`switching`: one `/auth/switch` began, to use another
-/// account).
-#[derive(Serialize, Deserialize)]
+/// account). It is a finished round trip, so the router makes one only
+/// with `of`, from the `Bound` of the browser that began it: its fields
+/// are private and it is not `Deserialize` (the Registry decodes the same
+/// body as an `ExchangeIn`, which is its own).
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Exchange {
-    pub state: String,
-    pub code: String,
-    pub client_id: String,
-    pub issuer: String,
-    pub switching: bool,
+    state: String,
+    code: String,
+    client_id: String,
+    issuer: String,
+    switching: bool,
+}
+
+impl Exchange {
+    /// The exchange of a sign-in's (or a switch's) code, coming back to
+    /// the browser that began it: the only way to make one.
+    pub(crate) fn of(bound: crate::auth::Bound, code: String, client_id: String, issuer: String) -> Exchange {
+        use fragment_core::roundtrip::Trip;
+        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a WorkOS code finishes a sign-in or a switch");
+        Exchange { state: bound.state().to_string(), code, client_id, issuer, switching: bound.trip() == Trip::Switch }
+    }
+}
+
+/// `Exchange`'s body as the Registry decodes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::registry) struct ExchangeIn {
+    pub(in crate::registry) state: String,
+    pub(in crate::registry) code: String,
+    pub(in crate::registry) client_id: String,
+    pub(in crate::registry) issuer: String,
+    pub(in crate::registry) switching: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -728,15 +758,91 @@ impl Call for Redeem {
     type Answer = Redeemed;
 }
 
-/// `POST /cli/add`: a key the signed-in person approved joins them (the
-/// router checked the key's own proof).
+/// `POST /cli/begin`: a CLI's new key (the router checked its signature)
+/// asks for the code its person types (`fragment_core::cli_code`). A key
+/// someone holds, or held, is 409; past the address's or the fleet's
+/// begins this minute, 429.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliBegin {
+    pub key: String,
+    /// The address it came from (`CF-Connecting-IP`), its begins counted
+    /// by: at most `FROM_MAX_BYTES`.
+    pub from: String,
+    /// What the platform knew of the request, shown to whoever types it.
+    pub asked: fragment_core::cli_code::Asked,
+}
+
+impl CliBegin {
+    /// An address, at most (an IPv6 one is 45 characters).
+    pub const FROM_MAX_BYTES: usize = 64;
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliBegun {
+    /// As kept: `cli_code::LEN` letters, no hyphen.
+    pub code: String,
+    pub expires_at: i64,
+}
+
+impl Call for CliBegin {
+    const PATH: &'static str = "/cli/begin";
+    type Answer = CliBegun;
+    fn checked(answer: CliBegun) -> CellResult<CliBegun> {
+        if fragment_core::cli_code::valid(&answer.code) {
+            Ok(answer)
+        } else {
+            Err(CellError::host("the registry made a code no one could type"))
+        }
+    }
+}
+
+/// `POST /cli/code`: the key a code a signed-in person typed names, to
+/// show them before they add it. A wrong code is a miss
+/// (`cli_code::MISSES_MAX`; past it, 429): 400, as is a used or expired one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliCodeOf {
+    pub token: String,
+    /// As typed.
+    pub code: String,
+}
+
+/// A code's key, and whom the session names.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliCoded {
+    /// As kept.
+    pub code: String,
+    /// 64 hex.
+    pub key: String,
+    pub identity: String,
+    pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
+}
+
+impl Call for CliCodeOf {
+    const PATH: &'static str = "/cli/code";
+    type Answer = CliCoded;
+}
+
+/// `POST /cli/add`: a code the signed-in person typed, spent: its key
+/// joins them (a key someone else holds, or a revoked one, 409). Misses as
+/// `CliCodeOf` does.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApproveKey {
     pub token: String,
+    /// As kept (the confirming page's).
+    pub code: String,
+}
+
+/// The key added, and the email of the person it joined (to mail).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct KeyAdded {
     pub key: String,
+    pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
 }
 
 impl Call for ApproveKey {
     const PATH: &'static str = "/cli/add";
-    type Answer = ();
+    type Answer = KeyAdded;
 }

@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use fragment_core::{form, npub};
+use fragment_core::{cli_code, form, npub};
 use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
@@ -32,14 +32,7 @@ pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -
 /// (`GET /api/identities/me` with the session: lib.rs `shell_session`):
 /// their identity, or 401's `Null`.
 pub(super) fn who(api: &Api, session: &str) -> Result<Value> {
-    let r = api.call(Call {
-        method: "GET",
-        url: format!("{}/api/identities/me", api.base),
-        cookie: Some(format!("fragment_session={session}")),
-        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
-        ..Call::default()
-    })?;
-    Ok(if r.status == 200 { r.body } else { Value::Null })
+    api.who(session)
 }
 
 /// The shell's page, which `/` and `/settings` are for everyone.
@@ -336,6 +329,13 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a callback without the browser's state cookie is refused", r.status == 400 && cookie_line(&r, "fragment_session").is_empty(), &r);
     let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some("fragment_login=".to_string() + &"0".repeat(64)), ..Call::default() })?;
     s.ok("and with another sign-in's state", r.status == 400, &r);
+    let state = reqwest::Url::parse(&to).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned())).unwrap_or_default();
+    let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(format!("fragment_own_key={state}")), ..Call::default() })?;
+    s.ok(
+        "and with its state in another kind of round trip's cookie (an own key's): each kind's cookie binds that kind alone",
+        fragment_core::roundtrip::valid_state(&state) && r.status == 400 && cookie_line(&r, "fragment_session").is_empty(),
+        &r,
+    );
     let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(bound.clone()), ..Call::default() })?;
     let session_line = cookie_line(&r, "fragment_session");
     s.ok(
@@ -474,50 +474,179 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
 
     switch_cases(s, api)?;
 
-    // a CLI key: its link carries its own proof; approving it adds it at once
+    // Goal: a CLI's key joins only the person who typed its code, from the
+    // terminal it printed in, at a page no link fills in (the typed device
+    // code: Paul, 2026-10-17; audit M6). Method: the code asked for by the
+    // key, the page read and posted as a browser would (its tokens from the
+    // pages, its buttons waited out); then each way around it: no
+    // signature, an old one, a key someone holds, a link, the old approval
+    // form, too soon, another session, another origin, a wrong code, a
+    // replay, an expired code (with the sweep, below), and too many misses.
     let cli = Keys::generate();
     let cli_npub = npub::encode(cli.pubkey_hex());
-    let link = api.approval_link(&cli, 0);
-    let path = link.trim_start_matches(&api.base).to_string();
-    let r = api.unsigned("GET", &path, None)?;
+    let tail = cli_npub[cli_npub.len() - 8..].to_string();
+    let cli_email = "cli-person@e2e.test";
+    let person = api.sign_in(cli_email)?;
+    let person_id = who(api, &person)?["id"].as_str().unwrap_or("").to_string();
+    let begun = api.cli_begin(&cli)?;
+    let code = begun.body["code"].as_str().unwrap_or("").to_string();
+    let kept = cli_code::normalize(&code).unwrap_or_default();
     s.ok(
-        "the approval page sends a signed-out browser to sign in first, keeping the link",
-        r.status == 302 && r.header("location").contains("/auth/login?return=") && r.header("location").contains("proof"),
-        &r,
+        "a new key asks for a code, signed by itself: eight letters shown as two fours, the plain /cli page to type it at, good for ten minutes",
+        begun.status == 200
+            && code.len() == cli_code::LEN + 1
+            && cli_code::valid(&kept)
+            && cli_code::display(&kept) == code
+            && begun.body["url"] == format!("{}/cli", api.base)
+            && begun.body["expiresAt"].as_i64().is_some_and(|t| (t - crate::api::now_ms() - cli_code::TTL_MS).abs() < 60_000),
+        &begun,
     );
-    let r = with_session(api, "GET", &path, &paul)?;
-    s.ok("signed in, it shows the key's ending to compare with the terminal", r.status == 200 && r.text.contains(&cli_npub[cli_npub.len() - 8..]), &r);
-    s.ok("and no page may frame it: a fragment's page could lay \"Add this key\" under a click", unframed(&r), framing(&r));
-    let r = with_session(api, "GET", &format!("/cli?key={cli_npub}"), &paul)?;
-    s.ok("a link without the key's proof is refused", r.status == 400, &r);
-    let stale = api.approval_link(&cli, 11 * 60);
-    let r = with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?;
-    s.ok("and one whose proof is older than ten minutes", r.status == 400 && r.text.contains("fragment login"), &r);
-    let forged = link.replace(&cli_npub, &npub::encode(Keys::generate().pubkey_hex()));
-    let r = api.approve_link(&paul, &forged)?;
-    s.ok("and a proof by another key than the one named", r.status == 400, &r);
-    let r = api.approve_link(&"0".repeat(64), &link)?;
-    s.ok("approving without a session is 401", r.status == 401, &r);
-    let r = api.call(Call {
-        method: "POST",
-        url: format!("{}/cli/approve", api.base),
-        body: Some(format!("key={cli_npub}").into_bytes()),
-        content_type: Some("application/x-www-form-urlencoded"),
-        cookie: Some(format!("fragment_session={paul}")),
-        extra: vec![("origin", "https://evil.example".into())],
-        ..Call::default()
-    })?;
-    s.ok("a form posted from another site is refused", r.status == 403, &r);
-    let r = api.approve_link(&paul, &api.approval_link(&k4, 0))?;
-    s.ok("a key someone else holds cannot be approved", r.status == 409, &r);
+    let r = api.unsigned("POST", "/cli/begin", Some(&json!({})))?;
+    s.ok("unsigned, it gets none (401)", r.status == 401 && r.body["code"].is_null(), &r);
+    let late = cli.header("POST", &format!("{}/cli/begin", api.base), b"{}", crate::api::now_s() - 120);
+    let r = api.call(Call { method: "POST", url: format!("{}/cli/begin", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), extra: vec![("authorization", late)], ..Call::default() })?;
+    s.ok("nor signed two minutes ago: a signature's usual window holds (401)", r.status == 401 && r.body["code"].is_null(), &r);
+    let r = api.cli_begin(&k4)?;
+    s.ok("nor does a key someone holds (409)", r.status == 409 && r.body["code"].is_null(), &r);
+
+    let r = api.unsigned("GET", "/cli", None)?;
+    s.ok("the page sends a signed-out browser to sign in first, and back to /cli", r.status == 302 && r.header("location").ends_with(&format!("/auth/login?return={}", url_enc("/cli"))), &r);
+    let page = with_session(api, "GET", "/cli", &person)?;
+    s.ok(
+        "signed in, it asks for the code: one field, a button that arms after a moment, and nothing of any key",
+        page.status == 200 && page.text.contains("name=\"code\"") && page.text.contains("data-arm disabled") && !page.text.contains(&tail) && !page.text.contains("Add this key"),
+        &page,
+    );
+    s.ok("and no page may frame it: a fragment's page could lay its button under a click", unframed(&page), framing(&page));
+    let linked = with_session(api, "GET", &format!("/cli?key={cli_npub}&code={}&proof=x", url_enc(&code)), &person)?;
+    s.ok(
+        "no link fills it in: a key and a code in its address show the same empty page",
+        linked.status == 200 && !linked.text.contains(&tail) && !linked.text.contains(&code) && !linked.text.contains(&kept) && !linked.text.contains("Add this key"),
+        &linked,
+    );
+    let r = api.cli_form(&person, "/cli/approve", &[("key", cli_npub.as_str()), ("proof", "x")])?;
+    s.ok("and the old approval's form adds nothing: a key and a proof are no code (403)", r.status == 403, &r);
     let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
-    s.ok("until approved, the key is no one's", r.status == 401, &r);
-    let (r, calls) = calls_of(api, || api.approve_link(&paul, &link))?;
+    s.ok("until its code is typed and pressed, the key is no one's", r.status == 401, &r);
+
+    // the page as a browser uses it: its own tokens, its buttons waited out
+    let armed = || std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
+    armed();
+    let confirm = api.cli_form(&person, "/cli", &[("form", &super::share::form_of(&page)), ("code", &code.to_lowercase())])?;
+    s.ok(
+        "typed (in any case), it shows whom the CLI would act as, by their email, the key's ending to compare with the terminal, where and when its code was asked for and by what, and never to type a code someone sent; then asks a press",
+        confirm.status == 200
+            && confirm.text.contains(cli_email)
+            && confirm.text.contains(&tail)
+            && confirm.text.contains("Its code was asked just now from ")
+            && confirm.text.contains(&format!("by {}", crate::api::CLI_AGENT))
+            && confirm.text.contains(cli_code::NEVER_SENT)
+            && confirm.text.contains("Add this key")
+            && confirm.text.contains("data-arm disabled")
+            && unframed(&confirm),
+        &confirm,
+    );
+    let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
+    s.ok("seeing whom it would act as adds nothing yet", r.status == 401, &r);
+    let pressed = super::share::form_of(&confirm);
+    let press = |session: &str, origin: &str| {
+        let fields = format!("form={}&code={}", url_enc(&pressed), url_enc(&kept));
+        api.call(Call {
+            method: "POST",
+            url: format!("{}/cli/approve", api.base),
+            body: Some(fields.into_bytes()),
+            content_type: Some("application/x-www-form-urlencoded"),
+            cookie: Some(format!("fragment_session={session}")),
+            extra: vec![("origin", origin.to_string())],
+            ..Call::default()
+        })
+    };
+    let r = press(&person, &api.base)?;
+    s.ok("pressed sooner than its button arms, it is refused (403): the click that opened the page cannot add the key", r.status == 403, &r);
+    armed();
+    let r = press(&paul, &api.base)?;
+    s.ok("another person's session cannot press it (403: the page's form is not theirs)", r.status == 403, &r);
+    let r = press(&person, A_FRAGMENTS_PAGE)?;
+    s.ok("nor can a page on another origin (403)", r.status == 403, &r);
+    let r = press(&"0".repeat(64), &api.base)?;
+    s.ok("nor a browser signed in to no one (403: no session's form)", r.status == 403, &r);
+    let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
+    s.ok("(none of those added it)", r.status == 401, &r);
+    let mails_before = s.mail.sent_to(cli_email).len();
+    let (added_page, calls) = calls_of(api, || press(&person, &api.base))?;
     let me = api.signed(&cli, "GET", "/api/identities/me", None)?;
-    s.ok("approved, the key is the person's at once: nothing waits to claim it", r.status == 200 && me.status == 200 && me.body["id"] == paul_id.as_str(), &me);
-    s.ok("(approving asks the registry once)", calls == 1, calls);
-    let r = api.approve_link(&paul, &link)?;
-    s.ok("approving it again changes nothing", r.status == 200, &r);
+    s.ok(
+        "pressed, the key is the person's at once, and says so by their email: nothing waits to claim it",
+        added_page.status == 200 && added_page.text.contains("Key added") && me.status == 200 && me.body["id"] == person_id.as_str() && me.body["email"] == cli_email,
+        &me,
+    );
+    s.ok("(adding asks the registry once)", calls == 1, calls);
+    // sent after the answer (wait_until), never in its way
+    let mailed = s.eventually(Duration::from_secs(10), || s.mail.sent_to(cli_email).len() == mails_before + 1);
+    let mail = s.mail.sent_to(cli_email);
+    s.ok(
+        "and the person is mailed that a key was added: its ending, the whole key, that its code was typed, where and when it was asked for, never to type one someone sent, and how to revoke it",
+        mailed
+            && mail.len() == mails_before + 1
+            && mail.last().is_some_and(|m| {
+                m.subject.contains(&tail)
+                    && m.text.contains("added when its code was typed at")
+                    && m.text.contains("The code was asked ")
+                    && m.text.contains(&format!("by {}", crate::api::CLI_AGENT))
+                    && m.text.contains(cli_code::NEVER_SENT)
+                    && m.text.contains(&format!("fragment keys revoke {cli_npub}"))
+            }),
+        format!("{mail:?}"),
+    );
+    let again = press(&person, &api.base)?;
+    s.ok("the same code again adds nothing: a code is spent once (400, the page asks again)", again.status == 400 && again.text.contains("is waiting on that code") && again.text.contains("name=\"code\""), &again);
+    let r = api.cli_begin(&cli)?;
+    s.ok("and a key added asks for no code again (409)", r.status == 409, &r);
+
+    // a wrong code, typed: a miss, counted; past the bound, the person waits
+    let other = Keys::generate();
+    let waiting = api.cli_begin(&other)?.body["code"].as_str().unwrap_or("").to_string();
+    let wrong = if waiting.starts_with('B') { "CCCC-CCCC" } else { "BBBB-BBBB" };
+    let typed = api.type_code(&person, wrong)?;
+    s.ok("a wrong code finds no key: the page says so and asks again (400)", typed.status == 400 && typed.text.contains("is waiting on that code") && !typed.text.contains("Add this key"), &typed);
+    let typed = api.type_code(&person, "not a code")?;
+    s.ok("and so does what is no code at all", typed.status == 400 && typed.text.contains("is waiting on that code"), &typed);
+    // the replay above and these two were misses already
+    let missed_before = 3;
+    let mut statuses = vec![];
+    for _ in 0..cli_code::MISSES_MAX {
+        statuses.push(api.type_code(&person, wrong)?.status);
+    }
+    let late = api.type_code(&person, &waiting)?;
+    let wrong_then = statuses.iter().take_while(|st| **st == 400).count();
+    s.ok(
+        &format!("past {} wrong codes in ten minutes, the person waits: even a right code is refused then (429)", cli_code::MISSES_MAX),
+        missed_before + wrong_then == cli_code::MISSES_MAX as usize && statuses[wrong_then..].iter().all(|st| *st == 429) && late.status == 429,
+        format!("{statuses:?} then {late}"),
+    );
+    let r = api.signed(&other, "GET", "/api/identities/me", None)?;
+    s.ok("(and adds nothing)", r.status == 401, &r);
+    let (typed, added) = (api.type_code(&paul, &waiting)?, api.add_code(&paul, &waiting)?);
+    let theirs = api.signed(&other, "GET", "/api/identities/me", None)?;
+    s.ok(
+        "another person's misses are theirs alone: whoever types a code adds its key to themselves, and their terminal says whose",
+        typed.status == 200 && added.status == 200 && theirs.status == 200 && theirs.body["id"] == paul_id.as_str(),
+        &theirs,
+    );
+    // a key keeps its newest few codes: one more pushes out its oldest, so
+    // no flood of one key's begins pushes out anyone else's
+    let many = Keys::generate();
+    let many_tail = npub::encode(many.pubkey_hex())[npub::encode(many.pubkey_hex()).len() - 8..].to_string();
+    let mut codes = vec![];
+    for _ in 0..=cli_code::CODES_PER_KEY_MAX {
+        codes.push(api.cli_begin(&many)?.body["code"].as_str().unwrap_or("").to_string());
+    }
+    let (oldest, newest) = (api.type_code(&paul, &codes[0])?, api.type_code(&paul, &codes[cli_code::CODES_PER_KEY_MAX])?);
+    s.ok(
+        &format!("a key keeps its newest {} codes: one more pushes out its oldest (400), and the newest still names it", cli_code::CODES_PER_KEY_MAX),
+        codes.iter().all(|c| cli_code::normalize(c).is_some()) && oldest.status == 400 && newest.status == 200 && newest.text.contains(&many_tail),
+        json!({ "oldest": oldest.to_string(), "newest": newest.status }),
+    );
     // every platform page refuses frames; its redirects need not (a
     // redirect shows nothing)
     let pages = [
@@ -525,8 +654,9 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         ("the shell, for someone new", "/__shell/shell.js", with_session(api, "GET", "/", &newcomer)?),
         ("the shell, signed out", "/__shell/shell.js", api.unsigned("GET", "/", None)?),
         ("the sign-out button", "Sign out", with_session(api, "GET", "/auth/logout", &paul)?),
-        ("an expired approval link", "fragment login", with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?),
-        ("a key added", "Key added", r),
+        ("the CLI code page", "name=\"code\"", with_session(api, "GET", "/cli", &paul)?),
+        ("a CLI key to confirm", "Add this key", confirm),
+        ("a key added", "Key added", added_page),
     ];
     let framable: Vec<String> = pages.iter().filter(|(_, shows, r)| !(r.text.contains(shows) && unframed(r))).map(|(page, _, r)| format!("{page}: {}", framing(r))).collect();
     s.ok(&format!("and so does every other platform page ({} of them)", pages.len()), framable.is_empty(), format!("{framable:?}"));
@@ -896,12 +1026,18 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let late = api.unsigned("GET", "/auth/login?login_hint=late@e2e.test", None)?;
     let late_cookie = late.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
     let late_back = api.external(&late.header("location"))?;
+    // and a CLI's code, left untyped
+    let untyped_key = Keys::generate();
+    let untyped = api.cli_begin(&untyped_key)?.body["code"].as_str().unwrap_or("").to_string();
     let expired = signins(api, "expire")?;
     s.ok(
-        "(the test hook expires every pending sign-in and unspent redemption)",
-        expired["logins"].as_u64() >= Some(1) && expired["redemptions"].as_u64() >= Some(1),
+        "(the test hook expires every pending sign-in, unspent redemption, CLI code, and person's wrong codes)",
+        expired["logins"].as_u64() >= Some(1) && expired["redemptions"].as_u64() >= Some(1) && expired["cli_codes"].as_u64() >= Some(1) && expired["cli_misses"].as_u64() >= Some(1),
         &expired,
     );
+    let r = api.type_code(&paul, &untyped)?;
+    let still = api.signed(&untyped_key, "GET", "/api/identities/me", None)?;
+    s.ok("a CLI code past its ten minutes finds no key, swept or not (400), and adds none", r.status == 400 && r.text.contains("is waiting on that code") && still.status == 401, &r);
     api.unsigned("GET", "/auth/login", None)?;
     let r = signins(api, "count")?;
     s.ok(
@@ -922,9 +1058,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let mut last = Value::Null;
     let swept = s.eventually(Duration::from_secs(10), || {
         last = signins(api, "count").unwrap_or(Value::Null);
-        last["logins"] == 1 && last["redemptions"] == 0
+        last["logins"] == 1 && last["redemptions"] == 0 && last["cli_codes"] == 0 && last["cli_misses"] == 1
     });
-    s.ok("the alarm's sweep takes every expired row, and keeps the live sign-in", swept, &last);
+    // paul's miss on the expired code is new, so it stays; the others go
+    s.ok("the alarm's sweep takes every expired row (CLI codes and wrong codes past their window too), and keeps the live sign-in and a fresh miss", swept, &last);
     s.ok("and every live session", last["sessions"] == expired["sessions"], &last);
 
     // Goal: a session past its time is nobody, whether the sweep has taken
@@ -1014,6 +1151,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             && fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label)
             && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
         format!("{r} {members}"),
+    );
+
+    // Goal: an address asks for at most the fleet's CLI codes a minute
+    // (FRAGMENT_CLI_BEGINS_PER_IP_MINUTE: crate::CLI_BEGINS_PER_IP_MINUTE
+    // here), counted apart from every other address. Method: one address's
+    // begins until it is refused; within one minute that is at the limit,
+    // across a minute's turn at most twice it; another address is not
+    // refused. Last in the section: nothing after it here asks for a code
+    // from those addresses.
+    let flood = Keys::generate();
+    let limit = crate::CLI_BEGINS_PER_IP_MINUTE as usize;
+    let mut statuses = vec![];
+    // bounded: two minutes' worth at most
+    while statuses.len() <= 2 * limit && statuses.last() != Some(&429) {
+        statuses.push(api.cli_begin_from(&flood, Some("203.0.113.7"))?.status);
+    }
+    let other = api.cli_begin_from(&flood, Some("203.0.113.8"))?;
+    let first_refused = statuses.iter().position(|st| *st == 429);
+    s.ok(
+        &format!("an address asks for at most {limit} CLI codes a minute (429 past them), counted apart from any other address"),
+        first_refused.is_some_and(|i| (limit..=2 * limit).contains(&i)) && statuses.iter().all(|st| *st == 200 || *st == 429) && other.status == 200,
+        format!("refused first at {first_refused:?} of {} begins; another address: {other}", statuses.len()),
     );
     Ok(())
 }

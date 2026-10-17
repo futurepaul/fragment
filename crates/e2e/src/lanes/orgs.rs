@@ -67,7 +67,9 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         &again,
     );
     if !s.hosted() {
-        let sent = s.mail.sent_to(&alice_email);
+        // her seat's mails (she is mailed of the key she added too: Sign-in)
+        let seat_mail = format!("You have a seat on {}", fragment_core::mail::PRODUCT);
+        let sent: Vec<_> = s.mail.sent_to(&alice_email).into_iter().filter(|m| m.subject == seat_mail).collect();
         s.ok(
             "the platform mails them their seat, once (the replay mails nothing)",
             r.body["mailed"] == true && again.body["mailed"] == false && sent.len() == 1 && sent[0].subject == format!("You have a seat on {}", fragment_core::mail::PRODUCT) && sent[0].text.contains("always-on computer") && sent[0].text.contains("It is yours now"),

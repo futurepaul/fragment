@@ -33,10 +33,16 @@ Every request is signed with this machine's nostr key. Pair it once:
 fragment login --host {{platform}}
 ```
 
-It makes the key and opens a page on the host: your person signs in and
-approves the key, whose ending the page and the terminal both show. On a
-machine without a browser, it prints the link to open anywhere they are
-signed in (`--no-wait` returns at once; run it again after approving).
+It makes the key, asks the host for a code (eight letters, good for ten
+minutes, once), prints it, and opens the host's `/cli` page: your person
+signs in there, types the code, and adds the key, whose ending the page
+and the terminal both show. The page reads nothing from its address, so
+no link anyone sends can add a key: only the code typed from this
+terminal. Then it prints whose account it acts as, by email, and the
+host mails that person each key added, with `fragment keys revoke` for
+one they did not add. On a machine without a browser, it prints the
+code and the page to open anywhere they are signed in (`--no-wait`
+returns at once; run it again once the code is typed).
 The CLI keeps the host `--host` named once it answered, so later
 commands need none; `FRAGMENT_HOST` (an environment's, never saved) or
 `fragment host <url>` names another. The host knows which identity (an npub) each key belongs to:
@@ -162,7 +168,7 @@ its jobs, an agent's owner for its turns (Your ledger, below).
 ## First moves
 
 ```
-fragment login --host {{platform}}        # once per machine: sign in in a browser, approve this machine's key
+fragment login --host {{platform}}        # once per machine: type its code at the host's /cli, signed in
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
 fragment init my-inbox --template inbox   # or: todo | notes | calories | doc | blank

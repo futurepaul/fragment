@@ -189,6 +189,16 @@ pub mod limits {
     /// ten minutes, so the oldest is let go only past about 166 starts a
     /// second, sustained.
     pub const SIGNINS_PENDING_MAX_DEFAULT: u64 = 100_000;
+    /// CLI codes one address may ask for a minute (`POST /cli/begin`) when
+    /// the fleet does not say (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`): a
+    /// person logs in a machine or two; past it, 429 until the next minute.
+    pub const CLI_BEGINS_PER_IP_MINUTE_DEFAULT: u32 = 30;
+    /// CLI codes the whole fleet hands out a minute, at most: in a code's
+    /// ten minutes that is far below the codes the registry keeps, so a
+    /// flood from many addresses is refused before it can push out the
+    /// codes real people are typing.
+    pub const CLI_BEGINS_PER_MINUTE_MAX: u32 = 5_000;
+    const _: () = assert!(CLI_BEGINS_PER_MINUTE_MAX as u64 * 10 < SIGNINS_PENDING_MAX_DEFAULT, "a code's ten minutes of the fleet's begins fit the codes it keeps");
     /// The sessions one browser's platform session keeps on one fragment's
     /// origin (past this, the oldest go first).
     pub const SITE_SESSIONS_PER_FRAGMENT_MAX: u64 = 4;
@@ -1185,6 +1195,18 @@ pub struct Register {
 #[serde(deny_unknown_fields)]
 pub struct AddKey {
     pub proof: String,
+}
+
+/// `POST <platform>/cli/begin`'s answer (signed by a new key, which no one
+/// holds yet): the code its person types at `url`, a page signed in to the
+/// platform, by `expires_at` (ms), once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliCode {
+    /// As shown: `WDJB-MJHT`.
+    pub code: String,
+    pub url: String,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

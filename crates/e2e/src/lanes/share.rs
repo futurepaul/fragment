@@ -56,7 +56,7 @@ fn value_of(r: &Reply, attr: &str) -> String {
 }
 
 /// The form token a sharing page holds.
-fn form_of(r: &Reply) -> String {
+pub(super) fn form_of(r: &Reply) -> String {
     value_of(r, "name=\"form\"")
 }
 
@@ -354,8 +354,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let form = armed(api, &sheet, &owner_session)?;
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &member_name.to_uppercase()), ("role", "viewer")])?;
     s.ok(
-        "an email someone signs in as already makes them a member at once (as typed, in any case), and mails no one",
-        r.status == 200 && r.text.contains(&format!("Added <b>{member_name}</b>")) && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty() && s.mail.sent_to(&member_name).is_empty(),
+        "an email someone signs in as already makes them a member at once (as typed, in any case), and mails them nothing about it",
+        r.status == 200 && r.text.contains(&format!("Added <b>{member_name}</b>")) && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty() && s.mail.sent_to(&member_name).iter().all(|m| !m.text.contains(&chat)),
         &r,
     );
     // Add is for adding: someone in already keeps their role (an Add at

@@ -100,6 +100,11 @@ const ENDED_CLEANUP_IN: Duration = Duration::from_secs(120);
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
+/// The local node's CLI codes an address may ask for a minute
+/// (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`): above what a section's people ask
+/// for in a minute, from the run's one address, and small enough for the
+/// signin section to pass it from another.
+pub const CLI_BEGINS_PER_IP_MINUTE: u32 = 120;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
@@ -572,6 +577,7 @@ impl Suite {
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
+            cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
@@ -835,18 +841,21 @@ pub fn cli_email(npub: &str) -> Result<String> {
     Ok(format!("cli-{}@e2e.test", npub.get(5..17).context("an npub is longer than 17 characters")?))
 }
 
-/// A person signs in through the WorkOS fake and approves the key a
-/// pending `fragment login` names (a key already approved has nothing
-/// pending).
+/// A person signs in through the WorkOS fake and types the code a pending
+/// `fragment login` printed, at the page it names (a key already added has
+/// nothing pending).
 fn approve_login(api: &Api, pending: &Value) -> Result<()> {
     if pending["pending"] != true {
         return Ok(());
     }
     let npub = pending["npub"].as_str().context("a pending login names its key")?;
-    let link = pending["approve"].as_str().context("a pending login answers its approval link")?;
+    let code = pending["code"].as_str().context("a pending login answers its code")?;
+    anyhow::ensure!(pending["url"] == format!("{}/cli", api.base), "a pending login names the platform's /cli, plain: {pending}");
     let session = api.sign_in(&cli_email(npub)?)?;
-    let r = api.approve_link(&session, link)?;
-    anyhow::ensure!(r.status == 200, "the approval: {r}");
+    let typed = api.type_code(&session, code)?;
+    anyhow::ensure!(typed.status == 200, "typing the code: {typed}");
+    let added = api.add_code(&session, code)?;
+    anyhow::ensure!(added.status == 200, "adding its key: {added}");
     Ok(())
 }
 

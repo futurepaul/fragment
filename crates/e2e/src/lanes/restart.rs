@@ -145,9 +145,37 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let tools_held = ai_tools::look_up(&api, &owner, &tooled, "before", json!({ "question": "What is a shard?" }), Duration::from_secs(40))?;
     anyhow::ensure!(tools_held["status"] == "held", "tool loop setup: {tools_held}");
     let tool_calls_before = s.ai.calls().len();
+    // a CLI's code asked for and an own key's sign-in begun, each left
+    // under way across the restart: their state is the registry's and the
+    // computer's rows, and the browser's cookie
+    let pending_key = Keys::generate();
+    let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
+    let connector = api.person()?;
+    let connector_session = api.sign_in(&Api::email_of(&connector))?;
+    let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+    let asked = super::credentials::shell_authorize(&api, &connector_session)?;
+    let bound = super::credentials::own_key_cookie(&asked);
+    let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
+    anyhow::ensure!(made.status == 200 && asked.status == 200 && !pending_code.is_empty() && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
 
     s.stop()?;
     let api = s.start(false)?;
+    let typed = api.type_code(&member_session, &pending_code)?;
+    let pressed = api.add_code(&member_session, &pending_code)?;
+    let theirs = api.signed(&pending_key, "GET", "/api/identities/me", None)?;
+    s.ok(
+        "after a restart a CLI's code asked for before it is still good: typed, it adds its key",
+        typed.status == 200 && pressed.status == 200 && theirs.status == 200 && theirs.body["email"] == MEMBER_EMAIL,
+        json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
+    );
+    let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
+    let state = api.signed(&connector, "GET", "/api/connections", None)?;
+    let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
+    s.ok(
+        "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
+        page.status == 200 && page.text.contains("is connected") && connected,
+        json!({ "page": page.to_string(), "connections": state.body }),
+    );
     let face_row = super::faces::row(&api, &face_owner, &faced);
     let face_got = super::faces::fetched(&api, &face_path)?;
     let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;

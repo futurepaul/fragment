@@ -9,10 +9,12 @@
 //! mints (finite-sites ADR 0025), so one fragment's cookie means nothing on
 //! another. Every session is looked up live on each request, and logging
 //! out ends the platform session and every site session made from it.
-//! A CLI key joins a person when the person approves it in a signed-in
-//! browser: the approval link carries a proof by the key itself (checked
-//! by the router), so approving adds the key at once, and the CLI only
-//! waits until its key works.
+//! A CLI key joins a person when the person types its code in a signed-in
+//! browser (`fragment_core::cli_code`): the key asks for one by signing
+//! `POST /cli/begin` (checked by the router), its person types it at `/cli`
+//! and adds the key with a second press, and the CLI only waits until its
+//! key works. A code is kept as its SHA-256 for ten minutes and spent once,
+//! and a person's wrong codes are counted (`cli_misses`).
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
@@ -26,28 +28,37 @@
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
 //! out of it there.
 //!
-//! Every sign-in table is bounded: a pending sign-in is kept through the
-//! fleet's next `FRAGMENT_SIGNINS_PENDING_MAX` starts (default
+//! Every sign-in table is bounded: a pending sign-in, and a CLI's code, is
+//! kept through the fleet's next `FRAGMENT_SIGNINS_PENDING_MAX` starts of
+//! its kind (default
 //! `limits::SIGNINS_PENDING_MAX_DEFAULT`), a platform session keeps its
 //! newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and its newest
 //! `SITE_SESSIONS_PER_FRAGMENT_MAX` top-level sessions and as many frame
-//! sessions on each fragment, and a person their newest `CONSENTS_MAX` yeses.
+//! sessions on each fragment, a person their newest `CONSENTS_MAX` yeses,
+//! `cli_misses` one row a person, forgotten with its window, and a key its
+//! newest `cli_code::CODES_PER_KEY_MAX` codes; the begins of each address,
+//! and of the fleet, are counted a minute (`RegistryCell::cli_begins`).
 //! Expired rows go in batches on the Registry's alarm, never on a request:
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
 
-use fragment_core::levers;
+use fragment_core::cli_code::{self, Misses};
+use fragment_core::{levers, roundtrip};
 use fragment_proto::Subject;
 use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Began, Begin, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint,
-    Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
+    LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
 const LOGIN_TTL_MS: i64 = 10 * 60 * 1000;
+const _: () = assert!(LOGIN_TTL_MS == roundtrip::TTL_S * 1000, "a sign-in lives as long as the cookie binding it");
+/// Draws of a CLI's code, at most: one almost always does (a draw comes
+/// short, or meets a code waiting, with odds far below one in a million).
+const CLI_CODE_DRAWS_MAX: usize = 4;
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 const REDEEM_TTL_MS: i64 = 60 * 1000;
 /// Subjects one person may link, and an email's length.
@@ -85,6 +96,13 @@ CREATE TABLE IF NOT EXISTS consents (
 CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
 CREATE TABLE IF NOT EXISTS e2e_days (
   day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS cli_codes (
+  code TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL, asked_place TEXT, asked_agent TEXT);
+CREATE INDEX IF NOT EXISTS cli_codes_created ON cli_codes (created_at);
+CREATE INDEX IF NOT EXISTS cli_codes_key ON cli_codes (key);
+CREATE TABLE IF NOT EXISTS cli_misses (
+  identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS cli_misses_since ON cli_misses (since);
 ";
 
 pub(super) fn sha(token: &str) -> String {
@@ -228,6 +246,33 @@ struct EarliestRow {
     login: Option<i64>,
     redeem: Option<i64>,
     session: Option<i64>,
+    cli_code: Option<i64>,
+    cli_miss: Option<i64>,
+}
+
+/// `cli_codes` (a code waiting).
+#[derive(Deserialize)]
+struct CliCodeRow {
+    key: String,
+    created_at: i64,
+    asked_place: Option<String>,
+    asked_agent: Option<String>,
+}
+
+/// A code a person typed, found: whom the session names, the code as
+/// kept, its key, and what asked for it.
+struct Typed {
+    live: LiveSession,
+    code: String,
+    key: String,
+    asked: cli_code::Asked,
+}
+
+/// `cli_misses` (a person's wrong codes).
+#[derive(Deserialize)]
+struct MissRow {
+    misses: i64,
+    since: i64,
 }
 
 pub(super) fn alarm_at(at_ms: i64) -> ScheduledTime {
@@ -253,7 +298,18 @@ impl RegistryCell {
             .len(),
             self.rows::<IgnoredAny>(
                 "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
-                vec![SqlStorageValue::Integer(now), batch],
+                vec![SqlStorageValue::Integer(now), batch.clone()],
+            )?
+            .len(),
+            // a code no longer `cli_code::live`, and misses past their window
+            self.rows::<IgnoredAny>(
+                "DELETE FROM cli_codes WHERE code IN (SELECT code FROM cli_codes WHERE created_at <= ? LIMIT ?) RETURNING code",
+                vec![SqlStorageValue::Integer(now - cli_code::TTL_MS), batch.clone()],
+            )?
+            .len(),
+            self.rows::<IgnoredAny>(
+                "DELETE FROM cli_misses WHERE identity IN (SELECT identity FROM cli_misses WHERE since <= ? LIMIT ?) RETURNING identity",
+                vec![SqlStorageValue::Integer(now - cli_code::TTL_MS), batch],
             )?
             .len(),
         ];
@@ -267,11 +323,13 @@ impl RegistryCell {
         let r = self
             .row::<EarliestRow>(
                 "SELECT (SELECT MIN(created_at) FROM logins) AS login, (SELECT MIN(expires_at) FROM redemptions) AS redeem,
-                        (SELECT MIN(expires_at) FROM sessions) AS session",
+                        (SELECT MIN(expires_at) FROM sessions) AS session, (SELECT MIN(created_at) FROM cli_codes) AS cli_code,
+                        (SELECT MIN(since) FROM cli_misses) AS cli_miss",
                 vec![],
             )?
             .ok_or_else(|| CellError::host("the sweep's MIN answered no row"))?;
-        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session].into_iter().flatten().min();
+        let cli = [r.cli_code, r.cli_miss].into_iter().flatten().map(|at| at + cli_code::TTL_MS);
+        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session].into_iter().flatten().chain(cli).min();
         Ok(earliest.map(|at| at + SWEEP_SLACK_MS))
     }
 
@@ -309,7 +367,8 @@ impl RegistryCell {
     fn signin_counts(&self) -> CellResult<SigninCounts> {
         self.row::<SigninCounts>(
             "SELECT (SELECT COUNT(*) FROM logins) AS logins, (SELECT COUNT(*) FROM redemptions) AS redemptions,
-                    (SELECT COUNT(*) FROM sessions) AS sessions",
+                    (SELECT COUNT(*) FROM sessions) AS sessions, (SELECT COUNT(*) FROM cli_codes) AS cli_codes,
+                    (SELECT COUNT(*) FROM cli_misses) AS cli_misses",
             vec![],
         )?
         .ok_or_else(|| CellError::host("COUNT answered no row"))
@@ -322,6 +381,8 @@ impl RegistryCell {
                 let now = js::now_ms();
                 self.exec("UPDATE logins SET created_at = ?", vec![SqlStorageValue::Integer(now - LOGIN_TTL_MS)])?;
                 self.exec("UPDATE redemptions SET expires_at = ?", vec![SqlStorageValue::Integer(now)])?;
+                self.exec("UPDATE cli_codes SET created_at = ?", vec![SqlStorageValue::Integer(now - cli_code::TTL_MS)])?;
+                self.exec("UPDATE cli_misses SET since = ?", vec![SqlStorageValue::Integer(now - cli_code::TTL_MS)])?;
             }
             SigninsHook::Sweep => self.state.storage().set_alarm(alarm_at(js::now_ms())).await?,
             SigninsHook::ExpireSession(token) => {
@@ -413,7 +474,7 @@ impl RegistryCell {
 
     /// WorkOS's code, exchanged with the deployment's API key, then the sign-in
     /// finished. A code is single-use at WorkOS; the state here.
-    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
+    pub(super) async fn exchange(&self, b: ExchangeIn) -> CellResult<Exchanged> {
         if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
             return Err(CellError::invalid("an exchange names its state, code, and client"));
         }
@@ -756,13 +817,114 @@ impl RegistryCell {
         Ok(Redeemed { token, return_to: row.return_to })
     }
 
-    /// A key the signed-in person approved joins them (the router checked
-    /// the key's own proof in the approval link).
-    pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<()> {
+    /// A CLI's new key asks for the code its person types (the router
+    /// checked its signature): kept as its hash for `cli_code::TTL_MS`, with
+    /// what asked (`cli_code::Asked`), the key's newest `cli_code::
+    /// CODES_PER_KEY_MAX` and the fleet's newest `signins_pending_max`
+    /// kept, as `logins` are. Each address's begins and the fleet's are
+    /// counted a minute (`cli_begins`), so a flood cannot push out the
+    /// codes people are typing. A key that is someone's, or was, has
+    /// nothing to be added to.
+    pub(super) async fn cli_begin(&self, b: CliBegin) -> CellResult<CliBegun> {
         check_key(&b.key)?;
-        let person = self.live_session(&b.token, None, false)?.session.identity;
-        self.insert_key(&person.id, &b.key, &person.id)?;
-        Ok(())
+        if b.from.is_empty() || b.from.len() > CliBegin::FROM_MAX_BYTES {
+            return Err(CellError::invalid("a begin names the address it came from"));
+        }
+        let now = js::now_ms();
+        if !self.cli_begins.borrow_mut().allow(&b.from, now) {
+            return Err(CellError::new(ErrorCode::RateLimited, "too many CLI codes asked for this minute: wait a minute, then run `fragment login` again"));
+        }
+        match self.key_row(&b.key)? {
+            Some(row) if row.active() => return Err(conflict("this key is someone's already: `fragment whoami` says whose")),
+            Some(_) => return Err(conflict("this key was revoked, and a revoked key stays revoked: `fragment login --force` makes a new one")),
+            None => {}
+        }
+        self.sweep_by(now + cli_code::TTL_MS).await?;
+        let cap = i64::try_from(self.cfg.signins_pending_max).expect("the cap fits a rowid");
+        let opt = |v: Option<&str>| v.map_or(SqlStorageValue::Null, |s| s.into());
+        // bounded: CLI_CODE_DRAWS_MAX draws, one almost always enough
+        for _ in 0..CLI_CODE_DRAWS_MAX {
+            let Some(code) = cli_code::from_random(&js::random_bytes::<{ cli_code::RANDOM_BYTES }>()) else { continue };
+            let made = self.row::<RowidRow>(
+                "INSERT INTO cli_codes (code, key, created_at, asked_place, asked_agent) VALUES (?, ?, ?, ?, ?) ON CONFLICT (code) DO NOTHING RETURNING rowid AS n",
+                vec![sha(&code).into(), b.key.as_str().into(), SqlStorageValue::Integer(now), opt(b.asked.place.as_deref()), opt(b.asked.agent.as_deref())],
+            )?;
+            // a code another key waits on: draw again
+            let Some(made) = made else { continue };
+            // bounded as `logins` is (`begin`): the newest within the cap's rowids
+            self.exec("DELETE FROM cli_codes WHERE rowid <= ?", vec![SqlStorageValue::Integer(made.n.saturating_sub(cap))])?;
+            // and a few a key: a `fragment login` run again asks again, and
+            // its older codes go first
+            self.exec(
+                "DELETE FROM cli_codes WHERE rowid IN (SELECT rowid FROM cli_codes WHERE key = ? ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
+                vec![b.key.as_str().into(), SqlStorageValue::Integer(cli_code::CODES_PER_KEY_MAX as i64)],
+            )?;
+            assert!(cli_code::valid(&code), "a code kept is one a person can type");
+            return Ok(CliBegun { code, expires_at: now + cli_code::TTL_MS });
+        }
+        Err(CellError::host(format!("{CLI_CODE_DRAWS_MAX} draws made no code")))
+    }
+
+    /// The code a signed-in person typed (`cli_code::normalize`), with the
+    /// key it names, what asked for it, and the session's person: a code no
+    /// CLI waits on (a wrong one, used, or expired) is a miss, and past
+    /// `cli_code::MISSES_MAX` in a window the person waits, whatever they
+    /// type.
+    async fn typed_code(&self, token: &str, typed: &str) -> CellResult<Typed> {
+        let live = self.live_session(token, None, false)?.session;
+        if live.identity.kind != IdentityKind::Person {
+            return Err(CellError::new(ErrorCode::Forbidden, "only a person adds a CLI's key"));
+        }
+        let who = live.identity.id.as_str();
+        let now = js::now_ms();
+        let misses = self
+            .row::<MissRow>("SELECT misses, since FROM cli_misses WHERE identity = ?", vec![who.into()])?
+            .map(|r| Misses { count: u32::try_from(r.misses.max(0)).unwrap_or(u32::MAX), since_ms: r.since });
+        if !cli_code::may_try(misses, now) {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("{} wrong codes in ten minutes: wait a while, then type the one your terminal shows", cli_code::MISSES_MAX)));
+        }
+        let found = match cli_code::normalize(typed) {
+            Some(code) => self
+                .row::<CliCodeRow>(
+                    "SELECT key, created_at, asked_place, asked_agent FROM cli_codes WHERE code = ? AND created_at > ?",
+                    vec![sha(&code).into(), SqlStorageValue::Integer(now - cli_code::TTL_MS)],
+                )?
+                .map(|row| (code, row)),
+            None => None,
+        };
+        let Some((code, row)) = found else {
+            let next = cli_code::missed(misses, now);
+            self.sweep_by(next.since_ms + cli_code::TTL_MS).await?;
+            self.exec(
+                "INSERT INTO cli_misses (identity, misses, since) VALUES (?, ?, ?) ON CONFLICT (identity) DO UPDATE SET misses = excluded.misses, since = excluded.since",
+                vec![who.into(), SqlStorageValue::Integer(i64::from(next.count)), SqlStorageValue::Integer(next.since_ms)],
+            )?;
+            return Err(CellError::invalid("No `fragment login` is waiting on that code. Check it against your terminal: a code is good for ten minutes, once."));
+        };
+        if !npub::is_hex_key(&row.key) {
+            return Err(CellError::host(format!("cli_codes.key {:?} is not 64 hex", row.key)));
+        }
+        assert!(cli_code::live(row.created_at, now), "a code found is one still to be typed");
+        let asked = cli_code::Asked { at_ms: row.created_at, place: row.asked_place, agent: row.asked_agent };
+        Ok(Typed { live, code, key: row.key, asked })
+    }
+
+    /// The key a typed code names, for the person's page to show before
+    /// they add it, with what asked for it.
+    pub(super) async fn cli_code_of(&self, b: CliCodeOf) -> CellResult<CliCoded> {
+        let t = self.typed_code(&b.token, &b.code).await?;
+        Ok(CliCoded { code: t.code, key: t.key, identity: t.live.identity.id, email: t.live.email, asked: t.asked })
+    }
+
+    /// A typed code spent: its key joins the signed-in person, and every
+    /// code it had waiting goes (a code adds a key once).
+    pub(super) async fn add_by_code(&self, b: ApproveKey) -> CellResult<KeyAdded> {
+        let t = self.typed_code(&b.token, &b.code).await?;
+        let person = t.live.identity.id.as_str();
+        self.insert_key(person, &t.key, person)?;
+        self.exec("DELETE FROM cli_codes WHERE key = ?", vec![t.key.as_str().into()])?;
+        assert_eq!(self.key_row(&t.key)?.map(|row| row.identity), Some(person.to_string()), "an added key is the person's");
+        Ok(KeyAdded { key: t.key, email: t.live.email, asked: t.asked })
     }
 
     /// Whether a person signs in (and so may hold no key).

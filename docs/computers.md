@@ -1276,22 +1276,32 @@ offered (decision 60 says why, with the vendors' words).
 
 - **Connecting** (`fragment_core::own_signin`, OpenRouter's PKCE key
   exchange; docs/api.md, Connections):
-  1. Settings' Connect calls `POST /api/connections/{provider}/authorize`.
-     The person's computer makes a nonce and a verifier and keeps them for
-     10 minutes, the verifier sealed (at most 8 sign-ins under way; past
-     that, 429). The answer is the provider's page, which the shell opens
-     in a window: the row's `authorize`, with the platform's callback, the
-     verifier's S256 challenge, the state (`<computer's 24 hex>.<nonce>`)
-     and the key's label (`Fragment`).
+  1. Settings' Connect calls `POST /api/connections/{provider}/authorize`
+     with the shell's session (a request signed by a key is refused: the
+     sign-in is bound to a browser). The person's computer makes a nonce
+     and a verifier and keeps them for 10 minutes, the verifier sealed (at
+     most 8 sign-ins under way; past that, 429), and the answer sets the
+     browser's `fragment_own_key` cookie to the nonce. The answer is the
+     provider's page, which the shell opens in a window: the row's
+     `authorize`, with the platform's callback, the verifier's S256
+     challenge, the state (the nonce: it names no computer) and the key's
+     label (`Fragment`).
   2. OpenRouter asks the person and makes a key that is theirs. It sends
      the browser back to `GET /api/connections/{provider}/callback?code=…
      &state=…` on the platform's host.
-  3. The state names the computer and the sign-in it began, once. No
-     session is needed, and the key can reach no one else's computer. A
-     state replayed, expired, made for another provider, or never made is
-     a page that says to connect again, and nothing is exchanged. A
-     person who declined comes back with no code: the sign-in is let go
-     and nothing is set.
+  3. The callback finishes only in the browser that began the sign-in
+     (its cookie holds the state) and signed in to the platform; the
+     computer is that person's own, never one a URL names (audit H3,
+     2026-10-16: the state once named the computer and took no session,
+     so a sign-in an attacker began and sent to someone sealed that
+     person's key into the attacker's computer). Sent to anyone else, it
+     seals nothing anywhere and stays its beginner's to finish. A state
+     replayed, expired, made for another provider, or never made is
+     refused, and nothing is exchanged. A person who declined comes back
+     with no code: the sign-in is let go and nothing is set. Each refusal
+     is a 303 to `…/callback?refused=<word>`, a page that says to connect
+     again at an address that holds no code. A browser holds one own-key
+     sign-in at a time: a second Connect replaces the first's binding.
   4. The platform exchanges the code with the verifier at the row's
      `exchange`. Their computer seals the key as `PUT …/key` does, and the
      page says it is connected. No answer ever holds the key.

@@ -276,6 +276,72 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
 
+## A connection's consent is not bound to the browser that began it
+
+- **Observed:** the 2026-10-16 security audit's round-trip work (H3).
+  Every round trip that comes back to the platform now finishes only in
+  the browser that began it (`auth::trip_bound`). A connection's does not
+  come back: `POST /api/connections/{provider}/authorize` asks WorkOS
+  Pipes for a consent URL for the person's WorkOS user (`POST
+  /data-integrations/{provider}/authorize {user_id}`, spike S5), the shell
+  opens it, and WorkOS finishes the provider's OAuth itself. WorkOS's docs
+  (the Pipes guide, the authorize reference, the OpenAPI spec,
+  workos-node) say nothing of who may complete it; its own Pipes widget
+  binds the flow to the opener's browser with a handoff token (an
+  internal GraphQL mutation, `requireHandoff: true`) that the REST
+  endpoint does not offer. Paul's test, 2026-10-17, settled it: in the old
+  WorkOS "Fragment" project's Staging environment
+  (environment_01M39VWAVVQ05KTFQ9VR22GAQV), a REST consent link for user A
+  (user_01M3ZQ6R42PT5581BTPT4VHE85: an `/authorize-redirect` URL, no
+  `return_to`), opened in an Incognito window signed in to nothing but a
+  different Google account, showed Google's consent; Allow completed it,
+  and WorkOS emitted `pipes.connected_account.connected`
+  (event_01M551YAQEBPM4EBX8AJJVGJYN, 13:48:39Z), attaching the other
+  person's Google to user A, with `established_by_user_id` = user A. The
+  REST consent is bound to no one.
+- **Shortcut:** none in our code: we cannot bind what never comes back to
+  us, and a `return_to` of our own would bind it only if WorkOS gave back
+  something the beginner cannot know, which it does not document. Nothing
+  is exposed today: the preview's WorkOS project has no Google Pipes
+  provider yet, and no deployment offers a connection whose consent is
+  unbound. The binding must exist before Google (or any connection) is
+  enabled in a deployment's WorkOS project.
+- **Risk:** confirmed, not hypothetical. Whoever holds a consent link gets
+  the account of whoever approves it: someone who can connect accounts
+  sends another person their own link, that person approves at Google,
+  and their Google (Paul's test granted gmail.modify and gmail.send,
+  Drive, Calendar, Docs, Sheets and Contacts) is attached to the sender's
+  WorkOS user, which the sender's agents then read and write through
+  their swap. Deleting the connected account at WorkOS does not revoke it
+  at Google.
+- **First proof:** done, Paul's test above (2026-10-17). Any deployment
+  that enables a connection provider reproduces it with one link.
+- **Delete when:** either WorkOS offers a bound REST flow (`require_handoff`
+  on `authorize`, with its token delivered to the browser that began it;
+  or a verifiable one-time code appended to `return_to` that our `Bound`
+  helper checks against the beginner's cookie and session before the
+  connection may be used), or the platform runs the provider's OAuth
+  itself under the `Bound` helper as it does an own key's; in either case
+  with the H3-style e2e (the link opened in another browser, as another
+  person, connects nothing for anyone), and before any deployment enables
+  the provider.
+
+## An own key's sign-in finishes at the person's one computer
+
+- **Observed:** the audit's H3 fix (2026-10-17). An own key's callback
+  asks the signed-in person's computer for the sign-in it began, and that
+  computer is `default_computer_of(person)` (`computer::SignedIn::of`):
+  one computer per person (decision 13), never one a URL names.
+- **Shortcut:** none today; the binding rests on that one-to-one.
+- **Risk:** once a person has several computers, the callback would ask
+  only the first, and a sign-in begun from another would come back as
+  "not under way". Naming the computer in the URL again would reopen H3.
+- **First proof:** a person's second computer, connecting an own key.
+- **Delete when:** a person may hold several computers: the sign-in's
+  computer is kept with its state where the callback can find it from the
+  bound state alone (the registry, or a cookie of the binding's), never
+  from the URL, with the H3 checks run against it.
+
 ## Running runs are checked a few at a time
 
 - **Observed:** phase 2 slice D. A run whose Workflow ended without

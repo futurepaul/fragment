@@ -1651,7 +1651,7 @@ impl ComputerCell {
         if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
         }
-        let nonce = own_signin::b64url(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+        let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
         let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
         let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), verifier.as_bytes()).await?;
         self.exec(
@@ -1872,7 +1872,8 @@ impl ComputerCell {
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
-    /// computer yet).
+    /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
+    /// past its time.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         let id = self.must(MetaKey::Id)?;
@@ -1916,6 +1917,13 @@ impl ComputerCell {
                 self.set_meta(MetaKey::AliveCheck, &json!({ "ms": ms, "freeze": freeze }).to_string())?;
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
+            }
+            "expire-sign-ins" => {
+                // every own-key sign-in under way is past its time, as ten
+                // minutes would leave it: its row stays, refused by its expiry
+                self.exec("UPDATE own_signins SET expires_at = ?", vec![js::now_ms().into()])?;
+                let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+                Ok(json!({ "computer": id, "expiredSignIns": pending }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
@@ -2430,6 +2438,46 @@ impl ComputerCell {
 /// The internal call `path` with `body` on computer `id`.
 pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
+}
+
+/// `computer/signed-in` as the router asks it: an own-key round trip
+/// coming back to the browser that began it, for its person, whose
+/// computer began it. It is a finished round trip, so only `of` makes one,
+/// from its `Bound`: its fields are private and it is not `Deserialize`
+/// (the computer decodes the same body as a `SignedInAsk`).
+#[derive(serde::Serialize)]
+pub(crate) struct SignedIn {
+    #[serde(skip)]
+    computer: String,
+    provider: String,
+    nonce: String,
+}
+
+impl SignedIn {
+    /// The own-key sign-in `bound` finishes, for `person`, to `provider`:
+    /// asked of the person's own computer, never one a URL names.
+    pub(crate) fn of(bound: crate::auth::Bound, person: &fragment_proto::Identity, provider: &str) -> SignedIn {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
+        assert_eq!(person.kind, fragment_proto::IdentityKind::Person, "an own key's sign-in is a person's");
+        SignedIn { computer: fragment_core::computer::default_computer_of(&person.id), provider: provider.to_string(), nonce: bound.state().to_string() }
+    }
+
+    /// The computer it is asked of.
+    pub(crate) fn computer(&self) -> &str {
+        &self.computer
+    }
+}
+
+/// The sign-in `signed` finishes, taken from its computer (once, and gone
+/// whatever comes of it): its verifier.
+pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
+    let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
+    let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();
+    if !own_signin::valid_token(&verifier) {
+        return Err(CellError::host("the computer kept a sign-in with no verifier"));
+    }
+    Ok(verifier)
 }
 
 fn view_of(v: Value) -> CellResult<ComputerView> {

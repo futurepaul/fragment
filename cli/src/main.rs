@@ -56,16 +56,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Make a nostr key (or use the one you have) and add it to you: sign
-    /// in on the host in a browser and approve it there (--force makes a
-    /// new key)
+    /// Make a nostr key (or use the one you have) and add it to you: it
+    /// prints a code, which you type at the host's /cli page, signed in, in
+    /// a browser (--force makes a new key)
     Login {
         #[arg(long)]
         force: bool,
-        /// Print the approval link and return (run `fragment login` again after approving)
+        /// Print the code and the page to type it at, and return (run `fragment login` again once it is typed)
         #[arg(long)]
         no_wait: bool,
-        /// Print the link instead of opening a browser
+        /// Print the page's address instead of opening a browser
         #[arg(long)]
         no_browser: bool,
     },
@@ -980,40 +980,47 @@ fn run(cli: Cli) -> Result<()> {
                 save_config("host", &c.host)?;
             }
             if done.is_none() {
-                // the link carries this key's own proof (ten minutes good):
-                // approving it in a signed-in browser adds the key at once
+                // a code for the person to type at the platform's `/cli`,
+                // signed in (ten minutes good, once): no link approves a key,
+                // only what they type from this terminal
+                let begun: fragment_proto::CliCode = c.call_as(c.post_json("/cli/begin", &json!({}))?)?;
+                // the page to type it at is this host's own: never one an
+                // answer names, which the CLI would open in a browser
+                let page = format!("{}/cli", c.host);
+                // and the code is one a person can type, as the CLI shows it,
+                // nothing else (a host's answer is printed to a terminal)
+                let code = fragment_core::cli_code::normalize(&begun.code).map(|k| fragment_core::cli_code::display(&k)).ok_or_else(|| anyhow!("{} answered no code a person can type", c.host))?;
                 let npub = key.npub();
-                let approve = format!("{}/cli/approve", c.host);
-                let proof = key.nip98_header("POST", &approve, &[]);
-                let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
-                let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
-                    json_exit(j, &json!({ "npub": npub, "pending": true, "approve": url }));
-                    println!("approve this key in a browser where you are signed in (the link is good for ten minutes):\n  {url}");
-                    println!("its key ends in {tail}; then run `fragment login` again");
+                    json_exit(j, &json!({ "npub": npub, "pending": true, "code": code, "url": page, "expiresAt": begun.expires_at }));
+                    println!("open {} in a browser where you are signed in, and type this code (good for ten minutes, once):\n  {}", page, code);
+                    println!("the page should show a key ending in {tail}; then run `fragment login` again");
                     return Ok(());
                 }
-                eprintln!("sign in and approve this key (the link is good for ten minutes):\n  {url}\nthe page should show a key ending in {tail}");
+                eprintln!("open {}, sign in, and type this code (good for ten minutes, once):\n  {}\nthe page should show a key ending in {tail}", page, code);
                 if !no_browser {
-                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &url);
+                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &page);
                 }
                 let t0 = std::time::Instant::now();
                 while done.is_none() {
                     if t0.elapsed() > std::time::Duration::from_secs(600) {
-                        anyhow::bail!("no approval in ten minutes; run `fragment login` again for a fresh link");
+                        anyhow::bail!("no one typed the code in ten minutes; run `fragment login` again for a fresh one");
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     done = me()?;
                 }
             }
             let v = done.expect("approved");
-            // never echo the key itself
+            // whom it acts as, by the email they sign in with: a key added
+            // to someone else's account shows here at once (never echo the
+            // key itself)
             json_exit(
                 j,
-                &json!({ "npub": key.npub(), "id": v.id, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
+                &json!({ "npub": key.npub(), "id": v.id, "email": v.email, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
             );
-            println!("logged in as {} on {}", v.id, c.host);
+            println!("logged in as {} on {}", v.email.as_deref().unwrap_or(&v.id), c.host);
+            println!("identity: {}", v.id);
             println!("key: {}", key.npub());
             return Ok(());
         }
@@ -2431,14 +2438,23 @@ mod tests {
     fn a_platform_that_knows_no_key() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        let base = origin.clone();
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
                 while !head.ends_with(b"\r\n\r\n") && std::io::Read::read(&mut stream, &mut byte).unwrap_or(0) == 1 {
                     head.push(byte[0]);
                 }
-                let body = r#"{"error":"unauthenticated","message":"this key belongs to no one"}"#;
-                let answer = format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                // its body read, so closing never resets what it answers
+                let head = String::from_utf8_lossy(&head).to_string();
+                let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                let _ = std::io::Read::read_exact(&mut stream, &mut vec![0u8; length.min(1 << 16)]);
+                // no one holds the key yet; it asks for a code to be typed
+                let (status, body) = match head.starts_with("POST /cli/begin ") {
+                    true => ("200 OK", json!({ "code": "WDJB-MJHT", "url": format!("{base}/cli"), "expiresAt": 0 }).to_string()),
+                    false => ("401 Unauthorized", r#"{"error":"unauthenticated","message":"this key belongs to no one"}"#.to_string()),
+                };
+                let answer = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
                 let _ = std::io::Write::write_all(&mut stream, answer.as_bytes());
             }
         });
@@ -2448,7 +2464,8 @@ mod tests {
     /// Goal: `fragment login --host` is typed once: the host it named,
     /// once it answered, is the config's, so every later command (and the
     /// next `fragment login`, after a `--no-wait`) calls it. Valid: a named
-    /// host that answers as a platform does (401: this key is no one's yet)
+    /// host that answers as a platform does (401: this key is no one's yet;
+    /// its code to type, from `POST /cli/begin`)
     /// is kept, beside the key. Invalid: a named host that does not answer
     /// is not kept, nor is a FRAGMENT_HOST (the environment's to keep
     /// naming). Method: a copy of this test runs each login with a HOME of

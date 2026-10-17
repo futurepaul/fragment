@@ -126,6 +126,9 @@ pub struct Config {
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: u64,
+    /// `FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`: CLI codes one address may ask
+    /// for a minute (default `CLI_BEGINS_PER_IP_MINUTE_DEFAULT`).
+    pub cli_begins_per_ip_minute: u32,
     /// `FRAGMENT_TEST_SECRET` (a Worker secret): the test levers
     /// (`/api/test/*`) answer requests that carry it, on a local fleet or a
     /// branch deployment only (`fragment_core::levers`). Without it they
@@ -306,6 +309,10 @@ impl Config {
                 // the registry counts rows as i64; a larger setting means "no cap to speak of"
                 .map(|n| n.min(i64::MAX as u64))
                 .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
+            cli_begins_per_ip_minute: var(env, "FRAGMENT_CLI_BEGINS_PER_IP_MINUTE")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n >= 1)
+                .unwrap_or(fragment_proto::limits::CLI_BEGINS_PER_IP_MINUTE_DEFAULT),
             test_hooks: test_secret.is_some(),
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,

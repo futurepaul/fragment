@@ -313,6 +313,11 @@ impl Resp {
     }
 }
 
+/// What the CLI calls itself to a host: its name, version, and system.
+pub fn user_agent() -> String {
+    format!("fragment-cli/{} ({}; {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH)
+}
+
 impl Client {
     pub fn new(host: &str, signer: impl Into<Signer>) -> Self {
         Self {
@@ -320,8 +325,11 @@ impl Client {
             signer: signer.into(),
             verbose: false,
             // every request sets its own total timeout (`timeout_for`)
+            // named, so a person adding this machine's key sees what asked
+            // (`/cli`'s confirm page and its mail: the begin's agent)
             http: reqwest::blocking::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                .user_agent(user_agent())
                 .build()
                 .expect("the HTTP client builds (its TLS backend is compiled in)"),
             names: Default::default(),

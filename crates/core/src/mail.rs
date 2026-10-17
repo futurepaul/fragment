@@ -163,6 +163,47 @@ pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i
     }
 }
 
+/// How a key came to be added to a person, as the mail about it says.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyHow<'a> {
+    /// A CLI's, its code typed at the platform's `/cli` by the person
+    /// (`cli_code`): what asked for that code.
+    Code(&'a crate::cli_code::Asked),
+    /// Added by a key the person already held (`POST /api/identities/{id}/
+    /// keys`: `fragment keys rotate`, or any key add), named by its npub.
+    ByKey(&'a str),
+}
+
+/// The mail a person is sent on every key added to them (docs/api.md,
+/// Sign-in): which key (`npub`, its ending as the page showed it), how it
+/// came (for a code, where and when it was asked for, as of `now_ms`, and
+/// never to type one someone sent), where, and how to revoke it from a
+/// machine they trust.
+pub fn key_added(to: &str, npub: &str, platform: &str, how: KeyHow<'_>, now_ms: i64) -> Mail {
+    assert!(npub.starts_with("npub1") && npub.len() > 8, "a key is named by its npub");
+    let tail = &npub[npub.len() - 8..];
+    let came = match how {
+        KeyHow::Code(asked) => format!(
+            "a fragment CLI's, added when its code was typed at {platform}/cli, signed in as you. The code was {}.\n\n{}",
+            asked.line(now_ms),
+            crate::cli_code::NEVER_SENT
+        ),
+        KeyHow::ByKey(by) => {
+            assert!(by.starts_with("npub1") && by.len() > 8, "a key is named by its npub");
+            format!("added by your key ending in {} (`fragment keys rotate` adds one this way).", &by[by.len() - 8..])
+        }
+    };
+    Mail {
+        to: to.to_string(),
+        subject: format!("A key ending in {tail} was added to your {PRODUCT} account"),
+        text: format!(
+            "A key ending in {tail} can now act as you on {platform}: {came}\n\n\
+             The whole key: {npub}\n\n\
+             If this was not you, revoke it from a machine you trust:\n  fragment keys revoke {npub}\n"
+        ),
+    }
+}
+
 fn truncated(s: &str) -> String {
     s.chars().take(80).collect()
 }
@@ -300,5 +341,27 @@ mod tests {
         assert_eq!(one_line("  a\tb\n", 10), "a b");
         assert_eq!(one_line("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}\u{2026}");
         assert_eq!(one_line("abc", 3), "abc");
+    }
+
+    /// Goal: the key-added mail names the key (its ending, as the page
+    /// showed it, and whole), the platform, and the command that revokes
+    /// it; and it is a mail the platform may send.
+    #[test]
+    fn a_key_added_names_the_key_and_how_to_revoke_it() {
+        let (npub, by) = ("npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmyk3ytl", "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzold4key");
+        let t = 1_790_000_000_000;
+        let asked = crate::cli_code::Asked::of(t, Some("Lagos"), Some("NG"), Some("fragment-cli/0.14.1 (linux; x86_64)"));
+        let by_code = key_added("bea@example.com", npub, "https://finite.chat", KeyHow::Code(&asked), t + 3 * 60_000);
+        let by_key = key_added("bea@example.com", npub, "https://finite.chat", KeyHow::ByKey(by), t);
+        for m in [&by_code, &by_key] {
+            assert_eq!(refusal(m), None);
+            assert_eq!(m.to, "bea@example.com");
+            assert!(m.subject.contains(&format!("ending in {}", &npub[npub.len() - 8..])));
+            assert!(m.text.contains("https://finite.chat") && m.text.contains(&format!("fragment keys revoke {npub}")) && m.text.contains(&npub[npub.len() - 8..]));
+        }
+        // worded by how it came: a code says where and when it was asked
+        // for, and never to type one someone sent; a key add names the key
+        assert!(by_code.text.contains("asked 3 minutes ago from Lagos, NG, by fragment-cli/0.14.1") && by_code.text.contains(crate::cli_code::NEVER_SENT) && by_code.text.contains("https://finite.chat/cli"));
+        assert!(by_key.text.contains("added by your key ending in zold4key") && !by_key.text.contains("code"));
     }
 }

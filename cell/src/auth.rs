@@ -23,11 +23,20 @@
 //!                                 shell's tabs), as Fetch Metadata says it is: a frame redemption
 //!                                 bound to the platform's origin; a note in the frame, and a word
 //!                                 to the page, where a tab must ask first or no one is signed in
-//!   GET  /cli?key=<npub>&proof=   the signed-in person approves a CLI key: the link
-//!                                 carries the key's own proof (a NIP-98 event by it for
-//!                                 `POST <platform>/cli/approve`, ten minutes good), so
-//!                                 approving adds the key at once
-//!   POST /cli/approve             (the form)
+//!   POST /cli/begin               a CLI's new key (signing this, NIP-98) asks for a code
+//!                                 (`fragment_core::cli_code`): ten minutes good, once
+//!   GET  /cli                     the signed-in person types that code; the page reads
+//!                                 nothing from its URL, so no link approves a key
+//!   POST /cli                     (the code typed) → "A CLI wants to act as you", the
+//!                                 key's ending, and a press to add it
+//!   POST /cli/approve             (that press) the code spent, the key the person's at
+//!                                 once; mailed to them (`mail_key_added`)
+//!
+//! Every round trip that leaves the platform and comes back (a sign-in, a
+//! link, a switch, an own key's sign-in: connections.rs) finishes only in
+//! the browser that began it: its state is bound by a cookie
+//! (`trip_begun`), and its callback finishes it only through
+//! `trip_bound`'s `Bound` (`fragment_core::roundtrip`).
 //!
 //! The rest of a person's account (their picture, email, fragments,
 //! credit) is the API's, which the shell calls with this session
@@ -63,7 +72,10 @@
 //! navigates to there is a page (`refused`): a top-level visit no session
 //! admits goes through `/auth/fragment` and back.
 
-use fragment_core::{form, npub, site};
+use std::collections::BTreeMap;
+
+use fragment_core::roundtrip::{self, Trip};
+use fragment_core::{cli_code, form, npub, site};
 use fragment_proto::ErrorCode;
 use worker::*;
 
@@ -78,34 +90,70 @@ pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
-const LOGIN_COOKIE: &str = "fragment_login";
-/// A switch's state cookie, in the sign-in's stead (`/auth/switch`).
-const SWITCH_COOKIE: &str = "fragment_switch";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
-/// How long an approval link's proof is good.
-const LINK_PROOF_WINDOW_S: i64 = 600;
-const LINK_PROOF_MAX: usize = 4096;
-/// The approval form: a key, and a proof of at most `LINK_PROOF_MAX` bytes
-/// that form encoding may triple.
-const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
-const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
+/// `/cli`'s forms: a form token and a code, or what a person typed.
+const CLI_FORM_MAX_BYTES: usize = 1024;
+/// `POST /cli/begin`'s body: the CLI sends `{}`.
+const CLI_BEGIN_MAX_BYTES: usize = 1024;
+/// The form purposes of `/cli`'s two pages: typing a code, then adding the
+/// key it names (bound to that code, so a token for one code adds no other).
+const CLI_TYPED: &str = "cli";
+fn cli_adding(code: &str) -> String {
+    format!("cli-approve:{code}")
+}
 
+/// A round trip begun (`fragment_core::roundtrip`): the cookie that binds
+/// its state to this browser, for the answer that sends it away.
+pub(crate) fn trip_begun(trip: Trip, state: &str, url: &Url) -> String {
+    assert!(roundtrip::valid_state(state), "a round trip's state is one made here");
+    set_cookie(trip.cookie(), state, "/", roundtrip::TTL_S, secure(url))
+}
 
-/// The key an approval link's proof is by, if it is good: a NIP-98 event
-/// by that key for `POST <platform>/cli/approve`, made within ten minutes.
-fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
-    let stale = || CellError::invalid("this approval link is not good (it is older than ten minutes, or for another key): run `fragment login` again for a fresh one");
-    if proof.is_empty() || proof.len() > LINK_PROOF_MAX {
-        return Err(stale());
+/// The cookie that ends a round trip's binding, once its callback came.
+pub(crate) fn trip_spent(trip: Trip, url: &Url) -> String {
+    set_cookie(trip.cookie(), "", "/", 0, secure(url))
+}
+
+/// A round trip coming back to the browser that began it: the only thing
+/// that finishes one. What finishes a round trip takes it by value
+/// (`calls::Exchange::of`, `computer::SignedIn::of`), never a state read
+/// from a URL. Its fields are private to this module, it is neither
+/// `Clone` nor `Deserialize`, and only `trip_bound` makes one, from the
+/// request's own cookie; xtask's `a_round_trip_is_bound_only_by_its_request`
+/// holds the rest of the cell to that.
+pub(crate) struct Bound {
+    trip: Trip,
+    state: String,
+}
+
+impl Bound {
+    pub(crate) fn trip(&self) -> Trip {
+        self.trip
     }
-    let approve = format!("{platform}/cli/approve");
-    let now_s = crate::js::now_ms() / 1000;
-    let signer = fragment_nip98::verify(Some(&format!("Nostr {proof}")), "POST", &approve, &[], now_s, LINK_PROOF_WINDOW_S).map_err(|_| stale())?;
-    if signer != key_hex {
-        return Err(stale());
+
+    /// The state the server keeps the round trip under.
+    pub(crate) fn state(&self) -> &str {
+        &self.state
     }
-    Ok(())
+}
+
+/// The round trip a callback's request began, of one of `trips`: the state
+/// its URL brings, when the request's own cookie for that kind holds it
+/// (`roundtrip::same_state`). The only place a `Bound` is made.
+pub(crate) fn trip_bound(req: &Request, url: &Url, trips: &[Trip]) -> CellResult<Option<Bound>> {
+    assert!(!trips.is_empty() && trips.len() <= Trip::ALL.len(), "a callback finishes one kind of round trip or a few");
+    let brought = query(url, "state").unwrap_or_default();
+    // bounded: at most every kind of round trip, one cookie each
+    for &trip in trips {
+        let Some(held) = cookie_of(req, trip.cookie(), secure(url), "/")? else { continue };
+        if roundtrip::same_state(&brought, &held) {
+            let bound = Bound { trip, state: brought };
+            assert!(roundtrip::valid_state(&bound.state), "a bound state is one made here");
+            return Ok(Some(bound));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn secure(url: &Url) -> bool {
@@ -282,9 +330,10 @@ fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response>
     Ok(resp)
 }
 
-/// A sign-in starts at WorkOS, its state bound to this browser by
-/// `cookie`: the sign-in's, or a switch's.
-async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, cookie: &str) -> CellResult<Response> {
+/// A sign-in starts at WorkOS, its state bound to this browser as
+/// `trip`'s: a sign-in's (or a link's), or a switch's.
+async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, trip: Trip) -> CellResult<Response> {
+    assert!(matches!(trip, Trip::SignIn | Trip::Switch), "a sign-in is begun as one, or as a switch");
     let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
@@ -304,11 +353,10 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, cookie:
     if let Some(token) = token {
         to += &format!("&invitation_token={token}");
     }
-    let cookies = [set_cookie(cookie, &state, "/", 600, secure(url))];
-    if cookie == SWITCH_COOKIE {
-        leave_form(&to, "Switching accounts", &cookies)
-    } else {
-        redirect(&to, &cookies)
+    let cookies = [trip_begun(trip, &state, url)];
+    match trip {
+        Trip::Switch => leave_form(&to, "Switching accounts", &cookies),
+        _ => redirect(&to, &cookies),
     }
 }
 
@@ -318,20 +366,14 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         let why = query(url, "error_description").unwrap_or_default();
         return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
     }
-    let state = query(url, "state").unwrap_or_default();
-    let bound = |cookie: &str| Ok::<_, CellError>(!state.is_empty() && cookie_of(req, cookie, secure(url), "/")?.as_deref() == Some(state.as_str()));
-    let switching = match (bound(LOGIN_COOKIE)?, bound(SWITCH_COOKIE)?) {
-        (true, _) => false,
-        (false, true) => true,
-        (false, false) => {
-            return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
-        }
+    let Some(bound) = trip_bound(req, url, &[Trip::SignIn, Trip::Switch])? else {
+        return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
     };
-    let spent = set_cookie(if switching { SWITCH_COOKIE } else { LOGIN_COOKIE }, "", "/", 0, secure(url));
+    let spent = trip_spent(bound.trip(), url);
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
     let issuer = workos.issuer();
-    let done = match ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer, switching }).await {
+    let done = match ask_registry(env, &calls::Exchange::of(bound, code, workos.client_id, issuer)).await {
         Ok(done) => done,
         // a sign-in the registry refuses for who it is (an email WorkOS has
         // not verified, or another person's; a person being wiped): said on
@@ -353,15 +395,15 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
 }
 
 /// Sign-in's routes on the platform origin (the router sends only these).
-pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
+pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
     let platform = cfg.platform();
     {
         match (method, segments) {
-            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None, LOGIN_COOKIE).await,
+            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None, Trip::SignIn).await,
             // the registry checks the session is live as the sign-in begins
             (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
-                Some(token) => match begin(env, cfg, url, Some(token), LOGIN_COOKIE).await {
+                Some(token) => match begin(env, cfg, url, Some(token), Trip::SignIn).await {
                     Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/auth/link"),
                     begun => begun,
                 },
@@ -393,7 +435,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                         _ => {}
                     }
                 }
-                let mut begun = begin(env, cfg, url, None, SWITCH_COOKIE).await?;
+                let mut begun = begin(env, cfg, url, None, Trip::Switch).await?;
                 begun.headers_mut().append("set-cookie", &set_cookie(SESSION_COOKIE, "", "/", 0, secure(url)))?;
                 Ok(begun)
             }
@@ -418,49 +460,159 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 Ok(to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?)?.with_status(303))
             }
             (Method::Get, ["auth", "frame"]) => frame(&req, env, cfg, url).await,
-            (Method::Get, ["cli"]) => {
-                let key = query(url, "key").unwrap_or_default();
-                let proof = query(url, "proof").unwrap_or_default();
-                let Some(hex) = npub::parse(&key) else { return page(400, "Not a key", "<p>This link names no key. Run <code>fragment login</code> again.</p>") };
-                if let Err(e) = link_proof(&platform, &hex, &proof) {
-                    return page(400, "This link has expired", &format!("<p>{}</p>", esc(&e.message)));
-                }
-                let Some((_, live)) = platform_session(&req, env, url).await? else {
-                    return to_login(&platform, &format!("/cli?key={}&proof={}", enc(&key), enc(&proof)));
+            // a CLI's new key asks for the code its person types: signed by
+            // that key (which no one holds yet, so `signer` would refuse it)
+            (Method::Post, ["cli", "begin"]) => {
+                let body = crate::read_body(&mut req, CLI_BEGIN_MAX_BYTES).await?;
+                let key = crate::authenticate(&req, url, fragment_nip98::Payload::Read(&body))?;
+                // what the platform knows of who asked: shown to whoever types it
+                let cf = req.cf();
+                let agent = req.headers().get("user-agent")?;
+                let asked = cli_code::Asked::of(crate::js::now_ms(), cf.and_then(|c| c.city()).as_deref(), cf.and_then(|c| c.country()).as_deref(), agent.as_deref());
+                let begun = ask_registry(env, &calls::CliBegin { key, from: client_address(&req)?, asked }).await?;
+                crate::fragment::json_response(&fragment_proto::CliCode { code: cli_code::display(&begun.code), url: format!("{platform}/cli"), expires_at: begun.expires_at })
+            }
+            // the page reads nothing from its URL: no link fills in a code
+            (Method::Get, ["cli"]) => match platform_session(&req, env, url).await? {
+                Some((token, _)) => cli_page(&token, None),
+                None => to_login(&platform, "/cli"),
+            },
+            (Method::Post, ["cli"]) => {
+                let (token, fields) = match cli_posted(&mut req, url, &platform, |_| CLI_TYPED.to_string()).await? {
+                    Ok(posted) => posted,
+                    Err(page) => return Ok(page),
                 };
-                let (who, email) = (live.identity, live.email.unwrap_or_default());
-                let you = esc(if email.is_empty() { &who.id } else { &email });
-                let npub = npub::encode(&hex);
-                let tail = &npub[npub.len() - 8..];
-                page(
-                    200,
-                    "Add a key to you",
-                    &format!(
-                        "<p>A <code>fragment</code> CLI wants to act as <b>{you}</b>.</p><p>Its key ends in <code>{tail}</code>; check that its terminal shows the same ending.</p>
-<form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"key\" value=\"{}\"><input type=\"hidden\" name=\"proof\" value=\"{}\"><button>Add this key</button></form>
-<p>Didn't run <code>fragment login</code>? Close this page.</p>",
-                        esc(&npub),
-                        esc(&proof)
-                    ),
-                )
+                // the registry checks the session is live as it reads the code
+                match ask_registry(env, &calls::CliCodeOf { token: token.clone(), code: field(&fields, "code").to_string() }).await {
+                    Ok(found) => cli_confirm(&token, &found),
+                    Err(e) => cli_refused(&platform, &token, e),
+                }
             }
             (Method::Post, ["cli", "approve"]) => {
-                same_origin(&req, &platform)?;
-                // read before anyone is known to be signed in: bounded as it arrives
-                let bytes = crate::read_body(&mut req, APPROVE_FORM_MAX_BYTES).await?;
-                let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
-                let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
-                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else {
-                    return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
+                let (token, fields) = match cli_posted(&mut req, url, &platform, |f| cli_adding(&cli_code::normalize(field(f, "code")).unwrap_or_default())).await? {
+                    Ok(posted) => posted,
+                    Err(page) => return Ok(page),
                 };
-                link_proof(&platform, &hex, &field("proof"))?;
-                // the registry checks the session is live as it adds the key
-                ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
-                page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>")
+                let code = cli_code::normalize(field(&fields, "code")).unwrap_or_default();
+                // the registry checks the session is live as it spends the code
+                // and adds its key: one call
+                let added = match ask_registry(env, &calls::ApproveKey { token: token.clone(), code }).await {
+                    Ok(added) => added,
+                    Err(e) => return cli_refused(&platform, &token, e),
+                };
+                mail_key_added(ctx, env, added.email.as_deref(), &added.key, fragment_core::mail::KeyHow::Code(&added.asked));
+                page(200, "Key added", "<p>This key is yours now. The <code>fragment login</code> waiting in your terminal finishes on its own.</p>")
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
         }
     }
+}
+
+fn field<'a>(fields: &'a BTreeMap<String, String>, name: &str) -> &'a str {
+    fields.get(name).map_or("", String::as_str)
+}
+
+/// `/cli`: where a person types the code `fragment login` printed (docs/api.md,
+/// Sign-in). A sharing page's protections (share.rs): unframed, a form
+/// token, a button that arms after a moment; and it reads nothing from its
+/// URL, so no link anyone sends fills in what a click would approve.
+fn cli_page(session: &str, flash: Option<&str>) -> CellResult<Response> {
+    let flash = flash.map_or(String::new(), |f| format!("<p class=\"flash error\">{}</p>", esc(f)));
+    let body = format!(
+        "{flash}<p>Type the code your terminal shows after <code>fragment login</code>.</p>\
+         <form method=\"post\" action=\"/cli\" class=\"add\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
+         <input name=\"code\" required autocomplete=\"off\" autocapitalize=\"characters\" spellcheck=\"false\" maxlength=\"{max}\" placeholder=\"XXXX-XXXX\" aria-label=\"The code\" autofocus>\
+         <button data-arm disabled>Continue</button></form>\
+         <p class=\"hint\"><b>{never}</b> Didn't run <code>fragment login</code>? Close this page.</p>",
+        f = esc(&form::issue(session, CLI_TYPED, crate::js::now_ms())),
+        max = cli_code::TYPED_MAX_BYTES,
+        never = esc(cli_code::NEVER_SENT),
+    );
+    share::sheet_page(if flash.is_empty() { 200 } else { 400 }, "Add a fragment CLI", &body, true)
+}
+
+/// The key a typed code names, to add with a second press: "A fragment CLI
+/// wants to act as you", the key's ending to compare with the terminal, and
+/// where and when its code was asked for, so a code someone else asked for
+/// and sent them says so.
+fn cli_confirm(session: &str, found: &calls::CliCoded) -> CellResult<Response> {
+    let you = match &found.email {
+        Some(e) => esc(e),
+        None => format!("<code>{}</code>", esc(&found.identity)),
+    };
+    let npub = npub::encode(&found.key);
+    let tail = &npub[npub.len() - 8..];
+    let body = format!(
+        "<p>A <code>fragment</code> CLI wants to act as <b>{you}</b>.</p>\
+         <p>Its key ends in <code>{tail}</code>: check that your terminal shows the same ending. Its code was {asked}.</p>\
+         <form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"code\" value=\"{c}\">\
+         <button data-arm disabled>Add this key</button></form>\
+         <p class=\"hint\"><b>{never}</b> Didn't run <code>fragment login</code>? Close this page.</p>",
+        asked = esc(&found.asked.line(crate::js::now_ms())),
+        never = esc(cli_code::NEVER_SENT),
+        f = esc(&form::issue(session, &cli_adding(&found.code), crate::js::now_ms())),
+        c = esc(&found.code),
+    );
+    share::sheet_page(200, "Add this key to you?", &body, true)
+}
+
+/// A `/cli` form's POST, once its Origin, the session cookie and its form
+/// token hold (`purpose`: the form's, from its own fields): the session's
+/// token, unresolved (the registry checks it in the call that follows), and
+/// the fields. Otherwise the page to show.
+async fn cli_posted(req: &mut Request, url: &Url, platform: &str, purpose: fn(&BTreeMap<String, String>) -> String) -> CellResult<Result<(String, BTreeMap<String, String>), Response>> {
+    same_origin(req, platform)?;
+    // read before anyone is known to be signed in: bounded as it arrives
+    let bytes = crate::read_body(req, CLI_FORM_MAX_BYTES).await?;
+    let fields: BTreeMap<String, String> = url::form_urlencoded::parse(&bytes).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else {
+        return Ok(Err(page(401, "Sign in first", "<p>This page's session ended.</p><p><a href=\"/auth/login?return=/cli\">Sign in</a>, then type the code again.</p>")?));
+    };
+    if let Err(refused) = form::check(&token, &purpose(&fields), field(&fields, "form"), crate::js::now_ms()) {
+        return Ok(Err(page(403, "Not sent", &format!("<p>{}</p><p><a href=\"/cli\">Type the code again</a></p>", esc(refused.message())))?));
+    }
+    Ok(Ok((token, fields)))
+}
+
+/// A code the registry would not take, as a page: a wrong one (a miss) asks
+/// again; too many misses, a key that cannot be added, or a session ended,
+/// say why.
+fn cli_refused(platform: &str, session: &str, e: CellError) -> CellResult<Response> {
+    match e.code {
+        ErrorCode::InvalidRequest => cli_page(session, Some(&e.message)),
+        ErrorCode::Unauthenticated => to_login(platform, "/cli"),
+        ErrorCode::RateLimited | ErrorCode::AlreadyExists | ErrorCode::Forbidden => page(e.code.status(), "Not added", &format!("<p>{}</p>", esc(&e.message))),
+        _ => Err(e),
+    }
+}
+
+/// The mail to a person whose identity a key just joined, on every key
+/// added to them: the key's ending, how it came (`how`), and how to revoke
+/// it. Sent after the answer (`wait_until`), never in its way: the key is
+/// added whatever becomes of it, and a mail that fails is logged.
+pub(crate) fn mail_key_added(ctx: &Context, env: &Env, email: Option<&str>, key: &str, how: fragment_core::mail::KeyHow<'_>) {
+    let npub = npub::encode(key);
+    let Some(email) = email else {
+        console_error!("{}", serde_json::json!({ "key-mail": npub, "failed": "the person has no email" }));
+        return;
+    };
+    let cfg = Config::from_env(env);
+    let mail = fragment_core::mail::key_added(email, &npub, &cfg.platform(), how, crate::js::now_ms());
+    let env = env.clone();
+    ctx.wait_until(async move {
+        if let Err(e) = crate::mail::send(&env, cfg, &mail).await {
+            console_error!("{}", serde_json::json!({ "key-mail": npub, "failed": e.message }));
+        }
+    });
+}
+
+/// The address a request came from, as Cloudflare names it
+/// (`CF-Connecting-IP`, which it sets on every request and a client cannot
+/// keep), bounded: what a limit counts by. A request with none (a local
+/// fleet's test, which names one to be counted apart) counts as `unnamed`.
+fn client_address(req: &Request) -> CellResult<String> {
+    let named = req.headers().get("cf-connecting-ip")?.map(|a| a.trim().to_string()).filter(|a| !a.is_empty() && a.len() <= calls::CliBegin::FROM_MAX_BYTES);
+    Ok(named.unwrap_or_else(|| "unnamed".to_string()))
 }
 
 /// The fragment and the way back `/auth/fragment` names.
