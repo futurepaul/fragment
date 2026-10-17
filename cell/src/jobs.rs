@@ -208,9 +208,10 @@ fn stored_json(r: &Value, column: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
 }
 
-/// A run as `GET runs` shows it; `detail` is its input and output, when one run is read.
-fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option<Value>)>) -> Run {
-    let (input, output) = detail.map_or((None, None), |(input, output)| (Some(input), output));
+/// A run as `GET runs` shows it; `detail` is its input (when the reader
+/// may see it) and output, when one run is read.
+fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Option<Value>, Option<Value>)>) -> Run {
+    let (input, output) = detail.unwrap_or((None, None));
     Run {
         id: row.id,
         op: row.op,
@@ -1237,15 +1238,37 @@ impl FragmentCell {
         json_response(&RunList { runs, counts, paused: self.paused_ops()? })
     }
 
-    /// `GET /api/f/<name>/runs/<id>`
+    /// `GET /api/f/<name>/runs/<id>`: the run, its output, and its input
+    /// when the reader's role may see it (`input_shown`).
     pub(crate) fn run_api(&self, caller: &Caller, id: &str) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
+        let role = self.require(caller, false, Role::Viewer)?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a run id is a number"))?;
         let rows = self.rows(&format!("SELECT {RUN_COLUMNS}, {RUN_COST}, input, output FROM runs WHERE id = ?"), vec![SqlStorageValue::Integer(id)])?;
         let r = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no run #{id}")))?;
+        let run = run_row(r);
+        let input = self.input_shown(role, &run)?.then(|| stored_json(r, "input"));
         // a run has its output once it succeeded
         let output = r["output"].is_string().then(|| stored_json(r, "output"));
-        json_response(&run_view(run_row(r), r["cost_micros"].as_i64(), Some((stored_json(r, "input"), output))))
+        json_response(&run_view(run, r["cost_micros"].as_i64(), Some((input, output))))
+    }
+
+    /// Whether `role` sees a run's input. A channel's run holds the record
+    /// that started it (`fire_channel`), kept whole for the job's steps
+    /// and replays, so it is shown as the record is: to a role that may
+    /// read its channel, asked of `channel_read_role` as every read of a
+    /// record asks. A channel no longer declared has no reader, so its
+    /// runs' records show to no one. Every other run's input is what its
+    /// caller or trigger handed it, a viewer's to see.
+    fn input_shown(&self, role: Role, run: &RunRow) -> CellResult<bool> {
+        if run.via != Via::Channel {
+            return Ok(true);
+        }
+        let channel = run.trigger.as_deref().ok_or_else(|| CellError::host(format!("channel run #{} names no channel", run.id)))?;
+        match self.channel_read_role(channel) {
+            Ok(read) => Ok(role >= read),
+            Err(gone) if gone.code == ErrorCode::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// `POST /api/f/<name>/replay` (editor): a held or blocked run again, as

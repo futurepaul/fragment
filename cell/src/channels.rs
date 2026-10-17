@@ -317,7 +317,11 @@ impl FragmentCell {
         )
     }
 
-    /// Who may read a channel, or 404 when there is no such channel.
+    /// Who may read a channel, or 404 when there is no such channel: the
+    /// one source of that rule. Every path that shows a channel's records
+    /// asks here, and compares the caller's role to the answer: the channel
+    /// API, `__channel`, live sockets, subscriptions (a person's and an
+    /// agent's), search's fence, and a run's input (`input_shown`).
     pub(crate) fn channel_read_role(&self, channel: &str) -> CellResult<Role> {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);

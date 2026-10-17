@@ -432,6 +432,47 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         arrived && texts.contains(&"hello from the cli") && texts.contains(&"A page to title (200)"),
         &list,
     );
+    channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a channel's run shows the record that started it only to a role
+/// that may read the channel (the audit's M1: the runs ledger showed an
+/// editor-read channel's records to every viewer). Method: `alarms` read
+/// by editors, its trigger's run read by a viewer and by an editor; then
+/// the app deployed without the channel, when it shows to no one.
+fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let viewer = api.person()?;
+    let editor = api.person()?;
+    let (name, c) = jobs_fragment(s, api, owner, "gated", |m| m["channels"]["alarms"] = json!({ "read": "editor" }))?;
+    for (who, role) in [(&viewer, "viewer"), (&editor, "editor")] {
+        api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+    }
+    api.op(owner, &name, "raise", "gated-1", json!({}))?;
+    let mut id = 0;
+    s.eventually(Duration::from_secs(40), || {
+        id = runs(api, owner, &name, "&op=boom").first().and_then(|r| r["id"].as_i64()).unwrap_or(0);
+        id > 0
+    });
+    let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/channels/alarms"), None)?;
+    s.ok("a viewer may not read the editors' channel", r.status == 403, &r);
+    let as_viewer = run(api, &viewer, &name, id)?;
+    s.ok(
+        "a viewer reads that channel's run without its record",
+        as_viewer.status == 200 && as_viewer.body["via"] == "channel" && as_viewer.body["trigger"] == "alarms" && as_viewer.body.get("input").is_none(),
+        &as_viewer,
+    );
+    let as_editor = run(api, &editor, &name, id)?;
+    s.ok(
+        "an editor reads it with the record",
+        as_editor.body["input"]["channel"] == "alarms" && as_editor.body["input"]["record"]["body"] == json!({ "raised": true }),
+        &as_editor,
+    );
+    let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
+    without["channels"].as_object_mut().map(|c| c.remove("alarms"));
+    without["triggers"].as_array_mut().map(|t| t.retain(|t| t["channel"] != "alarms"));
+    ship(s, &c, JOBS_APP, without.to_string().as_bytes());
+    let gone = run(api, &editor, &name, id)?;
+    s.ok("with its channel gone, no one reads a run's record", gone.status == 200 && gone.body.get("input").is_none(), &gone);
     Ok(())
 }
 
