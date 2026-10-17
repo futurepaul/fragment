@@ -686,20 +686,26 @@ function pairLabel(a, b) {
   const half = Math.floor((PAIR_LABEL_MAX - 1) / 2);
   return `${cutLabel(x, half)}-${cutLabel(y, half)}`;
 }
-/// The teammate whose chat `f` is: its own chat with the person, or a
-/// hand-off it is in. None for the person's own chats.
+/// The teammate whose chat `f` is: its own chat with the person, another
+/// chat of theirs with it alone, or a hand-off it is in. None for the
+/// person's own chats (their one agent's, and any of several agents).
 function teammateOf(f) {
   if (!f || f.kind !== "chat" || !own(f)) return null;
   const label = labelOf(f.name);
+  const alone = agentsOf(f.name);
   const mine = [...state.agents.values()].filter((a) => byName(a.fragment)?.role === "owner");
-  return teamAgents().find((a) => label === `${labelOf(a.fragment)}-chat` || mine.some((b) => b.identity !== a.identity && label === pairLabel(a.fragment, b.fragment))) ?? null;
+  return teamAgents().find((a) => label === `${labelOf(a.fragment)}-chat` || (alone.length === 1 && alone[0] === a.identity) || mine.some((b) => b.identity !== a.identity && label === pairLabel(a.fragment, b.fragment))) ?? null;
 }
 const yourChats = () => chats().filter((f) => !teammateOf(f));
 const teamChats = (a) => chats().filter((f) => teammateOf(f)?.identity === a.identity);
-// the hand-offs `a` was given, newest first: its team chats but its own
-const handoffsTo = (a) => {
+// the hand-offs `a` was given, newest first: its chats with another of the
+// person's agents
+const handoffsTo = (a) => teamChats(a).filter((f) => askerOf(f, a)).sort(newest);
+// its other chats with the person, newest first: neither its own nor a
+// hand-off (one started with it again, by the person)
+const otherChatsOf = (a) => {
   const ownChat = agentsOwnChat(a.fragment);
-  return teamChats(a).filter((f) => f.name !== ownChat?.name).sort(newest);
+  return shown(teamChats(a)).filter((f) => f.name !== ownChat?.name && !askerOf(f, a)).sort(newest);
 };
 
 // Where each agent's model calls go, as its agent.json says (the
@@ -788,8 +794,9 @@ const namesOf = (agents) => {
 // agent's own chat with the person, and says when it works, its new
 // messages, and when its model runs outside the platform; its ⋯ says
 // where, and offers its hand-offs, a change asked of the one agent, and
-// its profile. The open chat's teammate (its own chat, or a hand-off it is
-// in) is marked, its hand-offs listed under it. TEAM_SHOWN rows show at
+// its profile. The open chat's teammate (its own chat, another of the
+// person's with it alone, or a hand-off it is in) is marked, those chats
+// listed under it. TEAM_SHOWN rows show at
 // first (the open one's always), the rest behind "Show all"; "Your team"
 // folds them away (the open one's stays), saying who works.
 const TEAM_SHOWN = 4;
@@ -829,11 +836,22 @@ function renderTeam() {
   patch(box, [head, ...rows]);
 }
 // What a teammate said to the person and they have not yet seen: its own
-// chat's unread (none while it is open). Its hand-offs are its agents'
-// talk, which the one agent reports: they count for nothing.
+// chat's unread and its other chats' with them (none on the open one).
+// Its hand-offs are its agents' talk, which the one agent reports: they
+// count for nothing.
 function teamUnread(a) {
-  const f = agentsOwnChat(a.fragment);
-  return !f || (f.name === state.current && !state.page) ? 0 : f.unread ?? 0;
+  return [agentsOwnChat(a.fragment), ...otherChatsOf(a)].filter(Boolean).reduce((n, f) => n + (f.name === state.current && !state.page ? 0 : f.unread ?? 0), 0);
+}
+// A teammate's row, pressed: its own chat, else its newest other chat with
+// the person, else a new one (`<label>-chat` when free: its own). Looked up
+// as pressed, not as drawn: a row kept unchanged keeps its handler.
+function openTeammate(identity) {
+  const a = state.agents.get(identity);
+  if (!a) return;
+  const f = agentsOwnChat(a.fragment) ?? otherChatsOf(a)[0];
+  if (f) openChat(f.name);
+  else newChat(identity);
+  leaveSidebar();
 }
 // The agent, of the person's, that hand-off chat `f` of `a` is with
 function askerOf(f, a) {
@@ -875,7 +893,7 @@ function teamRow(a, active, open) {
   }
   if (unread) said.push(unread >= UNREAD_MAX ? "more than 99 unread" : `${unread} unread`);
   go.setAttribute("aria-label", said.join(", "));
-  go.onclick = () => { itsChat ? openChat(itsChat.name) : newChat(a.identity); leaveSidebar(); };
+  go.onclick = () => openTeammate(a.identity);
   const more = el("button", "icon-button team-more");
   more.type = "button";
   more.innerHTML = svg("more");
@@ -888,6 +906,16 @@ function teamRow(a, active, open) {
   more.onclick = () => openTeamMenu(a, more);
   row.append(go, more);
   if (!active) return [row];
+  const others = otherChatsOf(a).map((f) => {
+    const on = f.name === open?.name;
+    const sub = el("button", `row team-handoff${on ? " active" : ""}`);
+    sub.type = "button";
+    sub.dataset.key = `team-chat:${f.name}`;
+    sub.setAttribute("aria-current", on ? "page" : "false");
+    sub.append(el("span", "label", titleOf(f.name)), ...unreadMark(f));
+    sub.onclick = () => { openChat(f.name); leaveSidebar(); };
+    return sub;
+  });
   const handoffs = handoffsTo(a).map((f) => {
     const by = askerOf(f, a);
     const on = f.name === open?.name;
@@ -899,7 +927,7 @@ function teamRow(a, active, open) {
     sub.onclick = () => { openChat(f.name); leaveSidebar(); };
     return sub;
   });
-  return [row, ...handoffs];
+  return [row, ...others, ...handoffs];
 }
 // A teammate's ⋯: who it is and where its model runs, the hand-offs it was
 // given, a change asked of the one agent (into its chat's composer, sent

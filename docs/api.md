@@ -2481,16 +2481,20 @@ one level down under it (`#team`: indented, smaller and quieter than the
 person's chats), under "Your team", which folds them away (the open
 chat's teammate kept) and says who works while folded; past five, four
 show and "Show all" the rest. A row opens that agent's own chat with the
-person, is marked while it or a hand-off of it is open (that row's
-hand-offs, `fragment ask`'s pairs, listed under it, "Hand-offs from
-<agent>"), says when it works, its own chat's unread (its hand-offs
-count none: its agents' talk, which the one agent reports), and a globe
+person (else its newest other chat with them, else a new one), chosen
+as pressed; it is marked while one of its chats is open, those listed
+under it: its other chats with the person (any chat of theirs with it
+alone), then its hand-offs (`fragment ask`'s pairs, "Hand-offs from
+<agent>"). It says when it works, its unread with the person (its
+hand-offs count none: its agents' talk, which the one agent reports),
+and a globe
 when its model runs outside the platform (its `agent.json`: the
 platform's models, or "<model> · outside the platform"); its ⋯ says
 where, and offers its hand-offs, "Ask <agent> to change it" (put in the
 one agent's chat's composer, not sent), and its profile. Their chats (a
-teammate's own chat, `<label>-chat`, and the hand-offs) never list in
-the person's list; search still finds them. A prompt the shell puts in a
+teammate's own chat, `<label>-chat`, any other of the person's with it
+alone, and the hand-offs) never list in the person's list; search still
+finds them. A prompt the shell puts in a
 composer goes to the open chat when it is the person's own, never a
 teammate's. Who works the shell reads from those
 chats' `work` (a turn started and not ended), every 4 s while shown, at

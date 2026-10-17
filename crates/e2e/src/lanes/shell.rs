@@ -953,6 +953,20 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&page, "#team .team-head")?;
     let unfolded = b.until(&page, "document.querySelector('#team .team-head').getAttribute('aria-expanded') === 'true'", wait);
     s.ok("\"Your team\" folds the team away but the open chat's teammate, and unfolds it", folded && unfolded, b.eval(&page, "document.getElementById('team').innerText")?);
+    // another chat of theirs with the Reader alone (as New chat with it makes
+    // one) is the Reader's too: under its row, never among their chats
+    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "reading-notes", "template": "chat", "title": "Reading notes" })), &[])?;
+    anyhow::ensure!(made.status == 200, "a chat with the Reader: {made}");
+    let notes = made.body["name"].as_str().unwrap_or("").to_string();
+    let r = shell(api, &session, "PUT", &format!("/api/f/{notes}/members/{reader_id}"), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(r.status == 200, "the Reader in it: {r}");
+    let under = format!("!!document.querySelector({}) && !document.querySelector({})", js(&format!("#team [data-key={}]", js(&format!("team-chat:{notes}")))), js(&format!("#chats [data-key={}]", js(&format!("chat:{notes}")))));
+    let listed = b.until(&page, &under, wait);
+    s.ok(
+        "another chat of theirs with the Reader alone lists under its row (its own chat open), never among their chats",
+        listed,
+        b.eval(&page, "({ team: document.getElementById('team').innerText, chats: document.getElementById('chats').innerText })")?,
+    );
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &shots)?;
