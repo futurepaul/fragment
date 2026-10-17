@@ -2571,8 +2571,11 @@ has read it); `runsOn` where its model calls go, `{on: "platform"}` or
 `{on: "own", model}` (a model of its owner's own provider, outside the
 platform, as its `agent.json` says), and `working: true` while it works
 (decision 62, proposed). A frame may ask `{fragment: "open-handoff",
-identity}` for one of them: the shell opens that agent's newest team
-chat (where a hand-off to it went) beside the frame, and answers nothing. It sends the list again when any of it changes, its
+identity, via}` for one of them: the shell opens the chat a hand-off to
+it went to beside the frame, and answers nothing. `via: "ask"` (`fragment
+ask`'s) went to its chat with the agent that asked, the frame's chat's own
+(its teammate's, else the person's default agent), else its newest
+hand-off; `via: "message"` (`message_agent`'s) to its own chat. It sends the list again when any of it changes, its
 computer's phase too (the list's socket tells the shell, which reads the
 computer again). The frame may then ask
 `{fragment: "add-agent", identity, nonce}` (a nonce of at most 64

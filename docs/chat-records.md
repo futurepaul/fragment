@@ -595,7 +595,8 @@ what the step says it was sent (cut where its arguments were; each
 or while the roster says that agent works and this is the chat's newest
 hand-off to it; done after; "didn't go through" when the step failed.
 Framed, "See the hand-off" asks the shell to open the chat it went to
-(`{fragment: "open-handoff", identity}`). A step that names no agent
+(`{fragment: "open-handoff", identity, via}`, `via` "ask" or
+"message": docs/api.md). A step that names no agent
 the roster has stays an ordinary step: a card never says something was
 done that asked no one. An underscore opens or closes emphasis only at a
 word's edge, so `[SISTER_NAME]` and `snake_case` read as written.

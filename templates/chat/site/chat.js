@@ -1242,7 +1242,7 @@ export function mount(root) {
       if (!to) return null;
       const r = askedOne(to);
       if (!r && state.roster.length) return null;
-      return { r, name: r?.title ?? capital(to), brief: "" };
+      return { r, name: r?.title ?? capital(to), brief: "", via: "message" };
     }
     const m = /^\s*fragment\s+ask\s+["']?([A-Za-z0-9._-]+)["']?\s*([\s\S]*)$/.exec(args);
     if (!m) return null;
@@ -1250,7 +1250,7 @@ export function mount(root) {
     // one the owner's agents (the shell's roster) do not answer to asked no
     // one: an ordinary step, never a card that says it was done
     if (!r && state.roster.length) return null;
-    return { r, name: r?.title ?? capital(m[1].replace(/--[a-z0-9]{4}$/, "")), brief: briefOf(m[2]) };
+    return { r, name: r?.title ?? capital(m[1].replace(/--[a-z0-9]{4}$/, "")), brief: briefOf(m[2]), via: "ask" };
   }
   // the question as its command line says it: its quoted words, unescaped,
   // without what follows them; cut where the step's arguments were
@@ -1310,7 +1310,7 @@ export function mount(root) {
         if (h.r && rosterOrigin) {
           const open = el("button", "handoff-open", "See the hand-off");
           open.type = "button";
-          open.onclick = () => window.parent.postMessage({ fragment: "open-handoff", identity: h.r.identity }, rosterOrigin);
+          open.onclick = () => window.parent.postMessage({ fragment: "open-handoff", identity: h.r.identity, via: h.via }, rosterOrigin);
           card.append(open);
         }
         return card;

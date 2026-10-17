@@ -369,11 +369,17 @@ addEventListener("message", async (event) => {
     if (name === setup?.chat && setup.error) creatingAgent();
     return;
   }
-  // a hand-off card's "See the hand-off": the newest chat of that teammate
-  // (where the hand-off went), beside the chat
+  // a hand-off card's "See the hand-off": the chat it went to, beside the
+  // chat. `fragment ask`'s went to the teammate's chat with the agent that
+  // asked (this chat's: its teammate, else the person's default agent);
+  // `message_agent`'s, to the teammate's own chat.
   if (d.fragment === "open-handoff") {
     const a = typeof d.identity === "string" ? state.agents.get(d.identity) : null;
-    const chat = a ? teamChats(a).sort(newest)[0] : null;
+    if (!a) return;
+    const ownChat = agentsOwnChat(a.fragment);
+    const asker = teammateOf(byName(name)) ?? primaryAgent();
+    const pair = asker && asker.identity !== a.identity ? chats().find((f) => own(f) && labelOf(f.name) === pairLabel(asker.fragment, a.fragment)) : null;
+    const chat = d.via === "message" ? ownChat ?? handoffsTo(a)[0] : pair ?? handoffsTo(a)[0] ?? ownChat;
     if (chat) openApp(chat.name);
     return;
   }
@@ -686,6 +692,11 @@ function teammateOf(f) {
 }
 const yourChats = () => chats().filter((f) => !teammateOf(f));
 const teamChats = (a) => chats().filter((f) => teammateOf(f)?.identity === a.identity);
+// the hand-offs `a` was given, newest first: its team chats but its own
+const handoffsTo = (a) => {
+  const ownChat = agentsOwnChat(a.fragment);
+  return teamChats(a).filter((f) => f.name !== ownChat?.name).sort(newest);
+};
 
 // Where each agent's model calls go, as its agent.json says (the
 // agents-finite skill's convention: a `model` of its owner's own provider
@@ -799,7 +810,7 @@ function renderTeam() {
 function openTeamMenu(a, trigger) {
   const primary = primaryAgent();
   const ownChat = agentsOwnChat(a.fragment);
-  const handoffs = teamChats(a).filter((f) => f.name !== ownChat?.name).sort(newest);
+  const handoffs = handoffsTo(a);
   openMenu(trigger, [
     { heading: titleOf(a.fragment), note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
     { icon: "newChat", text: `Chat with ${titleOf(a.fragment)}`, onClick: () => (ownChat ? openChat(ownChat.name) : newChat(a.identity)) },
