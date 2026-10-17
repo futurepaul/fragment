@@ -248,8 +248,11 @@ pub fn honors_for(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
     // starting or stopping an agent, which an agent does for its owner
     // (decision 62, proposed)
-    let runs_an_agent = matches!(p.split('/').collect::<Vec<_>>()[..], ["", "api", "computers", _, "agents", _]);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || runs_an_agent
+    let segments = p.split('/').collect::<Vec<_>>();
+    let runs_an_agent = matches!(segments[..], ["", "api", "computers", _, "agents", _]);
+    // fencing one of its owner's agents (decision 63, proposed)
+    let fences_an_agent = matches!(segments[..], ["", "api", "identities", _, "fenced"]);
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || runs_an_agent || fences_an_agent
 }
 
 impl From<Identity> for Signer {
@@ -787,12 +790,14 @@ mod tests {
     }
 
     #[test]
-    fn for_is_named_on_a_fragments_routes_the_list_and_running_agents_only() {
-        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/computers/c0ffee/agents/maple--k3x9"] {
+    fn for_is_named_on_a_fragments_routes_the_list_and_running_and_fencing_agents_only() {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/computers/c0ffee/agents/maple--k3x9", "/api/identities/npub1maple/fenced"] {
             assert!(honors_for(yes), "{yes}");
         }
         for no in [
             "/api/identities/me",
+            "/api/identities/npub1maple/held",
+            "/api/identities/npub1maple/fenced/x",
             "/api/ledger",
             "/api/search?q=a",
             "/api/fragments/x.paul/archived",

@@ -812,6 +812,7 @@ fragment agent maple --model openrouter:anthropic/claude-sonnet-5.5   # a model 
 fragment agent maple --no-model                    # its tier again
 fragment agent maple --stop                        # stopped: its fragment, job and memories kept
 fragment agent maple --start                       # running again
+fragment agent maple --fence                       # fenced: it acts as itself alone (--no-fence, its owner's)
 fragment agent maple                               # its name, where its model calls go, whether it runs
 ```
 
@@ -835,6 +836,16 @@ its owner's own provider, outside the platform. An agent never starts or
 stops itself, and the platform refuses (403) every other computer route
 to an agent, starting or stopping acting for anyone but its owner, and
 any of it while its owner holds it below them.
+
+An agent on its owner's own provider is fenced (docs/cloudflare-v1.md,
+decision 63, proposed): `--new … --model` and `--model` fence it before
+it runs another turn, and `--fence` fences any. A fenced agent acts as
+itself alone: the platform refuses its `for` (403), so it reaches what is
+its own (its agent fragment, its chats) and what anyone shares with it,
+never the rest of its owner's; its computer gives it no connection and
+runs its commands as a user of its own, in a sandbox with no network.
+`--no-model` lifts nothing: only its owner lets it go (`--no-fence`, or
+the shell's team menu). `fragment agent <agent> --json` says `fenced`.
 
 ## Secrets
 
@@ -902,6 +913,7 @@ fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture] [--job T]
 fragment agent [<agent>] [--tier cheap|medium] [--model PROVIDER:ID | --no-model] [--start | --stop]
+fragment agent [<agent>] [--fence | --no-fence]
 fragment agent --new <label> --name N --job T [--tier cheap|medium] [--model PROVIDER:ID]
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]

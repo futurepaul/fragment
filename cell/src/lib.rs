@@ -36,6 +36,7 @@ mod card;
 mod config;
 mod connections;
 mod channels;
+mod columns;
 mod computer;
 mod deliveries;
 mod ended;
@@ -261,7 +262,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments, the model routes (/api/models/…) and starting or stopping an agent (/api/computers/<id>/agents/<fragment>) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), /api/fragments, the model routes (/api/models/…), starting or stopping an agent (/api/computers/<id>/agents/<fragment>) and fencing one (/api/identities/<agent>/fenced) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -290,8 +291,10 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
-    if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
-        return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
+    // only an owned agent acts for someone, and never a fenced one (decision
+    // 63, proposed): it acts as itself alone, wherever `for` is honored
+    if acting_for.is_some() {
+        access::may_act_for(identity.kind, identity.owner.as_deref(), identity.fenced).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
@@ -425,7 +428,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
-            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, fenced: false };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
@@ -694,7 +697,11 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
 /// before cannot act.
 async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
-    if acting_for(url)?.is_some() {
+    // fencing honors `for` (an agent fences its owner's agent for them);
+    // every other identities route is the signer's own
+    let fencing = matches!((req.method(), rest), (Method::Put, [_, "fenced"]));
+    let acting_for = acting_for(url)?;
+    if acting_for.is_some() && !fencing {
         return Err(CellError::invalid(FOR_HONORED));
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -752,6 +759,23 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let agent = named_identity(id)?.ok_or_else(|| CellError::invalid("name the agent"))?;
             let b: Held = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_answer(&ask_registry(env, &calls::Hold { agent, held: b.held, by: by() }).await?)
+        }
+        (Method::Put, [id, "fenced"]) => {
+            /// `PUT /api/identities/{agent}/fenced`'s body.
+            #[derive(Deserialize)]
+            struct Fenced {
+                fenced: bool,
+            }
+            let agent = named_identity(id)?.ok_or_else(|| CellError::invalid("name the agent"))?;
+            let b: Fenced = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e} (name `fenced`: true or false)")))?;
+            // the registry resolves the signer, and refuses a fenced one's
+            // `for` as `signer_of` does everywhere else (`may_act_for`)
+            let view = ask_registry(env, &calls::Fence { agent: agent.clone(), fenced: b.fenced, acting_for: acting_for.clone(), by: by() }).await?;
+            // its computer is told at once: it gives a fenced agent no
+            // connection, and its image a sandbox
+            let owner = view.owner.as_deref().ok_or_else(|| CellError::host(format!("the agent {agent} has no owner")))?;
+            computer::agent_fenced(env, owner, &agent, view.fenced).await?;
+            json_answer(&view)
         }
         (Method::Delete, [id, "keys", k]) => {
             let identity = named_identity(id)?;

@@ -170,7 +170,134 @@ pub fn orchestrator(s: &mut Suite, api: &Api) -> Result<()> {
     let r = start(&hand, &q)?;
     s.ok("and starts it again, the same identity", r.status == 200 && identity_in(&r.body, &maple) == maple_id, &r);
 
+    fences(s, api, &Fence { paul: &paul, bob: &bob, paul_id: &paul_id, hand: &hand, hand_id: &hand_id, computer: &computer, maple: &maple, maple_id: &maple_id })?;
     cli(s, api)
+}
+
+/// What `fences` works with: Paul, Bob, Hand (Paul's agent, by its key),
+/// Paul's computer, and Maple on it.
+struct Fence<'a> {
+    paul: &'a Keys,
+    bob: &'a Keys,
+    paul_id: &'a str,
+    hand: &'a Keys,
+    hand_id: &'a str,
+    computer: &'a str,
+    maple: &'a str,
+    maple_id: &'a str,
+}
+
+/// Whether the computer's view has `fragment` fenced.
+fn fenced_in(view: &Value, fragment: &str) -> Option<bool> {
+    view["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == fragment).map(|a| a["fenced"] == true)
+}
+
+/// A teammate on another provider is fenced (decision 63, proposed): it
+/// acts as itself alone. Wren, another agent of Paul's by its key: Hand,
+/// acting for Paul, fences it (and again: a replay), and then Wren reaches
+/// nothing for Paul, while what is its own, and what Paul shares with it,
+/// stand. Hand lets none go and fences not itself; Bob fences no one of
+/// Paul's; Paul lets Wren go, and Wren acts for him again. Maple, on Paul's
+/// computer, is fenced there too, and an agent fenced before it starts
+/// starts fenced.
+fn fences(s: &mut Suite, api: &Api, f: &Fence) -> Result<()> {
+    let (wren, wren_id) = agent_of(api, f.paul)?;
+    let for_paul = format!("for={}", f.paul_id);
+    let fence = |keys: &Keys, who: &str, query: &str, body: Value| api.signed(keys, "PUT", &format!("/api/identities/{who}/fenced{query}"), Some(&body));
+    let q = format!("?{for_paul}");
+
+    // valid: Hand fences Wren, acting for Paul; again, the same answer
+    let r = fence(f.hand, &wren_id, &q, json!({ "fenced": true }))?;
+    let again = fence(f.hand, &wren_id, &q, json!({ "fenced": true }))?;
+    s.ok(
+        "Paul's agent fences another of Paul's agents, acting for Paul (its view says fenced); fenced again, the same answer",
+        r.status == 200 && r.body["fenced"] == true && again.status == 200 && again.body["fenced"] == true,
+        json!({ "fence": r.body, "again": again.status }),
+    );
+
+    // fenced, it acts for no one: not its owner, on any route that honors `for`
+    let listed = api.signed(&wren, "GET", &format!("/api/fragments?{for_paul}"), None)?;
+    let made = api.signed(&wren, "POST", &format!("/api/fragments?{for_paul}"), Some(&json!({ "name": s.named(api, f.paul, "wren-made")?, "template": "blank" })))?;
+    let read = api.signed(&wren, "GET", &format!("/api/f/{}/files?{for_paul}", f.maple), None)?;
+    let ran = api.signed(&wren, "DELETE", &format!("/api/computers/{}/agents/{}?{for_paul}", f.computer, f.maple), None)?;
+    let fenced_off = |r: &Reply| r.status == 403 && r.text.contains("fenced agent acts as itself alone");
+    s.ok(
+        "a fenced agent acts for no one (403, saying so): it lists, makes, reads and runs nothing of its owner's",
+        fenced_off(&listed) && fenced_off(&made) && fenced_off(&read) && fenced_off(&ran),
+        json!({ "list": listed.status, "make": made.status, "read": read.status, "run": ran.status, "says": listed.text }),
+    );
+
+    // what is its own stands: its list, and a fragment Paul shares with it by its npub
+    let shared = s.named(api, f.paul, "wren-shared")?;
+    let r = api.create_with(f.paul, json!({ "name": shared, "template": "blank" }))?;
+    anyhow::ensure!(r.status == 200, "Paul's fragment for Wren: {r}");
+    let added = api.signed(f.paul, "PUT", &format!("/api/f/{shared}/members/{wren_id}"), Some(&json!({ "role": "editor" })))?;
+    let own_list = api.signed(&wren, "GET", "/api/fragments", None)?;
+    let own_read = api.signed(&wren, "GET", &format!("/api/f/{shared}/files"), None)?;
+    let not_shared = api.signed(&wren, "GET", &format!("/api/f/{}/files", f.maple), None)?;
+    s.ok(
+        "as itself it reaches what is shared with it (a fragment Paul added it to), never the rest of Paul's (403 or 404)",
+        added.status == 200 && own_list.status == 200 && own_read.status == 200 && matches!(not_shared.status, 403 | 404),
+        json!({ "added": added.status, "list": own_list.status, "shared": own_read.status, "maple": not_shared.status }),
+    );
+
+    // invalid: Hand lets none go, fences not itself; Bob fences no one of
+    // Paul's; Wren, fenced, fences no one; a body without `fenced`
+    let lift = fence(f.hand, &wren_id, &q, json!({ "fenced": false }))?;
+    let itself = fence(f.hand, f.hand_id, &q, json!({ "fenced": true }))?;
+    let bob = fence(f.bob, &wren_id, "", json!({ "fenced": false }))?;
+    let by_fenced = fence(&wren, f.hand_id, &q, json!({ "fenced": true }))?;
+    let as_itself = fence(f.hand, &wren_id, "", json!({ "fenced": false }))?;
+    let no_field = fence(f.paul, &wren_id, "", json!({}))?;
+    s.ok(
+        "refused: Paul's agent lets none go and fences not itself, Bob fences no one of Paul's, a fenced agent fences no one, an agent as itself fences no one (403); a body without `fenced` is 400",
+        lift.status == 403 && lift.text.contains("only an agent's owner lets it go")
+            && itself.status == 403 && itself.text.contains("never fences itself")
+            && bob.status == 403
+            && fenced_off(&by_fenced)
+            && as_itself.status == 403
+            && no_field.status == 400,
+        json!({ "lift": lift.status, "itself": itself.status, "bob": bob.status, "fenced": by_fenced.status, "asItself": as_itself.status, "noField": no_field.status }),
+    );
+    let still = api.signed(&wren, "GET", &format!("/api/fragments?{for_paul}"), None)?;
+    s.ok("and Wren is still fenced", fenced_off(&still), &still);
+
+    // Paul lets it go: it acts for him again
+    let r = fence(f.paul, &wren_id, "", json!({ "fenced": false }))?;
+    let back = api.signed(&wren, "GET", &format!("/api/fragments?{for_paul}"), None)?;
+    s.ok("its owner lets it go, and it acts for its owner again", r.status == 200 && r.body["fenced"] != true && back.status == 200, json!({ "lift": r.body, "list": back.status }));
+
+    // on Paul's computer: Maple fenced there at once, and let go
+    let view = |keys: &Keys| api.signed(keys, "GET", &format!("/api/computers/{}", f.computer), None);
+    let r = fence(f.hand, f.maple_id, &q, json!({ "fenced": true }))?;
+    let fenced_view = view(f.paul)?;
+    let lifted = fence(f.paul, f.maple_id, "", json!({ "fenced": false }))?;
+    let lifted_view = view(f.paul)?;
+    s.ok(
+        "an agent on Paul's computer fenced is fenced on its view at once, and let go, no more",
+        r.status == 200 && fenced_in(&fenced_view.body, f.maple) == Some(true) && lifted.status == 200 && fenced_in(&lifted_view.body, f.maple) == Some(false),
+        json!({ "fenced": fenced_view.body["agents"], "lifted": lifted_view.body["agents"] }),
+    );
+
+    // fenced before it starts, it starts fenced: Fern, made by Hand, fenced, then started
+    let fern = s.named(api, f.paul, "fern")?;
+    let r = api.signed(f.hand, "POST", &format!("/api/fragments?{for_paul}"), Some(&json!({ "name": fern, "template": "agent", "title": "Fern" })))?;
+    anyhow::ensure!(r.status == 200, "Hand makes Fern: {r}");
+    let path = format!("/api/computers/{}/agents/{fern}?{for_paul}", f.computer);
+    let started = api.signed(f.hand, "PUT", &path, Some(&json!({})))?;
+    let fern_id = identity_in(&started.body, &fern);
+    let stopped = api.signed(f.hand, "DELETE", &path, None)?;
+    anyhow::ensure!(stopped.status == 200, "Fern stopped: {stopped}");
+    let fenced = fence(f.hand, &fern_id, &q, json!({ "fenced": true }))?;
+    let again = api.signed(f.hand, "PUT", &path, Some(&json!({})))?;
+    s.ok(
+        "an agent fenced while it runs nowhere starts fenced (its computer reads the fence as it takes it)",
+        fenced.status == 200 && again.status == 200 && fenced_in(&again.body, &fern) == Some(true),
+        json!({ "fence": fenced.status, "view": again.body["agents"] }),
+    );
+    let r = api.signed(f.hand, "DELETE", &path, None)?;
+    anyhow::ensure!(r.status == 200, "Fern stopped again: {r}");
+    Ok(())
 }
 
 /// `fragment agent --new` and the flags that keep an agent, through the
@@ -244,8 +371,37 @@ fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && serde_json::from_str::<Value>(&written.text).ok().is_some_and(|v| v["model"]["id"] == "anthropic/claude-sonnet-5.5" && v["tier"] == "medium"),
         json!({ "answer": own, "agentJson": written.text }),
     );
+    let computer_fenced = |agent: &str| -> Result<Option<bool>> {
+        let view = api.signed(&me, "GET", "/api/computers", None)?.body["computers"][0].clone();
+        Ok(fenced_in(&view, agent))
+    };
+    s.ok(
+        "and fences it (decision 63, proposed): it says so, and so does its computer",
+        own["fenced"] == true && computer_fenced(&agent)? == Some(true),
+        json!({ "answer": own["fenced"], "computer": computer_fenced(&agent)? }),
+    );
     let back = s.cli_json(api, &home, &["agent", &agent, "--no-model", "--json"])?;
     s.ok("`--no-model` puts it on its tier again", back["runsOn"] == json!({ "on": "platform", "tier": "medium" }), &back);
+    s.ok("and lifts no fence: its owner does", back["fenced"] == true, &back);
+    let lifted = s.cli_json(api, &home, &["agent", &agent, "--no-fence", "--json"])?;
+    let again = s.cli_json(api, &home, &["agent", &agent, "--fence", "--json"])?;
+    let lifted_again = s.cli_json(api, &home, &["agent", &agent, "--no-fence", "--json"])?;
+    s.ok(
+        "its owner's `--no-fence` lets it go and `--fence` fences it again",
+        lifted["fenced"] == false && again["fenced"] == true && lifted_again["fenced"] == false && computer_fenced(&agent)? == Some(false),
+        json!({ "lifted": lifted["fenced"], "fenced": again["fenced"], "liftedAgain": lifted_again["fenced"] }),
+    );
+    // made on its owner's own provider, it is fenced from the start
+    let elm = s.name("elm");
+    let made = s.cli_json(api, &home, &["agent", "--new", &elm, "--name", "Elm", "--job", "You draft letters from the outlines you are sent.", "--model", "openrouter:anthropic/claude-sonnet-5.5", "--json"])?;
+    let elm_agent = made["agent"].as_str().unwrap_or("").to_string();
+    s.owned(&json!({ "name": elm_agent }), &me);
+    s.owned(&json!({ "name": made["chat"] }), &me);
+    s.ok(
+        "`fragment agent --new … --model <provider>:<id>` makes it fenced, before its job, model or chat",
+        made["fenced"] == true && computer_fenced(&elm_agent)? == Some(true),
+        json!({ "made": made, "computer": computer_fenced(&elm_agent)? }),
+    );
     let stopped = s.cli_json(api, &home, &["agent", &agent, "--stop", "--json"])?;
     let shown = s.cli_json(api, &home, &["agent", &agent, "--json"])?;
     let started = s.cli_json(api, &home, &["agent", &agent, "--start", "--json"])?;

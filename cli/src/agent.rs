@@ -149,6 +149,8 @@ impl RunsOn {
 pub struct Running {
     pub fragment: String,
     pub identity: String,
+    /// Fenced (decision 63, proposed): it acts as itself alone.
+    pub fenced: bool,
 }
 
 /// The signer's computer: its id, the agents it runs, and the asker's own
@@ -164,7 +166,7 @@ fn agents_of(v: &Value) -> Vec<Running> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|a| Some(Running { fragment: a["fragment"].as_str()?.to_string(), identity: a["identity"].as_str()?.to_string() }))
+        .filter_map(|a| Some(Running { fragment: a["fragment"].as_str()?.to_string(), identity: a["identity"].as_str()?.to_string(), fenced: a["fenced"] == true }))
         .collect()
 }
 
@@ -248,6 +250,9 @@ pub struct Made {
     pub computer: String,
     pub chat: String,
     pub runs_on: RunsOn,
+    /// Fenced (decision 63, proposed): on its owner's own provider, it acts
+    /// as itself alone.
+    pub fenced: bool,
     /// Made now (not by an earlier try).
     pub made_agent: bool,
     pub made_chat: bool,
@@ -257,6 +262,39 @@ pub struct Made {
 
 /// Makes `new` one of the signer's (an agent: its owner's) agents,
 /// running on their computer, with a chat of its own.
+/// Fences the agent `identity` (decision 63, proposed): one on its owner's
+/// own provider acts as itself alone, on the platform and on its computer.
+/// Its owner's agent fences, and never lets one go: its owner does.
+pub fn fence(c: &Client, identity: &str) -> Result<bool> {
+    let v = c.call(c.put_json(&format!("/api/identities/{identity}/fenced"), &json!({ "fenced": true }))?).with_context(|| format!("fencing {identity}"))?;
+    Ok(v["fenced"] == true)
+}
+
+/// The identity of `agent` (its fragment's npub, made when its computer
+/// first took it).
+fn identity_of(c: &Client, agent: &str) -> Result<String> {
+    let status = c.call(c.get(&format!("/api/f/{agent}/status"))?)?;
+    status["npub"].as_str().map(str::to_string).ok_or_else(|| coded(Code::ServerError, format!("{agent}'s status names no npub")))
+}
+
+/// Fences `agent` or lets it go (`fenced`): its owner either way, their
+/// agent fencing only. Answers whether it is fenced now.
+pub fn set_fence(c: &Client, agent: &str, fenced: bool) -> Result<bool> {
+    let identity = identity_of(c, agent)?;
+    let v = c.call(c.put_json(&format!("/api/identities/{identity}/fenced"), &json!({ "fenced": fenced }))?).map_err(|e| match e.downcast_ref::<CodedError>() {
+        Some(ce) if ce.code == Code::NotFound => coded(Code::NotFound, format!("{agent} has never run, so it has no identity to fence yet: start it first (`fragment agent {agent} --start`)")),
+        _ => e,
+    })?;
+    Ok(v["fenced"] == true)
+}
+
+/// Whether settings put an agent on its owner's own provider, outside the
+/// platform: the agents-finite skill's convention for an untrusted model,
+/// which fences it.
+pub fn outside(settings: &Value) -> bool {
+    matches!(runs_on(Some(settings)), RunsOn::Own { .. })
+}
+
 pub fn make(c: &Client, new: &New) -> Result<Made> {
     let label = new.label.trim();
     let chat_label = format!("{label}{OWN_CHAT}");
@@ -290,6 +328,10 @@ pub fn make(c: &Client, new: &New) -> Result<Made> {
     // its job and settings, then live (its computer reads them within seconds)
     // (keyed by what they say: an earlier try's same files commit nothing twice)
     let settings = settled(settings_of(c, &agent)?.as_ref(), &new.settings);
+    // on its owner's own provider: fenced before its job, its model or its
+    // chat exist, so no turn of its runs unfenced (its identity is made as
+    // its computer takes it, just above)
+    let fenced = if outside(&settings) { fence(c, &identity)? } else { false };
     let files = [json!({ "path": "SOUL.md", "text": job }), json!({ "path": "agent.json", "text": format!("{}\n", serde_json::to_string_pretty(&settings)?) })];
     write_live(c, &agent, &files, "a new agent")?;
 
@@ -309,7 +351,7 @@ pub fn make(c: &Client, new: &New) -> Result<Made> {
         c.call(c.delete(&format!("/api/f/{chat}/members/me"))?).with_context(|| format!("leaving {chat}, {agent}'s own chat"))?;
         left_chat = true;
     }
-    Ok(Made { agent, identity, name: name.to_string(), computer: home.computer, chat, runs_on: runs_on(Some(&settings)), made_agent, made_chat, left_chat })
+    Ok(Made { agent, identity, name: name.to_string(), computer: home.computer, chat, runs_on: runs_on(Some(&settings)), fenced, made_agent, made_chat, left_chat })
 }
 
 /// What a change of `agent`'s job and settings wrote (none: it already
@@ -320,6 +362,8 @@ pub struct Changed {
     pub agent: String,
     pub runs_on: RunsOn,
     pub changed: bool,
+    /// Fenced now, put on its owner's own provider (decision 63, proposed).
+    pub fenced: bool,
 }
 
 /// Writes `agent`'s job and settings as asked, and puts them live.
@@ -333,13 +377,16 @@ pub fn change(c: &Client, agent: &str, job: Option<&str>, asked: &Settings) -> R
         }
     }
     let settings = settled(now.as_ref(), asked);
+    // put on its owner's own provider: fenced first (its identity is its
+    // fragment's npub, made when its computer first took it)
+    let fenced = asked.model.is_some() && outside(&settings) && set_fence(c, agent, true)?;
     if !asked.is_empty() && now.as_ref() != Some(&settings) {
         files.push(json!({ "path": "agent.json", "text": format!("{}\n", serde_json::to_string_pretty(&settings)?) }));
     }
     if !files.is_empty() {
         write_live(c, agent, &files, "its job and model")?;
     }
-    Ok(Changed { agent: agent.to_string(), runs_on: runs_on(Some(&settings)), changed: !files.is_empty() })
+    Ok(Changed { agent: agent.to_string(), runs_on: runs_on(Some(&settings)), changed: !files.is_empty(), fenced })
 }
 
 /// Starts (`start`) or stops `agent` on the signer's computer: the view
@@ -352,6 +399,16 @@ pub fn run(c: &Client, agent: &str, start: bool) -> Result<bool> {
         false => c.call(c.delete(&path)?)?,
     };
     Ok(agents_of(&view).iter().any(|a| a.fragment == agent))
+}
+
+/// Whether `agent` is fenced, as the signer's computer has it (none: no
+/// computer, or it runs nowhere).
+pub fn fenced(c: &Client, agent: &str) -> Result<Option<bool>> {
+    match home(c, false) {
+        Ok(h) => Ok(h.agents.iter().find(|a| a.fragment == agent).map(|a| a.fenced)),
+        Err(e) if e.downcast_ref::<CodedError>().is_some_and(|e| e.code == Code::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether the signer's computer runs `agent` (none: no computer).

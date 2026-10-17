@@ -367,6 +367,13 @@ enum Cmd {
         /// Stop it on your computer (its fragment, job and memories are kept)
         #[arg(long)]
         stop: bool,
+        /// Fence it: it acts as itself alone, reaching only what it is sent
+        /// and what is shared with it (--model on your own provider fences it)
+        #[arg(long, conflicts_with = "no_fence")]
+        fence: bool,
+        /// Let it go (its owner only)
+        #[arg(long)]
+        no_fence: bool,
     },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
@@ -2009,9 +2016,12 @@ fn run(cli: Cli) -> Result<()> {
             let label = fragment_proto::split_fragment_name(&made.agent).map_or(made.agent.as_str(), |(l, _)| l);
             println!("{} ({}) runs on your computer, on {}", made.agent, made.name, made.runs_on.said());
             println!("its own chat with you: {}{}", made.chat, if made.left_chat { " (made by this agent, which left it: the new agent leads it)" } else { "" });
+            if made.fenced {
+                println!("fenced: it acts as itself alone, and reaches only what it is sent and what is shared with it (its owner lets it go)");
+            }
             println!("brief it: fragment ask {label} \"…\" --wait");
         }
-        Cmd::Agent { agent, new: None, name, picture, no_picture, job, tier, model, no_model, start, stop } => {
+        Cmd::Agent { agent, new: None, name, picture, no_picture, job, tier, model, no_model, start, stop, fence, no_fence } => {
             let Some(agent) = agent.or_else(|| c.agent().map(|m| m.agent.clone())) else {
                 return Err(usage("name the agent fragment: `fragment agent juniper--k3x9 --name Frank`"));
             };
@@ -2030,18 +2040,23 @@ fn run(cli: Cli) -> Result<()> {
                 true => agent::change(&c, &agent, job.as_deref(), &settings)?.changed,
                 false => false,
             };
+            if fence || no_fence {
+                agent::set_fence(&c, &agent, fence)?;
+            }
             let running = match (start, stop) {
                 (true, _) => Some(agent::run(&c, &agent, true)?),
                 (_, true) => Some(agent::run(&c, &agent, false)?),
                 _ => agent::running(&c, &agent)?,
             };
+            // as its computer has it (decision 63, proposed); none while it runs nowhere
+            let fenced = agent::fenced(&c, &agent)?;
             let runs_on = agent::runs_on(agent::settings_of(&c, &agent)?.as_ref());
             // as its list says it: the platform's face of it, a moment after a change
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
             let shown_name = name.or_else(|| row.as_ref().and_then(|r| r.title.clone())).unwrap_or_else(|| agent.clone());
             let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
-            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() || changed, "runsOn": runs_on, "running": running }));
+            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() || changed, "runsOn": runs_on, "running": running, "fenced": fenced }));
             println!("{agent}: {shown_name}");
             match (&picture, no_picture, shown_picture) {
                 (Some(p), _, _) => println!("picture: {} (it shows everywhere within seconds)", p.display()),
@@ -2051,6 +2066,9 @@ fn run(cli: Cli) -> Result<()> {
                 _ => {}
             }
             println!("runs on {}", runs_on.said());
+            if fenced == Some(true) {
+                println!("fenced: it acts as itself alone, and reaches only what it is sent and what is shared with it (its owner lets it go)");
+            }
             match running {
                 Some(true) => println!("running on your computer"),
                 Some(false) => println!("not running (`fragment agent {agent} --start` starts it)"),

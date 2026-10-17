@@ -336,7 +336,7 @@ impl FragmentCell {
     /// owner's behalf here (adding the agent as a member).
     fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
         let owner = self.must(MetaKey::Owner)?;
-        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
+        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None, fenced: false };
         let signed = crate::routed::Signed::new(identity, None);
         Ok(crate::fragment::Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false })
     }
