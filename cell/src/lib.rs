@@ -95,9 +95,12 @@ pub use ledger::LedgerCell;
 pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
-/// `x-fragment-*` a client sends, stays at the router.
-const PASSED_HEADERS: [&str; 7] =
-    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "range"];
+/// `x-fragment-*` a client sends, stays at the router. `sec-fetch-mode`
+/// says a page's navigation (where a share link's token leaves the URL),
+/// and `service-worker` a worker's script (only the platform's is served:
+/// serve.rs); a page's code sets neither.
+const PASSED_HEADERS: [&str; 9] =
+    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "range", "sec-fetch-mode", "service-worker"];
 
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.

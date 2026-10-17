@@ -947,7 +947,10 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let name = s.named(api, &owner, "todo-cap")?;
     let c = s.create(api, &owner, &name)?;
-    let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    let mut changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    // a worker the app would register: it would see every navigation on
+    // its scope, a share link's `?view=` among them, before the origin does
+    changes.push(("site/sw.js", Some(b"self.addEventListener('fetch', (e) => e.respondWith(fetch(e.request)));\n")));
     s.commit(&c, &changes);
     s.deploy(&c);
     for i in 1..=501 {
@@ -981,6 +984,14 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
         "the share link's page cannot read its token: its URL went on without `view`, and the cookie is HttpOnly",
         seen.as_str().is_some_and(|v| !v.contains(token) && !v.contains("view=") && v.contains(&api.site_url(&name, ""))),
         &seen,
+    );
+    let worker = |script: &str| format!("navigator.serviceWorker.register({script:?}, {{ scope: '/' }}).then(() => 'registered', (e) => 'refused: ' + e.name)");
+    let app = chrome.eval(&a, &worker("sw.js"))?;
+    let platform = chrome.eval(&a, &worker("__sw.js"))?;
+    s.ok(
+        "an app cannot register a service worker of its own (it would see a share link's navigation first); the platform's still registers",
+        app.as_str().is_some_and(|v| v.starts_with("refused")) && platform == "registered",
+        format!("app: {app}, platform: {platform}"),
     );
     let b = chrome.open(&url)?;
     s.ok("a second page sees the first", chrome.until(&b, "document.getElementById('here').textContent === 'you and 1 other here'", wait), "");

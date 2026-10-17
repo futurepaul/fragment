@@ -145,6 +145,18 @@ pub fn query_without_view(query: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Where a navigation that brought the share link goes on to (its
+/// `Location`): its path with one leading `/`, however many it came with
+/// (`//evil.example/` or `/\evil.example/` names another host to a
+/// browser), and its query without `view`.
+pub fn way_on(path: &str, query: Option<&str>) -> String {
+    let query = query.and_then(query_without_view).map(|q| format!("?{q}")).unwrap_or_default();
+    let location = format!("/{}{query}", path.trim_start_matches(['/', '\\']));
+    assert!(!location.starts_with("//") && !location.starts_with("/\\"), "the way on is a path on this origin, never another host");
+    assert!(location.split_once('?').is_none_or(|(_, q)| query_without_view(q).as_deref() == Some(q)), "the way on names no `view`");
+    location
+}
+
 /// One cookie's value from a `Cookie` header.
 pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     header.split(';').find_map(|pair| {
@@ -287,6 +299,19 @@ mod tests {
         assert_eq!(query_without_view("views=1&preview=2&view_=3"), Some("views=1&preview=2&view_=3".into()));
         assert_eq!(query_without_view("&&a=1&"), Some("a=1".into()));
         assert_eq!(query_without_view(""), None);
+    }
+
+    /// Goal: the way on from a share link is a path on this origin, never
+    /// another host (an open redirect). Method: paths that a browser reads
+    /// as another host, kept as paths here.
+    #[test]
+    fn the_way_on_stays_on_its_origin() {
+        assert_eq!(way_on("/docs/", Some("q=1&view=t&b=2")), "/docs/?q=1&b=2");
+        assert_eq!(way_on("/", Some("view=t")), "/");
+        assert_eq!(way_on("//evil.example/", Some("view=t")), "/evil.example/");
+        assert_eq!(way_on("/\\evil.example/x", Some("view=t&a=1")), "/evil.example/x?a=1");
+        assert_eq!(way_on("///\\//x", None), "/x");
+        assert_eq!(way_on("", None), "/");
     }
 
     use super::*;

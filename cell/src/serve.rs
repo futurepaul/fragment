@@ -120,21 +120,21 @@ fn answers_someone(path: &str) -> bool {
     path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live")
 }
 
-/// A browser's navigation to a page: a GET or HEAD whose `Accept` names
-/// HTML (a fetch, an image, a script, or a socket asks for no page).
+/// A browser's navigation to a page: a GET or HEAD that its Fetch
+/// Metadata names one (`Sec-Fetch-Mode: navigate`, which no page's script
+/// sets) and whose `Accept` names HTML. A link unfurler sends no Fetch
+/// Metadata, so it reads the page, and its Open Graph tags, where it asked.
 fn page_navigation(req: &Request) -> CellResult<bool> {
     let get = matches!(req.method(), Method::Get | Method::Head);
-    let upgrade = req.headers().get("upgrade")?.is_some();
-    Ok(get && !upgrade && req.headers().get("accept")?.is_some_and(|a| a.contains("text/html")))
+    let navigate = req.headers().get("sec-fetch-mode")?.as_deref() == Some("navigate");
+    Ok(get && navigate && req.headers().get("accept")?.is_some_and(|a| a.contains("text/html")))
 }
 
 /// The answer to a navigation that brought the share link: its cookie, and
-/// on to the same path and query without `view` (`302`, never cached).
+/// on to the same path and query without `view` (`302`, never cached),
+/// on this origin (`site::way_on`).
 fn without_view(url: &url::Url, cookies: &[String]) -> CellResult<Response> {
-    let kept = url.query().and_then(site::query_without_view);
-    assert!(kept.as_deref().is_none_or(|q| site::query_without_view(q).as_deref() == Some(q)), "the way on names no `view`");
-    let location = format!("{}{}", url.path(), kept.map(|q| format!("?{q}")).unwrap_or_default());
-    assert!(location.starts_with('/'), "the way on is a path on this origin");
+    let location = site::way_on(url.path(), url.query());
     let mut resp = Response::empty()?.with_status(302);
     let h = resp.headers_mut();
     h.set("location", &location)?;
@@ -163,6 +163,13 @@ impl FragmentCell {
     }
 
     async fn answer(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
+        // A fragment's one service worker is the platform's: an app's
+        // would see every navigation on its scope before this origin does,
+        // a share link's `?view=` among them. A worker's script is asked
+        // for with `Service-Worker: script` (no page's code sets it).
+        if req.headers().get("service-worker")?.is_some() && rest != "__sw.js" {
+            return Err(CellError::new(ErrorCode::NotFound, "no service worker but the platform's (__sw.js) is served on a fragment's origin"));
+        }
         // the fragment's facts, read once for the whole request
         let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)

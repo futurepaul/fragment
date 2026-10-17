@@ -342,11 +342,13 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<V
     cdp.target_session = Some(attached["sessionId"].as_str().ok_or_else(|| Failure::retry("no target session"))?.to_string());
     let viewport = json!({ "width": card::WIDTH, "height": card::HEIGHT, "deviceScaleFactor": card::SCALE, "mobile": false });
     cdp.call("Emulation.setDeviceMetricsOverride", viewport, deadline).await?;
-    for domain in ["Page", "Runtime", "Log", "Network"] {
+    for domain in ["Page", "Runtime", "Log"] {
         cdp.call(&format!("{domain}.enable"), json!({}), deadline).await?;
     }
     // a link holder's share link, as its `?view=` would have left it: the
-    // origin's HttpOnly cookie, so the page opens at a URL with no token
+    // origin's HttpOnly cookie, so the page opens at a URL with no token.
+    // Setting a cookie needs no `Network.enable`, whose events would count
+    // toward the shot's messages (`CDP_MESSAGES_MAX`).
     if let Some(token) = &page.view_token {
         let cookie = json!({
             "name": VIEW_COOKIE, "value": token, "url": page.url,

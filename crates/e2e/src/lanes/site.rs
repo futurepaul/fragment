@@ -135,6 +135,12 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("where the cookie opens it", r.status == 200 && r.text.contains("docs"), &r);
     let r = navigate("?view=0123456789abcdef01234567", None)?;
     s.ok("a token that opens nothing is not followed on: its page says the link changed", r.status == 401 && r.header("location").is_empty() && r.header("set-cookie").is_empty(), &r);
+    let r = navigate(&format!("/evil.example/?view={view}"), None)?;
+    s.ok("the way on is a path on this origin, never another host (`//evil.example/`)", r.status == 302 && r.header("location") == "/evil.example/", &r);
+    // a link unfurler sends no Fetch Metadata: it reads the page where it
+    // asked, and its Open Graph tags (no redirect it may not follow)
+    let unfurled = api.call(Call { method: "GET", url: api.site_url(&name, &format!("?view={view}")), extra: vec![("accept", "text/html".to_string())], ..Call::default() })?;
+    s.ok("a share link's preview still unfurls: no Fetch Metadata, no redirect, the page and its tags", unfurled.status == 200 && unfurled.text.contains("og:title"), &unfurled);
     let r = api.page(&name, "docs/", Some(&cookie))?;
     s.ok("the cookie opens other pages", r.status == 200 && r.text.contains("docs"), &r);
     s.ok("a link fragment's pages are private to caches", r.header("cache-control") == "private, no-cache", r.header("cache-control"));
