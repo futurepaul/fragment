@@ -256,8 +256,8 @@ its popup.
 ### The platform, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser`:
-32
-passed, 0 failed, 0 skipped, twice. The section takes about 11 s after the
+33
+passed, 0 failed, 0 skipped. The section takes about 11 s after the
 build (the cell, the CLI and the stub image), and no wait runs out its
 limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
 
@@ -312,6 +312,12 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
       one of the person's;
     - back at "Only the tabs they open", the person's tabs leave the
       list.
+  - Reloaded (its owner's Reload in `chrome://extensions`), the extension
+    comes back on its own, with its link. The Settings page open from
+    before keeps the old script, which Chrome cut off from it: asked, it
+    says "reload this page" instead of throwing (the error a person saw
+    in the extension's Errors, trying it), and that page loaded again
+    shows this browser connected.
   - Forget, in Settings, ends it. The extension hears it must not come
     back (its status says "your owner forgot this browser"), and the
     next `browse` is told the browser is not connected.
@@ -319,7 +325,7 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
 The harness launches a lane's own Chrome without `--disable-extensions`
 when the lane loads one (`crates/e2e/src/browser.rs`), and finds the
 extension by the id Chrome derives from its path. A Chrome that loads no
-unpacked extension (Google Chrome from 137, CI's) makes those twelve
+unpacked extension (Google Chrome from 137, CI's) makes those thirteen
 checks skips that say so.
 
 ### Hermes, end to end (run)

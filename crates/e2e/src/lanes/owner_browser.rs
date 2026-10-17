@@ -27,8 +27,10 @@
 //! - **Restart:** with its link a browser comes back on its own: a fake
 //!   one asks for a ticket of its own and replaces the socket before it
 //!   (told not to come back); the real extension, its connection dropped
-//!   (a lever), comes back by itself. Forgotten (by its owner, from
-//!   anywhere; in Settings), it does not.
+//!   (a lever), comes back by itself, and reloaded, it does too (the
+//!   Settings page open from before, its script cut off, says to load it
+//!   again). Forgotten (by its owner, from anywhere; in Settings), it does
+//!   not.
 //! - **Replaced:** one that disconnects mid-call ends the guest's socket,
 //!   which says so.
 
@@ -63,7 +65,7 @@ const PAGE_TITLE: &str = "Opened by the agent";
 const PERSON_PAGE: &str = "data:text/html,%3Ctitle%3EA%20tab%20of%20the%20person%3C%2Ftitle%3E";
 const PERSON_TITLE: &str = "A tab of the person";
 const SHELL_TITLE: &str = "Finite.Computer";
-const REAL: [&str; 12] = [
+const REAL: [&str; 13] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
     "another person signed in to this browser is offered Connect, not told it is connected",
@@ -74,6 +76,7 @@ const REAL: [&str; 12] = [
     "at \"Those, and tabs I choose\", the popup lists the person's tabs, and the one switched on joins the agent's",
     "at \"All my tabs and windows\", the agent lists every tab, and closes one of the person's",
     "back at \"Only the tabs they open\", the person's tabs leave the agent's list",
+    "the extension reloaded: Settings, open from before, says to load it again, and loaded again shows this browser back on its own, with its link",
     "Forget, in Settings, ends it: it does not come back, and Settings offers to connect again",
     "then the agent is told its owner's browser is not connected",
 ];
@@ -395,15 +398,31 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let back = chat.ask(s, "tabs")?;
     s.ok(REAL[9], back.contains(PAGE_TITLE) && !back.contains(SHELL_TITLE), &back);
     b.close(popup)?;
+    // the extension reloaded, as its owner's Reload in chrome://extensions
+    // does it (an unpacked one stays on only in developer mode): its script
+    // on the Settings page already open is cut off from it, and says so when
+    // the page asks, as it does each time it shows Settings; the page loaded
+    // again has the new one, and the extension is back on its own, its link
+    let extensions = b.open("chrome://extensions/")?;
+    let reload = format!("chrome.developerPrivate.updateProfileConfiguration({{ inDeveloperMode: true }}).then(() => chrome.developerPrivate.reload('{ext_id}', {{ failQuietly: true }})).then(() => true)");
+    let reloaded = b.eval(&extensions, &reload)?;
+    b.close(extensions)?;
+    let cut_off = b.until(&settings, "(window.postMessage({ fragmentBrowser: 'hello' }, location.origin), document.getElementById('settings-browser')?.innerText.includes('reload this page'))", wait);
+    let said = b.eval(&settings, LINE)?;
+    b.reload(&settings)?;
+    let back = b.until(&settings, &format!("document.querySelector('{row}')?.innerText.includes('(this browser): connected') === true"), wait);
+    let linked = browsers(api, &owner, &id);
+    let one = linked.len() == 1 && linked[0]["id"] == mine.as_str() && linked[0]["connected"] == true;
+    s.ok(REAL[10], reloaded == true && cut_off && back && one, format!("{said} / {} / {}", b.eval(&settings, LINE)?, json!(linked)));
     // forgotten in Settings: the extension hears it must not come back (its
     // link let go, its status says so), and Settings offers Connect again
     b.click(&settings, &format!("{row} [data-action=browser-forget]"))?;
     let told = format!("!document.querySelector('{row}') && !!document.querySelector('[data-action=browser-connect]') && document.getElementById('settings-browser').innerText.includes('your owner forgot this browser')");
     let off = b.until(&settings, &told, wait);
-    s.ok(REAL[10], off && browsers(api, &owner, &id).is_empty(), b.eval(&settings, LINE)?);
+    s.ok(REAL[11], off && browsers(api, &owner, &id).is_empty(), b.eval(&settings, LINE)?);
     chat.say(&format!("browse {PAGE}"))?;
     let reply = chat.reply(s);
-    s.ok(REAL[11], reply.contains("your owner's browser is not connected"), &reply);
+    s.ok(REAL[12], reply.contains("your owner's browser is not connected"), &reply);
     Ok(())
 }
 
