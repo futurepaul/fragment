@@ -197,14 +197,6 @@ pub const WS_OPEN_TIMEOUT_MS: u64 = 10_000;
 pub const BROWSE_CALL_MS: u64 = 10_000;
 pub const BROWSE_POLL_MS: u64 = 250;
 pub const BROWSE_POLLS_MAX: u32 = 80;
-/// Before each of its owner's turns the bridge asks whether their browser
-/// is connected (`$FRAGMENT_BROWSER/json/version`, the computer's own
-/// intercept, which answers in milliseconds): given this long, past which
-/// the turn is handed untold, never held longer than for its note; and its
-/// answer at most this long (a browser's name and its socket's address).
-pub const BROWSER_ASK_MS_MAX: u64 = 2_000;
-pub const BROWSER_ANSWER_MAX_BYTES: usize = 1024;
-const _: () = assert!(BROWSER_ASK_MS_MAX <= NOTE_READ_MS_MAX);
 /// A `__live` socket pings this often, and is given up on after twice that
 /// with nothing heard.
 pub const LIVE_PING_MS: u64 = 30_000;

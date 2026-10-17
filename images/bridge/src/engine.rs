@@ -1075,7 +1075,6 @@ impl Engine {
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
-            browser: None,
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));

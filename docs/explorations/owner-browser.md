@@ -31,9 +31,11 @@ unpacked. No hosted deployment was used.
   connects through the extension, and the person's computer carries the
   Chrome DevTools Protocol (CDP) between that browser and its guest. The agent's
   runtime needs nothing new: any CDP client works, Hermes' browser tools
-  and the agent-browser CLI in our image among them. While the browser
-  is connected, the bridge tells the agent so, in one line beside each of
-  its owner's messages: no skill.
+  and the agent-browser CLI in our image among them. The agent learns
+  of it from a managed skill, `owner-browser-finite`, which it loads
+  when its owner means their own browser: it checks that the browser is
+  connected, then drives it from its terminal. Nothing is said beside
+  its owner's messages.
 - **It fits the design as it is.** The platform gains no notion of an
   agent runtime, a vendor, or CDP's meaning: it carries frames.
   - The guest reaches it the way it reaches the API and models: one more
@@ -48,21 +50,22 @@ unpacked. No hosted deployment was used.
     and lists it by name. The agent (the stub image's `browse`) opens a
     tab in it and reads its title. A dropped connection comes back on
     its own. Forget, in Settings, ends it.
-  - Our Hermes image, unchanged, does the same: its terminal tool runs
-    the agent-browser on its PATH against the socket, and the tab opens
-    in the extension's Chrome.
+  - Our Hermes image does the same, as the skill says: its terminal tool
+    runs the skill's check and its agent-browser command against the
+    socket, and the tab opens in the extension's Chrome.
   - agent-browser 0.26.0 (Hermes' pin) drives the extension through
     open, title, snapshot, screenshot, a second tab and a click. At "All
     my tabs and windows" it lists the person's tabs, switches to one,
     reads it, closes a duplicate, and opens a new window.
   - On the dev stack, a person tries it as written under "Trying it
     locally", below.
-  - **A real agent, in plain English.** Hermes on a real model, told by
-    the bridge's line, used the owner's browser the first time it was
-    asked: it listed the tabs it may use, and duplicated the person's
-    tabs when asked to. An earlier trial, with a skill instead, searched
-    Google Flights in Austin's browser. A fresh agent told nothing used
-    the Chromium on its own desktop (below).
+  - **A real agent, in plain English.** Hermes on a real model used the
+    owner's browser the first time it was asked: with a skill in its own
+    fragment, it searched Google Flights in Austin's browser; told by a
+    line beside each message instead, it listed the tabs it may use, and
+    duplicated the person's tabs when asked to. A fresh agent told
+    nothing used the Chromium on its own desktop (below). The managed
+    skill that replaced the line has not met a real model yet.
 - **Not run:** anything hosted.
 
 ## The shape
@@ -140,13 +143,10 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
 - `GET /json/version` there answers as a browser's DevTools does, from
   the Computer DO: the connected browser's name (`Browser`) and its
   socket (`webSocketDebuggerUrl`), or `not_connected`.
-- **Told.** Before each turn its owner asks, the bridge asks
-  `/json/version` (at most 2 s, beside the note's reads), and while a
-  browser is connected the agent is told so in one line beside the
-  message: which browser "my browser" means, how its terminal reaches
-  it, and what it may use (the appendix; docs/bridge.md, "Its owner's
-  browser is told"). Another asker's turn is never told, the browser
-  being the owner's; nothing is told while none is connected.
+- **Learned.** The agent learns of it from the managed skill
+  `owner-browser-finite` (the appendix): which browser "my browser"
+  means, the check above, the agent-browser command its terminal reaches
+  it with, and what it may use. The bridge says nothing of it.
 - Accepted only while the owner's browser is connected. Otherwise 403
   `not_connected`: "your owner's browser is not connected: they connect it
   from Settings, with the Fragment extension". The stub's reply carries
@@ -282,7 +282,7 @@ its popup.
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser`:
 38
-passed, 0 failed, 0 skipped. The section takes about 11 s after the
+passed, 0 failed, 0 skipped. The section takes about 13 s after the
 build (the cell, the CLI and the stub image), and no wait runs out its
 limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
 
@@ -297,14 +297,14 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
   - The answers reach the guest (the agent's reply reads the page's
     title), and the guest socket's end is told to the browser
     (`<socket> close`).
-  - While it is connected, the owner's turn is told so first: the
-    browser's name and its socket, as the computer answered
-    `/json/version` (the stub echoes what it was told).
+  - While it is connected, `/json/version` answers the guest's own GET
+    (the stub's `fetch`) with the name the extension gave and the
+    guest's socket, as the skill's check reads it.
 - **Invalid.**
   - No one else mints a ticket (404) or forgets the browser (404).
-  - With no browser connected, the agent's reply carries the platform's
-    words, and the owner's turns are told nothing of a browser; nor after
-    Forget.
+  - With no browser connected, the agent's `browse` and its GET of
+    `/json/version` carry the platform's words (403 `not_connected`), and
+    so does `browse` after Forget.
   - A socket from a page's origin (403) and one naming no ticket (400)
     are refused.
   - A link's ticket is refused to a page (403), and to a link the
@@ -373,21 +373,25 @@ checks skips that say so.
 ### Hermes, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser-hermes`:
-8 passed, 0 failed, 0 skipped. The section runs only by name, as
-`hermes` does, because it builds our Hermes image (v0.21.7).
+11 passed, 0 failed, 0 skipped, in about 12 s after the build. The
+section runs only by name, as `hermes` does, because it builds our
+Hermes image (v0.21.7).
 
-- A computer pinned to the Hermes image wakes and follows its chat.
+- Its owner has a skills fragment, as the shell's setup makes one, and
+  a computer pinned to the Hermes image wakes and follows its chat.
 - Settings connects the extension's Chrome.
-- The scripted model's `run:` has Hermes' terminal tool run `agent-browser
-  --session owner --cdp ws://browser.fragment.internal/devtools/browser
-  open <the platform's page>`.
-- The tab opens in the extension's Chrome, and the tool's answer reads the
-  page's title.
-- The model's request carries the bridge's line: Hermes renders the
-  inbound's `context` before its owner's message.
+- The managed set installs `owner-browser-finite` in the agent's
+  profile.
+- The scripted model's `run:` has Hermes' terminal tool run the skill's
+  own lines, read from the release: its check, which answers with the
+  name the extension gave and the socket, and its `open` on the
+  platform's page. The tab opens in the extension's Chrome, and the
+  tool's answer reads the page's title.
+- The model's skills index lists the skill by "my browser", and its
+  owner's message reaches the model with nothing before it.
 - Nothing in Hermes changed: the agent-browser the image already
-  carries (0.26.0) is the client, and the bridge's line is the inbound's
-  `context`, which Hermes already renders.
+  carries (0.26.0) is the client, and the skill is one more of the
+  managed set its profiles already read.
 
 Its first run failed on its page, not its path (run). The tabs opened,
 but agent-browser's `open` navigates with `Page.navigate`, and Chrome
@@ -399,7 +403,9 @@ now opens the platform's own page.
 Hermes v0.21.7 also reads a CDP endpoint from `BROWSER_CDP_URL` or the
 profile's `browser.cdp_url`. A full `ws://…/devtools/browser…` URL
 passes through as given (`tools/browser_tool_cdp.py` at v0.21.7; read),
-so its own browser tools could be pointed here too (question 2).
+so its own browser tools could be pointed here too. They are not: they
+would drive the owner's browser for every call, connected or not, and
+never the agent's own desktop's.
 
 ### On the dev stack, as a person tries it (run)
 
@@ -430,7 +436,8 @@ The dev stack calls no real model by design. For these trials only, a
 local change to `cargo xtask dev`, not on this branch, gave it Finite's
 own model config (deploy/example.jsonc: GLM-5.3 Flash through
 OpenRouter, on a budgeted key of Austin's read from a file) and put new
-computers on our Hermes image.
+computers on our Hermes image. They ran before the line gave way to the
+managed skill (below, "Decided").
 
 - **With a skill.** The first trial's agent carried a skill in its own
   fragment (2.3 KB: `skills/owner-browser/SKILL.md`, this branch's
@@ -472,11 +479,17 @@ computers on our Hermes image.
   rules, the guest's path, the extension's origin, a browser's name and
   link, which ends of its socket it comes back from, and
   `/json/version`'s answer.
-- `cargo test -p fragment-bridge` (in `images/`):
-  `its_owner_is_told_their_browser_while_it_is_connected` (its owner's
-  turn told while a faked `/json/version` answers connected, another
-  asker's never, and none once it answers not), the line's own test, and
-  Relay's `context` as a line each.
+- `cargo test -p fragment-e2e owner_browser` (host):
+  `the_skill_names_the_computers_check_and_socket`, the managed skill's
+  check and every agent-browser command of it against crates/core's
+  host, path and socket; and
+  `the_skills_index_shows_what_its_owner_calls_it`, "my browser" within
+  the 57 characters of its description Hermes' index shows.
+- `cargo test -p fragment-templates
+  the_skills_template_is_the_managed_set`: the managed set is thirteen,
+  `owner-browser-finite` among them; and in `images/`,
+  `the_platform_skill_is_the_clis_after_the_computers_page`: the
+  computer's page names it, and the platform skill still fits its 16 KiB.
 - `cargo test -p fragment-bridge --lib browse` (in `images/`): `browse`
   against an in-process browser (an event before each answer, the page
   loaded on the second read), and a refusal that says why in the
@@ -510,15 +523,11 @@ computers on our Hermes image.
   `{}`.
 - **The agent's tabs open in the background** (`active: false`), so the
   person's tab keeps the focus.
-- **The line's cost.** It rides each turn its owner asks while the
-  browser is connected, about 100 tokens, and Hermes keeps each in its
-  session. Told once a chat, or when the browser comes or goes, would
-  cost less and keep more state (question 2).
 - **Hosted costs and bounds (unknown).** Each ping, 20 s apart, wakes the
-  DO, and so does the bridge's `/json/version` before each turn its
-  owner asks. A WebSocket auto-response would answer it without waking it. The
-  largest frame the DO carries, against a full-page screenshot's
-  base64, was not measured on Cloudflare.
+  DO, and so does each `/json/version` an agent asks. A WebSocket
+  auto-response would answer the ping without waking it. The largest
+  frame the DO carries, against a full-page screenshot's base64, was not
+  measured on Cloudflare.
 
 ## Decided (Austin, 2026-10-17)
 
@@ -527,7 +536,7 @@ computers on our Hermes image.
   connect is reached.
 - **Connecting is the consent.** The agent does not ask again before its
   first use in a chat; Chrome's own bar and the "Agent" tab group show
-  it in use. The line's last sentence, to ask before paying or typing a
+  it in use. The skill's last sentence, to ask before paying or typing a
   password, is a guardrail on what the agent does there, not a second
   consent, and stays.
 - **"All my tabs and windows" is offered,** with no second step and no
@@ -537,32 +546,35 @@ computers on our Hermes image.
   Disconnect in the popup, Forget in Settings, or closing Chrome's bar.
   The one bound is `LINKS_MAX`: an owner's ninth browser pushes out the
   one heard from longest ago.
+- **The agent learns of it from a managed skill, not a line beside each
+  message.** The line rode each of its owner's messages while the browser
+  was connected, about 100 tokens, and Hermes kept every one in its
+  session; a tool's schema would ride every request. A skill costs its
+  description in the model's skills index, the same every turn, and its
+  body only when loaded. `owner-browser-finite` (templates/skills) sits
+  beside `google-workspace-finite`, the other connection of its owner's
+  an agent uses, and the computer's page points to it in a line, as it
+  does to that one (the platform skill itself has 69 bytes left of its
+  16 KiB). The agent checks the browser is connected when it needs it.
+  Cut: the bridge's line (`relay::browser_told`), its `/json/version`
+  before each turn (`TurnStart::browser`), and the stub's echo of it.
 
 ## Questions for Paul
 
 1. **Whose agents, and whose turns (open).** As built, any agent on the
    computer can drive the browser (decision 44 makes a per-agent list no
-   boundary), and so can any turn. Only the owner's turns are told of
-   it, but the socket's address is fixed and in every guest's
-   environment (`FRAGMENT_BROWSER`), so a turn another chat member asks
-   reaches it too if the agent tries, as does a later turn of a session
-   the owner's line was in. In a shared chat, another member could ask
-   the agent to act in the owner's signed-in browser. Closing that would
+   boundary), and so can any turn. The skill says to use it for the
+   owner alone, but the socket's address is fixed and the same for every
+   agent and turn, so a turn another chat member asks reaches it too if
+   the agent tries. In a shared chat, another member could ask the agent
+   to act in the owner's signed-in browser. Closing that would
    take the computer telling the socket's callers apart by turn, which
    nothing does today. Should only the owner's agents, or only the
    owner's turns, reach it?
-2. **Where the agent learns of it.** As built, the bridge tells it: no
-   new tool and no skill, but one line of text beside each of its
-   owner's messages while the browser is connected (the appendix), and
-   nothing otherwise. The agent drives the browser with the
-   agent-browser command its terminal already has. Told nothing, an
-   agent used its own desktop's browser. Is the bridge the place? The
-   alternatives:
-   - a skill (the first trial's, 2.3 KB): a thirteenth managed one (that
-     set is Paul's), the platform skill (143 bytes left of its 16 KiB),
-     or each agent's own;
-   - Hermes' own `browser.cdp_url`, which would put its browser tools on
-     the owner's browser for every call, connected or not.
+2. **The managed set.** The skill is a thirteenth managed one, a
+   platform contract beside `google-workspace-finite`. That set is
+   Paul's (the 2026-10-08 audit, amended on 2026-10-09, kept twelve):
+   does it take this one?
 3. **How it ships (open).** An extension, or built into the CLI or a
    native app (Austin); an extension would go on the Chrome Web Store (a
    vendor account). Since Chrome 136, Chrome ignores
@@ -571,8 +583,9 @@ computers on our Hermes image.
    a CLI or an app cannot start the person's everyday, signed-in profile
    for debugging; an extension reaches it, as built. Whether newer
    Chrome's own switch for it, in `chrome://inspect`, would serve is
-   unknown. The computer's side (the ticket, the link, the relay, the
-   bridge's line) carries CDP from whatever holds a ticket. Whichever
+   unknown. The computer's side (the ticket, the link, the relay)
+   carries CDP from whatever holds a ticket, and the skill is the same
+   either way. Whichever
    ships: which platform origins a build trusts, and which extension the
    cell trusts (any, as built).
 4. **The inventory.** It would be a surface that is not a fragment
@@ -606,8 +619,7 @@ computers on our Hermes image.
    mode, and Load unpacked: `extension/`.
 3. Settings → Computer → Browsers → Connect this browser.
 4. In the agent's chat: `browse https://example.com`. A tab opens in the
-   "Agent" group, and the agent replies with its title, then what it was
-   told: `(told: its owner's browser, …)`.
+   "Agent" group, and the agent replies with its title.
 5. The extension's icon sets what your agents may use: only the tabs
    they open (the default), those and tabs you pick, or all your
    tabs and windows. At "All", `tabs` in the chat lists every tab you
@@ -624,30 +636,43 @@ that is the point, and why only you connect it. To try it without them,
 start Chromium with a profile of its own (`--user-data-dir=<a new
 directory>`) and load the extension there.
 
-The dev stack runs the stub image, whose `browse` is the guest. A real
-browser tool on a computer drives the same socket with
-`agent-browser --cdp ws://browser.fragment.internal/devtools/browser
-<command>`.
+The dev stack runs the stub image, whose `browse` is the guest. Our
+Hermes image's agent drives the same socket as its managed skill says
+(the appendix).
 
-## Appendix: what the agent is told
+## Appendix: the skill
 
-Before each turn its owner asks, while their browser is connected, our
-Hermes image's agent is handed this line beside the message
-(`relay::browser_told`, images/bridge), the name and socket as the
-computer answered `/json/version`:
+`templates/skills/skills/productivity/owner-browser-finite/SKILL.md`, in
+every owner's managed set. Its description, in the model's skills index
+on every turn, opens on what its owner calls the browser ("my browser",
+"my tabs"): a fresh agent told nothing took those for the Chromium on
+its own desktop. Hermes' index shows a description's first 57
+characters, then "..." (`SKILL_PROMPT_DESC_LIMIT`, 60, at v0.21.7;
+read), so the words are within them (host-tested). The first wording
+named them past that, and the model never saw them (run: the Hermes
+section failed on it). The same limit shows the platform skill's own
+description, `PLATFORM_DESCRIPTION`, as "You are an agent on a Fragment
+computer: what that is, an..." (read). Hermes lists a
+`productivity` skill by its name alone in one posture only, a profile's
+`agent.coding_context: focus`, which ours do not set
+(`agent/coding_context.py` at v0.21.7; read). Its body carries only what
+the agent cannot find by looking:
 
-> Your owner's browser is connected: Chromium on macOS, on their own
-> computer, signed in as them. When they say "my browser", or its tabs
-> and windows, they mean this one. Drive it from your terminal with
-> `agent-browser --session owner --cdp
-> ws://browser.fragment.internal/devtools/browser <command>` (its
-> `--help` lists the commands). `tab` lists only the tabs they let you
-> use, at first just the ones you open; they give you more from the
-> Fragment extension's icon. Ask them before you pay, buy, book or type a
-> password there.
+- which browser "my browser" means, and that its native browser tools
+  drive another;
+- the check (`/json/version`), and what to tell its owner when the
+  browser is not connected;
+- the address and the session: every agent-browser command takes
+  `--session owner --cdp ws://browser.fragment.internal/devtools/browser`,
+  and `--help` is the rest;
+- that `tab` lists only what its owner lets it use, "never every tab
+  they have open: at first just the ones you open". The trials' first
+  wording, "`tab` lists the tabs they let you use", let an agent answer
+  that its owner had one tab open;
+- the guardrail: for its owner alone, and asked first before paying,
+  buying, booking or typing a password.
 
-It carries only what the agent cannot find by looking: which browser
-"my browser" means, the address, and that what `tab` lists is the
-owner's choice. The commands are agent-browser's own `--help`, and the
-access levels the extension's. Its last sentence is a guardrail, added
-after the trials: the browser is signed in as its owner.
+Both commands are host-tested against crates/core's host, path and
+socket (`the_skill_names_the_computers_check_and_socket`), and the
+`owner-browser-hermes` section runs them as written and finds the skill
+in the model's index by "my browser".

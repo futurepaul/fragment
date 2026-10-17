@@ -19,7 +19,8 @@ pub const GUEST_PATH: &str = "/devtools/browser";
 /// Where a guest asks whether its owner's browser is there (`GET`), as a
 /// CDP client asks a browser's DevTools before it connects: while one is
 /// connected, `version`; otherwise the platform's words that it is not.
-/// The bridge asks before each of its owner's turns, and tells the agent.
+/// The agent asks before it drives it, as its managed skill says
+/// (templates/skills: owner-browser-finite).
 pub const VERSION_PATH: &str = "/json/version";
 /// The ping an extension sends to keep its service worker alive (Chrome
 /// keeps one alive while its socket carries a message every 30 s), which

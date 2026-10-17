@@ -125,6 +125,7 @@ browser from the terminal, without replacing your desktop browser:
 `BU_NAME=remote browser-harness 'new_tab("https://example.com"); print(page_info())'`.
 Finish with `BU_NAME=remote browser-harness 'stop_remote_daemon("remote")'`.
 Cloud sessions spend credit; use the local desktop for signed-in browsing.
+For your owner's own browser ("my browser"), load `owner-browser-finite`.
 
 ## Documents
 

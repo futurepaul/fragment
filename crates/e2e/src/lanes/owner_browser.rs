@@ -10,10 +10,10 @@
 //!   extension says is what its owner sees, connected. The guest's CDP
 //!   reaches it, each frame named by the guest socket it came on, and the
 //!   answers go back (the agent's reply reads the page's title); the
-//!   guest socket's end is told to it. While it is connected, its owner's
-//!   turn is told so first, by the bridge (the browser's name and its
-//!   socket, which the computer answers at `/json/version`; the stub
-//!   echoes it, and Hermes hands it to its model). In a Chrome that loads the extension
+//!   guest socket's end is told to it. Asked first, as a CDP client asks a
+//!   browser (`/json/version`: the check the managed skill
+//!   owner-browser-finite gives an agent), the computer answers with the
+//!   browser's name and the guest's socket. In a Chrome that loads the extension
 //!   (`extension/`), Settings connects this browser and lists it by name
 //!   (and another person signed in there is offered Connect, not told it
 //!   is theirs), the agent opens a tab in it and reads it, and what it may
@@ -24,7 +24,7 @@
 //!   socket from a page (no extension's origin), or naming no ticket, is
 //!   refused, and so is a link's ticket asked from a page or with a link
 //!   the computer never made; with no browser connected the guest is told
-//!   so, in the platform's words, and its owner's turns nothing of one.
+//!   so, in the platform's words, at its socket and at `/json/version`.
 //!   The extension refuses a ticket for a computer it does not trust
 //!   (another port than the platform's page, another zone than its
 //!   manifest's), and stays connected.
@@ -73,10 +73,6 @@ const PAGE_TITLE: &str = "Opened by the agent";
 const PERSON_PAGE: &str = "data:text/html,%3Ctitle%3EA%20tab%20of%20the%20person%3C%2Ftitle%3E";
 const PERSON_TITLE: &str = "A tab of the person";
 const SHELL_TITLE: &str = "Finite.Computer";
-/// What the stub echoes it was told before its owner's message while
-/// their browser is connected (the bridge asks the computer first), after
-/// its reply.
-const TOLD: &str = "\n\n(told: its owner's browser, ";
 const REAL: [&str; 16] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
@@ -93,12 +89,14 @@ const REAL: [&str; 16] = [
     "the extension reloaded: Settings, open from before, says to load it again, and loaded again shows this browser back on its own, with its link",
     "replaced by another browser, it keeps no link (a worker started again later never takes the slot back): Settings says why, and connects it again",
     "Forget, in Settings, ends it: it does not come back, and Settings offers to connect again",
-    "then the agent is told its owner's browser is not connected, and its owner's turns nothing of it",
+    "then the agent's browse is told its owner's browser is not connected, in the platform's words",
 ];
 
-/// A stub's reply less what it echoes it was told.
-fn answer(reply: &str) -> &str {
-    reply.split(TOLD).next().unwrap_or(reply)
+/// The stub's own GET of the computer's `/json/version`, as a CDP client
+/// asks a browser before it connects (and the managed skill's check does).
+fn version_asked() -> String {
+    use fragment_core::owner_browser::{GUEST_HOST, VERSION_PATH};
+    format!("fetch http://{GUEST_HOST}{VERSION_PATH} with application/json in accept")
 }
 
 /// The chat the agent is in, said to by its owner, one reply a message.
@@ -126,8 +124,13 @@ impl Chat<'_> {
 
     /// The agent's reply to what was said last.
     fn reply(&self, s: &Suite) -> String {
+        self.reply_within(s, REPLY)
+    }
+
+    /// The agent's reply to what was said last, waited for up to `within`.
+    fn reply_within(&self, s: &Suite, within: Duration) -> String {
         let replies = || agent_replies(&records(self.api, self.owner, &self.name, "chat"), &self.agent);
-        s.eventually(REPLY, || replies().len() >= self.said);
+        s.eventually(within, || replies().len() >= self.said);
         replies().get(self.said - 1).and_then(|r| r["body"]["text"].as_str()).unwrap_or("(no reply)").to_string()
     }
 }
@@ -276,7 +279,12 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     chat.say("browse https://example.test/one")?;
     let reply = chat.reply(s);
     s.ok("with no browser connected, the guest is told so, in the platform's words", reply.starts_with("browse failed") && reply.contains("your owner's browser is not connected"), &reply);
-    s.ok("and its owner's turns are told nothing of a browser", !reply.contains(TOLD), &reply);
+    let version = chat.ask(s, &version_asked())?;
+    s.ok(
+        "asked first, as a CDP client asks (`/json/version`), the computer says none is connected, in the same words",
+        version.starts_with("fetched 403") && version.contains("not_connected") && version.contains("your owner's browser is not connected"),
+        &version,
+    );
 
     // valid: an extension's first connection makes the browser a link, and
     // carries the guest's CDP, named
@@ -303,10 +311,15 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
         heard == ["Target.createTarget", "Target.attachToTarget", "Runtime.evaluate"] && sockets.len() == 1 && sockets.iter().all(|k| fragment_core::owner_browser::valid_socket(k)),
         format!("{served:?}"),
     );
-    s.ok("and the browser's answers reach the guest: the agent reads the page's title", answer(&reply) == "browsed https://example.test/one: A page", &reply);
-    let socket = format!("ws://{}{}", fragment_core::owner_browser::GUEST_HOST, fragment_core::owner_browser::GUEST_PATH);
-    s.ok("while it is connected, its owner's turn is told so first: the browser's name, and its socket", reply.ends_with(&format!("{TOLD}An e2e browser, at {socket})")), &reply);
+    s.ok("and the browser's answers reach the guest: the agent reads the page's title", reply == "browsed https://example.test/one: A page", &reply);
     s.ok("the guest socket's end is told to the browser", served.is_ok(), format!("{served:?}"));
+    let socket = format!("ws://{}{}", fragment_core::owner_browser::GUEST_HOST, fragment_core::owner_browser::GUEST_PATH);
+    let version = chat.ask(s, &version_asked())?;
+    s.ok(
+        "while it is connected, `/json/version` answers as a browser's DevTools does: the name its extension gave, and the guest's socket",
+        version.starts_with("fetched 200") && version.contains(r#""Browser":"An e2e browser""#) && version.contains(&format!(r#""webSocketDebuggerUrl":"{socket}""#)),
+        &version,
+    );
 
     // invalid: a page's socket, one with no ticket, a link from a page or
     // no link at all
@@ -396,7 +409,7 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = chat.reply(s);
     let pages = b.pages()?;
     let opened = pages.iter().any(|(_, url)| url.starts_with("data:text/html"));
-    s.ok(REAL[5], answer(&reply) == format!("browsed {PAGE}: {PAGE_TITLE}") && opened, format!("{reply} / {pages:?}"));
+    s.ok(REAL[5], reply == format!("browsed {PAGE}: {PAGE_TITLE}") && opened, format!("{reply} / {pages:?}"));
     // a dropped connection (the lever drops it as a network would): the
     // extension comes back on its own, with its link
     let r = super::computers::lever(api, &id, "drop-browser")?;
@@ -437,7 +450,7 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     let all = chat.ask(s, "tabs")?;
     let closed = chat.ask(s, &format!("close-tab {PERSON_TITLE}"))?;
     let gone = s.eventually(Duration::from_secs(10), || b.pages().is_ok_and(|p| !p.iter().any(|(_, url)| url == PERSON_PAGE)));
-    s.ok(REAL[10], all.contains(PERSON_TITLE) && all.contains(SHELL_TITLE) && answer(&closed) == format!("closed {PERSON_TITLE}") && gone, format!("{all} / {closed}"));
+    s.ok(REAL[10], all.contains(PERSON_TITLE) && all.contains(SHELL_TITLE) && closed == format!("closed {PERSON_TITLE}") && gone, format!("{all} / {closed}"));
     b.click(&popup, "input[value=own]")?;
     b.until(&popup, &at("own"), wait);
     let back = chat.ask(s, "tabs")?;
@@ -482,26 +495,44 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(REAL[14], off && !browsers(api, &owner, &id).iter().any(|b| b["id"] == mine.as_str()), b.eval(&settings, LINE)?);
     chat.say(&format!("browse {PAGE}"))?;
     let reply = chat.reply(s);
-    s.ok(REAL[15], reply.contains("your owner's browser is not connected") && !reply.contains(TOLD), &reply);
+    s.ok(REAL[15], reply.starts_with("browse failed") && reply.contains("your owner's browser is not connected"), &reply);
     Ok(())
 }
 
-/// The same browser driven by our Hermes image's own CDP client: the
-/// agent-browser on its PATH, run by Hermes' terminal tool (the scripted
-/// model's `run:`), its tab opened in the extension's Chrome. Nothing in
-/// the image changes for it. It builds the Hermes image (3.8 GB), so it
-/// runs only by name (`cargo xtask e2e --only owner-browser-hermes`).
+/// The same browser driven by our Hermes image as its managed skill
+/// teaches (owner-browser-finite, templates/skills): the skill installed
+/// from its owner's skills fragment and listed to the model by what its
+/// owner calls the browser; its check and its agent-browser command, each
+/// the skill's own line, run by Hermes' terminal tool (the scripted
+/// model's `run:`), the tab opening in the extension's Chrome; and nothing
+/// said of the browser beside its owner's message. It builds the Hermes
+/// image (3.8 GB), so it runs only by name (`cargo xtask e2e --only
+/// owner-browser-hermes`).
 pub const HERMES_SECTION: &str = "owner-browser-hermes";
 /// A Hermes start, and one of its turns (hermes.rs's bounds).
 const HERMES_WAKE: Duration = Duration::from_secs(300);
 const HERMES_TURN: Duration = Duration::from_secs(180);
-const HERMES: [&str; 5] = [
+/// The managed set's install, off the boot's path (hermes.rs waits as
+/// long for one made while the computer is awake).
+const SKILL_INSTALLED: Duration = Duration::from_secs(120);
+/// The skill, in the release's managed set, and where a profile has it.
+const SKILL: &str = "skills/productivity/owner-browser-finite/SKILL.md";
+const SKILL_INSTALLED_AT: &str = "/data/hermes/managed-skills/productivity/owner-browser-finite/SKILL.md";
+const HERMES: [&str; 7] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
-    "Hermes' terminal runs agent-browser against it, and the agent's tab opens in this browser",
-    "the tool's answer reads the page's title",
-    "the model is handed its owner's browser before their message: connected, and how its terminal reaches it",
+    "its owner's skills fragment installs owner-browser-finite in the agent's profile",
+    "the skill's check, run by Hermes' terminal, says the browser is connected: the name its extension gave, and the socket the skill drives",
+    "the skill's agent-browser command, run by Hermes' terminal, opens the agent's tab in this browser, and the tool's answer reads its title",
+    "Hermes lists the skill to its model, by what its owner calls the browser (\"my browser\")",
+    "nothing is said of the browser beside its owner's message",
 ];
+
+/// The skill's first line that `is`, as the release has it.
+fn skill_line(is: impl Fn(&str) -> bool) -> Option<String> {
+    let skill = fragment_templates::blessed::data_file("skills", SKILL)?;
+    std::str::from_utf8(skill.bytes).ok()?.lines().find(|l| is(l)).map(str::to_string)
+}
 
 pub fn owner_browser_hermes(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section_by_name(HERMES_SECTION, &[crate::Need::Fakes, crate::Need::LocalDocker], "it builds and runs the Hermes image") {
@@ -516,6 +547,10 @@ pub fn owner_browser_hermes(s: &mut Suite, api: &Api) -> Result<()> {
 
 fn hermes_run(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
+    // its owner's skills fragment, as the shell's setup makes one: the
+    // managed set, the skill among it, installed as the computer starts
+    let r = api.create_with(&owner, json!({ "label": s.name("skills"), "template": "skills" }))?;
+    s.ok("its owner has a skills fragment on the blessed template", r.status == 200 && r.body["name"].is_string(), &r);
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "hermes" })))?;
@@ -541,30 +576,99 @@ fn hermes_run(s: &mut Suite, api: &Api) -> Result<()> {
     let Some((mut b, _settings, _id)) = extension_chrome(s, api, &owner, &HERMES)? else {
         return Ok(());
     };
-    // a page this Chrome reaches, with a title of its own: the platform's
-    // (agent-browser navigates with Page.navigate, which Chrome refuses
-    // for a `data:` URL through chrome.debugger: net::ERR_ABORTED)
-    let page = format!("{}/", api.base);
     let mut chat = Chat { api, owner: &owner, name: chat_name, agent: identity, said: 0 };
+
+    // the managed set installs off the boot's path: looked for until it is there
+    let there = |said: &str| said.contains(SKILL_INSTALLED_AT) && !said.contains("No such file");
+    let looked = Instant::now();
+    let mut installed = String::new();
+    while looked.elapsed() < SKILL_INSTALLED {
+        chat.say(&format!("run: ls {SKILL_INSTALLED_AT}"))?;
+        installed = chat.reply_within(s, HERMES_TURN);
+        if there(&installed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    s.ok(HERMES[2], there(&installed), &installed);
+
+    // the skill's check, as it says it
     let socket = format!("ws://{}{}", fragment_core::owner_browser::GUEST_HOST, fragment_core::owner_browser::GUEST_PATH);
-    chat.say(&format!("run: agent-browser --session owner --cdp {socket} open {page}"))?;
-    let replies = || agent_replies(&records(api, &owner, &chat.name, "chat"), &chat.agent);
-    s.eventually(HERMES_TURN, || !replies().is_empty());
-    let reply = replies().first().and_then(|r| r["body"]["text"].as_str()).unwrap_or("(no reply)").to_string();
+    let check = skill_line(|l| l.starts_with("curl ")).context("the skill says how to check")?;
+    chat.say(&format!("run: {check}"))?;
+    let checked = chat.reply_within(s, HERMES_TURN);
+    let name = browsers(api, &owner, &id).first().and_then(|b| b["name"].as_str().map(str::to_string)).unwrap_or_default();
+    s.ok(HERMES[3], !name.is_empty() && checked.contains(&name) && checked.contains("webSocketDebuggerUrl") && checked.contains(&socket), format!("{name}: {checked}"));
+
+    // the skill's own command opens a page this Chrome reaches, with a title
+    // of its own: the platform's (agent-browser navigates with
+    // Page.navigate, which Chrome refuses for a `data:` URL through
+    // chrome.debugger: net::ERR_ABORTED)
+    let open = skill_line(|l| l.starts_with("agent-browser ") && l.contains(" open ")).context("the skill says how to open a page")?;
+    let (command, _) = open.rsplit_once(' ').context("the skill's open names a page")?;
+    let page = format!("{}/", api.base);
+    let opening = format!("run: {command} {page}");
+    chat.say(&opening)?;
+    let reply = chat.reply_within(s, HERMES_TURN);
     let pages = b.pages()?;
-    s.ok(HERMES[2], pages.iter().any(|(_, url)| *url == page), format!("{pages:?}"));
-    s.ok(HERMES[3], reply.contains(SHELL_TITLE), &reply);
+    s.ok(HERMES[4], command.contains(&socket) && pages.iter().any(|(_, url)| *url == page) && reply.contains(SHELL_TITLE), format!("{reply} / {pages:?}"));
+
+    // what the model was handed: the skill in its index, and its owner's
+    // message as they said it, with no context before it
     let chats = s.ai.chats();
-    let handed = chats.iter().any(|c| {
-        let c = c.to_string();
-        c.contains("Your owner's browser is connected: ") && c.contains(&format!("--cdp {socket}"))
-    });
-    s.ok(HERMES[4], handed, chats.last().map(|c| c.to_string().chars().take(600).collect::<String>()).unwrap_or_default());
+    let index = |c: &Value| {
+        let system = c["messages"].as_array()?.iter().find(|m| m["role"] == "system")?["content"].to_string();
+        let at = system.find("<available_skills>")?;
+        Some(system[at..].to_string())
+    };
+    let indexed = chats.iter().filter_map(index).find(|i| i.contains("owner-browser-finite"));
+    let listed = indexed.as_deref().and_then(|i| i.find("owner-browser-finite").map(|at| i[at..].chars().take(300).collect::<String>()));
+    s.ok(
+        HERMES[5],
+        listed.as_deref().is_some_and(|l| l.starts_with("owner-browser-finite: Your owner's own browser") && l.contains(r#"\"my browser\""#)),
+        listed.unwrap_or_else(|| {
+            // not in an index: where the model was told of it, if anywhere, and the index it had
+            let elsewhere = chats.iter().map(Value::to_string).find_map(|c| {
+                let at = c.find("owner-browser-finite")?;
+                let from = c.char_indices().map(|(i, _)| i).take_while(|i| *i <= at.saturating_sub(200)).last().unwrap_or(0);
+                Some(c[from..].chars().take(500).collect::<String>())
+            });
+            format!("elsewhere: {elsewhere:?}; its index: {}", chats.last().and_then(index).map(|i| i.chars().take(3000).collect::<String>()).unwrap_or_default())
+        }),
+    );
+    let asked = chats.iter().filter_map(|c| c["messages"].as_array()?.iter().rev().find(|m| m["role"] == "user").map(|m| m["content"].to_string())).find(|u| u.contains(&opening));
+    s.ok(HERMES[6], asked.as_deref().is_some_and(|u| !u.contains("[Recent channel messages]")), asked.unwrap_or_default());
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    /// The managed skill's check and its commands name where the computer
+    /// answers and the socket it carries (crates/core's), whole: the
+    /// Hermes section runs these lines as they are.
+    #[test]
+    fn the_skill_names_the_computers_check_and_socket() {
+        use fragment_core::owner_browser::{GUEST_HOST, GUEST_PATH, VERSION_PATH};
+        assert_eq!(super::skill_line(|l| l.starts_with("curl ")).unwrap(), format!("curl -s http://{GUEST_HOST}{VERSION_PATH}"));
+        let drives = format!("agent-browser --session owner --cdp ws://{GUEST_HOST}{GUEST_PATH} ");
+        let open = super::skill_line(|l| l.starts_with("agent-browser ") && l.contains(" open ")).unwrap();
+        assert!(open.starts_with(&format!("{drives}open ")), "{open}");
+        assert!(super::skill_line(|l| l.starts_with("agent-browser ") && !l.starts_with(&drives)).is_none(), "every command on the owner's session and socket");
+    }
+
+    /// Hermes' skills index shows a description's first 57 characters, and
+    /// "..." past 60 (`SKILL_PROMPT_DESC_LIMIT`, agent/skill_utils.py at
+    /// v0.21.7): what its owner calls the browser is within them, and the
+    /// description is one YAML scalar (no ": " in it).
+    #[test]
+    fn the_skills_index_shows_what_its_owner_calls_it() {
+        let description = super::skill_line(|l| l.starts_with("description: ")).unwrap();
+        let description = description.strip_prefix("description: ").unwrap();
+        let shown: String = description.chars().take(57).collect();
+        assert!(shown.starts_with("Your owner's own browser") && shown.contains("\"my browser\"") && shown.contains("\"my tabs\""), "{shown}");
+        assert!(!description.contains(": "), "{description}");
+    }
+
     /// An unpacked extension's id is its path's, as Chrome derives it (seen:
     /// the id Chrome 148 gave the extension loaded from this path).
     #[test]

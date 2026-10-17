@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills. Six are Fragment platform contracts:
+Thirteen skills. Seven are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -44,6 +44,7 @@ Twelve skills. Six are Fragment platform contracts:
 | git-finite | Fragment repositories, sync, deploys and rollback |
 | brain-finite | The brain template's files, search and wiki contract |
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
+| owner-browser-finite | The owner's own browser, which the computer carries once they connect it (docs/explorations/owner-browser.md, a spike) |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 

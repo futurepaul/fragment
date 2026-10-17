@@ -24,8 +24,8 @@
 //!   frames goes to the browser named by its guest socket, and back. It
 //!   asks first, if it likes, as a CDP client asks a browser (`GET
 //!   /json/version`): the connected browser's name and its socket, or
-//!   that none is connected. The bridge asks before each of its owner's
-//!   turns, and tells the agent.
+//!   that none is connected. The agent asks before it drives it, as its
+//!   managed skill says (owner-browser-finite).
 //! - **Told.** Its view lists the browsers linked, which is connected and
 //!   when each was last heard (`browsers`), and its owner's open pages are
 //!   told each time that changes.

@@ -795,13 +795,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let names: Vec<&str> = ts.files.iter().map(|f| f.name.as_str()).collect();
         reply = format!("{reply} [got {}: {}]", ts.files.len(), names.join(", "));
     }
-    // what it was told first (a turn after a cut one; its owner's browser,
-    // connected), echoed after the reply
+    // what it was told first (a turn after a cut one), echoed after the reply
     if let Some(note) = &ts.note {
         reply = format!("{reply}\n\n(told: {note})");
-    }
-    if let Some(b) = &ts.browser {
-        reply = format!("{reply}\n\n(told: its owner's browser, {}, at {})", b.name, b.socket);
     }
     if text.split_whitespace().any(|w| w == "notice") {
         emit(Event::Notice { agent: ts.agent.fragment.clone(), fragment: ts.fragment.clone(), category: NoticeCategory::Info, text: "Compressing context".into() }).await;
