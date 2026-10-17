@@ -40,6 +40,7 @@ const ICON = {
   // Lucide's external-link, link and square-pen
   external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  team: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
@@ -330,7 +331,8 @@ const roster = () => {
   const phase = state.computer?.phase;
   return [...state.agents.values()].map((a) => {
     const picture = agentFace(a.fragment, a.identity).picture;
-    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}) };
+    const where = runsOn.get(a.fragment);
+    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(where ? { runsOn: where } : {}), ...(isWorking(a) ? { working: true } : {}) };
   });
 };
 let rosterSent = "";
@@ -350,7 +352,7 @@ function rosterChanged() {
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (!["agents?", "add-agent", "retry-setup"].includes(d?.fragment)) return;
+  if (!["agents?", "add-agent", "retry-setup", "open-handoff"].includes(d?.fragment)) return;
   // the frame that sent it shows one of the person's own fragments, and
   // the page in it is that fragment's
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
@@ -365,6 +367,14 @@ addEventListener("message", async (event) => {
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
   if (d.fragment === "retry-setup") {
     if (name === setup?.chat && setup.error) creatingAgent();
+    return;
+  }
+  // a hand-off card's "See the hand-off": the newest chat of that teammate
+  // (where the hand-off went), beside the chat
+  if (d.fragment === "open-handoff") {
+    const a = typeof d.identity === "string" ? state.agents.get(d.identity) : null;
+    const chat = a ? teamChats(a).sort(newest)[0] : null;
+    if (chat) openApp(chat.name);
     return;
   }
   if (d.fragment === "agents?") {
@@ -547,6 +557,13 @@ function openMenu(button, items) {
   closeMenu(true);
   menuFor = { button };
   menu.replaceChildren(...items.map((it) => {
+    if (it.heading) {
+      const h = el("div", "menu-heading");
+      h.setAttribute("role", "presentation");
+      h.append(el("strong", null, it.heading));
+      if (it.note) h.append(el("span", null, it.note));
+      return h;
+    }
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
@@ -639,6 +656,158 @@ function primaryAgent() {
   const f = state.fragments.find((x) => x.kind === "agent" && own(x));
   return f ? { fragment: f.name, identity: null } : null;
 }
+// ---- the team (decision 62, proposed): the person's other agents, which
+// their one agent keeps. They show one level down, a face each under it,
+// ringed while one works; their chats (each one's own chat with the person,
+// and the hand-offs among the person's agents: `fragment ask`'s pairs) list
+// under them, never among the person's chats, which stay the one agent's.
+function teamAgents() {
+  const primary = primaryAgent();
+  return [...state.agents.values()].filter((a) => a.identity !== primary?.identity && byName(a.fragment)?.role === "owner");
+}
+// `fragment ask`'s chat of two agents: their labels in order, each cut so
+// its host fits any deployment (cli/src/ask.rs `pair_label`; proto's
+// `LABEL_ROOM_MIN_BYTES`).
+const PAIR_LABEL_MAX = 39;
+const cutLabel = (s, max) => s.slice(0, max).replace(/-+$/, "");
+function pairLabel(a, b) {
+  const [x, y] = [labelOf(a), labelOf(b)].sort();
+  if (x.length + 1 + y.length <= PAIR_LABEL_MAX) return `${x}-${y}`;
+  const half = Math.floor((PAIR_LABEL_MAX - 1) / 2);
+  return `${cutLabel(x, half)}-${cutLabel(y, half)}`;
+}
+/// The teammate whose chat `f` is: its own chat with the person, or a
+/// hand-off it is in. None for the person's own chats.
+function teammateOf(f) {
+  if (!f || f.kind !== "chat" || !own(f)) return null;
+  const label = labelOf(f.name);
+  const mine = [...state.agents.values()].filter((a) => byName(a.fragment)?.role === "owner");
+  return teamAgents().find((a) => label === `${labelOf(a.fragment)}-chat` || mine.some((b) => b.identity !== a.identity && label === pairLabel(a.fragment, b.fragment))) ?? null;
+}
+const yourChats = () => chats().filter((f) => !teammateOf(f));
+const teamChats = (a) => chats().filter((f) => teammateOf(f)?.identity === a.identity);
+
+// Where each agent's model calls go, as its agent.json says (the
+// agents-finite skill's convention: a `model` of its owner's own provider
+// runs outside the platform), read at most once a RUNS_ON_EVERY_MS per
+// agent: the team's menu and the chats' roster say it.
+const RUNS_ON_EVERY_MS = 60_000;
+const runsOn = new Map(); // fragment -> { on: "platform" } | { on: "own", provider, model }
+const runsOnAt = new Map(); // fragment -> when it was last read
+// `anthropic/claude-sonnet-5.5` as a person reads it: "Claude Sonnet 5.5"
+const modelName = (id) => id.split("/").pop().split("-").map((w) => /^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+async function readRunsOn() {
+  const due = [...state.agents.values()].filter((a) => !(Date.now() - (runsOnAt.get(a.fragment) ?? 0) < RUNS_ON_EVERY_MS));
+  if (!due.length) return;
+  for (const a of due) runsOnAt.set(a.fragment, Date.now());
+  const read = await Promise.all(due.map((a) => api("GET", `/api/f/${seg(a.fragment)}/file?path=agent.json`).catch(() => null)));
+  due.forEach((a, i) => {
+    const m = read[i]?.model;
+    runsOn.set(a.fragment, typeof m?.provider === "string" && typeof m?.id === "string" ? { on: "own", provider: m.provider, model: modelName(m.id) } : { on: "platform" });
+  });
+  renderChats();
+  rosterChanged();
+}
+const whereItRuns = (a) => {
+  const r = runsOn.get(a.fragment);
+  return r?.on === "own" ? `${r.model} · outside the platform` : r ? "On the platform's models" : "";
+};
+
+// Who of the team is working: a turn it started on one of its chats'
+// `work` (docs/chat-records.md) and has not ended, read every TEAM_POLL_MS
+// while the page is shown, from at most TEAM_CHATS_MAX of its newest
+// chats, each from TEAM_TAIL records back at first and after its cursor
+// since. A turn started TEAM_TURN_STALE_MS ago counts no more: one cut
+// short leaves no end.
+const TEAM_POLL_MS = 4000;
+const TEAM_CHATS_MAX = 12;
+const TEAM_TAIL = 40;
+const TEAM_TURN_STALE_MS = 30 * 60 * 1000;
+const teamWork = new Map(); // chat -> { after, open: Map<turn, { agent, at }> }
+async function readTeamWork() {
+  const names = teamAgents().flatMap(teamChats).sort(newest).slice(0, TEAM_CHATS_MAX).map((f) => f.name);
+  for (const name of [...teamWork.keys()]) if (!names.includes(name)) teamWork.delete(name);
+  // bounded: TEAM_CHATS_MAX chats, two reads each at most
+  for (const name of names) {
+    let w = teamWork.get(name);
+    if (!w) {
+      const listed = await api("GET", `/api/f/${seg(name)}/channels`).catch(() => null);
+      const seq = listed?.channels?.find((c) => c.name === "work")?.seq ?? 0;
+      w = { after: Math.max(0, seq - TEAM_TAIL), open: new Map() };
+      teamWork.set(name, w);
+    }
+    const page = await api("GET", `/api/f/${seg(name)}/channels/work?after=${w.after}`).catch(() => null);
+    for (const r of page?.records ?? []) {
+      w.after = Math.max(w.after, r.seq);
+      const b = r.body ?? {};
+      if (b.kind === "turn.start" && typeof b.turn === "string") w.open.set(b.turn, { agent: b.agent ?? r.principal, at: r.at });
+      else if (b.kind === "turn.end") w.open.delete(b.turn);
+    }
+  }
+}
+function isWorking(a) {
+  const now = Date.now();
+  for (const w of teamWork.values()) for (const t of w.open.values()) if (t.agent === a.identity && now - t.at < TEAM_TURN_STALE_MS) return true;
+  return false;
+}
+let teamTimer = 0;
+let teamStarted = false;
+async function teamTick() {
+  clearTimeout(teamTimer);
+  if (!document.hidden && teamAgents().length) {
+    const before = JSON.stringify(teamAgents().map(isWorking));
+    await readTeamWork().catch(() => {});
+    if (JSON.stringify(teamAgents().map(isWorking)) !== before) {
+      renderChats();
+      rosterChanged();
+    }
+  }
+  teamTimer = setTimeout(teamTick, TEAM_POLL_MS);
+}
+const namesOf = (agents) => {
+  const names = agents.map((a) => titleOf(a.fragment));
+  return names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+};
+// The team's faces under the one agent, and a line that says who works.
+function renderTeam() {
+  const team = state.guest ? [] : teamAgents();
+  const box = $("team");
+  box.hidden = !team.length;
+  if (!team.length) return patch(box, []);
+  const busy = team.filter(isWorking);
+  const faces = team.map((a) => {
+    const working = isWorking(a);
+    const unread = teamChats(a).some((f) => (f.unread ?? 0) > 0);
+    const b = el("button", `team-face${working ? " working" : ""}`);
+    b.type = "button";
+    b.dataset.key = `team:${a.identity}:${working}:${unread}`;
+    const label = `${titleOf(a.fragment)}${working ? ", working" : ""}${unread ? ", new messages" : ""}`;
+    b.setAttribute("aria-label", label);
+    b.setAttribute("aria-haspopup", "menu");
+    b.dataset.tooltip = label;
+    b.append(avatar(agentFace(a.fragment, a.identity), "small"));
+    if (unread) b.append(el("span", "team-unread"));
+    b.onclick = () => openTeamMenu(a, b);
+    return b;
+  });
+  const status = el("span", `team-status${busy.length ? " busy" : ""}`, busy.length ? `${namesOf(busy)} ${busy.length === 1 ? "is" : "are"} working…` : "Your team");
+  status.dataset.key = `team-status:${status.textContent}`;
+  patch(box, [...faces, status]);
+}
+// A teammate's own menu: who it is and where its model runs, its chat with
+// the person, the hand-offs it was given, and its profile.
+function openTeamMenu(a, trigger) {
+  const primary = primaryAgent();
+  const ownChat = agentsOwnChat(a.fragment);
+  const handoffs = teamChats(a).filter((f) => f.name !== ownChat?.name).sort(newest);
+  openMenu(trigger, [
+    { heading: titleOf(a.fragment), note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
+    { icon: "newChat", text: `Chat with ${titleOf(a.fragment)}`, onClick: () => (ownChat ? openChat(ownChat.name) : newChat(a.identity)) },
+    ...(handoffs.length ? [{ icon: "team", text: primary ? `Hand-offs from ${titleOf(primary.fragment)}` : "Its hand-offs", onClick: () => openApp(handoffs[0].name) }] : []),
+    { icon: "agent", text: "Its profile", onClick: () => openApp(a.fragment) },
+  ]);
+}
+
 // Newest first: a chat by when its newest message was said (its row's
 // `previewAt`); one with nothing said yet (just made) above them all.
 const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
@@ -661,6 +830,7 @@ function renderChats() {
     agentRows.push(row);
   }
   patch($("primary-agent"), agentRows);
+  renderTeam();
   // the launcher: a guest's searches; a seat's also starts a chat
   const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
   for (const id of ["sidebar-new-chat", "new-chat"]) {
@@ -668,7 +838,7 @@ function renderChats() {
     $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
     $(id).setAttribute("aria-label", launcherLabel);
   }
-  const rows = shown(chats()).sort(newest).map((f) => {
+  const rows = shown(yourChats()).sort(newest).map((f) => {
     const active = f.name === state.current && !state.page;
     const row = el("button", `row chat-row${active ? " active" : ""}`);
     row.type = "button";
@@ -2946,6 +3116,11 @@ async function load(changed = false) {
   rosterChanged();
   markSeen();
   renderAgentFaces();
+  readRunsOn().catch(() => {});
+  if (!teamStarted) {
+    teamStarted = true;
+    teamTick();
+  }
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
@@ -3017,7 +3192,7 @@ async function start(open) {
   if (!state.fragments.length && !open && !settings && state.guest) return welcome();
   $("first-run").hidden = true;
   $("layout").hidden = false;
-  const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
+  const pick = open ?? (byName(state.current) ? state.current : (shown(yourChats()).sort(newest)[0] ?? yourChats()[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
