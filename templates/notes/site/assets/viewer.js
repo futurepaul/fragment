@@ -48,16 +48,18 @@ const RECENT_MAX = 12;
 
 let files = []; // [{path, size, updatedAt, rev}]
 let byPath = new Map(); // lower path -> path
-let byName = new Map(); // lower basename-sans-ext -> [path]
+let byName = new Map(); // lower basename, and without its extension -> [path]
 let filterText = "";
 
 function buildIndex() {
   byPath = new Map(files.map((f) => [f.path.toLowerCase(), f.path]));
   byName = new Map();
   for (const f of files) {
-    const base = f.path.split("/").pop().replace(/\.[^.]+$/, "").toLowerCase();
-    if (!byName.has(base)) byName.set(base, []);
-    byName.get(base).push(f.path);
+    const name = f.path.split("/").pop().toLowerCase();
+    for (const key of new Set([name, name.replace(/\.[^.]+$/, "")])) {
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key).push(f.path);
+    }
   }
 }
 

@@ -80,13 +80,13 @@ fn links(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std
     s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
     chrome.eval(page, "location.hash = '#/notes/linked.md'; true")?;
     let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'Linked note'", wait);
-    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.width ?? 0, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
+    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.getAttribute('width') ?? null, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
     s.ok(
         "the viewer leaves out front matter, shows an embed through the app with its share link, and resolves wikilinks, relative and reference links to notes",
         shown
             && read["front"] == false
             && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg") && u.contains("view="))
-            && read["width"] == 40
+            && read["width"] == "40"
             && read["home"] == "#/notes%2Fwelcome.md"
             && read["second"] == "notes/second.md"
             && read["third"] == "notes/third.md",
