@@ -89,7 +89,7 @@ fn origin_detail(r: &Reply) -> Value {
 /// refusal page, an error the router raised itself); scriptable media
 /// (an SVG, at its site path or in `__file`) and `__file`'s HTML are
 /// sandboxed; a page, a markdown file and a picture are not.
-fn origin_headers(s: &mut Suite, api: &Api, name: &str, cookie: &str) -> Result<()> {
+fn origin_headers(s: &mut Suite, api: &Api, name: &str, cookie: &str, view: &str) -> Result<()> {
     let page = |path: &str| api.page(name, path, Some(cookie));
     for (what, r) in [
         ("a page", page("")?),
@@ -106,6 +106,22 @@ fn origin_headers(s: &mut Suite, api: &Api, name: &str, cookie: &str) -> Result<
         r.status == 401 && r.header("content-type").starts_with("text/html") && guarded(&r),
         origin_detail(&r),
     );
+    // the share link's navigation, which goes on without `view`, and a
+    // worker's script, which only `__sw.js` is (#366): the router's
+    // headers on both
+    let r = api.call(Call {
+        method: "GET",
+        url: api.site_url(name, &format!("docs/?view={view}&x=1")),
+        extra: vec![("accept", "text/html".into()), ("sec-fetch-mode", "navigate".into())],
+        ..Call::default()
+    })?;
+    s.ok(
+        "so does a share link's navigation, on to its URL without the link",
+        r.status == 302 && !r.header("location").contains("view") && guarded(&r),
+        origin_detail(&r),
+    );
+    let r = api.call(Call { method: "GET", url: api.site_url(name, "style.css"), cookie: Some(cookie.to_string()), extra: vec![("service-worker", "script".into())], ..Call::default() })?;
+    s.ok("and the refusal of a worker's script that is not the platform's", r.status == 404 && guarded(&r), origin_detail(&r));
     let sha = "0".repeat(64);
     let r = api.call(Call { method: "PUT", url: api.site_url(name, &format!("__blob/{sha}")), body: Some(b"x".to_vec()), content_type: Some("text/plain"), ..Call::default() })?;
     s.ok(
@@ -267,7 +283,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("HEAD answers without a body", r.status == 200 && r.text.is_empty(), &r);
     let r = api.call(Call { method: "DELETE", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
     s.ok("other methods are for the app's routes (none here: 404)", r.status == 404 && r.message().contains("no page or app route for DELETE /"), &r);
-    origin_headers(s, api, &name, &cookie)?;
+    origin_headers(s, api, &name, &cookie, &view)?;
 
     // revalidation: each file names its bytes in an ETag, and a conditional
     // GET naming it is answered before code.storage is asked for anything
