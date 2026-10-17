@@ -337,6 +337,29 @@ fn an_approval_answered() {
     assert!(commands(&second).is_empty(), "the first answer won");
 }
 
+/// Goal (audit M7, residual): prompt ids are each agent's own, so another
+/// agent of the chat may show a card of the same id; the owner's click on
+/// that card names its agent and turn (the chat's page does), and must
+/// never answer this agent's card. Method: answers naming another agent,
+/// and this agent's other turn, are ignored and leave the card open; one
+/// naming this agent's own turn answers it, as a bare one (the API's) does.
+#[test]
+fn an_answer_to_another_agents_card_of_the_same_prompt_id_answers_nothing() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "risky" }), T0)).expect("started").turn;
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }];
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "Run rm?".into(), options, ttl_ms: None }, T0 + 10);
+    let answer = |agent: &str, turn: &str| json!({ "kind": "prompt_response", "prompt": "p1", "option": "once", "agent": agent, "turn": turn });
+    let other_agent = said(&mut e, &a, &v, 2, "npub1paul", answer("npub1forger", &turn), T0 + 20);
+    assert!(commands(&other_agent).is_empty() && posts(&other_agent).is_empty(), "an answer to another agent's card of that id is not this card's");
+    let other_turn = said(&mut e, &a, &v, 3, "npub1paul", answer(&a.identity, "another-turn"), T0 + 21);
+    assert!(commands(&other_turn).is_empty() && posts(&other_turn).is_empty(), "nor is one to another turn of its own");
+    let mine = said(&mut e, &a, &v, 4, "npub1paul", answer(&a.identity, &turn), T0 + 22);
+    assert_eq!(commands(&mine), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None }], "its own card, named, is answered");
+}
+
 /// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
 /// doesn't work very well"): an option answered in words (a clarify's
 /// "Other") is answered on its card: the words go to the runtime with the

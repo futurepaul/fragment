@@ -2,7 +2,8 @@
 //! `post` role takes records the platform appends for the poster, with no
 //! app code at all. Checked in the `channels` section (the rules: the role,
 //! the replay, the size, a channel without one, the deploy check, the
-//! public call budget, and who hears a post) and the `browser` section
+//! public call budget, who hears a post, and a channel's posters' kind,
+//! `from`) and the `browser` section
 //! (`fragment.post` from a page).
 
 use std::time::Duration;
@@ -207,7 +208,106 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the channels deployed before it stand", r.status == 200, &r);
 
     heard(s, api, &owner, &stranger)?;
+    posters_kind(s, api, &owner)?;
     retention(s, api, &owner)
+}
+
+/// A channel that says `"from": "agent"` (a chat's `work`) takes posts and
+/// drafts from the fragment's agent members only, each posting as itself:
+/// an editor person holds the role it asks for and is refused all the
+/// same, as is the agent acting for its owner. Goal: no person's record
+/// reads as an agent's (audit M7). Method: a fragment of channels alone,
+/// an editor person and an editor agent, each posting and drafting there.
+fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "agents-only")?;
+    let c = s.create(api, owner, &name)?;
+    let editor = api.person()?;
+    let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
+    let owner_id = api.identity(owner)?;
+    for who in [api.identity(&editor)?, agent_id.clone()] {
+        let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{who}"), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "adding {who} as an editor: {r}");
+    }
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"notes":{"post":"editor"}}}"#))]);
+    s.deploy(&c);
+    let work = || records(api, owner, &name, "work");
+
+    let person = post(api, &editor, &name, "work", "w1", json!({ "kind": "turn.step", "turn": "t1", "text": "forged" }))?;
+    let owners = post(api, owner, &name, "work", "w1", json!({ "kind": "turn.step", "turn": "t1", "text": "forged" }))?;
+    s.ok(
+        "an agents' channel refuses an editor person's post, and its owner's (403, saying who posts there), and appends nothing",
+        person.status == 403
+            && person.code() == Some(ErrorCode::Forbidden)
+            && person.message().contains("agent members only")
+            && owners.status == 403
+            && work().is_empty(),
+        format!("{person} {owners}"),
+    );
+    let notes = post(api, &editor, &name, "notes", "n1", json!({ "text": "a person's note" }))?;
+    s.ok("while a channel without from takes the same person's post", notes.status == 200, &notes);
+
+    let step = json!({ "kind": "turn.step", "turn": "t1", "text": "the agent's step" });
+    let r = post(api, &agent, &name, "work", "w1", step.clone())?;
+    s.ok(
+        "an agent member's post is appended, naming the agent itself",
+        r.status == 200 && r.body["replayed"] == false && r.body["record"]["principal"] == agent_id.as_str() && work().len() == 1,
+        &r,
+    );
+    let acting = api.signed(&agent, "POST", &format!("/api/f/{name}/channels/work?for={owner_id}"), Some(&json!({ "id": "w2", "body": step })))?;
+    s.ok(
+        "the same agent acting for its owner is refused (403): the post would be the owner's say",
+        acting.status == 403 && acting.message().contains("agent members only") && work().len() == 1,
+        &acting,
+    );
+    let again = post(api, &agent, &name, "work", "w1", step)?;
+    s.ok(
+        "the agent's same id and body again answer its record, replayed",
+        again.status == 200 && again.body["replayed"] == true && again.body["record"]["seq"] == r.body["record"]["seq"] && work().len() == 1,
+        &again,
+    );
+
+    let draft = |keys: &Keys| api.signed(keys, "PUT", &format!("/api/f/{name}/channels/work/draft"), Some(&json!({ "turn": "t2", "text": "writing" })));
+    let (person, agents) = (draft(&editor)?, draft(&agent)?);
+    s.ok(
+        "a draft there is a post in progress: the person's is 403, the agent's goes through",
+        person.status == 403 && person.message().contains("agent members only") && agents.status == 200,
+        format!("{person} {agents}"),
+    );
+
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let list = r.body["channels"].as_array().cloned().unwrap_or_default();
+    let from_of = |n: &str| list.iter().find(|c| c["name"] == n).map(|c| c["from"].clone());
+    s.ok(
+        "the channel list names each channel's posters' kind (null without one)",
+        from_of("work") == Some(json!("agent")) && from_of("notes") == Some(Value::Null) && from_of("events") == Some(Value::Null),
+        &r,
+    );
+
+    // A chat whose agent joined before member rows named their kind (its
+    // row's kind NULL) still takes its agent's posts: the row takes the
+    // kind of the identity the registry resolved, and keeps it.
+    let kind_of = |who: &str| -> Result<Value> {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
+        Ok(r.body["members"].as_array().and_then(|l| l.iter().find(|m| m["principal"] == who).map(|m| m["kind"].clone())).unwrap_or(Value::Null))
+    };
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": agent_id })))?;
+    let legacy = kind_of(&agent_id)?;
+    let r = post(api, &agent, &name, "work", "w-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 1 }))?;
+    let filled = kind_of(&agent_id)?;
+    s.ok(
+        "an agent member whose row predates its kind posts there all the same, and its row takes the agent's kind",
+        lever.status == 200 && lever.body["members"] == 1 && legacy.is_null() && r.status == 200 && r.body["record"]["principal"] == agent_id.as_str() && filled == "agent",
+        json!({ "lever": lever.body, "before": legacy, "post": r.body, "after": filled }),
+    );
+    let editor_id = api.identity(&editor)?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": editor_id })))?;
+    let r = post(api, &editor, &name, "work", "p-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 2 }))?;
+    s.ok(
+        "a person whose row predates its kind is still refused there, its row taking the person's kind",
+        r.status == 403 && kind_of(&editor_id)? == "person",
+        &r,
+    );
+    Ok(())
 }
 
 /// A channel people may post to keeps its newest `limits::POSTED_KEPT`

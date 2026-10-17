@@ -316,7 +316,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the turn goes on approved", shows(&mut chrome, &page, &replied("(approved)")), "");
     let r = records(api, &owner, &chat_name, "chat");
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response").cloned().unwrap_or_default();
-    s.ok("the page answered with a prompt_response for the card's option", answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string(), &answer);
+    let asked = records(api, &owner, &chat_name, "work").into_iter().find(|x| x["body"]["kind"] == "turn.prompt" && x["body"]["prompt"] == answer["body"]["prompt"]).unwrap_or_default();
+    s.ok(
+        "the page answered with a prompt_response for the card's option, naming the card's agent and turn",
+        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str(),
+        json!({ "answer": answer, "card": asked }),
+    );
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");
     chrome.close(theirs)?;
 
@@ -582,7 +587,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &by_hand,
     );
 
-    polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
+    polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);

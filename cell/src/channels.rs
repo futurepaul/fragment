@@ -56,11 +56,12 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
     Ok((after, before, limit))
 }
 
-use fragment_core::access::Purpose;
+use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, PostRecord, Posted, PutDraft, Role, BUILTIN_CHANNELS, POST_KIND,
+    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role, BUILTIN_CHANNELS,
+    POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
@@ -333,7 +334,8 @@ impl FragmentCell {
     /// A post to a channel its fragment.json declares postable: the
     /// platform appends the record as the poster, and no app code runs.
     /// `principal` is who the record names (an identity, or an anonymous
-    /// visitor's id, whom a `signedIn` channel refuses); `link` says the
+    /// visitor's id, whom a `signedIn` channel refuses, as a `from` channel
+    /// refuses all but its kind's members: `admit_poster`); `link` says the
     /// caller holds the share link. The
     /// caller's standing is read once and decided twice, as a call's is
     /// (ops.rs `call_op`), and a caller holding the public floor alone
@@ -350,20 +352,7 @@ impl FragmentCell {
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
-        if BUILTIN_CHANNELS.contains(&channel) {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} is the platform's: posts go to a channel fragment.json declares with a post role")));
-        }
-        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
-        let Some(needs) = decl.post else {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
-        };
-        // posting acts, as a mutation does: an agent's owner reads through
-        // its membership and never posts through it
-        let role = decide(facts.visibility, standing, Purpose::Act, needs)?;
-        assert!(role >= decl.read, "whoever may post to a channel may read it (checked at deploy)");
-        if decl.signed_in && caller.principal().is_none() {
-            return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
-        }
+        let role = self.admit_poster(caller, facts, standing, channel)?;
         if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
             return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
         }
@@ -394,6 +383,91 @@ impl FragmentCell {
         }
         laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
+    }
+
+    /// Whether the caller may write to `channel`, for both of its writers:
+    /// a post, and a draft (a post in progress: whoever may post there may
+    /// draft there). In order: a built-in channel is the platform's, an
+    /// undeclared one is 404, one with no post role takes nothing; then
+    /// the caller acts with the post role (as a mutation does: an agent's
+    /// owner reads through its membership and never posts through it), a
+    /// `signedIn` channel's poster is signed in, and a `from` channel's is
+    /// a member of that kind posting as itself (`check_poster_kind`).
+    /// `standing` is the one the request read. Answers the caller's role.
+    fn admit_poster(&self, caller: &Caller, facts: &Facts, standing: Standing, channel: &str) -> CellResult<Role> {
+        if BUILTIN_CHANNELS.contains(&channel) {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} is the platform's: posts go to a channel fragment.json declares with a post role")));
+        }
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        let Some(needs) = decl.post else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
+        };
+        let role = decide(facts.visibility, standing, Purpose::Act, needs)?;
+        assert!(role >= decl.read, "whoever may post to a channel may read it (checked at deploy)");
+        if decl.signed_in && caller.principal().is_none() {
+            return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
+        }
+        if let Some(from) = decl.from {
+            self.check_poster_kind(caller, channel, from)?;
+        }
+        Ok(role)
+    }
+
+    /// A `from` channel's poster: a member of this fragment whose member
+    /// row is of that kind, posting as itself. The row's kind is the fact
+    /// a channel trigger's `from` reads (plane.rs `channel_triggers`), so
+    /// the two agree on who may have posted a record. A role says what a
+    /// poster may do, not what it is: an editor person holds the role an
+    /// agent's channel asks for, and only this check keeps their records
+    /// from reading as the agent's.
+    fn check_poster_kind(&self, caller: &Caller, channel: &str, from: IdentityKind) -> CellResult<()> {
+        let refused = || CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes posts from this fragment's {} members only", from.as_str()));
+        // no principal: an anonymous visitor is no member of any kind
+        let Some(signed) = &caller.signed else { return Err(refused()) };
+        // An agent acting for someone acts with its asker's standing
+        // (`standing_for`): its post would be the asker's say under the
+        // agent's name, so it is no post of the agent's own.
+        if signed.acting_for.is_some() {
+            return Err(refused());
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            kind: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed("SELECT kind FROM members WHERE principal = ?", vec![signed.id.as_str().into()])?;
+        // no member row: the caller reads by the share link, the
+        // visibility, or an agent of theirs that is a member, none of
+        // which makes them this fragment's member of any kind
+        let Some(row) = rows.into_iter().next() else { return Err(refused()) };
+        // The registry's identity, as the router resolved it: who asks, and
+        // what kind they are (an identity's kind never changes).
+        let Some(asker) = caller.kind() else { return Err(refused()) };
+        // `members.kind` is nullable: it came (2026-09-24) by a migration
+        // that left the rows before it NULL, and the owner's row is still
+        // written from an Option (fragment.rs `create`). A row without one
+        // takes its identity's now, from the registry's word, so a chat whose
+        // agent joined before then still takes its agent's posts (and its
+        // triggers' `from`, which read the row, agree from here on).
+        let kind = match row.kind {
+            Some(text) => IdentityKind::parse(&text).ok_or_else(|| CellError::host(format!("member {}'s stored kind {text:?} does not decode", signed.id)))?,
+            None => {
+                self.exec(
+                    "UPDATE members SET kind = ? WHERE principal = ? AND kind IS NULL",
+                    vec![asker.as_str().into(), signed.id.as_str().into()],
+                )?;
+                asker
+            }
+        };
+        // the row is written from the registry's identity (members.rs
+        // `put_member`): a row naming another kind is corrupt, and refuses
+        // (never a panic: the object serves everyone else meanwhile)
+        if kind != asker {
+            return Err(CellError::host(format!("member {}'s row says {} and its identity {}: the row is corrupt", signed.id, kind.as_str(), asker.as_str())));
+        }
+        if kind != from {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// A record the platform appends for the fragment itself (as its own
@@ -441,17 +515,12 @@ impl FragmentCell {
         let facts = self.facts()?;
         let standing = self.standing(caller, false)?;
         decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        // a draft says a built-in channel is no place for it before the
+        // shared checks would (`admit_poster`), as it always has: 400
         if !valid_channel_name(channel) || BUILTIN_CHANNELS.contains(&channel) {
             return Err(CellError::invalid("drafts go to a channel fragment.json declares with a post role"));
         }
-        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
-        let Some(needs) = decl.post else {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
-        };
-        decide(facts.visibility, standing, Purpose::Act, needs)?;
-        if decl.signed_in && caller.principal().is_none() {
-            return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
-        }
+        self.admit_poster(caller, &facts, standing, channel)?;
         if !valid_op_id(&draft.turn) {
             return Err(CellError::invalid("a draft's turn must match ^[A-Za-z0-9._:-]{1,128}$"));
         }
@@ -485,16 +554,17 @@ impl FragmentCell {
     pub(crate) fn channels(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut out: Vec<Value> = vec![];
-        let mut add = |name: &str, read: Role, post: Option<Role>, signed_in: bool| -> CellResult<()> {
+        let mut add = |name: &str, read: Role, post: Option<Role>, signed_in: bool, from: Option<IdentityKind>| -> CellResult<()> {
             let last = self.rows("SELECT MAX(seq) AS n FROM records WHERE channel = ?", vec![name.into()])?;
-            out.push(json!({ "name": name, "read": read, "post": post, "signedIn": signed_in, "seq": last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) }));
+            let seq = last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0);
+            out.push(json!({ "name": name, "read": read, "post": post, "signedIn": signed_in, "from": from, "seq": seq }));
             Ok(())
         };
         for b in BUILTIN_CHANNELS {
-            add(b, Role::Viewer, None, false)?;
+            add(b, Role::Viewer, None, false, None)?;
         }
         for (name, decl) in self.declared_channels()? {
-            add(&name, decl.read, decl.post, decl.signed_in)?;
+            add(&name, decl.read, decl.post, decl.signed_in, decl.from)?;
         }
         json_response(&json!({ "channels": out }))
     }

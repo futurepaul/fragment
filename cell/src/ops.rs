@@ -527,6 +527,13 @@ impl FragmentCell {
                 self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
                 json!({ "aged": ms })
             }
+            Some("legacy-member-kind") => {
+                // a member row from before `members.kind` (2026-09-24): its
+                // kind NULL, as such rows were left
+                let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("legacy-member-kind names a member's principal"))?;
+                let n = self.rows("UPDATE members SET kind = NULL WHERE principal = ? RETURNING principal", vec![principal.into()])?.len();
+                json!({ "members": n })
+            }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })

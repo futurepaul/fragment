@@ -61,6 +61,110 @@ pub(super) fn event_kinds(api: &Api, keys: &Keys, name: &str) -> Vec<String> {
     r["events"].as_array().into_iter().flatten().filter_map(|e| e["kind"].as_str().map(str::to_string)).collect()
 }
 
+/// An SVG that runs script when opened as a document, unless sandboxed.
+const SCRIPTED_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>document.title = 'ran'</script></svg>";
+
+/// Whether an answer carries the headers every answer on a fragment's
+/// origin does (the router's `fragment_origin`).
+fn guarded(r: &Reply) -> bool {
+    r.header("x-content-type-options") == "nosniff" && r.header("referrer-policy") == "same-origin"
+}
+
+/// Whether any of an answer's policies sandboxes it (`sandbox`, a
+/// directive of its own in any of its `Content-Security-Policy` headers).
+fn sandboxed(r: &Reply) -> bool {
+    r.headers.get_all("content-security-policy").iter().filter_map(|v| v.to_str().ok()).any(|v| v.split([',', ';']).any(|d| d.trim() == "sandbox"))
+}
+
+/// What a failed check of the origin's headers shows.
+fn origin_detail(r: &Reply) -> Value {
+    let csp: Vec<&str> = r.headers.get_all("content-security-policy").iter().filter_map(|v| v.to_str().ok()).collect();
+    json!({ "status": r.status, "type": r.header("content-type"), "nosniff": r.header("x-content-type-options"), "referrer": r.header("referrer-policy"), "csp": csp })
+}
+
+/// The origin's own headers (audit, the lows beside H2), on the `site`
+/// fragment as its first deploy left it, `cookie` its link: every answer
+/// carries nosniff and a same-origin referrer policy, whoever made it (a
+/// page, a file, the platform's script, the fragment's 404, the router's
+/// refusal page, an error the router raised itself); scriptable media
+/// (an SVG, at its site path or in `__file`) and `__file`'s HTML are
+/// sandboxed; a page, a markdown file and a picture are not.
+fn origin_headers(s: &mut Suite, api: &Api, name: &str, cookie: &str, view: &str) -> Result<()> {
+    let page = |path: &str| api.page(name, path, Some(cookie));
+    for (what, r) in [
+        ("a page", page("")?),
+        ("a site file", page("style.css")?),
+        ("the browser library", page("__fragment.js")?),
+        ("the fragment's 404", page("nope.html")?),
+        ("a content file", page("__file?path=notes/a.md")?),
+    ] {
+        s.ok(&format!("{what} carries nosniff and a same-origin referrer policy"), guarded(&r), origin_detail(&r));
+    }
+    let r = api.call(Call { method: "GET", url: api.site_url(name, "?view=wrong"), extra: vec![("accept", "text/html".into())], ..Call::default() })?;
+    s.ok(
+        "so does the router's refusal page (a changed link)",
+        r.status == 401 && r.header("content-type").starts_with("text/html") && guarded(&r),
+        origin_detail(&r),
+    );
+    // the share link's navigation, which goes on without `view`, and a
+    // worker's script, which only `__sw.js` is (#366): the router's
+    // headers on both
+    let r = api.call(Call {
+        method: "GET",
+        url: api.site_url(name, &format!("docs/?view={view}&x=1")),
+        extra: vec![("accept", "text/html".into()), ("sec-fetch-mode", "navigate".into())],
+        ..Call::default()
+    })?;
+    s.ok(
+        "so does a share link's navigation, on to its URL without the link",
+        r.status == 302 && !r.header("location").contains("view") && guarded(&r),
+        origin_detail(&r),
+    );
+    let r = api.call(Call { method: "GET", url: api.site_url(name, "style.css"), cookie: Some(cookie.to_string()), extra: vec![("service-worker", "script".into())], ..Call::default() })?;
+    s.ok("and the refusal of a worker's script that is not the platform's", r.status == 404 && guarded(&r), origin_detail(&r));
+    let sha = "0".repeat(64);
+    let r = api.call(Call { method: "PUT", url: api.site_url(name, &format!("__blob/{sha}")), body: Some(b"x".to_vec()), content_type: Some("text/plain"), ..Call::default() })?;
+    s.ok(
+        "and an error the router raises itself (an upload from no one), answered as JSON",
+        r.status == 401 && r.message().contains("sign in on this fragment's page") && guarded(&r),
+        origin_detail(&r),
+    );
+    for (what, path, kind) in [
+        ("a site's SVG at its path", "logo.svg", "image/svg+xml"),
+        ("the preview image", "__preview.svg", "image/svg+xml"),
+        ("an SVG in __file", "__file?path=notes/x.svg", "image/svg+xml"),
+        ("HTML in __file", "__file?path=notes/x.html", "text/html"),
+    ] {
+        let r = page(path)?;
+        s.ok(&format!("{what} is sandboxed: opened directly, it runs no script on the origin"), r.status == 200 && r.header("content-type").starts_with(kind) && sandboxed(&r) && guarded(&r), origin_detail(&r));
+    }
+    let r = api.call(Call { method: "HEAD", url: api.site_url(name, "__file?path=notes/x.html"), cookie: Some(cookie.to_string()), ..Call::default() })?;
+    s.ok("so is a HEAD of it", r.status == 200 && r.text.is_empty() && sandboxed(&r), origin_detail(&r));
+    for (what, path) in [("a page", ""), ("a markdown file in __file", "__file?path=notes/a.md"), ("a picture", "dot.png")] {
+        let r = page(path)?;
+        s.ok(&format!("{what} is not sandboxed"), r.status == 200 && !sandboxed(&r) && guarded(&r), origin_detail(&r));
+    }
+    Ok(())
+}
+
+/// The change feed opened as `api::watch` opens it, with the upgrade's
+/// answer: its status and headers.
+fn watch_answered(api: &Api, name: &str, query: &str) -> Result<(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, tungstenite::handshake::client::Response)> {
+    use tungstenite::client::IntoClientRequest;
+    let http = format!("{}/f/{name}/__watch{query}", api.base);
+    let req = http.replacen("http", "ws", 1).into_client_request()?;
+    let (socket, answer) = tungstenite::connect(req)?;
+    let tcp = match socket.get_ref() {
+        tungstenite::stream::MaybeTlsStream::Plain(s) => Some(s),
+        tungstenite::stream::MaybeTlsStream::Rustls(s) => Some(s.get_ref()),
+        _ => None,
+    };
+    if let Some(s) = tcp {
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
+    }
+    Ok((socket, answer))
+}
+
 pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("site", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
@@ -96,6 +200,10 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("site/app.3f9a1c2e.js", Some(b"console.log(1)")),
             ("site/style.css", Some(b"body{color:red}")),
             ("notes/a.md", Some(b"alpha")),
+            ("site/logo.svg", Some(SCRIPTED_SVG)),
+            ("site/dot.png", Some(b"\x89PNG\r\n\x1a\n")),
+            ("notes/x.svg", Some(SCRIPTED_SVG)),
+            ("notes/x.html", Some(b"<!doctype html><script>document.title = 'ran'</script>")),
             ("workflows/w.mjs", Some(b"code")),
             ("fragment.json", Some(br#"{"meta":{"title":"Site <Test>","description":"d"}}"#)),
         ],
@@ -175,6 +283,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("HEAD answers without a body", r.status == 200 && r.text.is_empty(), &r);
     let r = api.call(Call { method: "DELETE", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
     s.ok("other methods are for the app's routes (none here: 404)", r.status == 404 && r.message().contains("no page or app route for DELETE /"), &r);
+    origin_headers(s, api, &name, &cookie, &view)?;
 
     // revalidation: each file names its bytes in an ETag, and a conditional
     // GET naming it is answered before code.storage is asked for anything
@@ -398,13 +507,16 @@ fn page_errors(s: &mut Suite, api: &Api, owner: &Keys, clean: &[u8]) -> Result<(
     let errors = page["errors"].as_array().cloned().unwrap_or_default();
     let has = |kind: &str, f: &dyn Fn(&Value) -> bool| errors.iter().any(|e| e["kind"] == kind && f(e));
     let text = |e: &Value, s: &str| e["text"].as_str().is_some_and(|t| t.contains(s));
+    // the missing script's 404 is JSON, which nosniff (on every answer of
+    // the origin) refuses to run: a load that fails says so twice
     s.ok(
-        "a page that throws as it loads shows on status, tagged with its live: the exception, the console error, the failed load, the CSP violation",
+        "a page that throws as it loads shows on status, tagged with its live: the exception, the console error, the failed load and its refusal as a script, the CSP violation",
         has("exception", &|e| text(e, "Error: e2e boom"))
             && has("console", &|e| text(e, "e2e console 7"))
             && has("network", &|e| e["source"].as_str().is_some_and(|u| u.ends_with("/missing.js")))
+            && has("security", &|e| text(e, "strict MIME type checking"))
             && has("security", &|e| text(e, "img-src"))
-            && errors.len() == 4
+            && errors.len() == 5
             && page["dropped"] == 0
             && page["at"].as_i64().is_some_and(|at| at > 0),
         &page,
@@ -413,7 +525,7 @@ fn page_errors(s: &mut Suite, api: &Api, owner: &Keys, clean: &[u8]) -> Result<(
     let said: Vec<Value> = r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == "page.errors").cloned().collect();
     s.ok(
         "and as one page.errors event, saying the first",
-        said.len() == 1 && said[0]["data"] == page && said[0]["summary"].as_str().is_some_and(|t| t.contains("4 errors") && t.contains(&live[..12])),
+        said.len() == 1 && said[0]["data"] == page && said[0]["summary"].as_str().is_some_and(|t| t.contains("5 errors") && t.contains(&live[..12])),
         json!({ "said": said, "page": page }),
     );
     s.ok(
@@ -455,6 +567,19 @@ pub fn watch(s: &mut Suite, api: &Api) -> Result<()> {
     let mut feed = api::watch(api, &name, &format!("?view={view}"), None)?;
     let hello: serde_json::Value = serde_json::from_str(feed.read()?.to_text()?)?;
     s.ok("the link opens the feed; hello names main's pin", hello["type"] == "hello" && hello["sha"].as_str().is_some_and(|s| s.len() == 40), &hello);
+    // the router sets the origin's headers on every answer, a socket's
+    // upgrade too: rebuilt with them, it must still upgrade
+    let (mut answered, answer) = watch_answered(api, &name, &format!("?view={view}"))?;
+    let hello: serde_json::Value = serde_json::from_str(answered.read()?.to_text()?)?;
+    let nosniff = answer.headers().get("x-content-type-options").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    s.ok(
+        "the feed's upgrade, carrying the origin's headers (nosniff), still answers 101 and delivers its hello",
+        answer.status().as_u16() == 101 && nosniff == "nosniff" && hello["type"] == "hello",
+        json!({ "status": answer.status().as_u16(), "nosniff": nosniff, "hello": hello }),
+    );
+    // done with: the feed above is the one the frames below are read from
+    let _ = answered.close(None);
+    drop(answered);
     s.commit(&c, &[("b.md", Some(b"2"))]);
     let changed: serde_json::Value = serde_json::from_str(feed.read()?.to_text()?)?;
     s.ok("a push arrives as a changed frame with its paths", changed["type"] == "changed" && changed["paths"] == json!(["b.md"]), &changed);

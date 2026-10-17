@@ -41,9 +41,13 @@ const CLIENT_CSS: &str = include_str!("../fragment.css");
 /// a fragment's files as a tree beside a reader.
 const FILES_JS: &str = include_str!("../files.mjs");
 const FILES_CSS: &str = include_str!("../files.css");
+/// The markdown renderer pages import as `./__markdown.js`: markdown to
+/// DOM, never to markup (the files viewer, the chat, the notes viewer).
+const MARKDOWN_JS: &str = include_str!("../markdown.mjs");
 /// The scripts' entity tags, hashed at build time: a page view revalidates
 /// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
+const MARKDOWN_JS_HASH: u64 = site::content_hash(MARKDOWN_JS.as_bytes());
 const CLIENT_CSS_HASH: u64 = site::content_hash(CLIENT_CSS.as_bytes());
 const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
 const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
@@ -140,6 +144,21 @@ fn without_view(url: &url::Url, cookies: &[String]) -> CellResult<Response> {
     h.set("location", &location)?;
     h.set("cache-control", "no-store")?;
     with_cookies(resp, cookies)
+}
+
+/// `__file`, the content plane: a content file is data, never a page of
+/// the fragment's, so HTML there is sandboxed (no script, an opaque origin)
+/// and renders inert. Scriptable media is the router's to sandbox, on every
+/// answer of the origin (`fragment_origin`, lib.rs); other types need
+/// nothing (nosniff keeps them the type they name), and a PDF must not be
+/// sandboxed: Chrome's viewer does not render under a CSP sandbox.
+fn content_file(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    let content_type = h.get("content-type")?.unwrap_or_default();
+    if site::opened_as(&content_type) == site::Opened::Page {
+        h.append("content-security-policy", "sandbox")?;
+    }
+    Ok(resp.with_headers(h))
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -317,6 +336,8 @@ impl FragmentCell {
                 _ => self.app_fetch(&mut req, caller, &facts, &path, &url, link, anon).await?,
             }
         };
+        // whichever of its branches answered (live, main, the release's data, a HEAD)
+        let resp = if path == "__file" { content_file(resp)? } else { resp };
         with_cookies(resp, &set)
     }
 
@@ -395,6 +416,9 @@ impl FragmentCell {
         }
         if path == "__files.css" {
             return compiled_in(req, FILES_CSS, FILES_CSS_HASH, "text/css; charset=utf-8");
+        }
+        if path == "__markdown.js" {
+            return script(req, MARKDOWN_JS, MARKDOWN_JS_HASH);
         }
         self.ensure_pins(facts).await?;
         let facts = &*facts;

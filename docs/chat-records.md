@@ -15,7 +15,7 @@ own code, which runs from the platform's release as its page does
 ```json
 "channels": {
   "chat": { "read": "public", "post": "viewer" },
-  "work": { "read": "viewer", "post": "editor" }
+  "work": { "read": "viewer", "post": "editor", "from": "agent" }
 },
 "operations": { "notify_reply": { "kind": "job" } },
 "triggers": [{ "channel": "chat", "from": "agent", "run": "notify_reply" }]
@@ -25,8 +25,12 @@ own code, which runs from the platform's release as its page does
   prompt answers, and an agent's owner's commands. Anyone who may post
   may say them.
 - `work` holds an agent's progress: turns, steps, prompts, and the
-  commands its runtime takes. Only editors post there (the chat's agents
-  are editors), so no person can forge a step, a card or a menu.
+  commands its runtime takes. Only the chat's agent members post there,
+  each as itself (`"from": "agent"`: the platform refuses every other
+  poster, an editor person included, and an agent acting for someone),
+  so no person can forge a step, a card or a menu. The page counts a
+  turn's records only from the agent whose `turn.start` began it, so
+  one agent cannot write into another's turn either.
 
 An agent fragment has one more channel its computer follows:
 
@@ -153,13 +157,20 @@ From anyone else it is ignored. A waiting turn named by Stop never runs.
 **A prompt's answer:**
 
 ```json
-{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>", "text": "purple" }
+{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>",
+  "agent": "npub1…", "turn": "<turn>", "text": "purple" }
 ```
 
 Only the agent's owner answers its prompts (decision 42); anyone else's
 is ignored. The first answer on the channel wins; later ones are
-ignored. A page posts it with the id `pr:<prompt>`, so a second tap is
-the same record (or 409, for another option). `text`, only for an option
+ignored. `agent` and `turn` name the card it answers (both, or neither):
+prompt ids are each agent's own, so two agents of a chat may show cards
+of one id, and a bridge ignores an answer naming another agent or
+another turn of its own. The page always names them; an answer naming
+neither (the API's) is matched by its prompt alone. A page posts it with
+the id `pr:<32 hex of SHA-256 of "<agent> <turn>:<prompt>">`, so a second
+tap is the same record (or 409, for another option) and an answer to one
+card never blocks another's. `text`, only for an option
 answered in words (`words`, below): what was typed, trimmed, at most 32
 KiB (more is cut); with any other option it is ignored, and without it
 such an option is answered as a question in words is (its runtime asks
@@ -452,19 +463,27 @@ step says why, with Try again (`{fragment: "retry-setup"}` to the
 shell), in the same frame, keeping what was typed. When the shell sends
 `setup: null` the card goes.
 
-The chat template's page reads and writes only these records. It
+The chat template's page reads and writes only these records, and
+attributes each by the poster the platform stamps on it
+(`record.principal`), never by what a body says: a turn is its agent's
+from that agent's own `turn.start`, its later records count only from
+that agent, and records naming it from anyone else (or from before its
+start is read) show nothing. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
 agent's consecutive steps as one card (each its category's icon, verb and
 arguments; while it works, the card's head says what it does now); a
 prompt as a card whose buttons
-only `asks` may press (enabled for them alone), an option answered in
+only `asks` may press (enabled for them alone, and only their answer
+marks it sent: anyone else's changes nothing on it), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a
 reply; a runtime's notice, quietly, its category's icon beside its
 words; and a turn's end when it was not `idle` (Stopped, or the error,
-quietly). A turn's draft shows after the turn's last record, and while
+quietly). A turn's draft (its agent's own: a draft
+naming another poster's turn shows nothing) shows after the turn's last
+record, and while
 a turn runs with no draft nor open card, a working line does: "Waiting
 for your answer" in its place while the turn waits on the page's person's
 words (`turn.asked`), its composer saying what they type answers it

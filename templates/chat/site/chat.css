@@ -214,8 +214,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 /* a table's cells keep their words whole: a wide table scrolls in its own box, never letter by letter */
 .md .md-table :is(th, td) { overflow-wrap: normal; word-break: normal; min-width: 6.5em; }
 .md th { background: var(--surface-muted); font-weight: 600; }
-.shot-link { display: block; }
-.shot { cursor: zoom-in; display: block; width: 100%; max-width: 420px; margin-top: 10px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-card); }
+.md-image-link { display: block; }
+.md-image { cursor: zoom-in; display: block; width: 100%; max-width: 420px; margin-top: 10px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-card); }
 
 /* files: a message's, and the composer's before it is sent */
 .attachments, .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }

@@ -12,37 +12,14 @@
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
-import { appIcon } from "./app-icons.js";
+import { appIcon, icon } from "./icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
-import { LUCIDE_ICON } from "./lucide-icons.js";
 import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
 const DEFAULT_AGENT_TIER = "cheap";
-const ICON = {
-  cornerDownLeft: LUCIDE_ICON.cornerDownLeft,
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
-  invite: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0M19 8v6M16 11h6"/>',
-  agent: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
-  grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
-  reload: LUCIDE_ICON.reload,
-  folder: LUCIDE_ICON.folder,
-  share: LUCIDE_ICON.share,
-  more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
-  people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
-  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
-  screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
-  archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
-  // Lucide's external-link, link and square-pen
-  external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
-  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
-  newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
-};
-const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // A new agent's name, when its maker names none (Paul, 2026-10-03): the
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
@@ -238,14 +215,15 @@ function frameOf(src, title, name = null) {
 
 // A frame that could not sign in says so, and how on (the mint's note,
 // auth.rs `frame_note`, or a fragment's page whose browser keeps its frame
-// cookie from it): in this page's look, in the frame's place, tried again
-// when the person comes back from the tab it sent them to.
+// cookie from it): in this page's look, in the frame's place (a note
+// before it, the frame hidden), tried again when the person comes back
+// from the tab it sent them to.
 const BLOCKED = {
   consent: (t) => [`Open ${t} to continue`, "It isn't yours, and no one shared it with you: it learns who you are only once you say so, in a tab of its own.", "Open it in a tab", "_blank"],
   cookies: (t) => [`${t} can't sign in here`, "This browser keeps a window's own sign-in from it. Open it in a tab instead.", "Open it in a tab", "_blank"],
   "signed-out": (t) => [`Sign in to see ${t}`, "You're signed out.", "Sign in", "_top"],
 };
-const html = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const blockedNote = (frame) => (frame.previousElementSibling?.classList.contains("frame-note") ? frame.previousElementSibling : null);
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== "signin-blocked" || !Object.hasOwn(BLOCKED, d.why)) return;
@@ -254,12 +232,19 @@ addEventListener("message", (event) => {
   const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
   const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
   frame.dataset.blocked = d.why;
-  frame.srcdoc = `<!doctype html><link rel="stylesheet" href="/__shell/shell.css"><body class="frame-note"><div class="notice"><strong>${html(title)}</strong><span>${html(text)}</span><a class="allow" href="${html(href)}" target="${target}" rel="noopener">${html(go)}</a></div></body>`;
+  const allow = el("a", "allow", go);
+  Object.assign(allow, { href, target, rel: "noopener" });
+  const notice = el("div", "notice");
+  notice.append(el("strong", null, title), el("span", null, text), allow);
+  const note = el("div", "frame-note");
+  note.append(notice);
+  blockedNote(frame)?.remove();
+  frame.before(note);
 });
 addEventListener("focus", () => {
   for (const frame of document.querySelectorAll("iframe[data-blocked]")) {
     delete frame.dataset.blocked;
-    frame.removeAttribute("srcdoc");
+    blockedNote(frame)?.remove();
     frame.src = frame.dataset.src;
   }
 });
@@ -442,7 +427,7 @@ function badges(f) {
   const { guests = 0, invites = 0, visibility } = f.sharing ?? {};
   if (guests > 0 || invites > 0) {
     const b = el("span", "shared");
-    b.innerHTML = svg("people");
+    b.replaceChildren(icon("people"));
     b.append(String(guests + invites));
     b.title = [
       guests > 0 ? `Shared with ${guests} ${guests === 1 ? "person" : "people"}` : "",
@@ -452,7 +437,7 @@ function badges(f) {
   }
   if (visibility === "public") {
     const b = el("span", "shared");
-    b.innerHTML = svg("globe");
+    b.replaceChildren(icon("globe"));
     b.title = "Anyone can open it";
     out.push(b);
   }
@@ -550,7 +535,7 @@ function openMenu(button, items) {
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.innerHTML = svg(it.icon);
+    b.replaceChildren(icon(it.icon));
     b.append(it.text);
     b.onclick = () => { closeMenu(); it.onClick(); };
     return b;
@@ -820,7 +805,7 @@ function openChat(name, push = true) {
 // ---- apps: every other fragment, each a window in the viewer ----
 function paneIcon(name) {
   const i = el("span", "pane-icon");
-  i.innerHTML = svg(name);
+  i.replaceChildren(icon(name));
   return i;
 }
 const iconOf = (name) => appIcon(labelOf(name));
@@ -906,7 +891,7 @@ function renderApps() {
     add.dataset.key = "prompts";
     add.title = "Ask for an app";
     const art = el("span", "dock-art");
-    art.innerHTML = svg("plus");
+    art.replaceChildren(icon("plus"));
     add.append(art, el("span", "label", "Add"));
     add.onclick = () => { hidePeek(); showPrompts(); leaveSidebar(); };
     rows.push(add);
@@ -950,12 +935,12 @@ function openApp(name, path = "/") {
   show({
     key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
     actions: [
-      ...(f && own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
-      { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
-      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name, path); } },
-      { icon: ICON.external, title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
+      ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
+      { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
+      { icon: "reload", title: "Reload", onClick: () => { frame.src = framed(name, path); } },
+      { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
       {
-        icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [
+        icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [
           { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
           // someone else's: who else is in it, and leaving it
           ...(f && !own(f) ? [shareItem(name)] : []),
@@ -1304,14 +1289,14 @@ function renderFound(fragments, messages) {
   if (canLaunch()) {
     const action = el("button", "row search-result search-start");
     action.type = "button";
-    const icon = el("span", "search-action-icon");
-    icon.innerHTML = svg("newChat");
+    const mark = el("span", "search-action-icon");
+    mark.append(icon("newChat"));
     const copy = el("span", "agent-copy");
     copy.append(el("span", "label", `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
     const enter = el("span", "meta search-enter");
     enter.title = "Enter";
-    enter.innerHTML = svg("cornerDownLeft");
-    action.append(icon, copy, enter);
+    enter.replaceChildren(icon("cornerDownLeft"));
+    action.append(mark, copy, enter);
     action.onclick = startFromSearch;
     results.append(action);
   }
@@ -2093,7 +2078,7 @@ function accessHead(row) {
   const general = GENERAL[row.sharing?.visibility];
   const tag = el("span", "access-tag");
   if (general) {
-    tag.innerHTML = svg(general.icon);
+    tag.replaceChildren(icon(general.icon));
     tag.append(general.name);
   }
   head.append(open, el("span", "muted access-kind", row.kind), tag);

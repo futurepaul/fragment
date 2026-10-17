@@ -1382,6 +1382,16 @@ pub struct ChannelDecl {
     /// anonymous visitor holding the `post` role is refused (401).
     #[serde(default, rename = "signedIn", skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Only this kind of member posts (`"from": "agent"`): a poster who is
+    /// no member of the fragment, a member of the other kind, or an agent
+    /// acting for someone is refused (403), and an app publishes nothing
+    /// there (a mutation's effect or a job step names whoever called it:
+    /// `effects::check_record`), so a record there is that kind's own (a
+    /// chat's `work`: its agents' steps, never a person's forgery of one).
+    /// The same fact a channel trigger's `from` reads.
+    /// `None`: whoever holds the `post` role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<IdentityKind>,
 }
 
 /// One record in a channel. Records are appended by the platform (`events`,
@@ -1873,10 +1883,13 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
+        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent) };
+        assert_eq!(serde_json::to_string(&agents).unwrap(), r#"{"read":"viewer","post":"editor","from":"agent"}"#);
+        assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&agents).unwrap()).unwrap(), agents, "its posters' kind reads back");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a"}"#).is_err(), "a post has a body");
     }

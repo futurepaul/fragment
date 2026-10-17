@@ -29,8 +29,9 @@
 //!                    the config's canary, which the real-agent sections run
 //!                    and agent-restart upgrades into and back
 //!   check            every first-party JavaScript file parses (node --check;
-//!                    xtask/src/js_syntax.rs), then host tests and clippy,
-//!                    warnings denied
+//!                    xtask/src/js_syntax.rs) and none turns a string into
+//!                    markup or code (xtask/src/html_sinks.rs), then host
+//!                    tests and clippy, warnings denied
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -69,7 +70,10 @@ use fragment_devstack as devstack;
 mod build;
 mod deploy;
 mod dns;
+mod html_sinks;
 mod js_syntax;
+#[cfg(test)]
+mod markdown_dom;
 mod secret;
 mod stripe;
 
@@ -386,9 +390,20 @@ fn javascript_parses(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No first-party JavaScript turns a string into markup or code
+/// (xtask/src/html_sinks.rs): text becomes DOM only by the DOM's own
+/// constructors, so no file or message can script a fragment's origin.
+fn no_html_sinks(root: &Path) -> Result<()> {
+    let sources = html_sinks::sources(root)?;
+    html_sinks::check(&sources, &html_sinks::ALLOWED)?;
+    println!("HTML sinks: none in {} sources ({} allowed, each with why)", sources.len(), html_sinks::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
+    no_html_sinks(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;

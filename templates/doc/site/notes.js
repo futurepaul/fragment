@@ -37,6 +37,17 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+// A presence cursor's arrow, drawn through the DOM (never from markup).
+function pointer() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  for (const [k, v] of [["viewBox", "0 0 16 20"], ["width", "16"], ["height", "20"], ["aria-hidden", "true"]]) svg.setAttribute(k, v);
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", "M1 1 L1 16 L5 12 L8 19 L11 18 L8 11 L14 11 Z");
+  svg.append(path);
+  return svg;
+}
+
 // Every paragraph a note can hang on, in document order.
 const blocks = new Map();
 for (const el of doc.querySelectorAll("[data-a]")) {
@@ -454,8 +465,7 @@ function drawPresence() {
     const y = r.top + p.data.fy * r.height + scrollY;
     let el = cursorEls.get(p.id);
     if (!el) {
-      el = h("div", { class: "notes-cursor" });
-      el.innerHTML = '<svg viewBox="0 0 16 20" width="16" height="20" aria-hidden="true"><path d="M1 1 L1 16 L5 12 L8 19 L11 18 L8 11 L14 11 Z"/></svg><span></span>';
+      el = h("div", { class: "notes-cursor" }, pointer(), h("span"));
       cursorsEl.append(el);
       cursorEls.set(p.id, el);
     }

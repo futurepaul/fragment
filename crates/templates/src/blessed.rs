@@ -222,29 +222,6 @@ mod tests {
         assert_eq!(code("chat", files.into_iter().map(read).collect()), Err(CodeFault::NotUtf8("app.mjs")), "bytes that are not UTF-8 are no code");
     }
 
-    /// Goal: the notes viewer's bundle (the brain's too) carries no chunk
-    /// it never loads (templates/notes/src/viewer.mjs, its recipe). Method:
-    /// from viewer.js, every `"./…"` a file names, statically imported or
-    /// not, is followed; every chunk is reached.
-    #[test]
-    fn the_viewer_carries_no_chunk_it_never_loads() {
-        let files: BTreeMap<&str, Vec<u8>> = crate::NOTES.files.iter().filter_map(|f| Some((f.path.strip_prefix("site/assets/")?, bytes_of(&crate::NOTES, f)))).collect();
-        let (mut reached, mut queue) = (std::collections::BTreeSet::from(["viewer.js"]), vec!["viewer.js"]);
-        // bounded: each file is queued once
-        while let Some(f) = queue.pop() {
-            let dir = f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
-            for named in std::str::from_utf8(&files[f]).expect("JavaScript is UTF-8").split("\"./").skip(1).filter_map(|s| s.split_once('"')).map(|(n, _)| format!("{dir}{n}")) {
-                if let Some((&path, _)) = files.get_key_value(named.as_str()) {
-                    if reached.insert(path) {
-                        queue.push(path);
-                    }
-                }
-            }
-        }
-        let unread: Vec<&&str> = files.keys().filter(|p| p.starts_with("chunks/") && !reached.contains(*p)).collect();
-        assert!(unread.is_empty(), "chunks nothing imports: {unread:?}");
-    }
-
     /// Goal: every agent's image is one file (cell/shell/CREDITS.md).
     /// Method: the chat's and the shell's are the agent's: one asset.
     #[test]
@@ -257,7 +234,8 @@ mod tests {
     /// Goal: a brain (decision 30) is the notes viewer and the brain's own
     /// code, all of it the template's. Method: its page loads the viewer and
     /// its search; the viewer's files are the notes template's very bytes
-    /// (one asset, through the symlink build.rs follows); its code carries
+    /// (one asset, through the symlink build.rs follows), plain source that
+    /// renders with the platform's renderer and carries no bundle; its code carries
     /// its sections and its guide, which is one template literal; its file
     /// trigger keeps the index.
     #[test]
@@ -265,6 +243,10 @@ mod tests {
         let brain = template("brain").unwrap();
         let page = text(brain, "site/index.html");
         assert!(page.contains("assets/viewer.js") && page.contains("brain.js"), "its page is the viewer and its search");
+        let viewer = crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")).map(|f| f.path).collect::<Vec<_>>();
+        assert_eq!(viewer, ["site/assets/viewer.css", "site/assets/viewer.js"], "the viewer is two files of source, no bundle");
+        let source = text(&crate::NOTES, "site/assets/viewer.js");
+        assert!(source.contains("from \"../__markdown.js\""), "it renders with the platform's renderer");
         for f in crate::NOTES.files.iter().filter(|f| f.path.starts_with("site/assets/")) {
             let mine = site_file("brain", f.path).unwrap_or_else(|| panic!("the brain serves the viewer's {}", f.path));
             assert_eq!(mine.sha256, f.sha256, "{} is one asset", f.path);

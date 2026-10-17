@@ -663,7 +663,7 @@ impl Engine {
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
-            Said::PromptResponse { prompt, option, text } => self.answer(agent, fragment, &record.principal, &prompt, &option, text, record.seq),
+            Said::PromptResponse { prompt, option, text, card } => self.answer(agent, fragment, &record.principal, &prompt, &option, text, card.as_ref(), record.seq),
             Said::Command(c) => self.command(agent, fragment, record, c),
             Said::Other => {}
         }
@@ -1169,10 +1169,18 @@ impl Engine {
 
     /// An answer to a turn's prompt, from the agent's owner. Words go with
     /// it only for an option answered in words (the runtime asks for them
-    /// otherwise, as its question in words).
+    /// otherwise, as its question in words). An answer naming its card (the
+    /// chat's page names its agent and turn) is this agent's only for its
+    /// own turn: another agent of the chat may show a card of the same
+    /// prompt id, and a click on that card must never answer this one.
     #[allow(clippy::too_many_arguments)]
-    fn answer(&mut self, agent: &Agent, fragment: &str, principal: &str, prompt: &str, option: &str, text: Option<String>, seq: u64) {
-        let found = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.prompts.iter().any(|p| p.id == prompt)).map(|t| t.id.clone());
+    fn answer(&mut self, agent: &Agent, fragment: &str, principal: &str, prompt: &str, option: &str, text: Option<String>, card: Option<&records::Card>, seq: u64) {
+        if let Some(c) = card.filter(|c| c.agent != agent.identity) {
+            crate::ev!("prompt.ignored", { "agent": agent.fragment, "prompt": prompt, "why": "it answers another agent's card", "for": c.agent });
+            return;
+        }
+        let asked = |t: &&Turn| t.agent == agent.fragment && t.fragment == fragment && card.is_none_or(|c| c.turn == t.id) && t.prompts.iter().any(|p| p.id == prompt);
+        let found = self.state.turns.values().find(asked).map(|t| t.id.clone());
         let Some(id) = found else {
             crate::ev!("prompt.ignored", { "agent": agent.fragment, "prompt": prompt, "why": "no open turn asked it" });
             return;

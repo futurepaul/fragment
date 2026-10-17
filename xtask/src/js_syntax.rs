@@ -35,10 +35,7 @@ use fragment_devstack::node::{Node, NODE_VERSION};
 
 /// Built or vendored JavaScript, each prefix with where it is recorded:
 /// never edited here, so never checked.
-pub const VENDORED: [(&str, &str); 2] = [
-    ("templates/notes/site/assets/", "the notes viewer's prebuilt bundle (docs/technical-debt-ledger.md)"),
-    ("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)"),
-];
+pub const VENDORED: [(&str, &str); 1] = [("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)")];
 
 /// The `.js` files loaded as classic scripts, not modules.
 pub const CLASSIC: [(&str, &str); 1] = [
@@ -84,22 +81,28 @@ pub fn input_type(path: &str) -> Option<InputType> {
     }
 }
 
-fn vendored(path: &str) -> bool {
+pub fn vendored(path: &str) -> bool {
     VENDORED.iter().any(|(prefix, _)| path.starts_with(prefix))
 }
 
 /// The repo's JavaScript to check, sorted: what git tracks or would add
 /// (and is still on disk), less `VENDORED`.
 pub fn files(root: &Path) -> Result<Vec<(String, InputType)>> {
+    select(listed(root)?.into_iter())
+}
+
+/// Every file git tracks or would add (untracked and not ignored) that is
+/// still on disk, sorted: the files the repo's own checks read.
+pub fn listed(root: &Path) -> Result<BTreeSet<String>> {
     let out = Command::new("git")
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .current_dir(root)
         .output()
         .context("git ls-files")?;
     ensure!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
-    let listed: BTreeSet<String> = out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect();
+    let listed = out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned());
     // a path deleted but not yet committed is listed, and is not there
-    select(listed.into_iter().filter(|p| root.join(p).is_file()))
+    Ok(listed.filter(|p| root.join(p).is_file()).collect())
 }
 
 /// The JavaScript among `paths`, less `VENDORED`, with how each parses.
@@ -219,7 +222,7 @@ mod tests {
             ("tools/config.cjs", Some(InputType::CommonJs)),
             ("cell/src/lib.rs", None),
             ("templates/todo/site/index.html", None),
-            ("templates/notes/src/viewer.mjs.map", None),
+            ("templates/notes/site/assets/viewer.js.map", None),
             ("package.json", None),
         ] {
             assert_eq!(input_type(path), kind, "{path}");
@@ -227,8 +230,8 @@ mod tests {
     }
 
     /// The walk over the repo itself finds the shell, the templates' site
-    /// and app code, and the classic service worker, and leaves out the
-    /// vendored bundles.
+    /// and app code (the notes viewer's among them), and the classic
+    /// service worker, and leaves out vendored code.
     #[test]
     fn the_walk_covers_the_shell_and_templates_and_skips_vendored_code() {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
@@ -236,6 +239,8 @@ mod tests {
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         assert_eq!(kind("templates/todo/app.mjs"), Some(InputType::Module));
         assert_eq!(kind("templates/chat/site/chat.js"), Some(InputType::Module));
+        assert_eq!(kind("templates/notes/site/assets/viewer.js"), Some(InputType::Module));
+        assert_eq!(kind("cell/markdown.mjs"), Some(InputType::Module));
         assert_eq!(kind("cell/sw.js"), Some(InputType::CommonJs));
         assert!(found.iter().all(|(p, _)| !vendored(p)), "nothing vendored is checked");
         assert!(found.iter().all(|(p, _)| !p.split('/').any(|c| c == "node_modules" || c == "target")));
@@ -247,7 +252,7 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/shell.js", "cell/sw.js", "templates/notes/site/assets/viewer.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };

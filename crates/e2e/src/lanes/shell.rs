@@ -398,9 +398,23 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let posted = post("m1", "chat", json!({ "text": said }))?;
     anyhow::ensure!(took && posted.body["replayed"] == true, "posting to the chat: {posted}");
     let seq = posted.body["record"]["seq"].as_i64().unwrap_or(0);
-    // a record that is no message (a page's own kind, an agent's step) is never searched
+    // a record that is no message (an agent's step, a page's own kind) is
+    // never searched. A step is no person's to post (`work` is its agents':
+    // 403), so an agent of another person's, in the chat a moment, posts it.
     let step = post("w1", "work", json!({ "kind": "turn.step", "turn": "t1", "step": 1, "text": "zucchini plans" }))?;
-    anyhow::ensure!(step.status == 200, "posting a step: {step}");
+    anyhow::ensure!(step.status == 403, "a person's step is refused: {step}");
+    // (in a chat of their own: the first agent a chat takes is its own, for good)
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "garden-steps", "template": "chat", "title": "Garden steps" })), &[])?;
+    let steps = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200, "making the steps' chat: {r}");
+    let gardener = api.person()?;
+    let (hand, hand_id) = super::delegation::agent_of(api, &gardener)?;
+    let joined = shell(api, session, "PUT", &format!("/api/f/{steps}/members/{hand_id}"), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(joined.status == 200, "an agent joins the chat: {joined}");
+    let step = api.signed(&hand, "POST", &format!("/api/f/{steps}/channels/work"), Some(&json!({ "id": "w1", "body": { "kind": "turn.step", "turn": "t1", "step": 1, "text": "zucchini plans" } })))?;
+    anyhow::ensure!(step.status == 200, "the agent posts its step: {step}");
+    let own = post("w2", "chat", json!({ "kind": "garden.note", "text": "zucchini cuttings" }))?;
+    anyhow::ensure!(own.status == 200, "posting a page's own record: {own}");
     let search = |q: &str| shell(api, session, "GET", &format!("/api/search?q={}", query(q)), None, &[]);
 
     // a message's words find it, newest first, with where it is and a snippet
@@ -449,7 +463,11 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let r = search("tomatoes zucchini")?;
     s.ok("a word the message lacks finds nothing (an agent's step is not searched)", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
     let r = search("zucchini")?;
-    s.ok("nor is a record that is no message", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
+    s.ok("nor is a record that is no message (a step, a page's own record)", r.status == 200 && hits_in(&r, &chat).is_empty() && hits_in(&r, &steps).is_empty(), &r);
+    let gone = shell(api, session, "DELETE", &format!("/api/f/{steps}"), None, &[])?;
+    anyhow::ensure!(gone.status == 200, "deleting the steps' chat: {gone}");
+    let r = search("cuttings")?;
+    s.ok("a page's own record's words find nothing either", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
     let r = search("garden")?;
     let titled = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["kind"] == "chat" && f["title"] == "Garden talk"));
     s.ok("a fragment's title finds it, before any message", titled, &r);

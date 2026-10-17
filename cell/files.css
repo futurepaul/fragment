@@ -93,28 +93,28 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .doc h3 { font-size: 1.2em; }
 .doc h4, .doc h5, .doc h6 { font-size: 1em; }
 .doc h6 { color: var(--text-secondary); }
-.doc p, .doc ul, .doc ol, .doc blockquote, .doc pre, .doc .table { margin: 0 0 1em; }
+.doc p, .doc ul, .doc ol, .doc blockquote, .doc pre, .doc .md-table { margin: 0 0 1em; }
 .doc ul, .doc ol { padding-left: 1.6em; }
 .doc li > ul, .doc li > ol { margin: .2em 0; }
-.doc li.task { list-style: none; margin-left: -1.4em; }
-.doc li.task input { margin: 0 .5em 0 0; vertical-align: -2px; }
+.doc li.md-task { list-style: none; margin-left: -1.4em; }
+.doc li.md-task input { margin: 0 .25em 0 0; vertical-align: -2px; }
 .doc a { color: var(--accent-blue); text-decoration: none; }
 .doc a:hover { text-decoration: underline; }
-.doc .missing { color: var(--missing); border-bottom: 1px dashed currentColor; cursor: help; }
+.doc .md-missing { color: var(--missing); border-bottom: 1px dashed currentColor; cursor: help; }
 .doc code { padding: .15em .35em; border-radius: 5px; background: var(--bg-code); font: .86em/1.5 var(--font-mono); }
 .doc pre { position: relative; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-code); }
 .doc pre code { padding: 0; background: none; font-size: 13px; line-height: 1.6; }
 .doc pre[data-lang]::before { content: attr(data-lang); position: absolute; top: 6px; right: 10px; font: 11px var(--font-mono); color: var(--text-tertiary); }
 .doc blockquote { padding: .1em 1em; border-left: 3px solid var(--border-strong); color: var(--text-secondary); }
 .doc blockquote > :last-child { margin-bottom: 0; }
-.doc .callout { padding: .7em 1em; border: 1px solid var(--border); border-left: 3px solid var(--accent-blue); border-radius: 8px; background: var(--surface-subtle); color: var(--text-primary); }
-.doc .callout[data-kind="warning"], .doc .callout[data-kind="caution"], .doc .callout[data-kind="danger"], .doc .callout[data-kind="bug"] { border-left-color: var(--missing); }
-.doc .callout-title { margin-bottom: .3em; font-weight: 600; }
-.doc .callout-title:only-child { margin-bottom: 0; }
+.doc .md-callout { padding: .7em 1em; border: 1px solid var(--border); border-left: 3px solid var(--accent-blue); border-radius: 8px; background: var(--surface-subtle); color: var(--text-primary); }
+.doc .md-callout[data-kind="warning"], .doc .md-callout[data-kind="caution"], .doc .md-callout[data-kind="danger"], .doc .md-callout[data-kind="bug"] { border-left-color: var(--missing); }
+.doc .md-callout-title { margin-bottom: .3em; font-weight: 600; }
+.doc .md-callout-title:only-child { margin-bottom: 0; }
 .doc hr { margin: 2em 0; border: 0; border-top: 1px solid var(--border); }
 .doc img { max-width: 100%; border-radius: 6px; vertical-align: middle; }
 .doc mark { padding: 0 .15em; border-radius: 3px; background: var(--mark); color: inherit; }
-.doc .table { overflow-x: auto; }
+.doc .md-table { overflow-x: auto; }
 .doc table { border-collapse: collapse; font-size: .93em; }
 .doc th, .doc td { padding: 6px 12px; border: 1px solid var(--border-strong); }
 .doc th { background: var(--surface-subtle); font-weight: 600; }

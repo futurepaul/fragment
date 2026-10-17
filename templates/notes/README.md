@@ -17,5 +17,6 @@ are files in git, and the viewer follows them.
 - `app.mjs` answers `api/tree` and `api/file` from `this.files`, the
   app's read access to its files at `main`.
 
-The viewer (`site/assets/`) is a prebuilt bundle of marked and
-@pierre/diffs.
+The viewer (`site/assets/viewer.js`, plain source) renders markdown with
+the platform's renderer (`./__markdown.js`): DOM only, so HTML in a note
+shows as the text it is, and links go only to notes here or the web.

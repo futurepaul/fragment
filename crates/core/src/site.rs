@@ -14,7 +14,7 @@ pub fn mime_for_path(path: &str) -> &'static str {
     match ext.as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "js" | "mjs" | "cjs" => "text/javascript; charset=utf-8",
         "json" => "application/json",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -39,6 +39,65 @@ pub fn mime_for_path(path: &str) -> &'static str {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         _ => "application/octet-stream",
+    }
+}
+
+/// What a browser makes of a response it opens as a document (a top-level
+/// navigation, a frame), by its `Content-Type`: whether the router sandboxes
+/// it (`ScriptableMedia`, on every answer of a fragment's origin) or the
+/// content plane does (`Page`, on `__file`, where a file is data).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// HTML: a page, whose script runs on the origin that served it.
+    Page,
+    /// SVG and the XML types (`application/xml`, `text/xml`, `text/xsl`,
+    /// any `+xml`, `application/xhtml+xml` among them): a picture or data
+    /// to the site that uses it, yet, opened directly, a document whose
+    /// script runs on the origin as a page's does.
+    ScriptableMedia,
+    /// Anything else: shown, played, read as text, or downloaded, never a
+    /// document of the origin's that runs script (`nosniff`, on every
+    /// answer, keeps a browser to the type it names).
+    Inert,
+}
+
+/// `Opened` for a `Content-Type` header's value, by each type's essence:
+/// its `type/subtype`, without parameters, in any case (WHATWG MIME
+/// Sniffing, 2.1). A value that names more than one type (`a, b`: an app
+/// may append a second, and headers join them) is scriptable media when
+/// any of them is: a browser takes the last it can parse, and a reading
+/// that disagrees about which must err toward the sandbox. Commas inside a
+/// quoted parameter split here too, which only ever adds a part: a type a
+/// browser parses begins after a comma and holds none in its essence, so
+/// this reads its essence too.
+pub fn opened_as(content_type: &str) -> Opened {
+    let mut opened = Opened::Inert;
+    // bounded by the header's length: one turn per comma
+    for named in content_type.split(',') {
+        match opened_as_one(named) {
+            Opened::ScriptableMedia => return Opened::ScriptableMedia,
+            Opened::Page => opened = Opened::Page,
+            Opened::Inert => {}
+        }
+    }
+    opened
+}
+
+/// `Opened` for one media type (`type/subtype; parameters`).
+fn opened_as_one(media_type: &str) -> Opened {
+    let essence = media_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        // no type at all: with nosniff, a browser sniffs no document from it
+        return Opened::Inert;
+    };
+    match (kind, subtype) {
+        ("text", "html") => Opened::Page,
+        // Blink renders text/xsl as XML too; any +xml covers SVG and XHTML
+        ("application", "xml") | ("text", "xml") | ("text", "xsl") => Opened::ScriptableMedia,
+        // a type with no name of its own (`image/+xml`, `/svg+xml`) too:
+        // whether a browser renders it, the sandbox costs nothing there
+        (_, subtype) if subtype.ends_with("+xml") => Opened::ScriptableMedia,
+        _ => Opened::Inert,
     }
 }
 
@@ -325,6 +384,78 @@ mod tests {
         assert_eq!(mime_for_path("noext"), "application/octet-stream");
         assert!(is_machinery("workflows/a.mjs") && is_machinery(".git/x") && is_machinery("a/.env"));
         assert!(!is_machinery("notes/a.md"));
+    }
+
+    /// Goal: what opens as a document that runs script is told apart from
+    /// a page and from inert bytes by the type's essence alone (audit: an
+    /// SVG or XML file on a fragment's origin, opened directly, ran script
+    /// there). Method: the scriptable types in the cases and parameters a
+    /// header carries them; near misses that must stay inert; joined
+    /// values, a quoted comma included, erring toward the sandbox; and each
+    /// type `mime_for_path` serves, by its extension.
+    #[test]
+    fn scriptable_media_by_essence() {
+        for scriptable in [
+            "image/svg+xml",
+            "IMAGE/SVG+XML",
+            "image/svg+xml; charset=utf-8",
+            " image/svg+xml ;charset=utf-8",
+            "\timage/Svg+Xml\t",
+            "application/xml",
+            "text/xml; charset=utf-8",
+            "Text/XSL",
+            "application/xhtml+xml",
+            "application/rss+xml",
+            "application/atom+xml; type=feed",
+            "application/vnd.example.thing+xml",
+            // joined: any scriptable one counts, wherever it is in the list
+            "text/plain, image/svg+xml",
+            "image/svg+xml, text/html",
+            "image/svg+xml; x=\"a, text/html\"",
+            "image/+xml",
+            "/svg+xml",
+        ] {
+            assert_eq!(opened_as(scriptable), Opened::ScriptableMedia, "{scriptable:?}");
+        }
+        // a quoted comma: a browser reads one HTML value, and so does this
+        // (the part after the comma names no type: `image/svg+xml"`)
+        for page in ["text/html", "text/html; charset=utf-8", "TEXT/HTML;charset=UTF-8", " text/html ", "text/plain, text/html", "text/html; x=\"a, image/svg+xml\""] {
+            assert_eq!(opened_as(page), Opened::Page, "{page:?}");
+        }
+        for inert in [
+            "",
+            "image/png",
+            "image/svg",
+            "image/svg+xmlx",
+            "svg+xml",
+            "text/markdown; charset=utf-8",
+            "text/plain; charset=image/svg+xml",
+            "text/javascript; charset=utf-8",
+            "application/json",
+            "application/pdf",
+            "application/octet-stream",
+            "text/htmlx",
+            "texthtml",
+        ] {
+            assert_eq!(opened_as(inert), Opened::Inert, "{inert:?}");
+        }
+        for (path, opened) in [
+            ("a.html", Opened::Page),
+            ("a.HTM", Opened::Page),
+            ("a.svg", Opened::ScriptableMedia),
+            ("a.xml", Opened::ScriptableMedia),
+            ("a.md", Opened::Inert),
+            ("a.png", Opened::Inert),
+            ("a.pdf", Opened::Inert),
+            ("a.js", Opened::Inert),
+            ("a.css", Opened::Inert),
+            ("a.json", Opened::Inert),
+            ("a.webmanifest", Opened::Inert),
+            ("a.mp4", Opened::Inert),
+            ("noext", Opened::Inert),
+        ] {
+            assert_eq!(opened_as(mime_for_path(path)), opened, "{path}");
+        }
     }
 
     /// Goal: only a name with a content hash in it is cached for a year,

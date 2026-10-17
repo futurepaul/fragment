@@ -13,6 +13,36 @@
   <link rel="stylesheet" href="./chat.css">
 </head>
 <body>
+  <!-- the chat's parts, which chat.js mounts (`mount`); each data-icon is
+       a slot its icon fills -->
+  <template id="chat-page">
+    <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
+    <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
+    <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
+    <div class="composer-wrap">
+      <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
+      <div class="here" id="here" hidden></div>
+      <form class="composer" id="say">
+        <div class="mentions" id="mentions" role="listbox" aria-label="Agents" hidden></div>
+        <div class="mentions commands" id="commands" role="listbox" aria-label="Commands" hidden></div>
+        <input id="attachment-picker" type="file" multiple hidden>
+        <div class="quoting" id="quoting" hidden><span class="quote-who" id="quoting-who"></span><span class="quote-text" id="quoting-text"></span><button class="icon-button" id="unquote" type="button" title="Don't reply to it" aria-label="Don't reply to it"><i data-icon="x"></i></button></div>
+        <div class="attachments" id="attachments" hidden></div>
+        <textarea id="text" rows="1" aria-label="Message" disabled></textarea>
+        <div class="composer-actions">
+          <button class="icon-button" id="attach" type="button" title="Attach files" aria-label="Attach files" disabled><i data-icon="plus"></i></button>
+          <button class="icon-button" id="record" type="button" title="Record a voice memo" aria-label="Record a voice memo" aria-pressed="false" hidden disabled><i data-icon="mic"></i></button>
+          <button class="icon-button" id="discard" type="button" title="Discard the voice memo" aria-label="Discard the voice memo" hidden><i data-icon="x"></i></button>
+          <span class="recording" id="recording" role="status" hidden><i aria-hidden="true"></i><span id="recording-time">0:00</span></span>
+          <span class="note" id="note"></span>
+          <button class="icon-button" id="notify" type="button" hidden><i data-icon="bell"></i></button>
+          <button class="steer" id="steer" type="button" title="Tell it now, in what it is doing (/steer)" hidden><i data-icon="navigation"></i><span>Steer</span></button>
+          <button class="send stop" id="stop" type="button" title="Stop reply" aria-label="Stop reply" hidden><i data-icon="stop"></i></button>
+          <button class="send" id="send" type="submit" title="Send message (Enter)" aria-label="Send" disabled><i data-icon="send"></i></button>
+        </div>
+      </form>
+    </div>
+  </template>
   <script type="module">
     import { mount } from "./chat.js";
     mount(document.body);

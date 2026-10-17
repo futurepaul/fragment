@@ -9,5 +9,5 @@
   edges and resized to 240 wide. It is the agent template's
   (`templates/agent/site/agent.png`); this one and the chat template's are
   symlinks to it, and crates/templates embeds the two templates' once.
-- `vendor/split-grid.js` (`vendor/split-grid.LICENSE.txt`) and
-  `lucide-icons.js` (`vendor/lucide-LICENSE`): their own licenses.
+- `vendor/split-grid.js` (`vendor/split-grid.LICENSE.txt`) and the
+  Lucide icons in `icons.js` (`vendor/lucide-LICENSE`): their own licenses.

@@ -66,5 +66,92 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an open page shows a new note without a reload", chrome.until(&page, &has("third"), wait), "");
     chrome.eval(&page, "location.hash = '#/notes/third.md'; true")?;
     s.ok("and opens it", chrome.until(&page, "document.getElementById('content')?.textContent.includes('third')", wait), "");
+    let vault = Vault { home: &home, name: &name, dir: &dir, view: &view };
+    hostile(s, api, &vault, &mut chrome, &page)?;
+    links(s, api, &vault, &mut chrome, &page)
+}
+
+/// The notes fragment the lane made: its CLI's home, its name, the synced
+/// folder, and its share link.
+struct Vault<'a> {
+    home: &'a std::path::Path,
+    name: &'a str,
+    dir: &'a std::path::Path,
+    view: &'a str,
+}
+
+/// The viewer's own hooks into the renderer, in Chrome: a [[wikilink]]
+/// opens its note in the viewer, an ![[embed]] is the vault's picture
+/// through the app (with the page's share link), a relative link and a
+/// reference link resolve to notes, and front matter is left out.
+fn links(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir) = (vault.home, vault.name, vault.dir);
+    let wait = Duration::from_secs(20);
+    std::fs::write(dir.join("notes/linked.md"), "---\ntitle: Linked\nsecret: in the front matter\n---\n# Linked note\n\nGo [[welcome|home]], to [the second](second.md), or to [the third][3].\n\n![[pic.svg|40]]\n\n[3]: third.md\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
+    chrome.eval(page, "location.hash = '#/notes/linked.md'; true")?;
+    let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'Linked note'", wait);
+    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.getAttribute('width') ?? null, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
+    s.ok(
+        "the viewer leaves out front matter, shows an embed through the app (the share link rides its cookie), and resolves wikilinks, relative and reference links to notes",
+        shown
+            && read["front"] == false
+            && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg"))
+            && read["width"] == "40"
+            && read["home"] == "#/notes%2Fwelcome.md"
+            && read["second"] == "notes/second.md"
+            && read["third"] == "notes/third.md",
+        &read,
+    );
+    chrome.click(page, "#content .md a.md-wikilink")?;
+    let opened = chrome.until(page, "location.hash === '#/notes%2Fwelcome.md' && document.getElementById('content')?.textContent.includes('welcome to your notes')", wait);
+    s.ok("a click on a wikilink opens its note in the viewer", opened, chrome.eval(page, "location.hash + ' ' + (document.getElementById('content')?.innerText.slice(0, 120) ?? '')")?);
     Ok(())
 }
+
+/// What a note, an editor's or an agent's, holds is data (audit H2: the
+/// viewer once put `marked`'s output in `innerHTML`, and a note's `<img
+/// onerror>` ran as each of its viewers). Goal: the viewer renders a note's
+/// markup as its text and runs none of it; the platform's renderer is
+/// served and holds to that in a real browser; a note's SVG served by the
+/// app is sandboxed. Method: a committed hostile note opened in the
+/// viewer; the renderer imported on the page with hooks that allow any
+/// URL; an SVG that scripts itself, read and opened directly.
+fn hostile(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir, view) = (vault.home, vault.name, vault.dir, vault.view);
+    let wait = Duration::from_secs(20);
+    // a fetch with the share link, as the lane's own reads are
+    let get = |path: &str| api.call(Call { method: "GET", url: format!("{}{}view={view}", api.site_url(name, path), if path.contains('?') { "&" } else { "?" }), ..Call::default() });
+    let dir_s = dir.to_str().expect("utf-8 path");
+    std::fs::write(dir.join("notes/hostile.md"), HOSTILE_NOTE)?;
+    std::fs::write(dir.join("notes/pic.svg"), SCRIPTED_SVG)?;
+    s.cli(api, home, &["sync", name, "--dir", dir_s]);
+    chrome.eval(page, "location.hash = '#/notes/hostile.md'; true")?;
+    let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'A hostile note'", wait);
+    std::thread::sleep(Duration::from_millis(500));
+    s.ok(
+        "a note's <img onerror>, <script>, <svg onload> and javascript: links render as their text, and none of it runs",
+        shown && chrome.eval(page, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror=') && c.textContent.includes('<script>'); })()")? == true,
+        chrome.eval(page, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
+    );
+    let r = get("__markdown.js")?;
+    s.ok("the platform's renderer is served to every fragment, tagged with its build-time hash", r.status == 200 && r.header("content-type").starts_with("text/javascript") && r.header("etag").len() == 18 && r.text.contains("export function markdown"), &r);
+    let rendered = chrome.eval(page, "import('./__markdown.js').then((m) => { const box = document.createElement('div'); box.append(m.markdown('<img src=x onerror=\"window.__ran2 = 1\">\\n\\n[x](javascript:window.__ran2=2) [y](\\u0001javascript:window.__ran2=3) ![z](javascript:1) [[w]]', { resolve: (t) => ({ href: t }), image: (src) => ({ src, href: src }) })); document.body.append(box); return new Promise((done) => setTimeout(() => done(window.__ran2 === undefined && !box.querySelector('img,script,a[href^=\"javascript\" i]') && box.textContent.startsWith('<img')), 300)); })")?;
+    s.ok("in Chrome the renderer makes no element of markup and no script link, even when its hooks allow every URL", rendered == true, &rendered);
+    let r = get("api/file?path=notes/pic.svg")?;
+    s.ok(
+        "an SVG the app serves is sandboxed, and never sniffed",
+        r.status == 200 && r.header("content-type").starts_with("image/svg+xml") && r.header("content-security-policy").contains("sandbox") && r.header("x-content-type-options") == "nosniff",
+        &r,
+    );
+    // the page's browser holds the share link's cookie
+    let svg = chrome.open(&api.site_url(name, "api/file?path=notes/pic.svg"))?;
+    std::thread::sleep(Duration::from_millis(500));
+    let ran = chrome.eval(&svg, "document.documentElement.getAttribute('data-ran')")?;
+    s.ok("opened directly, the SVG's script does not run", ran.is_null(), &ran);
+    chrome.close(svg)?;
+    Ok(())
+}
+
+const HOSTILE_NOTE: &str = include_str!("../../fixtures/hostile-note.md");
+const SCRIPTED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"document.documentElement.setAttribute('data-ran', '1')\"><circle cx=\"4\" cy=\"4\" r=\"4\"/></svg>\n";
