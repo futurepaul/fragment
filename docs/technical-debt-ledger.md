@@ -1359,3 +1359,31 @@ fragment.club until cutover (decisions 34–35).
   chat's fragment names its kind of chat (own, hand-off, group) instead
   of its label saying it.
 
+## A fenced agent shares its computer's kernel and Hermes' process
+
+- **Observed:** decision 63 (proposed; branch `claude/fenced`). A fenced
+  agent's commands and file tools run as a user of its own in a sandbox
+  of its own, but its model runs in the one Hermes gateway, as the
+  `hermes` user, beside every other agent's, and its sandbox is
+  namespaces on the one kernel.
+- **Risk:** a tool that reads files or reaches services in the gateway's
+  own process, turned on for it by a Hermes update or a fault in one
+  turned off, reaches what the `hermes` user does: every agent's work and
+  Hermes' home. A kernel fault reaches the rest.
+- **First proof:** a fenced agent's turn that reads another agent's file
+  or a profile's `.env` (the hermes lane tries).
+- **Delete when:** a fenced agent's model runs in a process of its own
+  user's, or on a computer of its own.
+
+## A fenced agent's sandbox needs unprivileged user namespaces
+
+- **Observed:** decision 63's spike ran under `wrangler dev`, which gives a
+  computer `CAP_SYS_ADMIN` and AppArmor unconfined; a container without
+  them refuses `unshare` (seen in a plain `docker run`).
+- **Risk:** where a computer may not make one, its fenced agents' commands
+  have no sandbox, so `hermes-boot` refuses to run them (their sessions
+  are refused), and they answer without a terminal.
+- **First proof:** a preview's fenced agent whose terminal is refused.
+- **Delete when:** a preview shows Cloudflare's containers make them, or
+  the sandbox is something they allow.
+

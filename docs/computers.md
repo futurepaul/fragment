@@ -2056,7 +2056,9 @@ persisted)".
   install -g` are how an agent installs software. The computer is one
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
-  opens nothing of anyone else's.
+  opens nothing of anyone else's. A fenced agent (decision 63, proposed)
+  is the exception: its commands run as a user of its own, with no sudo
+  ("A fenced agent in our Hermes image", below).
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot
@@ -2082,6 +2084,60 @@ persisted)".
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer
   needs an apt mirror (and PyPI's and npm's) named in the image.
+
+### A fenced agent in our Hermes image
+
+Decision 63 (proposed): an agent its owner, or their agent, fences acts
+as itself alone. The platform refuses its `for` (docs/api.md), and its
+computer's guest view says `fenced` and gives it no connection. On the
+computer it is the same profile under the same gateway, walled off by
+Hermes' own per-profile terminal and the kernel's users and namespaces;
+no second computer.
+
+- **Its user.** `hermes-boot` (root) makes it a Linux user of its own,
+  `fence-<n>`, its uid kept for the agent in `/data` (root's), never the
+  `hermes` user, never in its group, with no sudo and no password (`*`,
+  so sshd takes its key). Its work directory (`/data/work/<agent>`: its
+  home, its `tmp`) is its user's and the `hermes` group's (2770, so the
+  gateway still reads and writes it: attachments, generated images);
+  every other agent's work directory is `hermes`' alone (0700), and so
+  are Hermes' home (`/data/hermes`, with every profile's `.env` and
+  their desktops' sockets) and the boot's runtime files. `/data/work`
+  itself is 0711: no one lists it. Fenced again after it ran unfenced,
+  its work becomes its user's; let go, the `hermes` user's again.
+- **Its sandbox.** One process of its user's holds a user, network and
+  mount namespace open for it while it runs (`unshare -r -n -m`, its
+  loopback up, its `tmp` bound on `/tmp`): its own loopback and no
+  other interface, so its commands reach no network at all (not the
+  platform's intercepts, not the internet, not the computer's own
+  services: the relay, Hermes' API, the screen, another agent's
+  browser), and its background servers answer its later commands.
+  `/proc` is mounted `hidepid=invisible` with the `hermes` group exempt,
+  so a fenced user sees only its own processes, never another agent's
+  command lines.
+- **How its commands get there.** The computer's sshd listens on
+  loopback alone (`127.0.0.1:2222`), lets in only fence users by a key
+  the gateway's user holds (made at each boot, under the boot's runtime
+  files), forwards nothing, and runs every session through its
+  `ForceCommand`, which joins the session to its user's sandbox
+  (`nsenter --preserve-credentials -U -n -m`) or refuses it when there
+  is none. The profile's terminal is Hermes' own `ssh` backend
+  (`terminal.backend: ssh` to that user), which also carries its file
+  tools and `execute_code` (Hermes runs them through the terminal's
+  environment), so every tool that reads or writes files runs as the
+  fenced user, in the sandbox.
+- **What is off for it.** In its profile: the browser, vision of a local
+  path, video, the desktop and computer use, projects, kanban, catalog
+  and connections management (`agent.disabled_toolsets`), each of which
+  reads files or reaches services in the gateway's own process; Bot Mode
+  (it is in no Bot Mode roster: `message_agent` acts for its owner, which
+  the platform refuses it), so it is reached by its chats; and
+  `FRAGMENT_FOR` (its terminal names no one to act for). Its web is
+  Hermes' `web_search` and `web_extract`, which refuse private and
+  internal addresses.
+- **The bridge.** What a person attaches for a fenced agent lands in its
+  work directory as its user's and the `hermes` group's; an attachment
+  it sends is read from its work directory alone.
 
 ### Hermes' container guesses
 

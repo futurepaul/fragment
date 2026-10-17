@@ -776,6 +776,9 @@ speaking Cloudflare's APIs) returns once this product works.
       for them (decision 62, proposed), and the care it takes for its
       owner's private things around a teammate on another provider is no
       wall either.
+    - the one wall among them is a fence (decision 63, proposed): an
+      agent its owner, or their agent, fences acts as itself alone, on
+      the platform and on its computer.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1349,7 +1352,84 @@ these other providers."
        a computer of its own, as an identity outside its owner's umbrella
        that reaches only what it is handed (an outsider's agent added by
        its npub already reaches only that: decision 36). That reopens
-       decisions 13 and 44, and costs a second computer.
+       decisions 13 and 44, and costs a second computer. Decision 63
+       proposes the wall on the same computer instead.
+
+### A teammate on another provider is fenced (proposed: Austin, 2026-10-17; Paul's to decide)
+
+Austin: each teammate on a provider that is not trusted gets "its own
+workspace … in order for it to not have access to all the user's data,
+but only really have its own profile, its own data, and it only works
+really through the orchestrator or the main user, anyone shared with
+it". And on a computer of its own each: "that cost would scale terribly
+… Already bots in Hermes are separated by profiles. Is there a Hermes
+native boundary that we can leverage here?"
+
+63. **A teammate on another provider is fenced** (proposed; a prototype
+    on branch `claude/fenced`, from decision 62's, not merged). It
+    answers decision 62's third question with a wall that costs no
+    computer: the agent stays on its owner's computer, in its own Hermes
+    profile, and reaches only what is its own or is handed to it.
+    - **On the platform, it acts as itself alone.** A fenced agent (the
+      registry's `identities.fenced`) never acts `for` anyone: a request
+      naming `for` is 403 where the signature is resolved, wherever `for`
+      is honored (`fragment_core::access::may_act_for`), so it shares
+      nothing, starts no agent, and reaches nothing by its owner's
+      access. Its own memberships stand: its agent fragment (its
+      memories, which its computer syncs as itself), its own chat with
+      its owner, each hand-off chat `fragment ask` adds it to, and what
+      anyone shares with it by its npub (decision 36: an agent added by
+      its npub is that agent alone). It is given no connection (its
+      owner's mail, calendar, files: decision 37), only the operator's
+      keys and its own model's.
+    - **Who fences it.** Its owner fences it or lets it go (`PUT
+      /api/identities/{agent}/fenced`, and the shell's team menu). Their
+      agent, acting for them, fences another of their agents, never
+      itself, and never lets one go (`fragment_core::access::may_fence`):
+      the default agent fences each teammate it puts on another provider
+      before it runs (`fragment agent --new … --model <provider>:<id>`,
+      `fragment agent <agent> --model …`), and only the person lifts it.
+    - **On its computer, a user and a sandbox of its own**
+      (docs/computers.md, "A fenced agent"). Its profile's commands, file
+      tools and code run as a Linux user of its own, through Hermes' own
+      `ssh` terminal backend to the computer's loopback sshd, whose
+      `ForceCommand` puts every session in the agent's sandbox: one user,
+      network and mount namespace per agent, held open while it runs, with
+      its own loopback and no route off it (not the platform, not the
+      internet, not the computer's services or another agent's browser),
+      and its own `/tmp`. Its work directory is its user's (the gateway's
+      group shares it); every other agent's, and Hermes' home with each
+      profile's `.env`, are closed to it. Hermes' tools that read files in
+      the gateway's own process (vision of a local path, the browser, the
+      desktop) are off for it, and so is Bot Mode, whose `message_agent`
+      acts for its owner: it is reached by its chats. Its web is Hermes'
+      web tools, which refuse private and internal addresses (Hermes'
+      `tools/url_safety.py`: `api.fragment.internal` among them).
+    - **What it does not change.** Decision 62's care stands: its
+      provider reads all it is sent, so the default agent still sends it
+      placeholders. Decision 44 stands for every unfenced agent.
+
+    *Status, 2026-10-17 (a spike, before any code).* On the Hermes image,
+    under the container settings `wrangler dev` gives a computer
+    (`CAP_SYS_ADMIN`, AppArmor unconfined): an unprivileged user and
+    network namespace per agent, held by a process of its user's; each
+    sshd session joins it (`nsenter --preserve-credentials`); Hermes'
+    `ssh` backend runs the terminal (its environment and directory kept
+    between commands), `write_file`, `read_file` and `search_files` there.
+    The agent read and wrote its own work and `/tmp`, and its own
+    background server answered a later session; another agent's file and
+    a profile's `.env` were refused, `/data/work` could not be listed, the
+    platform and the computer's own services were unreachable, `su` and
+    `sudo` failed, and sshd refused a tunnel.
+
+    **For Paul to decide:**
+    1. Whether a teammate on another provider is fenced, and by default
+       (decision 62's third question).
+    2. Whether Cloudflare's containers allow unprivileged user and
+       network namespaces as `wrangler dev`'s do (a preview's to show).
+    3. Whether a fenced agent's shell gets the internet (a userspace
+       network that never reaches the computer's own loopback), at the
+       cost of what it could then send anywhere.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
