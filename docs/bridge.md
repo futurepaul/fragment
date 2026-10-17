@@ -424,7 +424,7 @@ get_chat_info`.
   that woke the computer waits for it, unclaimed); once handed, kept until
   Hermes acks it and handed again on each dial, within that life. A
   turn's note (above, "The turn after a cut one is told") and its owner's
-  browser (below, "Its owner's browser is told") are the inbound's
+  browser (above, "Its owner's browser is told") are the inbound's
   `context`, an item each with no source, never its text: Hermes renders
   them before the message, a line each, reference only and never as the
   person's words:

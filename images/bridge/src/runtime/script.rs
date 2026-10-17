@@ -700,7 +700,8 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(_) => "browse failed: no FRAGMENT_BROWSER".to_string(),
         };
     }
-    if text.trim() == "tabs" || text.starts_with("close-tab ") {
+    // as typed, as `browse` is: a tab's title keeps its case
+    if ts.text.trim() == "tabs" || ts.text.starts_with("close-tab ") {
         let browser = std::env::var("FRAGMENT_BROWSER").map_err(|_| "no FRAGMENT_BROWSER".to_string());
         reply = match ts.text.strip_prefix("close-tab ") {
             None => match async { tabs(&browser?).await }.await {

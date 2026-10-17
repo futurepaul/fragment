@@ -1191,7 +1191,6 @@ impl RuntimeLane {
     }
 }
 
-/// The message a turn's message quotes (`reply_to`, a seq on the chat's
 /// Its owner's browser, if one is connected now: the computer answers
 /// `/json/version` as a browser's DevTools does (its name, and where its
 /// socket is), and anything else, or nothing within `BROWSER_ASK_MS_MAX`,
@@ -1199,8 +1198,12 @@ impl RuntimeLane {
 async fn owner_browser(base: &Base, turn: &str) -> Option<OwnerBrowser> {
     match crate::net::get(base, "/json/version", limits::BROWSER_ANSWER_MAX_BYTES, limits::BROWSER_ASK_MS_MAX).await {
         Ok((status, body)) if status.is_success() => {
-            let v: Value = serde_json::from_slice(&body).ok()?;
-            Some(OwnerBrowser { name: v["Browser"].as_str()?.to_string(), socket: v["webSocketDebuggerUrl"].as_str()?.to_string() })
+            let v: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let read = v["Browser"].as_str().zip(v["webSocketDebuggerUrl"].as_str()).map(|(name, socket)| OwnerBrowser { name: name.to_string(), socket: socket.to_string() });
+            if read.is_none() {
+                crate::ev!("browser.unread", { "turn": turn, "why": "its answer named no browser and socket" });
+            }
+            read
         }
         // none is connected: nothing to tell
         Ok(_) => None,
@@ -1211,6 +1214,7 @@ async fn owner_browser(base: &Base, turn: &str) -> Option<OwnerBrowser> {
     }
 }
 
+/// The message a turn's message quotes (`reply_to`, a seq on the chat's
 /// `chat`), read as the agent: its text (a command as typed; a file with no
 /// words, its names), cut to `QUOTE_TEXT_MAX_BYTES`, and whether it is the
 /// agent's own. `None` when it is not there, is no message, or the chat did
