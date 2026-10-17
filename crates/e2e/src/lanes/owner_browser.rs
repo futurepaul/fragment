@@ -73,7 +73,7 @@ const PAGE_TITLE: &str = "Opened by the agent";
 const PERSON_PAGE: &str = "data:text/html,%3Ctitle%3EA%20tab%20of%20the%20person%3C%2Ftitle%3E";
 const PERSON_TITLE: &str = "A tab of the person";
 const SHELL_TITLE: &str = "Finite.Computer";
-const REAL: [&str; 16] = [
+const REAL: [&str; 19] = [
     "Settings offers to connect this browser, which has the extension",
     "connecting it: the extension holds the computer's socket",
     "another person signed in to this browser is offered Connect, not told it is connected",
@@ -86,10 +86,13 @@ const REAL: [&str; 16] = [
     "at \"Their tabs, plus tabs I pick\", the popup lists the person's tabs, and the one ticked joins the agent's",
     "at \"All my tabs and windows\", the agent lists every tab, and closes one of the person's",
     "back at \"Only tabs they open\", the person's tabs leave the agent's list",
-    "the extension reloaded: Settings, open from before, says to load it again, and loaded again shows this browser back on its own, with its link",
+    "the extension reloaded: Settings, open from before, is given its new script and shows this browser back on its own, with its link, with no reload",
     "replaced by another browser, it keeps no link (a worker started again later never takes the slot back): Settings says why, and connects it again",
-    "Forget, in Settings, ends it: it does not come back, and Settings offers to connect again",
+    "Disconnect, on this browser's row in Settings, ends it: it does not come back, and Settings offers Connect again, with no error",
     "then the agent's browse is told its owner's browser is not connected, in the platform's words",
+    "Connect again, on the same Settings page with no reload: it says it is connecting at once, then connected",
+    "Disconnect from the extension, asked five times at once as closing Chrome's debugging bar asks once for each tab: Settings, open, offers Connect on its own, with no error, and it does not come back",
+    "disconnected again and its worker stopped meanwhile, as Chrome stops an idle one, Connect on the same page still connects it",
 ];
 
 /// The stub's own GET of the computer's `/json/version`, as a CDP client
@@ -457,21 +460,26 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(REAL[11], back.contains(PAGE_TITLE) && !back.contains(SHELL_TITLE), &back);
     b.close(popup)?;
     // the extension reloaded, as its owner's Reload in chrome://extensions
-    // does it (an unpacked one stays on only in developer mode): its script
-    // on the Settings page already open is cut off from it, and says so when
-    // the page asks, as it does each time it shows Settings; the page loaded
-    // again has the new one, and the extension is back on its own, its link
+    // does it (an unpacked one stays on only in developer mode), or as an
+    // update does: its script on the Settings page already open is cut off
+    // from it, the new worker gives the page its own (the copy on the page
+    // marks itself the newest), and Settings hears from it, with no reload,
+    // that this browser is back on its own, its link
+    const MARK: &str = "document.documentElement.dataset.fragmentExtension ?? ''";
+    let before = b.eval(&settings, MARK)?;
     let extensions = b.open("chrome://extensions/")?;
     let reload = format!("chrome.developerPrivate.updateProfileConfiguration({{ inDeveloperMode: true }}).then(() => chrome.developerPrivate.reload('{ext_id}', {{ failQuietly: true }})).then(() => true)");
     let reloaded = b.eval(&extensions, &reload)?;
     b.close(extensions)?;
-    let cut_off = b.until(&settings, "(window.postMessage({ fragmentBrowser: 'hello' }, location.origin), document.getElementById('settings-browser')?.innerText.includes('reload this page'))", wait);
-    let said = b.eval(&settings, LINE)?;
-    b.reload(&settings)?;
-    let back = b.until(&settings, &format!("document.querySelector('{row}')?.innerText.includes('(this browser): connected') === true"), wait);
+    let given = b.until(&settings, &format!("({MARK}) !== {before}"), wait);
+    let back = b.until(
+        &settings,
+        &format!("(window.postMessage({{ fragmentBrowser: 'hello' }}, location.origin), document.querySelector('{row}')?.innerText.includes('(this browser): connected') === true && !document.getElementById('settings-browser').innerText.includes('Reload'))"),
+        wait,
+    );
     let linked = browsers(api, &owner, &id);
     let one = linked.len() == 1 && linked[0]["id"] == mine.as_str() && linked[0]["connected"] == true;
-    s.ok(REAL[12], reloaded == true && cut_off && back && one, format!("{said} / {} / {}", b.eval(&settings, LINE)?, json!(linked)));
+    s.ok(REAL[12], reloaded == true && given && back && one, format!("{before} → {} / {} / {}", b.eval(&settings, MARK)?, b.eval(&settings, LINE)?, json!(linked)));
     // replaced: another browser of its owner's connects. This one is told
     // not to come back and keeps no link, so a worker Chrome starts again
     // later never takes the slot back; Settings says why, and connects it
@@ -487,15 +495,55 @@ pub fn owner_browser(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(REAL[13], said && unlinked && again, b.eval(&settings, LINE)?);
     let mine = browsers(api, &owner, &id).into_iter().find(|b| b["connected"] == true).and_then(|b| b["id"].as_str().map(str::to_string)).unwrap_or_default();
     let row = format!("[data-browser=\"{mine}\"]");
-    // forgotten in Settings: the extension hears it must not come back (its
-    // link let go, its status says so), and Settings offers Connect again
+    // disconnected in Settings (its row's Forget, said Disconnect on this
+    // browser's own): the extension hears it must not come back (its link
+    // let go), and Settings offers Connect again, with nothing to explain:
+    // its owner said so
+    let labelled = b.eval(&settings, &format!("document.querySelector('{row} [data-action=browser-forget]')?.innerText"))?;
     b.click(&settings, &format!("{row} [data-action=browser-forget]"))?;
-    let told = format!("!document.querySelector('{row}') && !!document.querySelector('[data-action=browser-connect]') && document.getElementById('settings-browser').innerText.includes('Not connected: this browser was forgotten in Settings.')");
+    let told = format!("!document.querySelector('{row}') && !!document.querySelector('[data-action=browser-connect]') && !document.getElementById('settings-browser').innerText.includes('Not connected')");
     let off = b.until(&settings, &told, wait);
-    s.ok(REAL[14], off && !browsers(api, &owner, &id).iter().any(|b| b["id"] == mine.as_str()), b.eval(&settings, LINE)?);
+    // and stays so, once the extension's own word arrives
+    std::thread::sleep(Duration::from_secs(1));
+    let quiet = b.eval(&settings, &format!("({told})"))? == true;
+    s.ok(REAL[14], labelled == "Disconnect" && off && quiet && !browsers(api, &owner, &id).iter().any(|b| b["id"] == mine.as_str()), format!("{labelled} / {}", b.eval(&settings, LINE)?));
     chat.say(&format!("browse {PAGE}"))?;
     let reply = chat.reply(s);
     s.ok(REAL[15], reply.starts_with("browse failed") && reply.contains("your owner's browser is not connected"), &reply);
+    // connected again from the same Settings, no reload: what its owner
+    // does next. Pressed, it says so at once, before the extension answers.
+    let connected = "document.getElementById('settings-browser')?.innerText.includes('(this browser): connected') === true";
+    b.click(&settings, "[data-action=browser-connect]")?;
+    let at_once = b.eval(&settings, &format!("document.getElementById('settings-browser')?.innerText.includes('Connecting this browser') || {connected}"))? == true;
+    let again = b.until(&settings, connected, wait);
+    s.ok(REAL[16], at_once && again, b.eval(&settings, LINE)?);
+    // disconnected from the extension's popup, as its owner might, asked
+    // five times at once as closing Chrome's "debugging this browser" bar
+    // asks once for each tab it held: each answer without an error, Settings
+    // (open, on another page) offers Connect on its own with nothing to
+    // explain, and it does not come back
+    let mine = browsers(api, &owner, &id).into_iter().find(|b| b["connected"] == true).and_then(|b| b["id"].as_str().map(str::to_string)).unwrap_or_default();
+    let popup = b.open(&format!("chrome-extension://{ext_id}/popup.html"))?;
+    // shown once the worker answered its first view
+    b.until(&popup, "!!document.querySelector('input[name=access]:checked')", wait);
+    let answers = b.eval(&popup, "Promise.all(Array.from({ length: 5 }, () => chrome.runtime.sendMessage({ type: 'disconnect' }))).then((all) => all.map((s) => [s.connected, s.link, s.error]))")?;
+    b.close(popup)?;
+    let clean = answers.as_array().is_some_and(|all| all.len() == 5 && all.iter().all(|a| a[0] == false && a[1].is_null() && a[2].is_null()));
+    let offered = b.until(&settings, "!!document.querySelector('[data-action=browser-connect]') && !document.getElementById('settings-browser').innerText.includes('Not connected')", wait);
+    std::thread::sleep(Duration::from_secs(2));
+    let gone = !browsers(api, &owner, &id).iter().any(|b| b["id"] == mine.as_str() || b["connected"] == true);
+    s.ok(REAL[17], clean && offered && gone, format!("{answers} / {} / {}", b.eval(&settings, LINE)?, json!(browsers(api, &owner, &id))));
+    // disconnected again, and its worker stopped meanwhile (Chrome stops an
+    // idle one within 30 s once its socket is gone): Connect wakes it
+    b.click(&settings, "[data-action=browser-connect]")?;
+    let first = b.until(&settings, connected, wait);
+    let mine = browsers(api, &owner, &id).into_iter().find(|b| b["connected"] == true).and_then(|b| b["id"].as_str().map(str::to_string)).unwrap_or_default();
+    b.click(&settings, &format!("[data-browser=\"{mine}\"] [data-action=browser-forget]"))?;
+    let offered = b.until(&settings, "!!document.querySelector('[data-action=browser-connect]')", wait);
+    let stopped = b.stop_extension_worker(&format!("chrome-extension://{ext_id}/"))?;
+    b.click(&settings, "[data-action=browser-connect]")?;
+    let woke = b.until(&settings, connected, wait);
+    s.ok(REAL[18], first && offered && stopped && woke, format!("{first} {offered} {stopped} / {}", b.eval(&settings, LINE)?));
     Ok(())
 }
 

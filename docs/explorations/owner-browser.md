@@ -49,7 +49,8 @@ unpacked. No hosted deployment was used.
   - In a Chrome with the extension, Settings connects the browser once,
     and lists it by name. The agent (the stub image's `browse`) opens a
     tab in it and reads its title. A dropped connection comes back on
-    its own. Forget, in Settings, ends it.
+    its own. Disconnect, in Settings, ends it, and Connect brings it
+    back on the same page, with no reload.
   - Our Hermes image does the same, as the skill says: its terminal tool
     runs the skill's check and its agent-browser command against the
     socket, and the tab opens in the extension's Chrome.
@@ -115,8 +116,9 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   (`MetaKey::BrowserOwner`), so the older one's late close ends nothing
   of the newer's.
 - **Forgetting.** Its owner forgets a browser from any device
-  (`DELETE /api/computers/{id}/browser/links/{link}`: Settings' Forget),
-  or the extension forgets itself (`POST /__browser/forget`: its own
+  (`DELETE /api/computers/{id}/browser/links/{link}`: Settings'
+  Disconnect on this browser's row, Forget on another's), or the
+  extension forgets itself (`POST /__browser/forget`: its own
   Disconnect). Its link is gone, and its socket is closed `4002`.
 - **Coming back, or not.** `4001`, `4002` and `4003` (its owner wiped)
   tell the extension not to come back; any other end, it does
@@ -175,27 +177,46 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
 - a worker: `background.js` wires `link.js` (the computer's socket and
   this browser's link, coming back on its own), `cdp.js` (the guest's
   CDP, answered) and `access.js` (what the agent may use);
-- a content script on the platform's page (`platform.js`);
+- a content script on the platform's page (`platform.js`), which the
+  worker also gives the platform's pages already open when the extension
+  is installed, reloaded or updated (`chrome.scripting`, with the
+  platform's pages in its host permissions);
 - a popup, its settings.
 
 - **Connecting.**
   - Settings' Computer section lists "Browsers": each one linked, by its
-    name, connected or when it was last heard, with Forget. This browser
-    is marked "(this browser)".
-  - With the extension, it offers "Connect this browser". The page mints
-    a ticket and hands it to the content script by a window message, and
-    the worker opens the socket.
+    name, connected or when it was last heard. This browser is marked
+    "(this browser)" and has Disconnect; any other has Forget. Both
+    forget the link.
+  - With the extension, it offers "Connect this browser". Pressed, it
+    says "Connecting this browser…" at once. The page mints a ticket and
+    hands it to the content script by a window message, and the worker
+    opens the socket. The worker gives up a socket not open in 10 s and
+    says why; a page that hears nothing in 15 s says the extension did
+    not answer and offers "Reload this page". It is never left pressed.
   - The extension says which computer and which link it holds. Settings
     calls this browser connected only on the person's own computer; for
     any other it offers Connect, which replaces it.
   - While the extension comes back with its link, Settings says
     "Reconnecting this browser…" and the popup "Reconnecting…", from its
-    first try. Its Disconnect forgets the browser.
-  - Not connected, both say why in a person's words: "this browser was
-    forgotten in Settings", "another browser connected in its place",
-    "your account was wiped", or, for a link the computer does not know
-    (forgotten while it was away, or a computer made again), "your
-    computer no longer knows this browser".
+    first try. A page or the popup asking how it is makes it try again
+    at once, not at its next minute: its owner is looking. Its
+    Disconnect forgets the browser.
+  - Not connected, both say why in a person's words: "another browser
+    connected in its place", "your account was wiped", "your computer
+    did not answer" (a socket that never opened), or, for a link the
+    computer does not know (forgotten while it was away, or a computer
+    made again), "your computer no longer knows this browser". A browser
+    its owner disconnected (in Settings, the popup, or Chrome's bar) is
+    their own word: Settings offers Connect with nothing to explain, and
+    the popup says it was forgotten.
+  - Reloaded or updated, the extension's script on a platform page
+    already open is cut off from it. The worker gives each such page its
+    own script, which marks itself the newest copy on the page (a data
+    attribute: the DOM is what the two copies share), and the old one
+    falls silent. Settings, open from before, shows the browser back
+    with no reload. A page no new copy reached says the extension
+    changed and offers "Reload this page".
   - Without the extension, the line says to add it.
 - **What an agent may use: the person's choice.** The popup is the
   extension's settings ("Your agents can use"). It offers three levels,
@@ -231,7 +252,11 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   shows its own bar, "Fragment started debugging this browser", while a
   debugger is attached. The extension detaches once no guest socket is
   left. The person's closing that bar forgets the browser: they said
-  stop, so it connects again only from Settings.
+  stop, so it connects again only from Settings. Chrome detaches every
+  tab the debugger held, each telling the extension; it forgets once
+  (one forgetting at a time, however many ask). Before, it asked the
+  computer once per tab: one forgotten, then a 401 for each of the rest
+  (about 40, on the dev stack).
 
 ## Evidence
 
@@ -281,7 +306,7 @@ its popup.
 ### The platform, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser`:
-38
+41
 passed, 0 failed, 0 skipped. The section takes about 13 s after the
 build (the cell, the CLI and the stub image), and no wait runs out its
 limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
@@ -350,24 +375,31 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
       one of the person's;
     - back at "Only tabs they open", the person's tabs leave the
       list.
-  - Reloaded (its owner's Reload in `chrome://extensions`), the extension
-    comes back on its own, with its link. The Settings page open from
-    before keeps the old script, which Chrome cut off from it: asked, it
-    says "reload this page" instead of throwing (the error a person saw
-    in the extension's Errors, trying it), and that page loaded again
-    shows this browser connected.
+  - Reloaded (its owner's Reload in `chrome://extensions`, as an update
+    reloads it), the extension comes back on its own, with its link. The
+    Settings page open from before is given the new script (the page's
+    mark of its newest copy changes), and shows this browser connected
+    with no reload.
   - Replaced by another browser, it keeps no link, so a worker started
     again later never takes the slot back. Settings says "Not connected:
     another browser connected in its place.", and connects it again.
-  - Forget, in Settings, ends it. The extension hears it must not come
-    back (Settings says "Not connected: this browser was forgotten in
-    Settings."), and the next `browse` is told the browser is not
+  - Disconnect, on this browser's row in Settings, ends it. The
+    extension hears it must not come back, Settings offers Connect with
+    no error, and the next `browse` is told the browser is not
     connected.
+  - Connect again, on the same page with no reload: it says "Connecting
+    this browser…" at once, then connected.
+  - Disconnect from the extension, asked five times at once as closing
+    Chrome's bar asks once for each tab: every answer is without an
+    error, Settings (open on another page) offers Connect on its own
+    with no error, and the browser does not come back.
+  - Disconnected again, its worker stopped meanwhile as Chrome stops an
+    idle one: Connect on the same page wakes it and connects.
 
 The harness launches a lane's own Chrome without `--disable-extensions`
 when the lane loads one (`crates/e2e/src/browser.rs`), and finds the
 extension by the id Chrome derives from its path. A Chrome that loads no
-unpacked extension (Google Chrome from 137, CI's) makes those sixteen
+unpacked extension (Google Chrome from 137, CI's) makes those nineteen
 checks skips that say so.
 
 ### Hermes, end to end (run)
@@ -429,6 +461,29 @@ Then a second person in the same browser, who connects and browses
   it holds, and Settings says "Connected" only for the person's own;
   otherwise it offers Connect, which replaces the other. The e2e checks
   it.
+
+Austin, trying it with a real agent (2026-10-17), found connecting,
+disconnecting and connecting again rough: an error showed, and he had to
+load the page again and press Connect again. The node's log showed what
+happened. Fixed on the branch, each checked in the e2e:
+
+- **His own Forget, said as an error.** Settings showed "Not connected:
+  this browser was forgotten in Settings." for what he had just done. It
+  now offers Connect with nothing to explain, and this browser's button
+  says Disconnect.
+- **A Connect that never connected.** The first Connect after Forget
+  made a ticket, and no socket followed until the page was loaded
+  again. Headless, the same steps connect, with or without the worker
+  stopped between (two checks, run against the extension before,
+  passed), so the cause is not pinned down. Now none can stick: Connect
+  says "Connecting this browser…" at once, the worker gives up a socket
+  not open in 10 s and says why, and the page offers a reload after 15 s
+  with no answer.
+- **A reloaded or updated extension needed the page loaded again.** The
+  worker gives the pages open its script.
+- **Closing Chrome's debugging bar** asked the computer to forget the
+  browser once for each tab the agent had (one forgotten, about 40
+  refused). It forgets once.
 
 ### A real agent, in plain English (run)
 
@@ -541,7 +596,8 @@ managed skill (below, "Decided").
   warning in Settings. Each level's line in the popup says plainly what
   it gives (the extension, above).
 - **A link does not lapse.** It lasts until the person disconnects it:
-  Disconnect in the popup, Forget in Settings, or closing Chrome's bar.
+  Disconnect in the popup or Settings, Forget in another browser's
+  Settings, or closing Chrome's bar.
   The one bound is `LINKS_MAX`: an owner's ninth browser pushes out the
   one heard from longest ago.
 - **The agent learns of it from a managed skill, not a line beside each
@@ -627,9 +683,9 @@ managed skill (below, "Decided").
 6. Let your laptop sleep, or stop the dev stack and start it again: the
    extension reconnects by itself, and Settings lists the browser by
    name.
-7. Forget it in Settings (or Disconnect in the popup, or close Chrome's
-   bar), then `browse` again: the agent says the browser is not
-   connected.
+7. Disconnect it in Settings (or in the popup, or close Chrome's bar),
+   then `browse` again: the agent says the browser is not connected.
+   Connect brings it back on the same page.
 
 Loaded into a browser you use, the agent's tabs carry your own sign-ins:
 that is the point, and why only you connect it. To try it without them,

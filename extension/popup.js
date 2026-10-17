@@ -25,11 +25,13 @@ function show(v) {
   const s = v.status;
   said.textContent = s.connected
     ? "Connected. Your agents can use this browser."
-    : s.link
-      ? "Reconnecting…"
-      : s.error
-        ? `Not connected: ${s.error}.`
-        : "Not connected. Connect it from Settings in Fragment.";
+    : s.connecting
+      ? "Connecting…"
+      : s.link
+        ? "Reconnecting…"
+        : s.error
+          ? `Not connected: ${s.error}.`
+          : "Not connected. Connect it from Settings in Fragment.";
   // Disconnect forgets this browser: it does not come back on its own
   button.hidden = !s.connected && !s.link;
   for (const r of document.querySelectorAll("input[name=access]")) r.checked = r.value === v.access;

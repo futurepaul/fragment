@@ -33,8 +33,13 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     link.forget().then(() => reply(link.current()));
     return true;
   }
-  if (m?.type === "status") return reply(link.current());
+  // asked by someone looking (a page, the popup): one coming back tries now
+  if (m?.type === "status") {
+    link.nudge();
+    return reply(link.current());
+  }
   if (m?.type === "view") {
+    link.nudge();
     access.view().then((v) => reply({ ...v, status: link.current() }));
     return true;
   }
@@ -53,3 +58,14 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
 // with its link, if it has one
 chrome.runtime.onStartup.addListener(() => link.resume());
 link.resume();
+
+// Installed, reloaded or updated: the platform's pages already open have no
+// script of this extension's, or one cut off from it, so each is given this
+// one's (platform.js), and shows how this browser is without a reload.
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  if (reason !== "install" && reason !== "update") return;
+  const url = chrome.runtime.getManifest().content_scripts.flatMap((c) => c.matches);
+  for (const tab of await chrome.tabs.query({ url })) {
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["platform.js"] }).catch(() => {});
+  }
+});

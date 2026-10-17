@@ -15,9 +15,10 @@ const PONG = '{"type":"pong"}';
 // a ticket's socket: the computer's own origin (`<24 hex>--computer…`), `/__browser`
 const COMPUTER_HEX = 24;
 const TICKET_HOST = new RegExp(`^[0-9a-f]{${COMPUTER_HEX}}--computer[.-]`);
-// The computers it trusts: under its manifest's host permissions
-// (`http://*.<zone>/*`), on the port of the platform's page that handed it
-// the ticket. A page elsewhere could otherwise send it to any socket.
+// The computers it trusts: under its manifest's wildcard host permissions
+// (`http://*.<zone>/*`; the others are the platform's pages, for
+// platform.js), on the port of the platform's page that handed it the
+// ticket. A page elsewhere could otherwise send it to any socket.
 const ZONES = chrome.runtime.getManifest().host_permissions.map((p) => /^https?:\/\/\*\.([^/:]+)\/\*$/.exec(p)?.[1]).filter(Boolean);
 // a guest socket's name, before each frame it carries (fragment_core::owner_browser::SOCKET_HEX)
 const SOCKET_HEX = 8;
@@ -30,23 +31,34 @@ const WIPED = 4003;
 // which wakes this worker however long it slept)
 const RETRY_MS = [1_000, 5_000, 15_000];
 const ALARM = "fragment-reconnect";
-// Why it is not connected, as its owner reads it after "Not connected: "
-// (Settings, the popup): the computer's word not to come back, or a link
-// the computer does not know (forgotten while it was away, or a computer
-// that never made it: another's, or one made again).
+// a socket not open by then is given up, as one that failed
+const OPEN_MS = 10_000;
+// Why it is not connected (`why`), and how its owner reads it after "Not
+// connected: " (`error`: Settings, the popup): the computer's word not to
+// come back, a link the computer does not know (forgotten while it was
+// away, or a computer that never made it: another's, or one made again),
+// or a connection that did not open. Forgotten is its owner's own word:
+// Settings shows nothing for it.
 const ENDED = {
-  [REPLACED]: "another browser connected in its place",
-  [FORGOTTEN]: "this browser was forgotten in Settings",
-  [WIPED]: "your account was wiped",
+  [REPLACED]: ["replaced", "another browser connected in its place"],
+  [FORGOTTEN]: ["forgotten", "this browser was forgotten in Settings"],
+  [WIPED]: ["wiped", "your account was wiped"],
 };
-const UNKNOWN = "your computer no longer knows this browser";
+const UNKNOWN = ["unknown", "your computer no longer knows this browser"];
+const FAILED = ["failed", "your computer did not answer"];
 
 let socket = null;
 let pinger = null;
+let retry = null;
 let tries = 0;
-// `computer`: the 24 hex of the computer it holds a socket to; `link`: the
-// id of this browser's link, while it has one
-let status = { connected: false, computer: null, link: null, error: null };
+// one forgetting and one coming back at a time, however many ask
+let forgetting = null;
+let resuming = null;
+// `connecting`: a socket of Settings' ticket, not open yet; `computer`: the
+// 24 hex of the computer it holds a socket to; `link`: the id of this
+// browser's link, while it has one
+const NONE = { connected: false, connecting: false, computer: null, link: null, error: null, why: null };
+let status = { ...NONE };
 let on = { frame() {}, ended() {}, changed() {} };
 
 /// What the rest of the worker hears: each guest socket's frame, the
@@ -76,27 +88,38 @@ export async function connect(url, page) {
     throw new Error("that is not a Fragment browser ticket");
   }
   await close(1000, "connected again");
+  set({ ...NONE, connecting: true });
   open(url);
 }
 
-// Its owner's Disconnect, here or in Settings: the computer forgets this
-// browser, and it does not come back.
-export async function forget() {
+// Its owner's Disconnect (the popup, Chrome's "debugging this browser"
+// bar, which asks once for each tab it held): the computer forgets this
+// browser, and it does not come back. Its socket is closed here first, so
+// its end is no news: its owner said so.
+export function forget() {
+  forgetting ??= leave().finally(() => (forgetting = null));
+  return forgetting;
+}
+
+async function leave() {
   const link = await saved();
   await chrome.storage.local.remove("link");
-  if (link) {
-    await ask(link, "forget").catch(() => {});
-  }
   await close(1000, "its owner disconnected");
-  set({ connected: false, computer: null, link: null, error: null });
+  set({ ...NONE });
+  if (link) await ask(link, "forget").catch(() => {});
 }
 
 // Comes back with its link, if it has one and is not connected.
-export async function resume() {
+export function resume() {
+  resuming ??= comeBack().finally(() => (resuming = null));
+  return resuming;
+}
+
+async function comeBack() {
   const link = await saved();
   if (!link || socket) return;
   // coming back, as its owner sees it, from the first try
-  if (status.link !== link.id) set({ ...status, link: link.id });
+  if (status.link !== link.id) set({ ...NONE, link: link.id });
   let answer;
   try {
     answer = await ask(link, "ticket");
@@ -105,10 +128,20 @@ export async function resume() {
   }
   if (answer.status === 401) {
     await chrome.storage.local.remove("link");
-    return set({ connected: false, computer: null, link: null, error: UNKNOWN });
+    return set({ ...NONE, why: UNKNOWN[0], error: UNKNOWN[1] });
   }
   if (!answer.ok) return later(`the computer answered ${answer.status}`);
-  open((await answer.json()).url);
+  if (!socket) open((await answer.json()).url);
+}
+
+// Asked how it is (a platform's page, the popup): a browser coming back
+// tries now, not at its next turn, since its owner is looking.
+export function nudge() {
+  if (socket || status.connected || !status.link) return;
+  tries = 0;
+  clearTimeout(retry);
+  chrome.alarms.clear(ALARM);
+  resume();
 }
 
 // The computer's origin, asked as this browser: a ticket to come back
@@ -122,20 +155,25 @@ function open(url) {
   const computer = new URL(url).hostname.slice(0, COMPUTER_HEX);
   const ws = new WebSocket(url);
   socket = ws;
+  let opened = false;
+  const slow = setTimeout(() => ws.readyState === WebSocket.CONNECTING && ws.close(), OPEN_MS);
   ws.onopen = async () => {
+    opened = true;
+    clearTimeout(slow);
     tries = 0;
     chrome.alarms.clear(ALARM);
     ws.send(JSON.stringify({ type: "hello", name: browserName() }));
     pinger = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send(PING), PING_MS);
-    set({ connected: true, computer, link: (await saved())?.id ?? null, error: null });
+    set({ ...NONE, connected: true, computer, link: (await saved())?.id ?? null });
   };
   ws.onmessage = (e) => heard(String(e.data), url);
   ws.onclose = (e) => {
+    clearTimeout(slow);
     if (socket !== ws) return;
     socket = null;
     clearInterval(pinger);
     on.ended();
-    ended(e.code, e.reason);
+    ended(e.code, e.reason, opened);
   };
 }
 
@@ -158,20 +196,26 @@ async function heard(frame, url) {
   if (at === SOCKET_HEX) on.frame(frame.slice(0, at), frame.slice(at + 1));
 }
 
-async function ended(code, reason) {
+async function ended(code, reason, opened) {
   // told not to come back (replaced, forgotten, wiped): its link goes, so a
   // worker Chrome starts again later never takes the slot back
   const told = code in ENDED;
   if (told) await chrome.storage.local.remove("link");
   const back = !told && (await saved());
-  set({ connected: false, computer: null, link: back ? status.link : null, error: back ? null : (ENDED[code] ?? (reason || null)) });
-  if (back) later(null);
+  if (back) {
+    set({ ...NONE, link: back.id });
+    return later(null);
+  }
+  // one that never opened did not connect; one that did, ended
+  const [why, error] = ENDED[code] ?? (opened ? ["ended", reason || "the connection ended"] : FAILED);
+  set({ ...NONE, why, error });
 }
 
 // Tries again: soon, then each minute, until it is connected or has no link.
 function later(error) {
   if (error) set({ ...status, error });
-  if (tries < RETRY_MS.length) setTimeout(resume, RETRY_MS[tries++]);
+  clearTimeout(retry);
+  if (tries < RETRY_MS.length) retry = setTimeout(resume, RETRY_MS[tries++]);
   else chrome.alarms.create(ALARM, { periodInMinutes: 1 });
 }
 
@@ -181,6 +225,7 @@ async function close(code, reason) {
   const ws = socket;
   socket = null;
   clearInterval(pinger);
+  clearTimeout(retry);
   chrome.alarms.clear(ALARM);
   tries = 0;
   if (ws && ws.readyState <= WebSocket.OPEN) ws.close(code, reason);

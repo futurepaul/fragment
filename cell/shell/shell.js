@@ -1733,24 +1733,33 @@ function say(text) {
 }
 // The browsers its agents may use (docs/explorations/owner-browser.md, a
 // spike): each one linked to the computer, by the name its extension
-// gave, connected or when it was last heard, forgotten from here (on
-// any device); and this browser, which the Fragment extension, when it
-// has it, says is connected or not (`{fragmentBrowser: "status"}` from
-// its script on this page: to which computer, by which link) and
-// connects with a one-time ticket minted here.
+// gave, connected or when it was last heard; this one disconnected, and
+// any other forgotten, from here (on any device). And this browser, which
+// the Fragment extension, when it has it, says is connected, connecting,
+// coming back or not, and why not (`{fragmentBrowser: "status"}` from its
+// script on this page: to which computer, by which link), and connects
+// with a one-time ticket minted here.
 let ownBrowser = null;
+// Connect, pressed here and not yet answered: said at once, and given up
+// after `CONNECT_WAIT_MS` with nothing heard (the extension gives up a
+// socket sooner, and says so), never left pressed with no answer.
+let connectPressed = 0;
+let unanswered = false;
+const CONNECT_WAIT_MS = 15_000;
+const redrawBrowsers = () => $("settings-browser")?.replaceWith(browserLine());
 addEventListener("message", (e) => {
   if (e.source !== window || e.origin !== location.origin || e.data?.fragmentBrowser !== "status") return;
   const was = ownBrowser;
-  ownBrowser = { connected: !!e.data.connected, computer: e.data.computer ?? null, link: e.data.link ?? null, error: e.data.error ?? null, reload: !!e.data.reload };
-  $("settings-browser")?.replaceWith(browserLine());
+  const d = e.data;
+  ownBrowser = { connected: !!d.connected, connecting: !!d.connecting, computer: d.computer ?? null, link: d.link ?? null, error: d.error ?? null, why: d.why ?? null, reload: !!d.reload };
+  unanswered = false;
+  // the extension answered Connect: connected, connecting, or why not
+  if (ownBrowser.connected || ownBrowser.connecting || ownBrowser.reload || (ownBrowser.error && ownBrowser.why !== "forgotten")) connectPressed = 0;
+  redrawBrowsers();
   // this browser connected, or left: the computer's list of its browsers changed too
   if (state.computer && (was?.connected !== ownBrowser.connected || was?.link !== ownBrowser.link)) {
     api("GET", `/api/computers/${seg(state.computer.computer)}`)
-      .then((v) => {
-        computerIs(v);
-        $("settings-browser")?.replaceWith(browserLine());
-      })
+      .then(computerIs)
       .catch(() => {});
   }
 });
@@ -1759,7 +1768,7 @@ function browserLine() {
   const rows = el("div", "settings-browsers");
   for (const b of c?.browsers ?? []) {
     const here = ownBrowser?.link === b.id;
-    const forget = el("button", "quiet", "Forget");
+    const forget = el("button", "quiet", here ? "Disconnect" : "Forget");
     forget.type = "button";
     forget.dataset.action = "browser-forget";
     forget.dataset.browser = b.id;
@@ -1767,10 +1776,11 @@ function browserLine() {
       forget.disabled = true;
       try {
         await api("DELETE", `/api/computers/${seg(c.computer)}/browser/links/${seg(b.id)}`);
+        // its owner's own word: Connect is offered, with nothing to explain
+        if (here) ownBrowser = { ...ownBrowser, connected: false, connecting: false, link: null, error: null, why: "forgotten" };
         computerIs(await api("GET", `/api/computers/${seg(c.computer)}`));
-        if (state.page === "Settings") await openSettings(false);
       } catch (e) {
-        notice("That browser was not forgotten", e.message);
+        notice(here ? "This browser was not disconnected" : "That browser was not forgotten", e.message);
         forget.disabled = false;
       }
     };
@@ -1786,25 +1796,45 @@ function browserLine() {
   // a restart): said so, with nothing to press
   const back = !mine && !!ownBrowser?.link && (c?.browsers ?? []).some((b) => b.id === ownBrowser.link);
   if (!ownBrowser) rows.append(el("span", "muted", "Add the Fragment extension to this browser to let your agents use it."));
-  // the extension was reloaded since this page loaded: its new one is the next load's
-  else if (ownBrowser.reload) rows.append(el("span", "settings-warning", "The Fragment extension was reloaded: reload this page."));
+  // the extension's script here cut off (the extension reloaded or
+  // updated) with none in its place (background.js gives the pages open
+  // one), or Connect heard nothing: the page's next load has its own
+  else if (ownBrowser.reload || unanswered) {
+    const again = el("button", "quiet", "Reload this page");
+    again.type = "button";
+    again.dataset.action = "browser-reload";
+    again.onclick = () => location.reload();
+    const row = el("div", "settings-actions");
+    row.append(el("span", "settings-warning", ownBrowser.reload ? "The Fragment extension changed since this page loaded." : "The Fragment extension did not answer."), again);
+    rows.append(row);
+  } else if (!mine && (connectPressed || ownBrowser.connecting)) rows.append(el("span", "muted", "Connecting this browser…"));
   else if (back) rows.append(el("span", "muted", "Reconnecting this browser…"));
   else if (!mine) {
     const on = el("button", "quiet", "Connect this browser");
     on.type = "button";
     on.dataset.action = "browser-connect";
     on.onclick = async () => {
-      on.disabled = true;
+      const pressed = (connectPressed = Date.now());
+      redrawBrowsers();
+      setTimeout(() => {
+        if (connectPressed !== pressed) return;
+        connectPressed = 0;
+        unanswered = true;
+        redrawBrowsers();
+      }, CONNECT_WAIT_MS);
       try {
         const t = await api("POST", `/api/computers/${seg(c.computer)}/browser/ticket`);
         window.postMessage({ fragmentBrowser: "connect", url: t.url }, location.origin);
       } catch (e) {
+        connectPressed = 0;
+        redrawBrowsers();
         notice("This browser did not connect", e.message);
-        on.disabled = false;
       }
     };
     const row = el("div", "settings-actions");
-    row.append(...(ownBrowser.error ? [el("span", "settings-warning", `Not connected: ${ownBrowser.error}.`)] : []), on);
+    // why it is not connected, unless its owner said so
+    const why = ownBrowser.error && ownBrowser.why !== "forgotten";
+    row.append(...(why ? [el("span", "settings-warning", `Not connected: ${ownBrowser.error}.`)] : []), on);
     rows.append(row);
   }
   const line = actionLine("Browsers", rows);
