@@ -1296,10 +1296,12 @@ offered (decision 60 says why, with the vendors' words).
      so a sign-in an attacker began and sent to someone sealed that
      person's key into the attacker's computer). Sent to anyone else, it
      seals nothing anywhere and stays its beginner's to finish. A state
-     replayed, expired, made for another provider, or never made is a
-     page that says to connect again, and nothing is exchanged. A person
-     who declined comes back with no code: the sign-in is let go and
-     nothing is set.
+     replayed, expired, made for another provider, or never made is
+     refused, and nothing is exchanged. A person who declined comes back
+     with no code: the sign-in is let go and nothing is set. Each refusal
+     is a 303 to `…/callback?refused=<word>`, a page that says to connect
+     again at an address that holds no code. A browser holds one own-key
+     sign-in at a time: a second Connect replaces the first's binding.
   4. The platform exchanges the code with the verifier at the row's
      `exchange`. Their computer seals the key as `PUT …/key` does, and the
      page says it is connected. No answer ever holds the key.

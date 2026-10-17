@@ -2440,6 +2440,46 @@ pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellRe
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
 }
 
+/// `computer/signed-in` as the router asks it: an own-key round trip
+/// coming back to the browser that began it, for its person, whose
+/// computer began it. It is a finished round trip, so only `of` makes one,
+/// from its `Bound`: its fields are private and it is not `Deserialize`
+/// (the computer decodes the same body as a `SignedInAsk`).
+#[derive(serde::Serialize)]
+pub(crate) struct SignedIn {
+    #[serde(skip)]
+    computer: String,
+    provider: String,
+    nonce: String,
+}
+
+impl SignedIn {
+    /// The own-key sign-in `bound` finishes, for `person`, to `provider`:
+    /// asked of the person's own computer, never one a URL names.
+    pub(crate) fn of(bound: crate::auth::Bound, person: &fragment_proto::Identity, provider: &str) -> SignedIn {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
+        assert_eq!(person.kind, fragment_proto::IdentityKind::Person, "an own key's sign-in is a person's");
+        SignedIn { computer: fragment_core::computer::default_computer_of(&person.id), provider: provider.to_string(), nonce: bound.state().to_string() }
+    }
+
+    /// The computer it is asked of.
+    pub(crate) fn computer(&self) -> &str {
+        &self.computer
+    }
+}
+
+/// The sign-in `signed` finishes, taken from its computer (once, and gone
+/// whatever comes of it): its verifier.
+pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
+    let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
+    let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();
+    if !own_signin::valid_token(&verifier) {
+        return Err(CellError::host("the computer kept a sign-in with no verifier"));
+    }
+    Ok(verifier)
+}
+
 fn view_of(v: Value) -> CellResult<ComputerView> {
     serde_json::from_value(v).map_err(|e| CellError::host(format!("the computer's view: {e}")))
 }

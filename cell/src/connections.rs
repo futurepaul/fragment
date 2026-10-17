@@ -32,9 +32,9 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{Kind, KeyOAuth};
 use fragment_core::own_signin;
-use fragment_core::roundtrip::{self, Bound, Trip};
+use fragment_core::roundtrip::{self, Trip};
 use fragment_proto::computer::{ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
-use fragment_proto::{ErrorCode, Identity, IdentityKind};
+use fragment_proto::{ErrorCode, IdentityKind};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -202,74 +202,126 @@ async fn sign_in(env: &Env, cfg: &Config, url: &Url, computer: &str, provider: &
     Ok(resp)
 }
 
+/// Why an own-key sign-in did not finish. Each is a page that says what to
+/// do, shown at a URL that holds no code (`?refused=<word>`): the callback
+/// answers a refusal with a redirect there, so the provider's code (unspent,
+/// when the browser was not the one that began it) leaves the address bar
+/// and the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unfinished {
+    /// This browser did not begin it (no cookie, or another sign-in's), or
+    /// began it too long ago, or began another since.
+    NotBegunHere,
+    /// No one is signed in to the platform here.
+    SignedOut,
+    /// The provider sent no code back: the person declined, or it failed.
+    Declined,
+    /// The person's computer has no such sign-in under way: finished
+    /// already, expired, made for another provider, or never theirs.
+    NotUnderWay,
+    /// The provider refused the code (a 4xx): expired, or spent.
+    CodeRefused,
+    /// The provider failed, or answered no key.
+    NoKey,
+}
+
+impl Unfinished {
+    const ALL: [Unfinished; 6] = [Unfinished::NotBegunHere, Unfinished::SignedOut, Unfinished::Declined, Unfinished::NotUnderWay, Unfinished::CodeRefused, Unfinished::NoKey];
+
+    /// Its word in the clean URL.
+    fn word(self) -> &'static str {
+        match self {
+            Unfinished::NotBegunHere => "elsewhere",
+            Unfinished::SignedOut => "signed-out",
+            Unfinished::Declined => "declined",
+            Unfinished::NotUnderWay => "not-under-way",
+            Unfinished::CodeRefused => "code-refused",
+            Unfinished::NoKey => "no-key",
+        }
+    }
+
+    fn parse(word: &str) -> Option<Unfinished> {
+        Unfinished::ALL.into_iter().find(|u| u.word() == word)
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Unfinished::NotBegunHere => "This sign-in did not begin in this browser, or began too long ago, or another began since: connect again from settings.",
+            Unfinished::SignedOut => "You are signed out here: sign in, then connect again from settings.",
+            Unfinished::Declined => "The provider sent no key back (declined, or it failed): connect again from settings if you meant to.",
+            Unfinished::NotUnderWay => "This sign-in is not one under way for you (finished already, or expired): connect again from settings.",
+            Unfinished::CodeRefused => "The provider refused the sign-in's code (expired, or used): connect again from settings.",
+            Unfinished::NoKey => "The provider gave no key back: connect again from settings.",
+        }
+    }
+}
+
 /// `GET /api/connections/{provider}/callback?code=&state=` on the
 /// platform's host: the person's browser, back from the provider's page.
 /// It finishes only the sign-in this browser began (its cookie holds the
 /// state: `auth::trip_bound`), and only for the person signed in here: the
-/// computer is theirs (`default_computer_of`), never one a URL names, so
+/// computer is theirs (`computer::SignedIn::of`), never one a URL names, so
 /// a sign-in someone else began and sent them seals nothing anywhere. The
 /// code is exchanged for their key, which their computer seals; a page
 /// says so. A refusal at the provider (the person declined: no code) or
-/// here is a page that says what to do; nothing is set.
+/// here is a 303 to `?refused=<word>`, a page that says what to do;
+/// nothing is set.
 pub(crate) async fn callback(req: &Request, env: &Env, url: &Url, provider: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     if !cfg.is_platform_host(url.host_str().unwrap_or_default()) {
         return Err(CellError::new(ErrorCode::NotFound, "a sign-in comes back to the platform's own host"));
     }
-    let failed = |why: &str| crate::auth::page(400, "Not connected", &format!("<p>{}</p><p><a href=\"/settings\">Back to settings</a></p>", crate::auth::esc(why)));
-    let Some(p) = cfg.providers.get(provider).filter(|p| p.kind == Kind::Own) else { return failed("This platform offers no such key.") };
-    let Some(o) = &p.oauth else { return failed("That key is given in settings, not signed in to.") };
-    let Some(bound) = crate::auth::trip_bound(req, url, &[Trip::OwnKey])? else {
-        return failed("This sign-in did not begin in this browser, or began too long ago: connect again from settings.");
+    let page = |status: u16, title: &str, says: &str| crate::auth::page(status, title, &format!("<p>{}</p><p><a href=\"/settings\">Back to settings</a></p>", crate::auth::esc(says)));
+    let Some(p) = cfg.providers.get(provider).filter(|p| p.kind == Kind::Own) else { return page(400, "Not connected", "This platform offers no such key.") };
+    let Some(o) = &p.oauth else { return page(400, "Not connected", "That key is given in settings, not signed in to.") };
+    // the clean page a refusal is sent to: its word, and nothing else
+    if let Some(word) = crate::auth::query(url, "refused") {
+        let why = Unfinished::parse(&word).map_or("This sign-in did not finish: connect again from settings.", Unfinished::message);
+        return page(400, "Not connected", why);
+    }
+    let finished = finish(req, env, cfg, url, provider, o).await?;
+    let spent = (finished != Err(Unfinished::NotBegunHere)).then(|| crate::auth::trip_spent(Trip::OwnKey, url));
+    let mut resp = match finished {
+        Ok(()) => page(200, "Connected", &format!("{provider} is connected: your agents can use its models now. You can close this window."))?,
+        Err(why) => {
+            console_log!("{}", json!({ "own-key-sign-in": provider, "unfinished": why.word() }));
+            crate::auth::redirect(&format!("{}?refused={}", callback_url(cfg, provider), why.word()), &[])?.with_status(303)
+        }
     };
-    let Some((_, live)) = crate::auth::platform_session(req, env, url).await? else {
-        return failed("You are signed out here: sign in, then connect again from settings.");
-    };
-    let spent = crate::auth::trip_spent(Trip::OwnKey, url);
-    let finished = finish(env, cfg, bound, &live.identity, provider, o, crate::auth::query(url, "code")).await;
-    let mut resp = match finished? {
-        Ok(()) => crate::auth::page(
-            200,
-            "Connected",
-            &format!(
-                "<p>{} is connected: your agents can use its models now. You can close this window.</p><p><a href=\"/settings\">Back to settings</a></p>",
-                crate::auth::esc(provider)
-            ),
-        )?,
-        Err(why) => failed(&why)?,
-    };
-    resp.headers_mut().append("set-cookie", &spent)?;
+    if let Some(spent) = spent {
+        resp.headers_mut().append("set-cookie", &spent)?;
+    }
     Ok(resp)
 }
 
-/// The own-key sign-in `bound` names, finished for `person`, whose
-/// computer began it (another's has no such nonce, and keeps none of
-/// theirs): its verifier taken (once), the provider's `code` exchanged
-/// with it, and the key sealed by that computer. `Err(why)`: nothing is
-/// set, and the page says why.
-async fn finish(env: &Env, cfg: &Config, bound: Bound, person: &Identity, provider: &str, o: &KeyOAuth, code: Option<String>) -> CellResult<Result<(), String>> {
-    assert_eq!(bound.trip(), Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
-    let computer = fragment_core::computer::default_computer_of(&person.id);
-    let taken = crate::computer::ask(env, &computer, "computer/signed-in", &json!({ "provider": provider, "nonce": bound.state() })).await;
-    let Some(code) = code.filter(|c| own_signin::valid_code(c)) else {
-        // nothing exchanged, and the sign-in under way was let go
-        return Ok(Err("The provider sent no key back (declined, or it failed): connect again from settings if you meant to.".into()));
-    };
+/// The own-key sign-in this request comes back with, finished: bound to
+/// this browser, for the person signed in here, whose computer began it
+/// (another's has no such nonce, and keeps none of theirs); its verifier
+/// taken (once), the provider's code exchanged with it, and the key sealed
+/// by that computer. `Err`: nothing is set.
+async fn finish(req: &Request, env: &Env, cfg: &Config, url: &Url, provider: &str, o: &KeyOAuth) -> CellResult<Result<(), Unfinished>> {
+    let Some(bound) = crate::auth::trip_bound(req, url, &[Trip::OwnKey])? else { return Ok(Err(Unfinished::NotBegunHere)) };
+    let Some((_, live)) = crate::auth::platform_session(req, env, url).await? else { return Ok(Err(Unfinished::SignedOut)) };
+    let signed = crate::computer::SignedIn::of(bound, &live.identity, provider);
+    // taken whatever comes back: a declined sign-in is let go too
+    let taken = crate::computer::signed_in(env, &signed).await;
+    let Some(code) = crate::auth::query(url, "code").filter(|c| own_signin::valid_code(c)) else { return Ok(Err(Unfinished::Declined)) };
     let verifier = match taken {
-        Ok(v) => v["verifier"].as_str().unwrap_or_default().to_string(),
-        Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::InvalidRequest) => return Ok(Err(e.message)),
+        Ok(v) => v,
+        Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::InvalidRequest) => return Ok(Err(Unfinished::NotUnderWay)),
         Err(e) => return Err(e),
     };
-    if !own_signin::valid_token(&verifier) {
-        return Err(CellError::host("the computer kept a sign-in with no verifier"));
-    }
     reachable(cfg, &o.exchange)?;
     let host = url::Url::parse(&o.exchange).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
     let (status, answer) = crate::keys::own_key_exchange(&o.exchange, &own_signin::exchange_body(&code, &verifier), &host).await?;
     let key = match own_signin::key_of(status, &answer) {
         Ok(k) => k,
-        Err(e) => return Ok(Err(e.message())),
+        Err(own_signin::ExchangeError::Refused(..)) => return Ok(Err(Unfinished::CodeRefused)),
+        Err(own_signin::ExchangeError::Failed(why)) => {
+            console_error!("{}", json!({ "own-key-sign-in": provider, "no-key": why }));
+            return Ok(Err(Unfinished::NoKey));
+        }
     };
-    crate::computer::ask(env, &computer, "computer/own-key", &json!({ "provider": provider, "key": key })).await?;
+    crate::computer::ask(env, signed.computer(), "computer/own-key", &json!({ "provider": provider, "key": key })).await?;
     Ok(Ok(()))
 }

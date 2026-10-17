@@ -984,17 +984,23 @@ fn run(cli: Cli) -> Result<()> {
                 // signed in (ten minutes good, once): no link approves a key,
                 // only what they type from this terminal
                 let begun: fragment_proto::CliCode = c.call_as(c.post_json("/cli/begin", &json!({}))?)?;
+                // the page to type it at is this host's own: never one an
+                // answer names, which the CLI would open in a browser
+                let page = format!("{}/cli", c.host);
+                // and the code is one a person can type, as the CLI shows it,
+                // nothing else (a host's answer is printed to a terminal)
+                let code = fragment_core::cli_code::normalize(&begun.code).map(|k| fragment_core::cli_code::display(&k)).ok_or_else(|| anyhow!("{} answered no code a person can type", c.host))?;
                 let npub = key.npub();
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
-                    json_exit(j, &json!({ "npub": npub, "pending": true, "code": begun.code, "url": begun.url, "expiresAt": begun.expires_at }));
-                    println!("open {} in a browser where you are signed in, and type this code (good for ten minutes, once):\n  {}", begun.url, begun.code);
+                    json_exit(j, &json!({ "npub": npub, "pending": true, "code": code, "url": page, "expiresAt": begun.expires_at }));
+                    println!("open {} in a browser where you are signed in, and type this code (good for ten minutes, once):\n  {}", page, code);
                     println!("the page should show a key ending in {tail}; then run `fragment login` again");
                     return Ok(());
                 }
-                eprintln!("open {}, sign in, and type this code (good for ten minutes, once):\n  {}\nthe page should show a key ending in {tail}", begun.url, begun.code);
+                eprintln!("open {}, sign in, and type this code (good for ten minutes, once):\n  {}\nthe page should show a key ending in {tail}", page, code);
                 if !no_browser {
-                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &begun.url);
+                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &page);
                 }
                 let t0 = std::time::Instant::now();
                 while done.is_none() {

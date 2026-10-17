@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CellError, CellResult};
 
 /// A call to the Registry: `PATH` names its route, the implementing type is
-/// its body, and `Answer` is what a 200 carries.
-pub(crate) trait Call: Serialize + DeserializeOwned {
+/// its body, and `Answer` is what a 200 carries. A body is `Deserialize` as
+/// the Registry decodes it (`RegistryCell::route`), but for a finished round
+/// trip's (`Exchange`), which no one but `Exchange::of` makes: its route
+/// decodes a type of its own.
+pub(crate) trait Call: Serialize {
     const PATH: &'static str;
     type Answer: Serialize + DeserializeOwned;
 
@@ -568,26 +571,39 @@ impl Call for Begin {
 
 /// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
 /// sign-in finished (`switching`: one `/auth/switch` began, to use another
-/// account). Its fields are the Registry's to read: the router makes one
-/// only with `of`, from a round trip bound to the browser that began it.
-#[derive(Serialize, Deserialize)]
+/// account). It is a finished round trip, so the router makes one only
+/// with `of`, from the `Bound` of the browser that began it: its fields
+/// are private and it is not `Deserialize` (the Registry decodes the same
+/// body as an `ExchangeIn`, which is its own).
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Exchange {
-    pub(in crate::registry) state: String,
-    pub(in crate::registry) code: String,
-    pub(in crate::registry) client_id: String,
-    pub(in crate::registry) issuer: String,
-    pub(in crate::registry) switching: bool,
+    state: String,
+    code: String,
+    client_id: String,
+    issuer: String,
+    switching: bool,
 }
 
 impl Exchange {
     /// The exchange of a sign-in's (or a switch's) code, coming back to
     /// the browser that began it: the only way to make one.
-    pub(crate) fn of(bound: fragment_core::roundtrip::Bound, code: String, client_id: String, issuer: String) -> Exchange {
+    pub(crate) fn of(bound: crate::auth::Bound, code: String, client_id: String, issuer: String) -> Exchange {
         use fragment_core::roundtrip::Trip;
         assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a WorkOS code finishes a sign-in or a switch");
         Exchange { state: bound.state().to_string(), code, client_id, issuer, switching: bound.trip() == Trip::Switch }
     }
+}
+
+/// `Exchange`'s body as the Registry decodes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::registry) struct ExchangeIn {
+    pub(in crate::registry) state: String,
+    pub(in crate::registry) code: String,
+    pub(in crate::registry) client_id: String,
+    pub(in crate::registry) issuer: String,
+    pub(in crate::registry) switching: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -744,10 +760,21 @@ impl Call for Redeem {
 
 /// `POST /cli/begin`: a CLI's new key (the router checked its signature)
 /// asks for the code its person types (`fragment_core::cli_code`). A key
-/// someone holds, or held, is 409.
+/// someone holds, or held, is 409; past the address's or the fleet's
+/// begins this minute, 429.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CliBegin {
     pub key: String,
+    /// The address it came from (`CF-Connecting-IP`), its begins counted
+    /// by: at most `FROM_MAX_BYTES`.
+    pub from: String,
+    /// What the platform knew of the request, shown to whoever types it.
+    pub asked: fragment_core::cli_code::Asked,
+}
+
+impl CliBegin {
+    /// An address, at most (an IPv6 one is 45 characters).
+    pub const FROM_MAX_BYTES: usize = 64;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -789,6 +816,7 @@ pub(crate) struct CliCoded {
     pub key: String,
     pub identity: String,
     pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
 }
 
 impl Call for CliCodeOf {
@@ -811,6 +839,7 @@ pub(crate) struct ApproveKey {
 pub(crate) struct KeyAdded {
     pub key: String,
     pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
 }
 
 impl Call for ApproveKey {

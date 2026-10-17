@@ -329,6 +329,13 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a callback without the browser's state cookie is refused", r.status == 400 && cookie_line(&r, "fragment_session").is_empty(), &r);
     let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some("fragment_login=".to_string() + &"0".repeat(64)), ..Call::default() })?;
     s.ok("and with another sign-in's state", r.status == 400, &r);
+    let state = reqwest::Url::parse(&to).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned())).unwrap_or_default();
+    let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(format!("fragment_own_key={state}")), ..Call::default() })?;
+    s.ok(
+        "and with its state in another kind of round trip's cookie (an own key's): each kind's cookie binds that kind alone",
+        fragment_core::roundtrip::valid_state(&state) && r.status == 400 && cookie_line(&r, "fragment_session").is_empty(),
+        &r,
+    );
     let r = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(bound.clone()), ..Call::default() })?;
     let session_line = cookie_line(&r, "fragment_session");
     s.ok(
@@ -527,8 +534,16 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     armed();
     let confirm = api.cli_form(&person, "/cli", &[("form", &super::share::form_of(&page)), ("code", &code.to_lowercase())])?;
     s.ok(
-        "typed (in any case), it shows whom the CLI would act as, by their email, and the key's ending to compare with the terminal, then asks a press",
-        confirm.status == 200 && confirm.text.contains(cli_email) && confirm.text.contains(&tail) && confirm.text.contains("Add this key") && confirm.text.contains("data-arm disabled") && unframed(&confirm),
+        "typed (in any case), it shows whom the CLI would act as, by their email, the key's ending to compare with the terminal, where and when its code was asked for and by what, and never to type a code someone sent; then asks a press",
+        confirm.status == 200
+            && confirm.text.contains(cli_email)
+            && confirm.text.contains(&tail)
+            && confirm.text.contains("Its code was asked just now from ")
+            && confirm.text.contains(&format!("by {}", crate::api::CLI_AGENT))
+            && confirm.text.contains(cli_code::NEVER_SENT)
+            && confirm.text.contains("Add this key")
+            && confirm.text.contains("data-arm disabled")
+            && unframed(&confirm),
         &confirm,
     );
     let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
@@ -566,10 +581,21 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &me,
     );
     s.ok("(adding asks the registry once)", calls == 1, calls);
+    // sent after the answer (wait_until), never in its way
+    let mailed = s.eventually(Duration::from_secs(10), || s.mail.sent_to(cli_email).len() == mails_before + 1);
     let mail = s.mail.sent_to(cli_email);
     s.ok(
-        "and the person is mailed that a key was added: its ending, the whole key, and how to revoke it",
-        mail.len() == mails_before + 1 && mail.last().is_some_and(|m| m.subject.contains(&tail) && m.text.contains(&format!("fragment keys revoke {cli_npub}"))),
+        "and the person is mailed that a key was added: its ending, the whole key, that its code was typed, where and when it was asked for, never to type one someone sent, and how to revoke it",
+        mailed
+            && mail.len() == mails_before + 1
+            && mail.last().is_some_and(|m| {
+                m.subject.contains(&tail)
+                    && m.text.contains("added when its code was typed at")
+                    && m.text.contains("The code was asked ")
+                    && m.text.contains(&format!("by {}", crate::api::CLI_AGENT))
+                    && m.text.contains(cli_code::NEVER_SENT)
+                    && m.text.contains(&format!("fragment keys revoke {cli_npub}"))
+            }),
         format!("{mail:?}"),
     );
     let again = press(&person, &api.base)?;
@@ -606,6 +632,20 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         "another person's misses are theirs alone: whoever types a code adds its key to themselves, and their terminal says whose",
         typed.status == 200 && added.status == 200 && theirs.status == 200 && theirs.body["id"] == paul_id.as_str(),
         &theirs,
+    );
+    // a key keeps its newest few codes: one more pushes out its oldest, so
+    // no flood of one key's begins pushes out anyone else's
+    let many = Keys::generate();
+    let many_tail = npub::encode(many.pubkey_hex())[npub::encode(many.pubkey_hex()).len() - 8..].to_string();
+    let mut codes = vec![];
+    for _ in 0..=cli_code::CODES_PER_KEY_MAX {
+        codes.push(api.cli_begin(&many)?.body["code"].as_str().unwrap_or("").to_string());
+    }
+    let (oldest, newest) = (api.type_code(&paul, &codes[0])?, api.type_code(&paul, &codes[cli_code::CODES_PER_KEY_MAX])?);
+    s.ok(
+        &format!("a key keeps its newest {} codes: one more pushes out its oldest (400), and the newest still names it", cli_code::CODES_PER_KEY_MAX),
+        codes.iter().all(|c| cli_code::normalize(c).is_some()) && oldest.status == 400 && newest.status == 200 && newest.text.contains(&many_tail),
+        json!({ "oldest": oldest.to_string(), "newest": newest.status }),
     );
     // every platform page refuses frames; its redirects need not (a
     // redirect shows nothing)
@@ -1111,6 +1151,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             && fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label)
             && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
         format!("{r} {members}"),
+    );
+
+    // Goal: an address asks for at most the fleet's CLI codes a minute
+    // (FRAGMENT_CLI_BEGINS_PER_IP_MINUTE: crate::CLI_BEGINS_PER_IP_MINUTE
+    // here), counted apart from every other address. Method: one address's
+    // begins until it is refused; within one minute that is at the limit,
+    // across a minute's turn at most twice it; another address is not
+    // refused. Last in the section: nothing after it here asks for a code
+    // from those addresses.
+    let flood = Keys::generate();
+    let limit = crate::CLI_BEGINS_PER_IP_MINUTE as usize;
+    let mut statuses = vec![];
+    // bounded: two minutes' worth at most
+    while statuses.len() <= 2 * limit && statuses.last() != Some(&429) {
+        statuses.push(api.cli_begin_from(&flood, Some("203.0.113.7"))?.status);
+    }
+    let other = api.cli_begin_from(&flood, Some("203.0.113.8"))?;
+    let first_refused = statuses.iter().position(|st| *st == 429);
+    s.ok(
+        &format!("an address asks for at most {limit} CLI codes a minute (429 past them), counted apart from any other address"),
+        first_refused.is_some_and(|i| (limit..=2 * limit).contains(&i)) && statuses.iter().all(|st| *st == 200 || *st == 429) && other.status == 200,
+        format!("refused first at {first_refused:?} of {} begins; another address: {other}", statuses.len()),
     );
     Ok(())
 }

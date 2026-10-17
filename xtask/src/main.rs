@@ -69,6 +69,7 @@ use fragment_devstack as devstack;
 mod build;
 mod deploy;
 mod dns;
+mod guards;
 mod js_syntax;
 mod secret;
 mod stripe;
@@ -195,6 +196,7 @@ fn dev(args: &[String]) -> Result<()> {
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
         signins_pending_max: None,
+        cli_begins_per_ip_minute: None,
         test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,

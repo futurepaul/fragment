@@ -310,6 +310,22 @@ fragment.club until cutover (decisions 34–35).
   allowlisted), and either it binds consent itself or we bind it the same
   way as our own round trips, with a test.
 
+## An own key's sign-in finishes at the person's one computer
+
+- **Observed:** the audit's H3 fix (2026-10-17). An own key's callback
+  asks the signed-in person's computer for the sign-in it began, and that
+  computer is `default_computer_of(person)` (`computer::SignedIn::of`):
+  one computer per person (decision 13), never one a URL names.
+- **Shortcut:** none today; the binding rests on that one-to-one.
+- **Risk:** once a person has several computers, the callback would ask
+  only the first, and a sign-in begun from another would come back as
+  "not under way". Naming the computer in the URL again would reopen H3.
+- **First proof:** a person's second computer, connecting an own key.
+- **Delete when:** a person may hold several computers: the sign-in's
+  computer is kept with its state where the callback can find it from the
+  bound state alone (the registry, or a cookie of the binding's), never
+  from the URL, with the H3 checks run against it.
+
 ## Running runs are checked a few at a time
 
 - **Observed:** phase 2 slice D. A run whose Workflow ended without

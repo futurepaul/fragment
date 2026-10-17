@@ -273,7 +273,8 @@ pub(super) const MODEL_CHECKS: &[&str] = &[
     "sign-ins under way are bounded: past eight, another is refused until one ends",
     "disconnected, the guest is given it no more",
     "connecting is a browser's, the shell's: a request signed by a key is refused, and binds nothing",
-    "a sign-in finishes only in the browser that began it, signed in as its person: sent to anyone else (no state cookie, no session, another person's session, even with the cookie), it seals nothing and exchanges nothing, and is still the person's to finish",
+    "a sign-in finishes only in the browser that began it, signed in as its person: sent to anyone else (no state cookie, no session, another person's session even with the cookie, or its state in another kind of round trip's cookie), it seals nothing and exchanges nothing, its refusal a 303 to a page whose address holds no code, and it is still the person's to finish",
+    "a browser holds one own-key sign-in at a time: a second Connect replaces the first's binding, so the first comes back refused and the second connects",
 ];
 
 /// The path and query of `url` (the platform's callback, as the provider
@@ -283,7 +284,7 @@ fn path_of(url: &str) -> String {
 }
 
 /// Where the provider's page sent the browser (its 302's `location`).
-fn sent_back(api: &Api, page: &str) -> Result<String> {
+pub(super) fn sent_back(api: &Api, page: &str) -> Result<String> {
     let r = api.external(page)?;
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
 }
@@ -291,7 +292,7 @@ fn sent_back(api: &Api, page: &str) -> Result<String> {
 /// Settings' Connect, as the shell sends it (its session, from the
 /// platform's own page): the provider's page, and the cookie binding the
 /// sign-in to this browser.
-fn shell_authorize(api: &Api, session: &str) -> Result<crate::api::Reply> {
+pub(super) fn shell_authorize(api: &Api, session: &str) -> Result<crate::api::Reply> {
     api.call(crate::api::Call {
         method: "POST",
         url: format!("{}/api/connections/{SWAP_ROUTER}/authorize", api.base),
@@ -304,15 +305,52 @@ fn shell_authorize(api: &Api, session: &str) -> Result<crate::api::Reply> {
 }
 
 /// The `name=value` of the own-key sign-in's cookie an answer set, or "".
-fn own_key_cookie(r: &crate::api::Reply) -> String {
+pub(super) fn own_key_cookie(r: &crate::api::Reply) -> String {
     r.cookies().into_iter().find(|c| c.starts_with("fragment_own_key=")).unwrap_or_default()
 }
 
+/// Where a browser landed back from the provider: the page it shows, and
+/// the clean address a refusal sent it to on the way (`?refused=`), or ""
+/// when the callback answered at once.
+pub(super) struct Landed {
+    pub page: crate::api::Reply,
+    pub via: String,
+}
+
+impl std::ops::Deref for Landed {
+    type Target = crate::api::Reply;
+    fn deref(&self) -> &crate::api::Reply {
+        &self.page
+    }
+}
+
+impl std::fmt::Display for Landed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (via {:?})", self.page, self.via)
+    }
+}
+
+impl Landed {
+    /// A refusal, as the callback answers one: a 303 to the clean page,
+    /// whose address holds no code nor state, and that page, saying so.
+    pub(super) fn refused_cleanly(&self) -> bool {
+        self.via.contains("?refused=") && !self.via.contains("code=") && !self.via.contains("state=") && self.page.status == 400 && self.page.text.contains("Not connected")
+    }
+}
+
 /// A browser holding `cookies` (each `name=value`; "" for none) opens
-/// `back`, where the provider sent it: the platform's callback.
-fn came_back(api: &Api, back: &str, cookies: &[&str]) -> Result<crate::api::Reply> {
+/// `back`, where the provider sent it: the platform's callback, and the
+/// clean page a refusal redirects to (303), as a browser follows it.
+pub(super) fn came_back(api: &Api, back: &str, cookies: &[&str]) -> Result<Landed> {
     let cookie = cookies.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join("; ");
-    api.call(crate::api::Call { method: "GET", url: format!("{}{}", api.base, path_of(back)), cookie: (!cookie.is_empty()).then_some(cookie), ..crate::api::Call::default() })
+    let at = |path: String| api.call(crate::api::Call { method: "GET", url: format!("{}{path}", api.base), cookie: (!cookie.is_empty()).then(|| cookie.clone()), ..crate::api::Call::default() });
+    let first = at(path_of(back))?;
+    if first.status != 303 {
+        return Ok(Landed { page: first, via: String::new() });
+    }
+    let via = first.header("location");
+    let page = at(path_of(&format!("{}{via}", if via.starts_with('/') { api.base.as_str() } else { "" })))?;
+    Ok(Landed { page, via })
 }
 
 /// An own key signed in to, through its provider's own page (Paul,
@@ -354,7 +392,7 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let exchanges = s.openrouter.exchanges().len();
     s.ok(
         MODEL_CHECKS[2],
-        declined.status == 200 && !back.contains("code=") && page.status == 400 && page.text.contains("sent no key back") && exchanges == 0 && row(&api.signed(w.owner, "GET", "/api/connections", None)?)["state"] == "not_set",
+        declined.status == 200 && !back.contains("code=") && page.refused_cleanly() && page.text.contains("sent no key back") && exchanges == 0 && row(&api.signed(w.owner, "GET", "/api/connections", None)?)["state"] == "not_set",
         json!({ "back": back, "page": page.to_string(), "exchanges": exchanges }),
     );
 
@@ -389,12 +427,14 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         ("the cookie, signed in to no one", came_back(api, &back, &[&bound])?),
         ("another person's browser", came_back(api, &back, &[&session_of(&stranger_session)])?),
         ("another person's session, with the cookie", came_back(api, &back, &[&bound, &session_of(&stranger_session)])?),
+        // a round trip's cookie is its kind's alone: a sign-in's holds no own key's state
+        ("the owner's session, the state in a sign-in's cookie", came_back(api, &back, &[&format!("fragment_login={state}"), &format!("fragment_switch={state}"), &session_of(&owner_session)])?),
     ];
     let set = |keys: &crate::Keys| api.signed(keys, "GET", "/api/connections", None).map(|r| row(&r)["state"].clone()).unwrap_or(Value::Null);
     let sealed_nowhere = s.openrouter.exchanges().len() == exchanges && s.openrouter.keys().len() == keys_before && set(w.owner) == "not_set" && set(w.stranger) != "set";
     s.ok(
         MODEL_CHECKS[10],
-        elsewhere.iter().all(|(_, r)| r.status == 400 && r.text.contains("Not connected")) && sealed_nowhere,
+        elsewhere.iter().all(|(_, r)| r.refused_cleanly()) && sealed_nowhere,
         json!(elsewhere.iter().map(|(how, r)| format!("{how}: {r}")).collect::<Vec<_>>()),
     );
 
@@ -451,15 +491,31 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let garbled = came_back(api, &format!("{}/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope", api.base), &["fragment_own_key=nope", &session_of(&owner_session)])?;
     s.ok(
         MODEL_CHECKS[6],
-        again.status == 400
+        again.refused_cleanly()
             && expired.status == 200
-            && late.status == 400
-            && none.status == 400
-            && garbled.status == 400
+            && late.refused_cleanly()
+            && none.refused_cleanly()
+            && garbled.refused_cleanly()
             && s.openrouter.exchanges().len() == exchanged.len()
             && s.openrouter.keys().len() == 1,
         json!({ "replay": again.to_string(), "expired": expired.body, "late": late.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
     );
+
+    // a browser holds one own-key sign-in at a time: a second Connect's
+    // binding replaces the first's, so the first comes back refused and
+    // the second connects (fragment_core::roundtrip::Trip)
+    let (first, second) = (authorize()?, authorize()?);
+    let (first_back, second_back) = (sent_back(api, first.body["url"].as_str().unwrap_or_default())?, sent_back(api, second.body["url"].as_str().unwrap_or_default())?);
+    let held = own_key_cookie(&second);
+    let first_page = came_back(api, &first_back, &[&held, &session_of(&owner_session)])?;
+    let second_page = came_back(api, &second_back, &[&held, &session_of(&owner_session)])?;
+    s.ok(
+        MODEL_CHECKS[11],
+        first_page.refused_cleanly() && first_page.text.contains("another began since") && second_page.status == 200 && second_page.text.contains("is connected") && s.openrouter.keys().len() == 2,
+        json!({ "first": first_page.to_string(), "second": second_page.to_string() }),
+    );
+    // the first's sign-in is left under way; past its time, it counts no more
+    super::computers::lever_with(api, w.id, json!({ "op": "expire-sign-ins" }))?;
 
     // bounded: eight under way, the ninth refused
     let pending: Vec<u16> = (0..fragment_core::own_signin::SIGNINS_PENDING_MAX + 1).map(|_| authorize().map(|r| r.status).unwrap_or(0)).collect();

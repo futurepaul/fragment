@@ -693,7 +693,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// checked here and resolved by the registry in the same turn as what it
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
 /// before cannot act.
-async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest: &[&str]) -> CellResult<Response> {
     if acting_for(url)?.is_some() {
         return Err(CellError::invalid(FOR_HONORED));
     }
@@ -740,11 +740,12 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         (Method::Post, [id, "keys"]) => {
             let identity = named_identity(id)?;
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let key = proven_key(&add.proof, &req, url, &signer_key()?)?;
+            let signing = signer_key()?;
+            let key = proven_key(&add.proof, &req, url, &signing)?;
             let view = ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key: key.clone(), by: by() })).await?;
-            // every key added to a person is mailed to them (auth.rs)
+            // every key added to a person is mailed to them, saying by which key (auth.rs)
             if view.kind == IdentityKind::Person && view.created == Some(true) {
-                auth::mail_key_added(env, Config::from_env(env), view.email.as_deref(), &key).await;
+                auth::mail_key_added(ctx, env, view.email.as_deref(), &key, fragment_core::mail::KeyHow::ByKey(&npub::encode(&signing)));
             }
             json_answer(&view)
         }
@@ -1026,7 +1027,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "begin" | "approve"]) => {
             let segs = segments.clone();
-            auth::platform(req, env, cfg, &url, &segs).await
+            auth::platform(req, env, ctx, cfg, &url, &segs).await
         }
         (_, ["share", _]) => {
             let segs = segments.clone();
@@ -1158,7 +1159,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
-            identities(req, env, &url, &rest).await
+            identities(req, env, ctx, &url, &rest).await
         }
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the

@@ -21,6 +21,10 @@ pub const LEN: usize = 8;
 pub const TTL_MS: i64 = 10 * 60_000;
 /// Wrong codes a person may type within `TTL_MS` before they must wait.
 pub const MISSES_MAX: u32 = 10;
+/// Codes one key keeps waiting at once: a `fragment login` run again
+/// asks again, and past this its oldest goes first (a flood of codes for
+/// one key pushes out no one else's).
+pub const CODES_PER_KEY_MAX: usize = 3;
 /// Random bytes a code is drawn from: rejection sampling keeps a byte
 /// below `ACCEPT_BELOW` (240 = 12 × 20, so each letter is equally likely);
 /// 32 bytes hold 8 such bytes but with odds of about 10^-25 against.
@@ -80,6 +84,67 @@ pub fn display(code: &str) -> String {
     assert!(valid(code), "only a code as kept is shown");
     format!("{}-{}", &code[..LEN / 2], &code[LEN / 2..])
 }
+
+/// A place, as shown, at most (a city and a country).
+pub const PLACE_MAX_CHARS: usize = 80;
+/// A request's user agent, as shown, at most.
+pub const AGENT_MAX_CHARS: usize = 120;
+
+/// What the platform knew of the request that asked for a code (`POST
+/// /cli/begin`): when, from where (Cloudflare's reading of its address),
+/// and what it called itself. Shown to whoever types the code, and in the
+/// mail that its key was added, so a code someone else asked for, and
+/// sent them to type, says so: "asked 2 minutes ago from Lagos, NG".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Asked {
+    pub at_ms: i64,
+    pub place: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// `s` on one line, at most `max` characters: control characters become
+/// spaces, and an empty result is none.
+fn shown(s: &str, max: usize) -> Option<String> {
+    let line: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect();
+    let line = line.trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+impl Asked {
+    /// From the request: its time, its city and country (`request.cf`),
+    /// and its user agent, each bounded to a line.
+    pub fn of(at_ms: i64, city: Option<&str>, country: Option<&str>, agent: Option<&str>) -> Asked {
+        let place = match (city.and_then(|c| shown(c, PLACE_MAX_CHARS)), country.and_then(|c| shown(c, PLACE_MAX_CHARS))) {
+            (Some(city), Some(country)) => shown(&format!("{city}, {country}"), PLACE_MAX_CHARS),
+            (one, other) => one.or(other),
+        };
+        Asked { at_ms, place, agent: agent.and_then(|a| shown(a, AGENT_MAX_CHARS)) }
+    }
+
+    /// "asked 2 minutes ago from Lagos, NG, by fragment-cli/0.14.1 (linux;
+    /// x86_64)", as of `now_ms`.
+    pub fn line(&self, now_ms: i64) -> String {
+        let minutes = (now_ms - self.at_ms).max(0) / 60_000;
+        let ago = match minutes {
+            0 => "just now".to_string(),
+            1 => "1 minute ago".to_string(),
+            n => format!("{n} minutes ago"),
+        };
+        let place = self.place.as_deref().unwrap_or("a place the platform could not tell");
+        match &self.agent {
+            Some(agent) => format!("asked {ago} from {place}, by {agent}"),
+            None => format!("asked {ago} from {place}"),
+        }
+    }
+}
+
+/// What every page and mail about a code says.
+pub const NEVER_SENT: &str = "Never type a code someone sent you: only the one your own terminal shows.";
 
 /// A person's wrong codes: how many, since when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +243,23 @@ mod tests {
         assert!(!may_try(m, t + 1 + TTL_MS - 1));
         assert!(may_try(m, t + 1 + TTL_MS));
         assert_eq!(missed(m, t + 1 + TTL_MS), Misses { count: 1, since_ms: t + 1 + TTL_MS });
+    }
+
+    /// What asked is shown on a line, bounded, however the request named
+    /// itself: no place, one half of it, control characters, or too long.
+    #[test]
+    fn what_asked_is_shown_on_a_bounded_line() {
+        let t = 1_790_000_000_000;
+        let a = Asked::of(t, Some("Lagos"), Some("NG"), Some("fragment-cli/0.14.1 (linux; x86_64)"));
+        assert_eq!(a.line(t + 30_000), "asked just now from Lagos, NG, by fragment-cli/0.14.1 (linux; x86_64)");
+        assert_eq!(a.line(t + 60_000), "asked 1 minute ago from Lagos, NG, by fragment-cli/0.14.1 (linux; x86_64)");
+        assert_eq!(a.line(t + 9 * 60_000 + 1), "asked 9 minutes ago from Lagos, NG, by fragment-cli/0.14.1 (linux; x86_64)");
+        assert_eq!(Asked::of(t, None, Some("NG"), None).line(t), "asked just now from NG");
+        assert_eq!(Asked::of(t, None, None, Some("  ")).line(t), "asked just now from a place the platform could not tell");
+        let odd = Asked::of(t, Some("Lag\nos"), Some(&"X".repeat(500)), Some(&format!("ua\r\nX-Evil: 1{}", "y".repeat(500))));
+        assert!(odd.place.as_deref().is_some_and(|p| p.chars().count() <= PLACE_MAX_CHARS && !p.contains('\n')), "{odd:?}");
+        assert!(odd.agent.as_deref().is_some_and(|a| a.chars().count() <= AGENT_MAX_CHARS && !a.contains('\r') && !a.contains('\n')), "{odd:?}");
+        assert!(a.line(t - 5).starts_with("asked just now"), "a clock behind is never a negative time");
     }
 
     /// A code lives TTL_MS, and the sweep takes it at the boundary.

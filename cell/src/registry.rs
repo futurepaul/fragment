@@ -101,6 +101,11 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: how long the next call waits before it is
     /// answered (0: it does not), set only by the hook.
     hold_ms: Cell<u32>,
+    /// CLI codes asked for this minute, by each address and in all
+    /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
+    /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
+    /// them, which costs at most a minute's more.
+    cli_begins: RefCell<fragment_core::ratelimit::Rate>,
 }
 
 impl DurableObject for RegistryCell {
@@ -116,7 +121,8 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
-        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0) }
+        let cli_begins = RefCell::new(fragment_core::ratelimit::Rate::new(cfg.cli_begins_per_ip_minute, limits::CLI_BEGINS_PER_MINUTE_MAX));
+        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0), cli_begins }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -246,7 +252,7 @@ fn check_key(key: &str) -> CellResult<()> {
 }
 
 /// A call's body, decoded once.
-fn body<C: Call>(bytes: &[u8]) -> CellResult<C> {
+fn body<T: DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
     serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
 }
 

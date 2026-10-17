@@ -74,7 +74,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::roundtrip::{self, Bound, Trip};
+use fragment_core::roundtrip::{self, Trip};
 use fragment_core::{cli_code, form, npub, site};
 use fragment_proto::ErrorCode;
 use worker::*;
@@ -115,16 +115,41 @@ pub(crate) fn trip_spent(trip: Trip, url: &Url) -> String {
     set_cookie(trip.cookie(), "", "/", 0, secure(url))
 }
 
-/// The round trip a callback's browser began, of one of `trips`: the state
-/// its URL brings, when this browser's cookie for that kind holds it. The
-/// only way a callback finishes one: what finishes it takes the `Bound`.
+/// A round trip coming back to the browser that began it: the only thing
+/// that finishes one. What finishes a round trip takes it by value
+/// (`calls::Exchange::of`, `computer::SignedIn::of`), never a state read
+/// from a URL. Its fields are private to this module, it is neither
+/// `Clone` nor `Deserialize`, and only `trip_bound` makes one, from the
+/// request's own cookie; xtask's `a_round_trip_is_bound_only_by_its_request`
+/// holds the rest of the cell to that.
+pub(crate) struct Bound {
+    trip: Trip,
+    state: String,
+}
+
+impl Bound {
+    pub(crate) fn trip(&self) -> Trip {
+        self.trip
+    }
+
+    /// The state the server keeps the round trip under.
+    pub(crate) fn state(&self) -> &str {
+        &self.state
+    }
+}
+
+/// The round trip a callback's request began, of one of `trips`: the state
+/// its URL brings, when the request's own cookie for that kind holds it
+/// (`roundtrip::same_state`). The only place a `Bound` is made.
 pub(crate) fn trip_bound(req: &Request, url: &Url, trips: &[Trip]) -> CellResult<Option<Bound>> {
     assert!(!trips.is_empty() && trips.len() <= Trip::ALL.len(), "a callback finishes one kind of round trip or a few");
     let brought = query(url, "state").unwrap_or_default();
     // bounded: at most every kind of round trip, one cookie each
     for &trip in trips {
-        let held = cookie_of(req, trip.cookie(), secure(url), "/")?;
-        if let Some(bound) = roundtrip::bind(trip, &brought, held.as_deref()) {
+        let Some(held) = cookie_of(req, trip.cookie(), secure(url), "/")? else { continue };
+        if roundtrip::same_state(&brought, &held) {
+            let bound = Bound { trip, state: brought };
+            assert!(roundtrip::valid_state(&bound.state), "a bound state is one made here");
             return Ok(Some(bound));
         }
     }
@@ -370,7 +395,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
 }
 
 /// Sign-in's routes on the platform origin (the router sends only these).
-pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
+pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
     let platform = cfg.platform();
     {
@@ -440,7 +465,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Post, ["cli", "begin"]) => {
                 let body = crate::read_body(&mut req, CLI_BEGIN_MAX_BYTES).await?;
                 let key = crate::authenticate(&req, url, fragment_nip98::Payload::Read(&body))?;
-                let begun = ask_registry(env, &calls::CliBegin { key }).await?;
+                // what the platform knows of who asked: shown to whoever types it
+                let cf = req.cf();
+                let agent = req.headers().get("user-agent")?;
+                let asked = cli_code::Asked::of(crate::js::now_ms(), cf.and_then(|c| c.city()).as_deref(), cf.and_then(|c| c.country()).as_deref(), agent.as_deref());
+                let begun = ask_registry(env, &calls::CliBegin { key, from: client_address(&req)?, asked }).await?;
                 crate::fragment::json_response(&fragment_proto::CliCode { code: cli_code::display(&begun.code), url: format!("{platform}/cli"), expires_at: begun.expires_at })
             }
             // the page reads nothing from its URL: no link fills in a code
@@ -471,7 +500,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Ok(added) => added,
                     Err(e) => return cli_refused(&platform, &token, e),
                 };
-                mail_key_added(env, cfg, added.email.as_deref(), &added.key).await;
+                mail_key_added(ctx, env, added.email.as_deref(), &added.key, fragment_core::mail::KeyHow::Code(&added.asked));
                 page(200, "Key added", "<p>This key is yours now. The <code>fragment login</code> waiting in your terminal finishes on its own.</p>")
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
@@ -494,15 +523,18 @@ fn cli_page(session: &str, flash: Option<&str>) -> CellResult<Response> {
          <form method=\"post\" action=\"/cli\" class=\"add\"><input type=\"hidden\" name=\"form\" value=\"{f}\">\
          <input name=\"code\" required autocomplete=\"off\" autocapitalize=\"characters\" spellcheck=\"false\" maxlength=\"{max}\" placeholder=\"XXXX-XXXX\" aria-label=\"The code\" autofocus>\
          <button data-arm disabled>Continue</button></form>\
-         <p class=\"hint\">Didn't run <code>fragment login</code>? Close this page.</p>",
+         <p class=\"hint\"><b>{never}</b> Didn't run <code>fragment login</code>? Close this page.</p>",
         f = esc(&form::issue(session, CLI_TYPED, crate::js::now_ms())),
         max = cli_code::TYPED_MAX_BYTES,
+        never = esc(cli_code::NEVER_SENT),
     );
     share::sheet_page(if flash.is_empty() { 200 } else { 400 }, "Add a fragment CLI", &body, true)
 }
 
 /// The key a typed code names, to add with a second press: "A fragment CLI
-/// wants to act as you", and the key's ending to compare with the terminal.
+/// wants to act as you", the key's ending to compare with the terminal, and
+/// where and when its code was asked for, so a code someone else asked for
+/// and sent them says so.
 fn cli_confirm(session: &str, found: &calls::CliCoded) -> CellResult<Response> {
     let you = match &found.email {
         Some(e) => esc(e),
@@ -512,10 +544,12 @@ fn cli_confirm(session: &str, found: &calls::CliCoded) -> CellResult<Response> {
     let tail = &npub[npub.len() - 8..];
     let body = format!(
         "<p>A <code>fragment</code> CLI wants to act as <b>{you}</b>.</p>\
-         <p>Its key ends in <code>{tail}</code>: check that your terminal shows the same ending.</p>\
+         <p>Its key ends in <code>{tail}</code>: check that your terminal shows the same ending. Its code was {asked}.</p>\
          <form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"code\" value=\"{c}\">\
          <button data-arm disabled>Add this key</button></form>\
-         <p class=\"hint\">Didn't run <code>fragment login</code>? Close this page.</p>",
+         <p class=\"hint\"><b>{never}</b> Didn't run <code>fragment login</code>? Close this page.</p>",
+        asked = esc(&found.asked.line(crate::js::now_ms())),
+        never = esc(cli_code::NEVER_SENT),
         f = esc(&form::issue(session, &cli_adding(&found.code), crate::js::now_ms())),
         c = esc(&found.code),
     );
@@ -553,17 +587,32 @@ fn cli_refused(platform: &str, session: &str, e: CellError) -> CellResult<Respon
 }
 
 /// The mail to a person whose identity a key just joined, on every key
-/// added to them: the key's ending, and how to revoke it. The key is added
-/// whatever this does; a mail that fails is logged.
-pub(crate) async fn mail_key_added(env: &Env, cfg: &Config, email: Option<&str>, key: &str) {
+/// added to them: the key's ending, how it came (`how`), and how to revoke
+/// it. Sent after the answer (`wait_until`), never in its way: the key is
+/// added whatever becomes of it, and a mail that fails is logged.
+pub(crate) fn mail_key_added(ctx: &Context, env: &Env, email: Option<&str>, key: &str, how: fragment_core::mail::KeyHow<'_>) {
+    let npub = npub::encode(key);
     let Some(email) = email else {
-        console_error!("{}", serde_json::json!({ "key-mail": npub::encode(key), "failed": "the person has no email" }));
+        console_error!("{}", serde_json::json!({ "key-mail": npub, "failed": "the person has no email" }));
         return;
     };
-    let mail = fragment_core::mail::key_added(email, &npub::encode(key), &cfg.platform());
-    if let Err(e) = crate::mail::send(env, cfg, &mail).await {
-        console_error!("{}", serde_json::json!({ "key-mail": npub::encode(key), "failed": e.message }));
-    }
+    let cfg = Config::from_env(env);
+    let mail = fragment_core::mail::key_added(email, &npub, &cfg.platform(), how, crate::js::now_ms());
+    let env = env.clone();
+    ctx.wait_until(async move {
+        if let Err(e) = crate::mail::send(&env, cfg, &mail).await {
+            console_error!("{}", serde_json::json!({ "key-mail": npub, "failed": e.message }));
+        }
+    });
+}
+
+/// The address a request came from, as Cloudflare names it
+/// (`CF-Connecting-IP`, which it sets on every request and a client cannot
+/// keep), bounded: what a limit counts by. A request with none (a local
+/// fleet's test, which names one to be counted apart) counts as `unnamed`.
+fn client_address(req: &Request) -> CellResult<String> {
+    let named = req.headers().get("cf-connecting-ip")?.map(|a| a.trim().to_string()).filter(|a| !a.is_empty() && a.len() <= calls::CliBegin::FROM_MAX_BYTES);
+    Ok(named.unwrap_or_else(|| "unnamed".to_string()))
 }
 
 /// The fragment and the way back `/auth/fragment` names.

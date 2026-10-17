@@ -100,6 +100,11 @@ const ENDED_CLEANUP_IN: Duration = Duration::from_secs(120);
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
+/// The local node's CLI codes an address may ask for a minute
+/// (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`): above what a section's people ask
+/// for in a minute, from the run's one address, and small enough for the
+/// signin section to pass it from another.
+pub const CLI_BEGINS_PER_IP_MINUTE: u32 = 120;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
@@ -572,6 +577,7 @@ impl Suite {
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
+            cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),

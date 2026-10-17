@@ -6,14 +6,13 @@
 //! its page to someone else, could open it in another browser; so a round
 //! trip finishes only in the browser that began it. Its state is kept server
 //! side (the registry's `logins`, a computer's `own_signins`) and is bound
-//! to that browser by a host-only cookie holding it, set as it begins.
+//! to that browser by a host-only cookie of its kind holding it, set as it
+//! begins.
 //!
-//! Every callback finishes through a `Bound`, and only `bind` makes one:
-//! from the state the callback's URL brings and the browser's cookie for
-//! that kind of round trip, when they are the same state. What finishes a
-//! round trip takes a `Bound` by value (the registry's `Exchange`, an own
-//! key's exchange in connections.rs), never a state read from a URL, so a
-//! new callback cannot skip the binding.
+//! The pure half lives here: the kinds, their cookies, a state's shape, and
+//! the comparison. The binding itself is the cell's `auth::Bound`, which
+//! only `auth::trip_bound` makes, from the request's own cookie: what
+//! finishes a round trip takes one, never a state read from a URL.
 
 /// A state: 32 random bytes, as 64 lowercase hex.
 pub const STATE_HEX_LEN: usize = 64;
@@ -23,7 +22,9 @@ pub const STATE_HEX_LEN: usize = 64;
 pub const TTL_S: i64 = 600;
 
 /// Which round trip: each has its own cookie, so one kind's state never
-/// finishes another's.
+/// finishes another's. A browser holds one of each at a time: a second
+/// round trip of a kind begun in it replaces the first's binding, and the
+/// first's callback is refused (connect, or sign in, again).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trip {
     /// A sign-in at WorkOS (`/auth/login`), or one adding a second sign-in
@@ -56,41 +57,16 @@ pub fn valid_state(s: &str) -> bool {
     s.len() == STATE_HEX_LEN && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A round trip coming back to the browser that began it: the only way a
-/// callback finishes one. Its fields are private, so only `bind` makes it.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Bound {
-    trip: Trip,
-    state: String,
-}
-
-impl Bound {
-    pub fn trip(&self) -> Trip {
-        self.trip
-    }
-
-    /// The state the server keeps the round trip under.
-    pub fn state(&self) -> &str {
-        &self.state
-    }
-}
-
-/// The round trip of kind `trip` a callback finishes: when the state its
-/// URL `brought` is one made here and the browser `held` the same in that
-/// kind's cookie. Compared in constant time: a callback learns nothing of
-/// a cookie it does not hold.
-pub fn bind(trip: Trip, brought: &str, held: Option<&str>) -> Option<Bound> {
-    let held = held?;
+/// Whether the state a callback's URL `brought` is the one the browser's
+/// cookie `held`: both states as made here, and equal. Compared in
+/// constant time, so a callback learns nothing of a cookie it does not
+/// hold.
+pub fn same_state(brought: &str, held: &str) -> bool {
     if !valid_state(brought) || !valid_state(held) {
-        return None;
+        return false;
     }
     let differ = brought.bytes().zip(held.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b));
-    if differ != 0 {
-        return None;
-    }
-    let bound = Bound { trip, state: brought.to_string() };
-    assert!(valid_state(&bound.state), "a bound state is one made here");
-    Some(bound)
+    differ == 0
 }
 
 #[cfg(test)]
@@ -101,28 +77,25 @@ mod tests {
         std::iter::repeat_n(c, STATE_HEX_LEN).collect()
     }
 
-    /// Valid: the state the URL brings is the one the browser's cookie
-    /// holds, and the round trip is bound, of its kind.
+    /// Valid: the state the URL brings is the one the cookie holds.
     #[test]
-    fn a_state_the_browser_holds_is_bound() {
+    fn a_state_the_browser_holds_is_the_same() {
         let s = state('a');
-        let bound = bind(Trip::OwnKey, &s, Some(&s)).expect("the same state binds");
-        assert_eq!((bound.trip(), bound.state()), (Trip::OwnKey, s.as_str()));
-        assert_eq!(bind(Trip::SignIn, &s, Some(&s)).map(|b| b.trip()), Some(Trip::SignIn));
+        assert!(same_state(&s, &s.clone()));
     }
 
-    /// Invalid: no cookie (another browser), another state (another round
-    /// trip, an attacker's sent to someone else), or anything not a state.
+    /// Invalid: another state (another round trip, an attacker's sent to
+    /// someone else), one that differs in its last place, or anything that
+    /// is not a state, even when both sides are alike.
     #[test]
-    fn another_browser_or_state_binds_nothing() {
+    fn another_state_or_none_is_never_the_same() {
         let (a, b) = (state('a'), state('b'));
-        assert_eq!(bind(Trip::SignIn, &a, None), None);
-        assert_eq!(bind(Trip::SignIn, &a, Some(&b)), None);
+        assert!(!same_state(&a, &b));
         let mut one_off = a.clone();
         one_off.replace_range(63.., "b");
-        assert_eq!(bind(Trip::SignIn, &a, Some(&one_off)), None);
+        assert!(!same_state(&a, &one_off));
         for bad in ["", "a", &a[..63], &format!("{a}0"), &a.to_uppercase(), &format!("{}g", &a[..63])] {
-            assert_eq!(bind(Trip::SignIn, bad, Some(bad)), None, "{bad:?}");
+            assert!(!same_state(bad, bad), "{bad:?}");
             assert!(!valid_state(bad), "{bad:?}");
         }
     }

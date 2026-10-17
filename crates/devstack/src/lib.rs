@@ -313,6 +313,10 @@ pub struct Fleet {
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
+    /// CLI codes one address may ask for a minute
+    /// (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`; `None`: the cell's default,
+    /// `limits::CLI_BEGINS_PER_IP_MINUTE_DEFAULT`).
+    pub cli_begins_per_ip_minute: Option<u32>,
     /// The test levers' secret (`FRAGMENT_TEST_SECRET`: `/api/test/*`
     /// answers requests that carry it; the registry can be made to fail).
     /// The e2e's, made per run; never dev's.
@@ -455,6 +459,10 @@ impl Fleet {
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {
             vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
+        }
+        let begins = self.cli_begins_per_ip_minute.map(|n| n.to_string());
+        if let Some(n) = &begins {
+            vars.push(("FRAGMENT_CLI_BEGINS_PER_IP_MINUTE", n.as_str()));
         }
         if let Some(secret) = &self.test_secret {
             vars.push(("FRAGMENT_TEST_SECRET", secret.as_str()));

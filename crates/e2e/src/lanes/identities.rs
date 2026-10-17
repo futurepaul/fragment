@@ -87,6 +87,18 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a key someone else holds cannot be added", r.status == 409, &r);
     let (r, add_calls) = calls_of(api, || api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) }))))?;
     s.ok("with a proof by the new key, it is added", r.status == 200 && r.body["created"] == true && keys_of(&r.body).iter().filter(|k| k.1).count() == 3, &r);
+    if !s.hosted() {
+        // mailed as it came: by a key they hold, named, never as a code typed
+        let (paul_npub, new_npub) = (npub::encode(paul.pubkey_hex()), npub::encode(new.pubkey_hex()));
+        let by_key = |m: &fragment_fakes::mail::Sent| m.text.contains(&format!("fragment keys revoke {new_npub}"));
+        let mailed = s.eventually(Duration::from_secs(10), || s.mail.sent_to(&Api::email_of(&paul)).iter().any(by_key));
+        let mail = s.mail.sent_to(&Api::email_of(&paul));
+        s.ok(
+            "a key added by another of theirs is mailed to the person as that: by the key that added it, not as a code typed",
+            mailed && mail.iter().filter(|m| by_key(m)).all(|m| m.text.contains(&format!("added by your key ending in {}", &paul_npub[paul_npub.len() - 8..])) && !m.text.contains("code")),
+            format!("{mail:?}"),
+        );
+    }
     let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) })))?;
     s.ok("adding it again changes nothing", r.status == 200 && r.body["created"] == false, &r);
 

@@ -146,6 +146,9 @@ impl Reply {
     }
 }
 
+/// What the suite's `fragment login` stand-in calls itself (`Api::cli_begin`).
+pub const CLI_AGENT: &str = "fragment-e2e/1";
+
 /// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
 pub(crate) const HOST_PREFIX: &str = "__Host-";
 /// The cookies the cell names `__Host-` over https, at a host's root.
@@ -590,9 +593,29 @@ impl Api {
     }
 
     /// `fragment login`'s ask for a code (`POST /cli/begin`), signed by the
-    /// new key itself: `{code, url, expiresAt}`.
+    /// new key itself: `{code, url, expiresAt}`. It names itself
+    /// (`CLI_AGENT`), as the CLI does, which the confirming page shows.
     pub fn cli_begin(&self, keys: &Keys) -> Result<Reply> {
-        self.signed(keys, "POST", "/cli/begin", Some(&json!({})))
+        self.cli_begin_from(keys, None)
+    }
+
+    /// `cli_begin` from an address of its own (`CF-Connecting-IP`, as
+    /// Cloudflare sets it; a local node takes it from the request): what a
+    /// limit by address counts. A deployment's edge sets its own.
+    pub fn cli_begin_from(&self, keys: &Keys, address: Option<&str>) -> Result<Reply> {
+        let mut extra = vec![("user-agent", CLI_AGENT.to_string())];
+        if let Some(a) = address {
+            extra.push(("cf-connecting-ip", a.to_string()));
+        }
+        self.call(Call {
+            method: "POST",
+            url: format!("{}/cli/begin", self.base),
+            body: Some(b"{}".to_vec()),
+            content_type: Some("application/json"),
+            keys: Some(keys),
+            extra,
+            ..Call::default()
+        })
     }
 
     /// One of `/cli`'s forms (`path`: `/cli`, the code typed, or

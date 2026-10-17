@@ -35,7 +35,9 @@
 //! newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and its newest
 //! `SITE_SESSIONS_PER_FRAGMENT_MAX` top-level sessions and as many frame
 //! sessions on each fragment, a person their newest `CONSENTS_MAX` yeses,
-//! and `cli_misses` one row a person, forgotten with its window.
+//! `cli_misses` one row a person, forgotten with its window, and a key its
+//! newest `cli_code::CODES_PER_KEY_MAX` codes; the begins of each address,
+//! and of the fleet, are counted a minute (`RegistryCell::cli_begins`).
 //! Expired rows go in batches on the Registry's alarm, never on a request:
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
@@ -47,7 +49,7 @@ use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, Exchange, Exchanged, KeyAdded,
+    ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
     LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
@@ -95,7 +97,7 @@ CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
 CREATE TABLE IF NOT EXISTS e2e_days (
   day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS cli_codes (
-  code TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL);
+  code TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL, asked_place TEXT, asked_agent TEXT);
 CREATE INDEX IF NOT EXISTS cli_codes_created ON cli_codes (created_at);
 CREATE INDEX IF NOT EXISTS cli_codes_key ON cli_codes (key);
 CREATE TABLE IF NOT EXISTS cli_misses (
@@ -252,6 +254,18 @@ struct EarliestRow {
 #[derive(Deserialize)]
 struct CliCodeRow {
     key: String,
+    created_at: i64,
+    asked_place: Option<String>,
+    asked_agent: Option<String>,
+}
+
+/// A code a person typed, found: whom the session names, the code as
+/// kept, its key, and what asked for it.
+struct Typed {
+    live: LiveSession,
+    code: String,
+    key: String,
+    asked: cli_code::Asked,
 }
 
 /// `cli_misses` (a person's wrong codes).
@@ -460,7 +474,7 @@ impl RegistryCell {
 
     /// WorkOS's code, exchanged with the deployment's API key, then the sign-in
     /// finished. A code is single-use at WorkOS; the state here.
-    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
+    pub(super) async fn exchange(&self, b: ExchangeIn) -> CellResult<Exchanged> {
         if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
             return Err(CellError::invalid("an exchange names its state, code, and client"));
         }
@@ -804,30 +818,47 @@ impl RegistryCell {
     }
 
     /// A CLI's new key asks for the code its person types (the router
-    /// checked its signature): kept as its hash for `cli_code::TTL_MS`, the
-    /// fleet's newest `signins_pending_max` kept, as `logins` are. A key
-    /// that is someone's, or was, has nothing to be added to.
+    /// checked its signature): kept as its hash for `cli_code::TTL_MS`, with
+    /// what asked (`cli_code::Asked`), the key's newest `cli_code::
+    /// CODES_PER_KEY_MAX` and the fleet's newest `signins_pending_max`
+    /// kept, as `logins` are. Each address's begins and the fleet's are
+    /// counted a minute (`cli_begins`), so a flood cannot push out the
+    /// codes people are typing. A key that is someone's, or was, has
+    /// nothing to be added to.
     pub(super) async fn cli_begin(&self, b: CliBegin) -> CellResult<CliBegun> {
         check_key(&b.key)?;
+        if b.from.is_empty() || b.from.len() > CliBegin::FROM_MAX_BYTES {
+            return Err(CellError::invalid("a begin names the address it came from"));
+        }
+        let now = js::now_ms();
+        if !self.cli_begins.borrow_mut().allow(&b.from, now) {
+            return Err(CellError::new(ErrorCode::RateLimited, "too many CLI codes asked for this minute: wait a minute, then run `fragment login` again"));
+        }
         match self.key_row(&b.key)? {
             Some(row) if row.active() => return Err(conflict("this key is someone's already: `fragment whoami` says whose")),
             Some(_) => return Err(conflict("this key was revoked, and a revoked key stays revoked: `fragment login --force` makes a new one")),
             None => {}
         }
-        let now = js::now_ms();
         self.sweep_by(now + cli_code::TTL_MS).await?;
         let cap = i64::try_from(self.cfg.signins_pending_max).expect("the cap fits a rowid");
+        let opt = |v: Option<&str>| v.map_or(SqlStorageValue::Null, |s| s.into());
         // bounded: CLI_CODE_DRAWS_MAX draws, one almost always enough
         for _ in 0..CLI_CODE_DRAWS_MAX {
             let Some(code) = cli_code::from_random(&js::random_bytes::<{ cli_code::RANDOM_BYTES }>()) else { continue };
             let made = self.row::<RowidRow>(
-                "INSERT INTO cli_codes (code, key, created_at) VALUES (?, ?, ?) ON CONFLICT (code) DO NOTHING RETURNING rowid AS n",
-                vec![sha(&code).into(), b.key.as_str().into(), SqlStorageValue::Integer(now)],
+                "INSERT INTO cli_codes (code, key, created_at, asked_place, asked_agent) VALUES (?, ?, ?, ?, ?) ON CONFLICT (code) DO NOTHING RETURNING rowid AS n",
+                vec![sha(&code).into(), b.key.as_str().into(), SqlStorageValue::Integer(now), opt(b.asked.place.as_deref()), opt(b.asked.agent.as_deref())],
             )?;
             // a code another key waits on: draw again
             let Some(made) = made else { continue };
             // bounded as `logins` is (`begin`): the newest within the cap's rowids
             self.exec("DELETE FROM cli_codes WHERE rowid <= ?", vec![SqlStorageValue::Integer(made.n.saturating_sub(cap))])?;
+            // and a few a key: a `fragment login` run again asks again, and
+            // its older codes go first
+            self.exec(
+                "DELETE FROM cli_codes WHERE rowid IN (SELECT rowid FROM cli_codes WHERE key = ? ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
+                vec![b.key.as_str().into(), SqlStorageValue::Integer(cli_code::CODES_PER_KEY_MAX as i64)],
+            )?;
             assert!(cli_code::valid(&code), "a code kept is one a person can type");
             return Ok(CliBegun { code, expires_at: now + cli_code::TTL_MS });
         }
@@ -835,10 +866,11 @@ impl RegistryCell {
     }
 
     /// The code a signed-in person typed (`cli_code::normalize`), with the
-    /// key it names and the session's person: a code no CLI waits on (a
-    /// wrong one, used, or expired) is a miss, and past `cli_code::
-    /// MISSES_MAX` in a window the person waits, whatever they type.
-    async fn typed_code(&self, token: &str, typed: &str) -> CellResult<(LiveSession, String, String)> {
+    /// key it names, what asked for it, and the session's person: a code no
+    /// CLI waits on (a wrong one, used, or expired) is a miss, and past
+    /// `cli_code::MISSES_MAX` in a window the person waits, whatever they
+    /// type.
+    async fn typed_code(&self, token: &str, typed: &str) -> CellResult<Typed> {
         let live = self.live_session(token, None, false)?.session;
         if live.identity.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "only a person adds a CLI's key"));
@@ -853,11 +885,14 @@ impl RegistryCell {
         }
         let found = match cli_code::normalize(typed) {
             Some(code) => self
-                .row::<CliCodeRow>("SELECT key FROM cli_codes WHERE code = ? AND created_at > ?", vec![sha(&code).into(), SqlStorageValue::Integer(now - cli_code::TTL_MS)])?
-                .map(|row| (code, row.key)),
+                .row::<CliCodeRow>(
+                    "SELECT key, created_at, asked_place, asked_agent FROM cli_codes WHERE code = ? AND created_at > ?",
+                    vec![sha(&code).into(), SqlStorageValue::Integer(now - cli_code::TTL_MS)],
+                )?
+                .map(|row| (code, row)),
             None => None,
         };
-        let Some((code, key)) = found else {
+        let Some((code, row)) = found else {
             let next = cli_code::missed(misses, now);
             self.sweep_by(next.since_ms + cli_code::TTL_MS).await?;
             self.exec(
@@ -866,28 +901,30 @@ impl RegistryCell {
             )?;
             return Err(CellError::invalid("No `fragment login` is waiting on that code. Check it against your terminal: a code is good for ten minutes, once."));
         };
-        if !npub::is_hex_key(&key) {
-            return Err(CellError::host(format!("cli_codes.key {key:?} is not 64 hex")));
+        if !npub::is_hex_key(&row.key) {
+            return Err(CellError::host(format!("cli_codes.key {:?} is not 64 hex", row.key)));
         }
-        Ok((live, code, key))
+        assert!(cli_code::live(row.created_at, now), "a code found is one still to be typed");
+        let asked = cli_code::Asked { at_ms: row.created_at, place: row.asked_place, agent: row.asked_agent };
+        Ok(Typed { live, code, key: row.key, asked })
     }
 
     /// The key a typed code names, for the person's page to show before
-    /// they add it.
+    /// they add it, with what asked for it.
     pub(super) async fn cli_code_of(&self, b: CliCodeOf) -> CellResult<CliCoded> {
-        let (live, code, key) = self.typed_code(&b.token, &b.code).await?;
-        Ok(CliCoded { code, key, identity: live.identity.id, email: live.email })
+        let t = self.typed_code(&b.token, &b.code).await?;
+        Ok(CliCoded { code: t.code, key: t.key, identity: t.live.identity.id, email: t.live.email, asked: t.asked })
     }
 
     /// A typed code spent: its key joins the signed-in person, and every
     /// code it had waiting goes (a code adds a key once).
     pub(super) async fn add_by_code(&self, b: ApproveKey) -> CellResult<KeyAdded> {
-        let (live, _, key) = self.typed_code(&b.token, &b.code).await?;
-        let person = live.identity.id.as_str();
-        self.insert_key(person, &key, person)?;
-        self.exec("DELETE FROM cli_codes WHERE key = ?", vec![key.as_str().into()])?;
-        assert_eq!(self.key_row(&key)?.map(|row| row.identity), Some(person.to_string()), "an added key is the person's");
-        Ok(KeyAdded { key, email: live.email })
+        let t = self.typed_code(&b.token, &b.code).await?;
+        let person = t.live.identity.id.as_str();
+        self.insert_key(person, &t.key, person)?;
+        self.exec("DELETE FROM cli_codes WHERE key = ?", vec![t.key.as_str().into()])?;
+        assert_eq!(self.key_row(&t.key)?.map(|row| row.identity), Some(person.to_string()), "an added key is the person's");
+        Ok(KeyAdded { key: t.key, email: t.live.email, asked: t.asked })
     }
 
     /// Whether a person signs in (and so may hold no key).
