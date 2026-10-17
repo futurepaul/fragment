@@ -36,6 +36,10 @@
 //!   agent of its was added to): the agent's own fragment posts `joined`
 //!   on its `tasks`, and the fragment that added it then wakes the
 //!   computer (`Wake::Joined`; docs/computers.md).
+//! - **Its owner's browser** (docs/explorations/owner-browser.md, a spike;
+//!   `browser`): a browser its owner connected, through its extension, on
+//!   this computer's origin, and the CDP the computer carries between it
+//!   and the guest (`browser.fragment.internal`), reading none of it.
 //! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
 //!   marks it wiped before anything else, destroys its container, deletes
 //!   every save from R2 (each record, then whatever else is under its saves'
@@ -70,6 +74,8 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
 use crate::js;
 
+mod browser;
+
 /// The marker an internal route's caller carries (routed.rs `marker`): the
 /// router never passes it.
 pub const INTERNAL_HEADER: &str = "x-fragment-computer-internal";
@@ -97,6 +103,11 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 /// keys, sealed for this object; `own_signins` the sign-ins to an own key's
 /// provider under way (`fragment_core::own_signin`): each nonce's hash, its
 /// provider, its verifier sealed, until it expires or is finished, once.
+/// Its owner's browser's (`browser`): `browser_tickets`, its owner's
+/// one-time tickets for connecting one; `browser_links`, each browser
+/// linked (its secret's hash, its name, when it was made and last heard);
+/// `link_tickets`, the one-time tickets a linked browser asks for itself.
+/// Each ticket is spent once, within `TICKET_TTL_MS`.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
@@ -106,6 +117,9 @@ CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NU
 CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
 CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS browser_tickets (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS browser_links (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS link_tickets (hash TEXT PRIMARY KEY, link TEXT NOT NULL, expires_at INTEGER NOT NULL);
 ";
 /// The one row a wiped computer keeps: when it was wiped. Apart from
 /// `SCHEMA`, whose tables the wipe drops.
@@ -288,6 +302,10 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// Its owner's connected browser: the hex its socket's `owner-<hex>`
+    /// tag names. A socket closing that it no longer names (one a newer
+    /// browser replaced) ends nothing.
+    BrowserOwner,
 }
 
 impl MetaKey {
@@ -306,6 +324,7 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::BrowserOwner => "browser_owner",
         }
     }
 }
@@ -408,6 +427,13 @@ impl DurableObject for ComputerCell {
     }
 
     async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+        let tags = self.state.get_tags(&ws);
+        if tags.iter().any(|t| t == browser::OWNER_TAG) {
+            return self.owner_said(&ws, message).await.map_err(|e| e.message.into());
+        }
+        if let Some(socket) = browser::guest_socket(&tags) {
+            return self.guest_said(&ws, &socket, message).map_err(|e| e.message.into());
+        }
         // the keepalive says nothing the cell needs; a ping is answered
         if let WebSocketIncomingMessage::String(s) = message {
             if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
@@ -420,12 +446,12 @@ impl DurableObject for ComputerCell {
     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));
-        self.keepalive_closed(&ws).await;
+        self.socket_ended(&ws).await;
         Ok(())
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
-        self.keepalive_closed(&ws).await;
+        self.socket_ended(&ws).await;
         Ok(())
     }
 }
@@ -1002,6 +1028,7 @@ impl ComputerCell {
             "FRAGMENT_COMPUTER": id,
             "FRAGMENT_API": "http://api.fragment.internal",
             "FRAGMENT_MODEL": "http://model.fragment.internal",
+            "FRAGMENT_BROWSER": format!("http://{}", fragment_core::owner_browser::GUEST_HOST),
             "FRAGMENT_IMAGE": image,
         });
         if restoring {
@@ -1761,6 +1788,7 @@ impl ComputerCell {
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
             always_on: life.always_on(),
+            browsers: self.browsers()?,
         })
     }
 
@@ -1786,6 +1814,7 @@ impl ComputerCell {
             self.wiped.set(true);
             console_log!("{}", json!({ "computer": id, "wipe": "marked" }));
         }
+        self.browser_wiped();
         self.state.storage().delete_alarm().await?;
         // whatever start runs it (`0`), and waited out
         let destroyed = self.destroy(0, "its owner was wiped").await?;
@@ -1917,6 +1946,11 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "drop-browser" => {
+                let dropped = self.browser_dropped()?;
+                console_log!("{}", json!({ "computer": id, "lever": "drop-browser", "dropped": dropped }));
+                Ok(json!({ "computer": id, "dropped": dropped }))
+            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -1951,7 +1985,7 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, always-on or drop-browser"))),
         }
     }
 
@@ -1964,6 +1998,7 @@ impl ComputerCell {
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("port") => return self.port(req).await,
+            Some(k) if browser::is_browser_kind(k) => return self.browser_route(k, &req).await,
             _ => {}
         }
         if req.headers().get(INTERNAL_HEADER)?.is_none() {
@@ -2211,6 +2246,14 @@ impl ComputerCell {
                 self.trim("tickets", TICKETS_MAX)?;
                 json_response(&json!({ "ticket": token, "port": b.port, "expiresAt": expires }))
             }
+            "computer/browser-ticket" => {
+                let b: browser::TicketAsk = body_json(&mut req).await?;
+                json_response(&self.browser_ticket(&b)?)
+            }
+            "computer/browser-forget" => {
+                let b: browser::ForgetAsk = body_json(&mut req).await?;
+                json_response(&self.browser_forget(&b).await?)
+            }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
                 let now = js::now_ms();
@@ -2371,7 +2414,7 @@ impl ComputerCell {
 
     /// Keeps the newest `max` rows of `table` (by expiry).
     fn trim(&self, table: &str, max: u64) -> CellResult<()> {
-        assert!(matches!(table, "tickets" | "sessions"), "a table of this file's");
+        assert!(matches!(table, "tickets" | "sessions" | "browser_tickets" | "link_tickets"), "a table of this file's");
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
@@ -2398,6 +2441,14 @@ impl ComputerCell {
         self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation]);
         self.drive(Event::Opened { socket: Socket::Keepalive }).await?;
         Ok(Response::from_websocket(pair.client)?)
+    }
+
+    /// A socket of its closed: one of its browser's (`browser`), or the
+    /// keepalive.
+    async fn socket_ended(&self, ws: &WebSocket) {
+        if !self.browser_socket_ended(&self.state.get_tags(ws)).await {
+            self.keepalive_closed(ws).await;
+        }
     }
 
     /// A request to one of its ports, from its owner (a session the router
@@ -2569,6 +2620,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
             json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
         }
+        (m, [id, "browser", rest @ ..]) => browser::api_route(env, who, m, id, rest).await,
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
     }
 }
@@ -2648,6 +2700,9 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
         headers.set("cache-control", "no-store")?;
         return Ok(Response::empty()?.with_status(303).with_headers(headers));
     }
+    if path == "/__browser" || path.starts_with("/__browser/") {
+        return browser::host_route(req, env, url, id).await;
+    }
     let Some(rest) = path.strip_prefix("/p/") else {
         return Err(CellError::new(ErrorCode::NotFound, "a computer serves its ports at /p/<port>/"));
     };
@@ -2698,6 +2753,7 @@ impl ComputerEgress {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
+            "browser" => browser::egress_browser(req, &env, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -2714,6 +2770,26 @@ impl ComputerEgress {
     }
 }
 
+/// The Computer DO's own request for a WebSocket `req` asked for: the
+/// handshake's headers carried, `kind` (`KIND_HEADER`) and `extra` beside
+/// them.
+fn upgrade_request(req: &Request, kind: &str, extra: &[(&str, &str)]) -> CellResult<Request> {
+    let headers = Headers::new();
+    for k in ["upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"] {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    headers.set("connection", "Upgrade")?;
+    headers.set(KIND_HEADER, kind)?;
+    for (k, v) in extra {
+        headers.set(k, v)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    Ok(Request::new_with_init(&format!("https://computer.internal/{kind}"), &init)?)
+}
+
 /// The guest's request to the platform's API (`/api/…`) or a fragment's
 /// own routes (`/f/<fragment>/…`), as the agent its `x-fragment-agent`
 /// names: the agent fragment signs it (NIP-98) only when it runs on this
@@ -2726,17 +2802,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     match path.as_str() {
         "/api/computer" => return json_response(&ask(env, computer, "computer/guest", &json!({})).await?),
         "/api/computer/keepalive" => {
-            let headers = Headers::new();
-            headers.set(KIND_HEADER, "keepalive")?;
-            for k in ["upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"] {
-                if let Some(v) = req.headers().get(k)? {
-                    headers.set(k, &v)?;
-                }
-            }
-            headers.set("connection", "Upgrade")?;
-            let mut init = RequestInit::new();
-            init.with_method(Method::Get).with_headers(headers);
-            let inner = Request::new_with_init("https://computer.internal/keepalive", &init)?;
+            let inner = upgrade_request(&req, "keepalive", &[])?;
             return Ok(env.durable_object("COMPUTER")?.get_by_name(computer)?.fetch_with_request(inner).await?);
         }
         _ => {}

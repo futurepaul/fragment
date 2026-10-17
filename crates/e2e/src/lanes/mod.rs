@@ -35,6 +35,7 @@ mod limits;
 mod members;
 mod notes;
 mod orgs;
+pub mod owner_browser;
 mod plane;
 mod posts;
 mod restart;
@@ -120,11 +121,13 @@ const LANES: &[Lane] = &[
     admin::admin_page,
     shell::shell_platform,
     computers::computers,
+    owner_browser::owner_browser,
     export::export,
     chat::chat,
     shell::shell_ui,
     wipe::wipe,
     hermes::hermes,
+    owner_browser::owner_browser_hermes,
     agent_smoke::agent_smoke,
     agent_ask::agent_ask,
     agent_restart::agent_restart,
@@ -151,8 +154,8 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "restart"],
+    &["shell", "computers", "export", "hermes", "owner-browser-hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
+    &["finite-private", "chat", "shell-ui", "wipe", "owner-browser", "sync", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",

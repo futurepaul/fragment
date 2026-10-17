@@ -172,8 +172,12 @@ impl Browser {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
         }
         let log = std::fs::File::create(profile.join("chrome.log"))?;
+        // none of a user's extensions, unless the lane loads its own
+        // (`--load-extension=`: the owner-browser section's)
+        let loads = args.iter().any(|a| a.starts_with("--load-extension="));
         let mut child = Command::new(bin)
             .args(args)
+            .args((!loads).then_some("--disable-extensions"))
             .args([
                 "--headless=new",
                 &format!("--remote-debugging-port={port}"),
@@ -181,7 +185,6 @@ impl Browser {
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-gpu",
-                "--disable-extensions",
                 // two people's windows at once (the phase7 section): one
                 // that covers another must not hide it, or the hidden page
                 // stops drawing (no requestAnimationFrame) and pausing its timers
@@ -326,6 +329,30 @@ impl Browser {
             .filter(|t| t["type"] == "page" && ours(&t["browserContextId"]))
             .map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t["url"].as_str().unwrap_or("").to_string()))
             .collect())
+    }
+
+    /// The extensions running in this Chrome: each one's worker's URL
+    /// (`chrome-extension://<id>/…`), as a lane that loads one sees it up.
+    pub fn extension_workers(&mut self) -> Result<Vec<String>> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        Ok(v["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "service_worker")
+            .filter_map(|t| t["url"].as_str().filter(|u| u.starts_with("chrome-extension://")).map(str::to_string))
+            .collect())
+    }
+
+    /// Stops the worker of the extension whose URLs begin `prefix`
+    /// (`chrome-extension://<id>/`), as Chrome stops an idle one: whether
+    /// one was running.
+    pub fn stop_extension_worker(&mut self, prefix: &str) -> Result<bool> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let worker = v["targetInfos"].as_array().into_iter().flatten().find(|t| t["type"] == "service_worker" && t["url"].as_str().is_some_and(|u| u.starts_with(prefix)));
+        let Some(id) = worker.and_then(|t| t["targetId"].as_str()).map(str::to_string) else { return Ok(false) };
+        self.send("Target.closeTarget", json!({ "targetId": id }), None)?;
+        Ok(true)
     }
 
     /// Evaluates `expr` in the page (awaiting a promise) and returns its value.

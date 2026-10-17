@@ -100,8 +100,9 @@ prebuilt bundle is in the debt ledger).
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
-  billing-page, trials, admin, admin-page, shell, computers, chat,
-  shell-ui, wipe, hermes, agent-smoke, sync, restart;
+  billing-page, trials, admin, admin-page, shell, computers, owner-browser,
+  chat, shell-ui, wipe, hermes, owner-browser-hermes, agent-smoke, sync,
+  restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
   shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
   OpenRouter with its provider routing, both the model fake's
@@ -113,7 +114,9 @@ prebuilt bundle is in the debt ledger).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
-  (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
+  (`--only hermes`) and is a skip otherwise, as does `owner-browser-hermes`
+  (the owner's browser, a spike: docs/explorations/owner-browser.md), which
+  builds it too. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one

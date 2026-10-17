@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fragment</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 12px; width: 300px; }
+  h2 { font-size: 13px; margin: 14px 0 6px; }
+  p { margin: 0 0 8px; }
+  label { display: block; margin: 8px 0 2px; font-weight: 500; }
+  .hint { margin: 0 0 0 22px; color: #666; }
+  .warning { color: #a33; }
+  .foot { margin-top: 14px; color: #666; }
+  #tabs { max-height: 200px; overflow: auto; margin: 4px 0 0 22px; }
+  #tabs label { font-weight: normal; margin: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+<p id="said">…</p>
+<button id="disconnect" type="button" hidden>Disconnect</button>
+<h2>Your agents can use</h2>
+<label><input type="radio" name="access" value="own"> Only tabs they open</label>
+<p class="hint">They work in tabs they open, in the Agent group. Your other tabs stay hidden from them.</p>
+<label><input type="radio" name="access" value="chosen"> Their tabs, plus tabs I pick</label>
+<p class="hint">Tick which of your tabs they can use too.</p>
+<div id="tabs"></div>
+<label><input type="radio" name="access" value="all"> All my tabs and windows</label>
+<p class="hint" id="all">They can read and use any tab, and open or close tabs and windows.</p>
+<p class="foot">On every site, they're signed in as you.</p>
+<p id="error" class="warning"></p>
+<script type="module" src="popup.js"></script>

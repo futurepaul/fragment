@@ -911,7 +911,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             Err(e) => println!("      could not remove this run's containers: {e:#}"),
         }
     })?;
-    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION || n == lanes::owner_browser::HERMES_SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
     let test_secret = devstack::random_hex(32);

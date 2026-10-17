@@ -190,6 +190,13 @@ pub const HELD_PATTERNS_MAX: usize = 16;
 pub const HELD_PATTERN_MAX_BYTES: usize = 128;
 /// A WebSocket's connect and its first frame are given this long.
 pub const WS_OPEN_TIMEOUT_MS: u64 = 10_000;
+/// The script runtime's `browse`: one CDP call to its owner's browser is
+/// answered within this (it crosses the platform and their internet), and
+/// the page it opened is read every `BROWSE_POLL_MS`, at most
+/// `BROWSE_POLLS_MAX` times, until it has loaded.
+pub const BROWSE_CALL_MS: u64 = 10_000;
+pub const BROWSE_POLL_MS: u64 = 250;
+pub const BROWSE_POLLS_MAX: u32 = 80;
 /// A `__live` socket pings this often, and is given up on after twice that
 /// with nothing heard.
 pub const LIVE_PING_MS: u64 = 30_000;

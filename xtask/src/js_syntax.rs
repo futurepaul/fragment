@@ -41,8 +41,9 @@ pub const VENDORED: [(&str, &str); 2] = [
 ];
 
 /// The `.js` files loaded as classic scripts, not modules.
-pub const CLASSIC: [(&str, &str); 1] = [
+pub const CLASSIC: [(&str, &str); 2] = [
     ("cell/sw.js", "the service worker client.mjs registers without `type: \"module\"` (served as __sw.js, cell/src/push.rs)"),
+    ("extension/platform.js", "the extension's content script: Chrome runs every content script as a classic one (extension/manifest.json)"),
 ];
 
 /// More files than this means the walk reached something it should not
@@ -247,12 +248,12 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/shell.js", "cell/sw.js", "templates/notes/site/assets/viewer.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/shell.js", "cell/sw.js", "extension/platform.js", "templates/notes/site/assets/viewer.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };
         let selected = select(paths(&["templates/todo/app.mjs", "README.md"]).into_iter()).expect("a whole list");
-        assert_eq!(selected.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["cell/shell/shell.js", "cell/sw.js", "templates/todo/app.mjs"]);
+        assert_eq!(selected.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["cell/shell/shell.js", "cell/sw.js", "extension/platform.js", "templates/todo/app.mjs"]);
         let without = |gone: &str| select(paths(&[]).into_iter().filter(|p| p != gone));
         assert!(without("cell/sw.js").is_err(), "CLASSIC names a file that is gone");
         assert!(without("cell/shell/vendor/split-grid.js").is_err(), "VENDORED names a directory with no JavaScript");

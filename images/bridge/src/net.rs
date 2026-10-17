@@ -156,7 +156,11 @@ pub async fn connect_ws(base: &Base, path: &str, headers: &[(&str, String)]) -> 
     let open = async {
         let tcp = TcpStream::connect((base.host.as_str(), base.port)).await.map_err(|e| format!("{url}: {e}"))?;
         let _ = tcp.set_nodelay(true);
-        let (ws, _) = tokio_tungstenite::client_async_with_config(req, tcp, Some(ws_config())).await.map_err(|e| format!("{url}: {e}"))?;
+        // a refusal says why: the platform's answer carries its message
+        let (ws, _) = tokio_tungstenite::client_async_with_config(req, tcp, Some(ws_config())).await.map_err(|e| match e {
+            tokio_tungstenite::tungstenite::Error::Http(r) => format!("{url}: {} {}", r.status(), r.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default()),
+            e => format!("{url}: {e}"),
+        })?;
         Ok::<_, String>(ws)
     };
     match tokio::time::timeout(Duration::from_millis(limits::WS_OPEN_TIMEOUT_MS), open).await {
