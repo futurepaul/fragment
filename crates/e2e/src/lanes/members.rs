@@ -442,6 +442,12 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     let status = api.status(&owner, &name)?;
     s.ok("the value is in no answer", !events.text.contains(value) && !status.text.contains(value), "events or status held it");
+    let seen = api.signed(&viewer, "GET", &format!("/api/f/{name}/events"), None)?;
+    s.ok(
+        "a viewer reads that a secret was set, not where it goes (its hosts are its editors')",
+        seen.status == 200 && seen.text.contains("secret.set") && !seen.text.contains("openrouter.ai"),
+        &seen,
+    );
     // a secret goes somewhere it names, and its hosts change only with its value
     let refused = [
         ("no hosts", json!({ "value": "v" })),

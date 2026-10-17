@@ -24,9 +24,10 @@ export class App extends DurableObject {
     return this.ctx.storage.sql.exec("SELECT text, source FROM items ORDER BY id").toArray();
   }
 
-  // Fetches a list with the fragment's API_KEY, saves it, and says so.
-  async digest({ url }, job) {
-    const resp = await job.fetch(url, { headers: { authorization: "Bearer {{API_KEY}}" } });
+  // Fetches a list with the fragment's API_KEY (and any other headers
+  // asked for), saves it, and says so.
+  async digest({ url, headers }, job) {
+    const resp = await job.fetch(url, { headers: { ...headers, authorization: "Bearer {{API_KEY}}" } });
     const { items } = resp.json();
     const saved = await job.call("save", { texts: items, source: "digest" });
     await job.publish("feed", { digest: items.length, by: job.principal }, "digest");

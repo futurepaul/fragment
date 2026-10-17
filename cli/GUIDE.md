@@ -544,8 +544,9 @@ The share link's `?view=` token is a secret, its owner's to give. A
 browser that opens the link keeps the token in an HttpOnly cookie and
 goes on to the page's URL without it, so your page's code never sees it
 (`location`, `document.cookie`, an app's `fetch`, and the preview card's
-error report all lack it): an editor's code cannot capture it. Never
-build links that carry it.
+error report all lack it), and no page registers a service worker but
+the platform's (one would see the link's navigation first): an editor's
+code cannot capture it. Never build links that carry it.
 
 ## Notes on a page
 
@@ -807,9 +808,11 @@ fragment secret rm my-thing API_KEY
 Your code never holds a secret: `job.fetch` fills `{{API_KEY}}` in a
 header at the way out, and only toward a host the secret names, over
 https (`--to`, once per host, at most 8; a host is exact:
-`api.example.com` is not `eu.api.example.com`). A fetch elsewhere, or
-over `http:`, fails its step, so no editor's code sends a secret where
-its setter did not mean it to go. The hosts change only with the value:
+`api.example.com` is not `eu.api.example.com`, and any port of it is
+it). A fetch elsewhere, over `http:`, or with a `Host`, `Forwarded`, or
+`X-Forwarded-Host` header fails its step, so no editor's code sends a
+secret where its setter did not mean it to go. A secret's hosts are its
+editors' to know: the event log and a refused fetch name none. The hosts change only with the value:
 set it again, value and all. The value comes from the environment
 variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with

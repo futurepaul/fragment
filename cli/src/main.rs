@@ -1597,6 +1597,9 @@ fn run(cli: Cli) -> Result<()> {
             let v: Run = c.call_as(c.get(&format!("/api/f/{name}/runs/{id}"))?)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
+            if v.withheld {
+                eprintln!("its input and error are withheld: they may hold a record of channel {}, which your role may not read", v.trigger.as_deref().unwrap_or("?"));
+            }
         }
         Cmd::Export { out } => {
             use fragment_proto::export::{ExportState, ExportView};
@@ -1690,6 +1693,8 @@ fn run(cli: Cli) -> Result<()> {
                 println!("#{}\t{}\t{}\t{}\tattempt {}\t{cost}", r.id, r.via.as_str(), r.op, r.status.as_str(), r.attempt);
                 if let Some(e) = &r.error {
                     println!("  {}", e.chars().take(120).collect::<String>());
+                } else if r.withheld {
+                    println!("  (its error, if any, is withheld: your role may not read channel {})", r.trigger.as_deref().unwrap_or("?"));
                 }
             }
             if v.runs.is_empty() {
@@ -2371,13 +2376,6 @@ mod tests {
         entries
     }
 
-    /// Goal: GUIDE.md's command reference is the CLI's, not a copy that
-    /// drifts from it. Method: walk clap's tree; every command and
-    /// subcommand that is not hidden has an entry in the reference that
-    /// names it (its parents first, it among the entry's words), and each
-    /// long flag of its own is in one of its entries (`--host`, `--json`
-    /// and `-v`, global, are listed under the block). Invalid: an entry
-    /// for no command.
     /// Goal: a secret's value and an inbox token never come from argv,
     /// and a secret is never set without the hosts it may go to (the
     /// audit's M3). Method: the command lines clap takes and refuses.
@@ -2393,6 +2391,13 @@ mod tests {
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
     }
 
+    /// Goal: GUIDE.md's command reference is the CLI's, not a copy that
+    /// drifts from it. Method: walk clap's tree; every command and
+    /// subcommand that is not hidden has an entry in the reference that
+    /// names it (its parents first, it among the entry's words), and each
+    /// long flag of its own is in one of its entries (`--host`, `--json`
+    /// and `-v`, global, are listed under the block). Invalid: an entry
+    /// for no command.
     #[test]
     fn the_guide_lists_every_command_and_flag() {
         use clap::CommandFactory;

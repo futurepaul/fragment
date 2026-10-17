@@ -882,7 +882,9 @@ impl FragmentCell {
         }
         let stored = self.stored_secret(key)?.map(|s| s.hosts);
         assert_eq!(stored.as_ref(), Some(&hosts), "a secret's hosts are the ones just set");
-        self.event("secret.set", &format!("secret {key} set by {} for {}", npub::display(by), hosts.join(", ")), json!({ "name": key, "hosts": hosts }));
+        // its hosts are its editors' to know (`GET secrets`), never the
+        // event log's, which every viewer reads
+        self.event("secret.set", &format!("secret {key} set by {}", npub::display(by)), json!({ "name": key }));
         json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
     }
 
@@ -926,8 +928,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
     }
     let mut hosts = Vec::with_capacity(given.len());
     for g in given {
-        let host = fragment_core::secrets::secret_host(g)
-            .ok_or_else(|| CellError::invalid(format!("{g:?} is not a host as a URL names it (api.example.com: no scheme, port, path, or wildcard)")))?;
+        let host = fragment_core::secrets::secret_host(g).map_err(|not| CellError::invalid(not.to_string()))?;
         if !hosts.contains(&host) {
             hosts.push(host);
         }

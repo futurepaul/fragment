@@ -215,10 +215,12 @@ pub(crate) struct StoredSecret {
     pub(crate) hosts: Vec<String>,
 }
 
-/// A run as `GET runs` shows it; `detail` is its input (when the reader
-/// may see it) and output, when one run is read.
-fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Option<Value>, Option<Value>)>) -> Run {
-    let (input, output) = detail.unwrap_or((None, None));
+/// A run as `GET runs` shows it to a reader; `detail` is its input and
+/// output, when one run is read; `shown`, whether the reader sees what may
+/// hold the record that started it (`input_shown`): its input and error.
+fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option<Value>)>, shown: bool) -> Run {
+    let (input, output) = detail.map_or((None, None), |(input, output)| (shown.then_some(input), output));
+    let error = if shown { row.error } else { None };
     Run {
         id: row.id,
         op: row.op,
@@ -230,10 +232,11 @@ fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Option<Value>
         depth: row.depth,
         created_at: row.created_at,
         finished_at: row.finished_at,
-        error: row.error,
+        error,
         input,
         output,
         cost_micros,
+        withheld: !shown,
     }
 }
 
@@ -535,7 +538,13 @@ impl FragmentCell {
                 self.event("run.succeeded", &format!("{op} run #{id}"), json!({ "op": op, "run": id }))
             }
             Err(e) => {
-                self.event("run.held", &format!("{op} run #{id}: {}", clip(&e)), json!({ "op": op, "run": id, "attempt": attempt }));
+                // the event log and a pause's reason are every viewer's: a
+                // run's error goes there only when a viewer may see it
+                let said = match self.input_shown(Role::Viewer, run)? {
+                    true => clip(&e),
+                    false => "its error is withheld (it may hold a record of a channel viewers do not read)".to_string(),
+                };
+                self.event("run.held", &format!("{op} run #{id}: {said}"), json!({ "op": op, "run": id, "attempt": attempt }));
                 let since = self.breaker_reset_at(op)?;
                 let held = self.count_of(
                     "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND status = 'held' AND finished_at > ?",
@@ -546,7 +555,7 @@ impl FragmentCell {
                 // a run of it held after the install pauses nothing
                 let gone = matches!(self.declared(op), Err(e) if e.code == ErrorCode::UnknownOperation);
                 if held >= limits::AUTO_PAUSE_HELD && !gone {
-                    let why = format!("{held} held runs in {} minutes; last: {}", limits::AUTO_PAUSE_WINDOW_MS / 60_000, clip(&e));
+                    let why = format!("{held} held runs in {} minutes; last: {said}", limits::AUTO_PAUSE_WINDOW_MS / 60_000);
                     self.set_paused(op, true, "auto", &why)?;
                 }
             }
@@ -937,6 +946,13 @@ impl FragmentCell {
         if f.headers.len() > FETCH_HEADERS_MAX {
             return Err(permanent(format!("at most {FETCH_HEADERS_MAX} headers")));
         }
+        // a request carrying a secret goes to its URL's host, the one its
+        // secrets' hosts are checked against, and to no host a header names
+        if f.headers.values().any(|v| !placeholders(v).is_empty()) {
+            if let Some(h) = fragment_core::secrets::routing_header(f.headers.keys().map(String::as_str)) {
+                return Err(permanent(format!("a fetch that carries a secret goes to its URL's host alone: it sets no {h} header")));
+            }
+        }
         let headers = Headers::new();
         for (k, given) in &f.headers {
             let mut value = given.clone();
@@ -949,8 +965,8 @@ impl FragmentCell {
                 let stored = self
                     .stored_secret(name)
                     .map_err(|e| StepFail::Retry(e.message))?
-                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to {}`)", url.host_str().unwrap_or(""))))?;
-                fragment_core::secrets::may_fill(name, &stored.hosts, &url, self.cfg.egress_local).map_err(permanent)?;
+                    .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
+                fragment_core::secrets::may_fill(&stored.hosts, &url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
                 let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
                 let secret = String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?;
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
@@ -1226,7 +1242,7 @@ impl FragmentCell {
 
     /// `GET /api/f/<name>/runs?status=&op=&limit=`
     pub(crate) fn runs_api(&self, caller: &Caller, status: Option<String>, op: Option<String>, limit: usize) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
+        let role = self.require(caller, false, Role::Viewer)?;
         let mut q = format!("SELECT {RUN_COLUMNS}, {RUN_COST} FROM runs WHERE 1 = 1");
         let mut binds: Vec<SqlStorageValue> = vec![];
         if let Some(s) = status {
@@ -1240,7 +1256,13 @@ impl FragmentCell {
         }
         q.push_str(" ORDER BY id DESC LIMIT ?");
         binds.push(SqlStorageValue::Integer(limit.clamp(1, 200) as i64));
-        let runs: Vec<Run> = self.rows(&q, binds)?.iter().map(|r| run_view(run_row(r), r["cost_micros"].as_i64(), None)).collect();
+        let mut runs: Vec<Run> = Vec::new();
+        // at most the page's 200
+        for r in self.rows(&q, binds)? {
+            let run = run_row(&r);
+            let shown = self.input_shown(role, &run)?;
+            runs.push(run_view(run, r["cost_micros"].as_i64(), None, shown));
+        }
         let mut counts = BTreeMap::new();
         for r in self.rows("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![])? {
             let status = r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string();
@@ -1250,26 +1272,28 @@ impl FragmentCell {
     }
 
     /// `GET /api/f/<name>/runs/<id>`: the run, its output, and its input
-    /// when the reader's role may see it (`input_shown`).
+    /// and error when the reader's role may see them (`input_shown`).
     pub(crate) fn run_api(&self, caller: &Caller, id: &str) -> CellResult<Response> {
         let role = self.require(caller, false, Role::Viewer)?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a run id is a number"))?;
         let rows = self.rows(&format!("SELECT {RUN_COLUMNS}, {RUN_COST}, input, output FROM runs WHERE id = ?"), vec![SqlStorageValue::Integer(id)])?;
         let r = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no run #{id}")))?;
         let run = run_row(r);
-        let input = self.input_shown(role, &run)?.then(|| stored_json(r, "input"));
+        let shown = self.input_shown(role, &run)?;
         // a run has its output once it succeeded
         let output = r["output"].is_string().then(|| stored_json(r, "output"));
-        json_response(&run_view(run, r["cost_micros"].as_i64(), Some((input, output))))
+        json_response(&run_view(run, r["cost_micros"].as_i64(), Some((stored_json(r, "input"), output)), shown))
     }
 
-    /// Whether `role` sees a run's input. A channel's run holds the record
-    /// that started it (`fire_channel`), kept whole for the job's steps
-    /// and replays, so it is shown as the record is: to a role that may
-    /// read its channel, asked of `channel_read_role` as every read of a
-    /// record asks. A channel no longer declared has no reader, so its
-    /// runs' records show to no one. Every other run's input is what its
-    /// caller or trigger handed it, a viewer's to see.
+    /// Whether `role` sees a run's input, and its error (a job's thrown
+    /// message may quote its input). A channel's run holds the record that
+    /// started it (`fire_channel`), kept whole for the job's steps and
+    /// replays, so it is shown as the record is: to a role that may read
+    /// its channel, asked of `channel_read_role` as every read of a record
+    /// asks. A channel no longer declared has no reader, so its runs'
+    /// records show to no one. Every other run's input is what its caller
+    /// or trigger handed it, a viewer's to see. Its output is the app's
+    /// own answer, a viewer's to see whatever it copied (docs/api.md).
     fn input_shown(&self, role: Role, run: &RunRow) -> CellResult<bool> {
         if run.via != Via::Channel {
             return Ok(true);

@@ -452,9 +452,17 @@ fn secret_hosts(s: &mut Suite, api: &Api, owner: &Keys, upstream: &Upstream) -> 
     let r = api.op(owner, &name, "digest", "other-host", json!({ "url": other }))?;
     let elsewhere = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok(
-        "a fetch toward a host the secret does not name fills nothing, and fails its step",
-        elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("may go to 127.0.0.1, not localhost")),
+        "a fetch toward a host the secret does not name fills nothing, and fails its step, naming no host (a viewer reads it)",
+        elsewhere["status"] == "held"
+            && elsewhere["error"].as_str().is_some_and(|e| e.contains("may not go to this request's host") && !e.contains("127.0.0.1") && !e.contains("localhost")),
         &elsewhere,
+    );
+    let r = api.op(owner, &name, "digest", "host-header", json!({ "url": upstream.url("/data"), "headers": { "Host": "evil.example" } }))?;
+    let rerouted = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch that carries a secret and names another host in a header fills nothing, and fails its step",
+        rerouted["status"] == "held" && rerouted["error"].as_str().is_some_and(|e| e.to_ascii_lowercase().contains("sets no host header")),
+        &rerouted,
     );
     let r = set_secret(api, owner, &name, SECRET, &["127.0.0.1", "example.com"])?;
     anyhow::ensure!(r.status == 200, "secret hosts: {r}");
@@ -487,18 +495,41 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         id = runs(api, owner, &name, "&op=boom").first().and_then(|r| r["id"].as_i64()).unwrap_or(0);
         id > 0
     });
+    // `boom` throws: its error, as its input, may hold what the record said
+    let held = settle(api, owner, &name, id, &["held"], Duration::from_secs(40));
     let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/channels/alarms"), None)?;
     s.ok("a viewer may not read the editors' channel", r.status == 403, &r);
     let as_viewer = run(api, &viewer, &name, id)?;
     s.ok(
-        "a viewer reads that channel's run without its record",
-        as_viewer.status == 200 && as_viewer.body["via"] == "channel" && as_viewer.body["trigger"] == "alarms" && as_viewer.body.get("input").is_none(),
-        &as_viewer,
+        "a viewer reads that channel's run without its record or its error, marked withheld",
+        as_viewer.status == 200
+            && as_viewer.body["via"] == "channel"
+            && as_viewer.body["trigger"] == "alarms"
+            && as_viewer.body.get("input").is_none()
+            && as_viewer.body.get("error").is_none()
+            && as_viewer.body["withheld"] == true
+            && held["status"] == "held",
+        format!("{as_viewer} | {held}"),
+    );
+    let listed = runs(api, &viewer, &name, "&op=boom");
+    s.ok(
+        "and the runs list withholds its error from a viewer too",
+        listed.first().is_some_and(|r| r["id"] == id && r.get("error").is_none() && r["withheld"] == true),
+        json!(listed),
+    );
+    let said: Vec<Value> = events(api, &viewer, &name).into_iter().filter(|e| e["kind"] == "run.held" && e["data"]["run"] == id).collect();
+    s.ok(
+        "the event log, a viewer's, says it was held, not why",
+        said.len() == 1 && said[0]["summary"].as_str().is_some_and(|t| t.contains("withheld") && !t.contains("boom\"") && !t.contains("Error: boom")),
+        json!(said),
     );
     let as_editor = run(api, &editor, &name, id)?;
     s.ok(
-        "an editor reads it with the record",
-        as_editor.body["input"]["channel"] == "alarms" && as_editor.body["input"]["record"]["body"] == json!({ "raised": true }),
+        "an editor reads it with the record and its error",
+        as_editor.body["input"]["channel"] == "alarms"
+            && as_editor.body["input"]["record"]["body"] == json!({ "raised": true })
+            && as_editor.body["error"].as_str().is_some_and(|e| e.contains("boom"))
+            && as_editor.body.get("withheld").is_none(),
         &as_editor,
     );
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
@@ -510,7 +541,7 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     }
     ship(s, &c, JOBS_APP, without.to_string().as_bytes());
     let gone = run(api, &editor, &name, id)?;
-    s.ok("with its channel gone, no one reads a run's record", gone.status == 200 && gone.body.get("input").is_none(), &gone);
+    s.ok("with its channel gone, no one reads a run's record", gone.status == 200 && gone.body.get("input").is_none() && gone.body["withheld"] == true, &gone);
     Ok(())
 }
 

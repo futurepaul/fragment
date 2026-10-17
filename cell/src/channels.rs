@@ -250,9 +250,10 @@ impl FragmentCell {
             None => None,
             Some(d) => d.post.map(|_| limits::POSTED_KEPT),
         };
-        // a message on an app channel goes to its people's search, in this turn
-        if let Some(d) = &declared {
-            self.log_search(d.read, channel, seq, now, body)?;
+        // a message on an app channel goes to its people's search, in this
+        // turn, as its read role says (`channel_read_role`, the one source)
+        if declared.is_some() {
+            self.log_search(self.channel_read_role(channel)?, channel, seq, now, body)?;
         }
         if let Some(kept) = kept {
             assert!(kept >= 1, "a channel keeps the record just appended");
