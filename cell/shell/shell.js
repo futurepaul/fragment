@@ -931,7 +931,8 @@ function teamRow(a, active, open) {
 }
 // A teammate's ⋯: who it is and where its model runs, the hand-offs it was
 // given, a change asked of the one agent (into its chat's composer, sent
-// by the person), and its profile.
+// by the person), its screen (its own desktop on the computer), and its
+// profile.
 function openTeamMenu(a, trigger) {
   const primary = primaryAgent();
   const title = titleOf(a.fragment);
@@ -941,6 +942,7 @@ function openTeamMenu(a, trigger) {
     { heading: title, note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
     ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
+    ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
     { icon: "agent", text: "Its profile", onClick: () => openApp(a.fragment) },
   ]);
 }

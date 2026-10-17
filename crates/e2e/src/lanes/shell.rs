@@ -923,7 +923,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // team, a row each under it (decision 62, proposed), their own chats
     // out of the person's list
     let first_title = row.as_str().unwrap_or("").to_string();
-    let (_, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
+    let (reader_agent, reader_chat, reader_id) = extra_agent(api, &session, "reader", "Reader", "keep my reading list")?;
     let reader_row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}")))));
     let reader_team = team_row(&reader_id);
     let one = b.until(
@@ -966,6 +966,15 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         "another chat of theirs with the Reader alone lists under its row (its own chat open), never among their chats",
         listed,
         b.eval(&page, "({ team: document.getElementById('team').innerText, chats: document.getElementById('chats').innerText })")?,
+    );
+    // its ⋯ opens its screen, its own desktop on the computer
+    b.click(&page, &format!("#team .team-row[data-key={}] .team-more", js(&format!("team:{reader_id}"))))?;
+    let picked = menu_item(&mut b, &page, "Its screen")?;
+    let landed = picked && screen_landed(s, &mut b, &page, &reader_agent);
+    s.ok(
+        "a teammate's ⋯ opens its screen: its frame lands on the computer's screen port at ?agent=<that agent>",
+        landed,
+        b.eval(&page, "[...document.querySelectorAll('#stack iframe')].map((f) => f.dataset.src)")?,
     );
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
