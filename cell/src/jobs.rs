@@ -1003,13 +1003,14 @@ impl FragmentCell {
     /// `job.files.write` and `remove` (`bytes: None`): one commit per step,
     /// compare-and-swapped when the step names what it expects.
     async fn step_write(&self, run: &RunRow, index: u32, path: &str, bytes: Option<Vec<u8>>, expect: Option<Option<String>>) -> Result<Value, StepFail> {
+        let path = fragment_proto::RepoPath::parse(path).map_err(|not| permanent(not.to_string()))?;
         let mut expected = BTreeMap::new();
         if let Some(e) = expect {
             expected.insert(path.to_string(), e);
         }
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: {} {path}", run.op, run.id, if bytes.is_some() { "write" } else { "remove" });
-        let writes = [crate::files::FileWrite { path: path.to_string(), bytes }];
+        let writes = [crate::files::FileWrite { path, bytes }];
         match self.commit_files(&key, &writes, &expected, &message, &run.principal, run.depth).await.map_err(settle_files)? {
             crate::files::Wrote::Commit(sha) => Ok(json!({ "commit": sha })),
             crate::files::Wrote::Conflict(why) => Err(permanent(format!("conflict: {why}"))),

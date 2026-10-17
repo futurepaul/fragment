@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::{ErrorCode, Role};
+use fragment_proto::{ErrorCode, RepoPath, Role};
 use fragment_templates::{blessed, Template, CATALOG};
 use serde_json::{json, Value};
 use worker::*;
@@ -52,7 +52,12 @@ fn stamp(bytes: &[u8], name: &str, title: Option<&str>) -> Vec<u8> {
 async fn stamped(env: &Env, t: &'static Template, name: &str, title: Option<&str>) -> CellResult<Vec<FileWrite>> {
     let files: Vec<&'static fragment_templates::File> = t.files.iter().collect();
     let read = crate::assets::read_all(env, &files).await?;
-    Ok(files.iter().zip(read).map(|(f, bytes)| FileWrite { path: f.path.to_string(), bytes: Some(if f.path == "fragment.json" { stamp(&bytes, name, title) } else { bytes }) }).collect())
+    let mut writes = Vec::with_capacity(files.len());
+    for (f, bytes) in files.iter().zip(read) {
+        let path = RepoPath::parse(f.path).map_err(|not| CellError::host(format!("the {} template: {not}", t.name)))?;
+        writes.push(FileWrite { path, bytes: Some(if f.path == "fragment.json" { stamp(&bytes, name, title) } else { bytes }) });
+    }
+    Ok(writes)
 }
 
 impl FragmentCell {
@@ -81,7 +86,7 @@ impl FragmentCell {
                     manifest["meta"] = json!({ "title": title });
                 }
                 let bytes = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
-                vec![FileWrite { path: "fragment.json".into(), bytes: Some(bytes) }]
+                vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
             }
             (None, None) => return Err(CellError::host(format!("no template {which}"))),
         };
@@ -137,7 +142,8 @@ impl FragmentCell {
         let files = body["files"].as_array().filter(|f| !f.is_empty()).ok_or_else(|| CellError::invalid("files: a list of {path, text | base64 | delete}"))?;
         let mut writes = Vec::with_capacity(files.len());
         for f in files {
-            let path = f["path"].as_str().ok_or_else(|| CellError::invalid("each file has a path"))?.to_string();
+            let given = f["path"].as_str().ok_or_else(|| CellError::invalid("each file has a path"))?;
+            let path = RepoPath::parse(given).map_err(|not| CellError::invalid(not.to_string()))?;
             let bytes = match f["delete"].as_bool() {
                 Some(true) => None,
                 _ => Some(content_of(f).map_err(|e| CellError::invalid(format!("{path}: {e}")))?),
