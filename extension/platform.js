@@ -6,14 +6,14 @@
 // manifest's `matches` say the platform is.
 
 function post(status) {
-  window.postMessage({ fragmentBrowser: "status", connected: !!status?.connected, computer: status?.computer ?? null, link: status?.link ?? null, error: status?.error ?? null }, location.origin);
+  window.postMessage({ fragmentBrowser: "status", connected: !!status?.connected, computer: status?.computer ?? null, link: status?.link ?? null, error: status?.error ?? null, reload: !!status?.reload }, location.origin);
 }
 
 // The worker, asked, and its answer told to the page. Once the extension
 // is reloaded or removed, this script is left on a page already open, cut
 // off from it (Chrome takes its runtime away, and a message would throw):
 // the page is told to load again, which brings the extension's new one.
-const CUT_OFF = { connected: false, error: "the Fragment extension was reloaded: reload this page" };
+const CUT_OFF = { connected: false, reload: true };
 function ask(m) {
   if (!chrome.runtime?.id) return post(CUT_OFF);
   chrome.runtime.sendMessage(m).then(post, () => post(CUT_OFF));

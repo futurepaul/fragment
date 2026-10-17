@@ -13,7 +13,14 @@ const PING_MS = 20_000;
 const PING = '{"type":"ping"}';
 const PONG = '{"type":"pong"}';
 // a ticket's socket: the computer's own origin (`<24 hex>--computer…`), `/__browser`
-const TICKET_HOST = /^[0-9a-f]{24}--computer[.-]/;
+const COMPUTER_HEX = 24;
+const TICKET_HOST = new RegExp(`^[0-9a-f]{${COMPUTER_HEX}}--computer[.-]`);
+// The computers it trusts: under its manifest's host permissions
+// (`http://*.<zone>/*`), on the port of the platform's page that handed it
+// the ticket. A page elsewhere could otherwise send it to any socket.
+const ZONES = chrome.runtime.getManifest().host_permissions.map((p) => /^https?:\/\/\*\.([^/:]+)\/\*$/.exec(p)?.[1]).filter(Boolean);
+// a guest socket's name, before each frame it carries (fragment_core::owner_browser::SOCKET_HEX)
+const SOCKET_HEX = 8;
 // the computer's word not to come back (fragment_core::owner_browser):
 // replaced by a newer browser, forgotten, its owner wiped
 const REPLACED = 4001;
@@ -23,6 +30,16 @@ const WIPED = 4003;
 // which wakes this worker however long it slept)
 const RETRY_MS = [1_000, 5_000, 15_000];
 const ALARM = "fragment-reconnect";
+// Why it is not connected, as its owner reads it after "Not connected: "
+// (Settings, the popup): the computer's word not to come back, or a link
+// the computer does not know (forgotten while it was away, or a computer
+// that never made it: another's, or one made again).
+const ENDED = {
+  [REPLACED]: "another browser connected in its place",
+  [FORGOTTEN]: "this browser was forgotten in Settings",
+  [WIPED]: "your account was wiped",
+};
+const UNKNOWN = "your computer no longer knows this browser";
 
 let socket = null;
 let pinger = null;
@@ -50,10 +67,12 @@ async function saved() {
   return (await chrome.storage.local.get("link")).link ?? null;
 }
 
-// Settings' ticket: this browser connects, and is given its link.
-export async function connect(url) {
+// Settings' ticket, from the platform's page at `page`: this browser
+// connects, and is given its link.
+export async function connect(url, page) {
   const u = new URL(url);
-  if (!["ws:", "wss:"].includes(u.protocol) || !TICKET_HOST.test(u.hostname) || u.pathname !== "/__browser") {
+  const trusted = ZONES.some((z) => u.hostname.endsWith(`.${z}`)) && u.port === new URL(page).port;
+  if (!["ws:", "wss:"].includes(u.protocol) || !TICKET_HOST.test(u.hostname) || u.pathname !== "/__browser" || !trusted) {
     throw new Error("that is not a Fragment browser ticket");
   }
   await close(1000, "connected again");
@@ -76,6 +95,8 @@ export async function forget() {
 export async function resume() {
   const link = await saved();
   if (!link || socket) return;
+  // coming back, as its owner sees it, from the first try
+  if (status.link !== link.id) set({ ...status, link: link.id });
   let answer;
   try {
     answer = await ask(link, "ticket");
@@ -83,9 +104,8 @@ export async function resume() {
     return later(`the computer did not answer: ${e.message}`);
   }
   if (answer.status === 401) {
-    // forgotten while away
     await chrome.storage.local.remove("link");
-    return set({ connected: false, computer: null, link: null, error: "your owner forgot this browser: connect it again from Settings" });
+    return set({ connected: false, computer: null, link: null, error: UNKNOWN });
   }
   if (!answer.ok) return later(`the computer answered ${answer.status}`);
   open((await answer.json()).url);
@@ -99,7 +119,7 @@ function ask(link, what) {
 }
 
 function open(url) {
-  const computer = new URL(url).hostname.slice(0, 24);
+  const computer = new URL(url).hostname.slice(0, COMPUTER_HEX);
   const ws = new WebSocket(url);
   socket = ws;
   ws.onopen = async () => {
@@ -122,7 +142,12 @@ function open(url) {
 async function heard(frame, url) {
   if (frame === PONG) return;
   if (frame.startsWith("{")) {
-    const m = JSON.parse(frame);
+    let m;
+    try {
+      m = JSON.parse(frame);
+    } catch {
+      return;
+    }
     if (m.type !== "link") return;
     // the computer's origin, where this browser comes back
     const origin = new URL(url.replace(/^ws/, "http")).origin;
@@ -130,14 +155,16 @@ async function heard(frame, url) {
     return set({ ...status, link: m.id });
   }
   const at = frame.indexOf(" ");
-  if (at === 8) on.frame(frame.slice(0, at), frame.slice(at + 1));
+  if (at === SOCKET_HEX) on.frame(frame.slice(0, at), frame.slice(at + 1));
 }
 
 async function ended(code, reason) {
-  if (code === FORGOTTEN || code === WIPED) await chrome.storage.local.remove("link");
-  const back = ![REPLACED, FORGOTTEN, WIPED].includes(code) && (await saved());
-  const said = code === REPLACED ? "another browser connected" : code === FORGOTTEN ? "your owner forgot this browser" : reason || null;
-  set({ connected: false, computer: null, link: back ? status.link : null, error: back ? null : said });
+  // told not to come back (replaced, forgotten, wiped): its link goes, so a
+  // worker Chrome starts again later never takes the slot back
+  const told = code in ENDED;
+  if (told) await chrome.storage.local.remove("link");
+  const back = !told && (await saved());
+  set({ connected: false, computer: null, link: back ? status.link : null, error: back ? null : (ENDED[code] ?? (reason || null)) });
   if (back) later(null);
 }
 

@@ -10,6 +10,10 @@ import * as access from "./access.js";
 import * as link from "./link.js";
 
 const PROTOCOL = "1.3";
+// a guest socket's end, as the computer frames it (fragment_core::owner_browser::CLOSE)
+const CLOSE = "close";
+// JSON-RPC's code for a server's own error: CDP answers a refused call with it
+const SERVER_ERROR = -32000;
 // the browser context `Target.createBrowserContext` answers: a new window
 const NEW_WINDOW = "new-window";
 
@@ -28,7 +32,7 @@ function send(client, message) {
 
 // A frame for guest socket `client`: a CDP message, or its end.
 export function said(client, message) {
-  if (message === "close") return forget(client);
+  if (message === CLOSE) return forget(client);
   let m;
   try {
     m = JSON.parse(message);
@@ -79,13 +83,7 @@ async function targetOf(targetId) {
 export async function refresh() {
   const now = await access.usable();
   const ids = new Set(now.map((t) => t.tabId));
-  for (const [client, c] of clients) {
-    for (const [sessionId, tabId] of c.sessions) {
-      if (ids.has(tabId)) continue;
-      c.sessions.delete(sessionId);
-      send(client, { method: "Target.detachedFromTarget", params: { sessionId } });
-    }
-  }
+  detach((tabId) => !ids.has(tabId));
   for (const tabId of [...attached]) {
     if (ids.has(tabId)) continue;
     attached.delete(tabId);
@@ -104,6 +102,18 @@ export async function refresh() {
   }
 }
 
+// Each client's sessions on a tab `gone` says is gone: dropped, and the
+// client told.
+function detach(gone) {
+  for (const [client, c] of clients) {
+    for (const [sessionId, tabId] of c.sessions) {
+      if (!gone(tabId)) continue;
+      c.sessions.delete(sessionId);
+      send(client, { method: "Target.detachedFromTarget", params: { sessionId } });
+    }
+  }
+}
+
 async function answer(client, m) {
   await access.ready;
   const c = clientOf(client);
@@ -112,7 +122,7 @@ async function answer(client, m) {
     const result = m.sessionId ? await onPage(c, m) : await onBrowser(client, c, m);
     return { id: m.id, result, ...session };
   } catch (e) {
-    return { id: m.id, error: { code: -32000, message: String(e?.message ?? e) }, ...session };
+    return { id: m.id, error: { code: SERVER_ERROR, message: String(e?.message ?? e) }, ...session };
   }
 }
 
@@ -235,13 +245,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (!attached.delete(source.tabId)) return;
   // the person closed Chrome's "debugging this browser" bar: they said stop
   if (reason === "canceled_by_user") return link.forget();
-  for (const [client, c] of clients) {
-    for (const [sessionId, tabId] of c.sessions) {
-      if (tabId !== source.tabId) continue;
-      c.sessions.delete(sessionId);
-      send(client, { method: "Target.detachedFromTarget", params: { sessionId } });
-    }
-  }
+  detach((tabId) => tabId === source.tabId);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {

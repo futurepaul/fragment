@@ -1613,6 +1613,8 @@ function noticeRow(n) {
   return row;
 }
 function renderComputer() {
+  // its browsers, as another device's Settings or the extension changed them
+  $("settings-browser")?.replaceWith(browserLine());
   const box = $("computer-notices");
   const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
   box.replaceChildren(...rows);
@@ -1740,7 +1742,7 @@ let ownBrowser = null;
 addEventListener("message", (e) => {
   if (e.source !== window || e.origin !== location.origin || e.data?.fragmentBrowser !== "status") return;
   const was = ownBrowser;
-  ownBrowser = { connected: !!e.data.connected, computer: e.data.computer ?? null, link: e.data.link ?? null, error: e.data.error ?? null };
+  ownBrowser = { connected: !!e.data.connected, computer: e.data.computer ?? null, link: e.data.link ?? null, error: e.data.error ?? null, reload: !!e.data.reload };
   $("settings-browser")?.replaceWith(browserLine());
   // this browser connected, or left: the computer's list of its browsers changed too
   if (state.computer && (was?.connected !== ownBrowser.connected || was?.link !== ownBrowser.link)) {
@@ -1780,7 +1782,13 @@ function browserLine() {
   // this browser: connected to this person's computer, not another's
   // (another sign-in in this browser)
   const mine = ownBrowser?.connected && `computer:${ownBrowser.computer}` === c?.computer;
+  // its link to this computer, coming back on its own (a dropped network,
+  // a restart): said so, with nothing to press
+  const back = !mine && !!ownBrowser?.link && (c?.browsers ?? []).some((b) => b.id === ownBrowser.link);
   if (!ownBrowser) rows.append(el("span", "muted", "Add the Fragment extension to this browser to let your agents use it."));
+  // the extension was reloaded since this page loaded: its new one is the next load's
+  else if (ownBrowser.reload) rows.append(el("span", "settings-warning", "The Fragment extension was reloaded: reload this page."));
+  else if (back) rows.append(el("span", "muted", "Reconnecting this browser…"));
   else if (!mine) {
     const on = el("button", "quiet", "Connect this browser");
     on.type = "button";
@@ -1796,7 +1804,7 @@ function browserLine() {
       }
     };
     const row = el("div", "settings-actions");
-    row.append(...(ownBrowser.error ? [el("span", "settings-warning", ownBrowser.error)] : []), on);
+    row.append(...(ownBrowser.error ? [el("span", "settings-warning", `Not connected: ${ownBrowser.error}.`)] : []), on);
     rows.append(row);
   }
   const line = actionLine("Browsers", rows);

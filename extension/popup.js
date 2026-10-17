@@ -33,7 +33,7 @@ function show(v) {
     : s.link
       ? "Reconnecting to your computer…"
       : s.error
-        ? `Not connected: ${s.error}`
+        ? `Not connected: ${s.error}.`
         : "Not connected. Connect this browser from Settings on your Fragment platform.";
   // Disconnect forgets this browser: it does not come back on its own
   button.hidden = !s.connected && !s.link;

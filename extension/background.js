@@ -26,7 +26,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
   if (m?.type === "connect") {
     // only the platform's own page hands it a ticket (platform.js runs there alone)
     if (!sender.tab || popup) return reply({ ...link.current(), error: "a ticket comes from the platform's page" });
-    link.connect(m.url).then(() => reply(link.current()), (e) => reply({ ...link.current(), error: e.message }));
+    link.connect(m.url, sender.origin ?? sender.url).then(() => reply(link.current()), (e) => reply({ ...link.current(), error: e.message }));
     return true;
   }
   if (m?.type === "disconnect") {
