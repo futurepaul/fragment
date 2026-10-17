@@ -102,9 +102,8 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("no grant was rewritten: the members are the same identities", after.body["members"] == before.body["members"], &after);
     let r = api.signed(&paul, "GET", "/api/fragments", None)?;
     s.ok("the revoked key is 401 from the next request", r.status == 401 && r.message().contains("revoked"), &r);
-    let session = api.sign_in("paul-revoked@e2e.test")?;
-    let r = api.approve_link(&session, &api.approval_link(&paul, 0))?;
-    s.ok("a revoked key cannot be approved again, by anyone", r.status == 409, &r);
+    let r = api.cli_begin(&paul)?;
+    s.ok("a revoked key cannot be added again, by anyone: it gets no code to type (409)", r.status == 409 && r.body["code"].is_null(), &r);
     let r = api.signed(&new, "POST", add, Some(&json!({ "proof": api.proof(&paul, "POST", add, &new) })))?;
     s.ok("a revoked key stays revoked", r.status == 409, &r);
     let r = api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{old_hex}"), None)?;
@@ -183,7 +182,12 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     // the CLI: login registers, whoami says who, rotate keeps every grant
     let home = s.dir("identities-home");
     let out = s.login(api, &home);
-    s.ok("fragment login, approved in a browser, adds the key to the person", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("logged in as npub1"), String::from_utf8_lossy(&out.stderr));
+    let logged_as = s.cli_keys(&home).map(|k| crate::cli_email(&npub::encode(k.pubkey_hex()))).transpose()?.unwrap_or_default();
+    s.ok(
+        "fragment login, its code typed in a browser, adds the key to the person, and says whose account it acts as by their email",
+        out.status.success() && !logged_as.is_empty() && String::from_utf8_lossy(&out.stdout).contains(&format!("logged in as {logged_as} on ")),
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+    );
     let me = s.cli_json(api, &home, &["whoami", "--json"])?;
     let cli_id = me["identity"]["id"].as_str().unwrap_or("").to_string();
     let first = s.cli_keys(&home).expect("the CLI logged in");

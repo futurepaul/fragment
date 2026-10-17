@@ -361,7 +361,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- the same sign-in again: a new person
     let session = api.sign_in(&email)?;
     let fresh = Keys::generate();
-    let approved = api.approve_link(&session, &api.approval_link(&fresh, 0))?;
+    let approved = api.approve(&session, &fresh)?;
     let me = api.signed(&fresh, "GET", "/api/identities/me", None)?;
     let fresh_id = me.body["id"].as_str().unwrap_or("").to_string();
     s.ok(

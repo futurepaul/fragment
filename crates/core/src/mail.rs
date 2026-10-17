@@ -163,6 +163,23 @@ pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i
     }
 }
 
+/// The mail a person is sent on every key added to them (docs/api.md,
+/// Sign-in): which key (`npub`, its ending as the page showed it), where,
+/// and how to revoke it from a machine they trust.
+pub fn key_added(to: &str, npub: &str, platform: &str) -> Mail {
+    assert!(npub.starts_with("npub1") && npub.len() > 8, "a key is named by its npub");
+    let tail = &npub[npub.len() - 8..];
+    Mail {
+        to: to.to_string(),
+        subject: format!("A key ending in {tail} was added to your {PRODUCT} account"),
+        text: format!(
+            "A key ending in {tail} can now act as you on {platform}: a fragment CLI you added with the code its terminal showed.\n\n\
+             The whole key: {npub}\n\n\
+             If this was not you, revoke it from a machine you trust:\n  fragment keys revoke {npub}\n"
+        ),
+    }
+}
+
 fn truncated(s: &str) -> String {
     s.chars().take(80).collect()
 }
@@ -300,5 +317,18 @@ mod tests {
         assert_eq!(one_line("  a\tb\n", 10), "a b");
         assert_eq!(one_line("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}\u{2026}");
         assert_eq!(one_line("abc", 3), "abc");
+    }
+
+    /// Goal: the key-added mail names the key (its ending, as the page
+    /// showed it, and whole), the platform, and the command that revokes
+    /// it; and it is a mail the platform may send.
+    #[test]
+    fn a_key_added_names_the_key_and_how_to_revoke_it() {
+        let npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmyk3ytl";
+        let m = key_added("bea@example.com", npub, "https://finite.chat");
+        assert_eq!(refusal(&m), None);
+        assert_eq!(m.to, "bea@example.com");
+        assert!(m.subject.contains(&format!("ending in {}", &npub[npub.len() - 8..])));
+        assert!(m.text.contains("https://finite.chat") && m.text.contains(&format!("fragment keys revoke {npub}")) && m.text.contains(&npub[npub.len() - 8..]));
     }
 }

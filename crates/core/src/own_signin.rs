@@ -8,16 +8,21 @@
 //! (openrouter.ai/docs/guides/overview/auth/oauth), named by a catalog
 //! row's `oauth` (`catalog::KeyOAuth`):
 //!
-//! 1. `POST /api/connections/{provider}/authorize`: the person's computer
-//!    makes a nonce and a verifier, keeps them for `SIGNIN_TTL_MS` (at most
-//!    `SIGNINS_PENDING_MAX` at once), and the person's browser is sent to
-//!    the provider's `authorize` with the callback, the verifier's S256
-//!    challenge, the state (`<computer's 24 hex>.<nonce>`) and a key label.
+//! 1. `POST /api/connections/{provider}/authorize`, from settings (the
+//!    shell's session: a browser to bind): the person's computer makes a
+//!    nonce and a verifier, keeps them for `SIGNIN_TTL_MS` (at most
+//!    `SIGNINS_PENDING_MAX` at once), the nonce is bound to the browser by
+//!    a cookie (`roundtrip::Trip::OwnKey`), and the browser is sent to the
+//!    provider's `authorize` with the callback, the verifier's S256
+//!    challenge, the nonce as the state, and a key label.
 //! 2. The provider asks the person, makes a key that is theirs, and sends
 //!    the browser back to `GET /api/connections/{provider}/callback?code=…
-//!    &state=…`. The state names the computer and the sign-in it made, once:
-//!    no session is needed, and a state replayed, expired or made for
-//!    another provider is refused, nothing exchanged.
+//!    &state=…`. It finishes only in the browser that began it (the
+//!    state is the one its cookie holds: `roundtrip::bind`), signed in to
+//!    the platform: the computer is the signed-in person's own, never one
+//!    a URL names, so a sign-in someone else began and sent to them seals
+//!    nothing anywhere. A state replayed, expired or made for another
+//!    provider is refused, nothing exchanged.
 //! 3. The platform exchanges the code with the verifier (`POST exchange
 //!    {code, code_verifier, code_challenge_method}` → `{key}`) and the
 //!    computer seals the key as `PUT …/key` does. Nothing gives it back.
@@ -34,8 +39,8 @@ pub const SIGNIN_TTL_MS: i64 = 10 * 60_000;
 /// Sign-ins one computer keeps under way at once: a person starts one or
 /// two; more are refused until the oldest end or expire.
 pub const SIGNINS_PENDING_MAX: usize = 8;
-/// Random bytes in a nonce, and in a verifier (43 characters as base64url:
-/// RFC 7636's least).
+/// Random bytes in a nonce (64 hex), and in a verifier (43 characters as
+/// base64url: RFC 7636's least).
 pub const NONCE_BYTES: usize = 32;
 pub const VERIFIER_BYTES: usize = 32;
 /// The label the provider gives the key it makes (the person sees it in
@@ -60,25 +65,23 @@ pub fn nonce_key(nonce: &str) -> String {
     hex::encode(Sha256::digest(nonce.as_bytes()))
 }
 
-/// Whether `s` is a nonce or a verifier as made here: 43 base64url characters.
+/// Whether `s` is a verifier or a challenge as made here: 43 base64url
+/// characters.
 pub fn valid_token(s: &str) -> bool {
     s.len() == 43 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// The state sent with an authorization: the computer it is for and its
-/// nonce.
-pub fn state(computer: &str, nonce: &str) -> String {
-    assert!(fragment_proto::computer::valid_computer_id(computer) && valid_token(nonce), "a state is made from a computer's id and a nonce made here");
-    format!("{}.{nonce}", &computer["computer:".len()..])
+/// A nonce from `random` (the caller's randomness): the sign-in's state, a
+/// round trip's (`roundtrip::valid_state`), and nothing more. It names no
+/// computer: the callback's is the signed-in person's own.
+pub fn nonce(random: &[u8; NONCE_BYTES]) -> String {
+    let nonce = hex::encode(random);
+    assert!(crate::roundtrip::valid_state(&nonce), "a nonce is a round trip's state");
+    nonce
 }
 
-/// A state back from a provider: `(computer, nonce)`, or none if it is not
-/// one `state` made.
-pub fn parse_state(state: &str) -> Option<(String, String)> {
-    let (hex, nonce) = state.split_once('.')?;
-    let computer = format!("computer:{hex}");
-    (fragment_proto::computer::valid_computer_id(&computer) && valid_token(nonce)).then(|| (computer, nonce.to_string()))
-}
+const _: () = assert!(SIGNIN_TTL_MS == crate::roundtrip::TTL_S * 1000, "a sign-in lives as long as the cookie binding it");
+const _: () = assert!(NONCE_BYTES * 2 == crate::roundtrip::STATE_HEX_LEN, "a nonce is a state");
 
 /// Whether `code` is one a provider may send back: 1 to `CODE_MAX_BYTES`
 /// printable characters, no space.
@@ -146,30 +149,22 @@ pub const OWN_KEY_MAX_BYTES: usize = 4096;
 mod tests {
     use super::*;
 
-    const COMPUTER: &str = "computer:0123456789abcdef01234567";
-
-    fn token(c: char) -> String {
-        std::iter::repeat_n(c, 43).collect()
-    }
-
     /// The challenge is RFC 7636's (its appendix B's example).
     #[test]
     fn the_challenge_is_s256() {
         assert_eq!(challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
         assert_eq!(b64url(&[0xfb, 0xff]), "-_8");
         assert_eq!(nonce_key("a").len(), 64);
+        assert!(valid_token(&challenge("v")) && !valid_token(&"a".repeat(42)) && !valid_token(&format!("{}!", "a".repeat(42))));
     }
 
-    /// Valid: a state names its computer and nonce and reads back. Invalid:
-    /// anything else, which names no sign-in.
+    /// A nonce is a round trip's state and names nothing else: no computer
+    /// rides in it for a callback to trust.
     #[test]
-    fn a_state_names_its_computer_and_nonce() {
-        let s = state(COMPUTER, &token('a'));
-        assert_eq!(s, format!("0123456789abcdef01234567.{}", token('a')));
-        assert_eq!(parse_state(&s), Some((COMPUTER.to_string(), token('a'))));
-        for bad in ["", ".", "0123456789abcdef01234567", &format!("0123456789abcdef0123456.{}", token('a')), &format!("0123456789abcdef01234567.{}", "a".repeat(42)), &format!("0123456789ABCDEF01234567.{}", token('a')), &format!("0123456789abcdef01234567.{}!", &token('a')[1..])] {
-            assert_eq!(parse_state(bad), None, "{bad}");
-        }
+    fn a_nonce_is_a_bare_state() {
+        let n = nonce(&[0xab; NONCE_BYTES]);
+        assert_eq!(n, "ab".repeat(NONCE_BYTES));
+        assert!(crate::roundtrip::valid_state(&n) && !n.contains('.'));
         assert!(valid_code("abc-123") && !valid_code("") && !valid_code("a b") && !valid_code(&"a".repeat(CODE_MAX_BYTES + 1)));
     }
 

@@ -276,6 +276,40 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
 
+## A connection's consent is not bound to the browser that began it
+
+- **Observed:** the 2026-10-16 security audit's round-trip work (H3).
+  Every round trip that comes back to the platform now finishes only in
+  the browser that began it (`fragment_core::roundtrip`). A connection's
+  does not come back: `POST /api/connections/{provider}/authorize` asks
+  WorkOS Pipes for a consent URL for the person's WorkOS user
+  (`POST /data-integrations/{provider}/authorize {user_id}`, spike S5),
+  the shell opens it, and WorkOS finishes the provider's OAuth itself.
+  WorkOS's docs (the Pipes guide, the authorize reference, the OpenAPI
+  spec, workos-node) do not say its consent page checks who completes
+  it. Its own Pipes widget binds the flow to the opener's browser with a
+  handoff token (an internal GraphQL mutation, `requireHandoff: true`)
+  that the REST endpoint does not offer.
+- **Shortcut:** none in our code: we cannot bind what never comes back
+  to us. Binding it ourselves (a `return_to` with a secret only WorkOS
+  sees, a cookie, and a "pending until confirmed" state the swap honors)
+  rests on behaviour WorkOS does not document: whether `return_to` stays
+  hidden from whoever began the consent, and what it appends on success.
+- **Risk:** someone who can connect accounts sends a victim their own
+  consent URL; the victim approves at Google; the victim's account is
+  connected to the sender's WorkOS user, and the sender's agents read it
+  through their swap. Deleting the connected account at WorkOS does not
+  revoke it at Google.
+- **First proof:** a consent URL minted for one WorkOS user and
+  completed in a browser signed in as another, on staging (Paul's to
+  run: it touches the real Google client).
+- **Delete when:** WorkOS answers these (Paul's to ask its support: does
+  `authorize-redirect` check the browser's AuthKit session against
+  `user_id`; can the REST `authorize` take `require_handoff`, and how is
+  its handoff token delivered; what is appended to `return_to`, and is it
+  allowlisted), and either it binds consent itself or we bind it the same
+  way as our own round trips, with a test.
+
 ## Running runs are checked a few at a time
 
 - **Observed:** phase 2 slice D. A run whose Workflow ended without

@@ -53,7 +53,7 @@ pub(crate) mod trials;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -788,7 +788,9 @@ impl RegistryCell {
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
-            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            CliBegin::PATH => reply::<CliBegin>(self.cli_begin(body(&bytes)?).await),
+            CliCodeOf::PATH => reply::<CliCodeOf>(self.cli_code_of(body(&bytes)?).await),
+            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_code(body(&bytes)?).await),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),

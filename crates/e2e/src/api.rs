@@ -149,7 +149,7 @@ impl Reply {
 /// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
 pub(crate) const HOST_PREFIX: &str = "__Host-";
 /// The cookies the cell names `__Host-` over https, at a host's root.
-pub(crate) const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
+pub(crate) const HOST_COOKIES: [&str; 7] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_switch", "fragment_own_key", "fragment_computer"];
 
 /// A `Cookie` header as a browser on https sends it: each of the cell's
 /// host cookies under its `__Host-` name, the rest as they are.
@@ -589,23 +589,21 @@ impl Api {
         self.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })
     }
 
-    /// The link `fragment login` prints for `keys`: its npub and its own
-    /// proof for `POST /cli/approve` (made `age_s` ago).
-    pub fn approval_link(&self, keys: &Keys, age_s: i64) -> String {
-        let proof = keys.header("POST", &format!("{}/cli/approve", self.base), b"", now_s() - age_s);
-        let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof).to_string();
-        format!("{}/cli?key={}&proof={}", self.base, fragment_core::npub::encode(keys.pubkey_hex()), url_enc(&proof))
+    /// `fragment login`'s ask for a code (`POST /cli/begin`), signed by the
+    /// new key itself: `{code, url, expiresAt}`.
+    pub fn cli_begin(&self, keys: &Keys) -> Result<Reply> {
+        self.signed(keys, "POST", "/cli/begin", Some(&json!({})))
     }
 
-    /// The signed-in browser approves the key an approval link names
-    /// (`/cli`'s form, with the link's key and proof).
-    pub fn approve_link(&self, session: &str, link: &str) -> Result<Reply> {
-        let url = reqwest::Url::parse(link)?;
-        let field = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned()).unwrap_or_default();
-        let body = format!("key={}&proof={}", url_enc(&field("key")), url_enc(&field("proof")));
+    /// One of `/cli`'s forms (`path`: `/cli`, the code typed, or
+    /// `/cli/approve`, the key added) posted by the signed-in browser
+    /// `session` from the platform's own page, with `fields` as the page's
+    /// form holds them.
+    pub fn cli_form(&self, session: &str, path: &str, fields: &[(&str, &str)]) -> Result<Reply> {
+        let body = fields.iter().map(|(k, v)| format!("{k}={}", url_enc(v))).collect::<Vec<_>>().join("&");
         self.call(Call {
             method: "POST",
-            url: format!("{}/cli/approve", self.base),
+            url: format!("{}{path}", self.base),
             body: Some(body.into_bytes()),
             content_type: Some("application/x-www-form-urlencoded"),
             cookie: Some(format!("fragment_session={session}")),
@@ -614,11 +612,37 @@ impl Api {
         })
     }
 
-    /// The signed-in browser approves `keys` (its own link), and it works:
-    /// the answer is the key's `GET /api/identities/me`.
+    /// A form token for one of `/cli`'s forms (`purpose`), as its page
+    /// would hold it: the session's own HMAC, dated past the armed delay
+    /// (`fragment_core::form`), so a lane need not wait it out.
+    pub fn cli_token(session: &str, purpose: &str) -> String {
+        fragment_core::form::issue(session, purpose, now_ms() - fragment_core::form::DELAY_MS - 50)
+    }
+
+    /// The signed-in browser types `code` at `/cli`: the confirming page
+    /// (whom the key would act as), or why not.
+    pub fn type_code(&self, session: &str, code: &str) -> Result<Reply> {
+        self.cli_form(session, "/cli", &[("form", &Api::cli_token(session, "cli")), ("code", code)])
+    }
+
+    /// The confirming page's press: the key `code` names added to the
+    /// signed-in browser's person (the "Key added" page), or why not.
+    pub fn add_code(&self, session: &str, code: &str) -> Result<Reply> {
+        let kept = fragment_core::cli_code::normalize(code).unwrap_or_default();
+        self.cli_form(session, "/cli/approve", &[("form", &Api::cli_token(session, &format!("cli-approve:{kept}"))), ("code", &kept)])
+    }
+
+    /// The signed-in browser adds `keys` as `fragment login` does (the
+    /// key's code, typed, then the press), and it works: the answer is the
+    /// key's `GET /api/identities/me`.
     pub fn approve(&self, session: &str, keys: &Keys) -> Result<Reply> {
-        let r = self.approve_link(session, &self.approval_link(keys, 0))?;
-        anyhow::ensure!(r.status == 200, "approving a key: {r}");
+        let begun = self.cli_begin(keys)?;
+        anyhow::ensure!(begun.status == 200, "asking for a CLI code: {begun}");
+        let code = begun.body["code"].as_str().context("a CLI code")?.to_string();
+        let typed = self.type_code(session, &code)?;
+        anyhow::ensure!(typed.status == 200, "typing a CLI code: {typed}");
+        let added = self.add_code(session, &code)?;
+        anyhow::ensure!(added.status == 200, "adding a CLI key: {added}");
         self.signed(keys, "GET", "/api/identities/me", None)
     }
 

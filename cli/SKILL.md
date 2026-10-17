@@ -50,13 +50,16 @@ this nor pairing: `fragment` is installed there, and acts as the agent.
 fragment login --host {{platform}}
 ```
 
-Once per machine. It opens {{platform}} in a browser, where your person
-signs in and approves this machine's key (the page and the terminal show
-the same ending); the CLI keeps the host, so later commands need no
-`--host`. With no browser at hand, `--no-wait` prints the link: give it
-to your person, and run `fragment login` again once they have approved
-it. From then on the CLI acts as them. Their account must be one that
-makes apps: a guest only edits what is shared with them.
+Once per machine. It prints a code and opens {{platform}}/cli in a
+browser, where your person signs in, types the code, and adds this
+machine's key (the page and the terminal show the same ending); no link
+adds a key, only the code typed. The CLI then says whose account it acts
+as, by email, and keeps the host, so later commands need no `--host`.
+With no browser at hand, `--no-wait` prints the code and the page: give
+both to your person (the code is good for ten minutes, once), and run
+`fragment login` again once they have typed it. From then on the CLI
+acts as them. Their account must be one that makes apps: a guest only
+edits what is shared with them.
 
 ## Build, deploy, share
 

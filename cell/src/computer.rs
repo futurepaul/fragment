@@ -1651,7 +1651,7 @@ impl ComputerCell {
         if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
         }
-        let nonce = own_signin::b64url(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+        let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
         let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
         let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), verifier.as_bytes()).await?;
         self.exec(
@@ -1872,7 +1872,8 @@ impl ComputerCell {
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
-    /// computer yet).
+    /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
+    /// past its time.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         let id = self.must(MetaKey::Id)?;
@@ -1916,6 +1917,13 @@ impl ComputerCell {
                 self.set_meta(MetaKey::AliveCheck, &json!({ "ms": ms, "freeze": freeze }).to_string())?;
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
+            }
+            "expire-sign-ins" => {
+                // every own-key sign-in under way is past its time, as ten
+                // minutes would leave it: its row stays, refused by its expiry
+                self.exec("UPDATE own_signins SET expires_at = ?", vec![js::now_ms().into()])?;
+                let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+                Ok(json!({ "computer": id, "expiredSignIns": pending }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;

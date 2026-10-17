@@ -56,7 +56,7 @@ fn value_of(r: &Reply, attr: &str) -> String {
 }
 
 /// The form token a sharing page holds.
-fn form_of(r: &Reply) -> String {
+pub(super) fn form_of(r: &Reply) -> String {
     value_of(r, "name=\"form\"")
 }
 

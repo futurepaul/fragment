@@ -1187,6 +1187,18 @@ pub struct AddKey {
     pub proof: String,
 }
 
+/// `POST <platform>/cli/begin`'s answer (signed by a new key, which no one
+/// holds yet): the code its person types at `url`, a page signed in to the
+/// platform, by `expires_at` (ms), once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliCode {
+    /// As shown: `WDJB-MJHT`.
+    pub code: String,
+    pub url: String,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyView {

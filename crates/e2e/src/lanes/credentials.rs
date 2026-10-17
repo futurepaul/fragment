@@ -264,14 +264,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 /// skips them.
 pub(super) const MODEL_CHECKS: &[&str] = &[
     "an own key signed in to is listed with its provider's page to revoke it and the models it offers, not set; its guest is given none",
-    "connecting sends the person's browser to the provider with the platform's callback, an S256 challenge, a state that names their computer, and the key's label",
+    "connecting, from settings, sends the person's browser to the provider with the platform's callback, an S256 challenge, a bare state that names no computer, bound to that browser by a cookie, and the key's label",
     "a person who declines at the provider comes back to a page that says so; nothing is exchanged or set",
     "back from the provider with a code, the platform exchanges it with the sign-in's verifier, and the computer seals the key the provider made: connected, the key in no answer",
     "the guest is given a placeholder in OPENROUTER_API_KEY, with its models' base URL, and never the key",
     "its call to the provider with the placeholder reaches the provider with the person's key, counted as the agent's, never charged",
-    "a sign-in comes back once: replayed, or a state that names none here, it is refused and nothing is exchanged",
+    "a sign-in comes back once: replayed, past its time, or a state that names none here, it is refused and nothing is exchanged",
     "sign-ins under way are bounded: past eight, another is refused until one ends",
     "disconnected, the guest is given it no more",
+    "connecting is a browser's, the shell's: a request signed by a key is refused, and binds nothing",
+    "a sign-in finishes only in the browser that began it, signed in as its person: sent to anyone else (no state cookie, no session, another person's session, even with the cookie), it seals nothing and exchanges nothing, and is still the person's to finish",
 ];
 
 /// The path and query of `url` (the platform's callback, as the provider
@@ -284,6 +286,33 @@ fn path_of(url: &str) -> String {
 fn sent_back(api: &Api, page: &str) -> Result<String> {
     let r = api.external(page)?;
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+}
+
+/// Settings' Connect, as the shell sends it (its session, from the
+/// platform's own page): the provider's page, and the cookie binding the
+/// sign-in to this browser.
+fn shell_authorize(api: &Api, session: &str) -> Result<crate::api::Reply> {
+    api.call(crate::api::Call {
+        method: "POST",
+        url: format!("{}/api/connections/{SWAP_ROUTER}/authorize", api.base),
+        body: Some(b"{}".to_vec()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())],
+        ..crate::api::Call::default()
+    })
+}
+
+/// The `name=value` of the own-key sign-in's cookie an answer set, or "".
+fn own_key_cookie(r: &crate::api::Reply) -> String {
+    r.cookies().into_iter().find(|c| c.starts_with("fragment_own_key=")).unwrap_or_default()
+}
+
+/// A browser holding `cookies` (each `name=value`; "" for none) opens
+/// `back`, where the provider sent it: the platform's callback.
+fn came_back(api: &Api, back: &str, cookies: &[&str]) -> Result<crate::api::Reply> {
+    let cookie = cookies.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join("; ");
+    api.call(crate::api::Call { method: "GET", url: format!("{}{}", api.base, path_of(back)), cookie: (!cookie.is_empty()).then_some(cookie), ..crate::api::Call::default() })
 }
 
 /// An own key signed in to, through its provider's own page (Paul,
@@ -308,12 +337,20 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "row": r, "given": given }),
     );
 
+    // connecting is the shell's, from settings: its session, and a browser
+    // to bind the sign-in to; a key's own request is refused
+    let owner_session = api.sign_in(&Api::email_of(w.owner))?;
+    let stranger_session = api.sign_in(&Api::email_of(w.stranger))?;
+    let session_of = |session: &str| format!("fragment_session={session}");
+    let by_key = api.signed(w.owner, "POST", &format!("/api/connections/{SWAP_ROUTER}/authorize"), Some(&json!({})))?;
+    s.ok(MODEL_CHECKS[9], by_key.status == 403 && own_key_cookie(&by_key).is_empty() && by_key.body["url"].is_null(), &by_key);
+    let authorize = || shell_authorize(api, &owner_session);
+
     // the person declines at the provider: nothing set, the sign-in let go
-    let authorize = || api.signed(w.owner, "POST", &format!("/api/connections/{SWAP_ROUTER}/authorize"), Some(&json!({})));
     s.openrouter.decline_next();
     let declined = authorize()?;
     let back = sent_back(api, declined.body["url"].as_str().unwrap_or_default())?;
-    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let page = came_back(api, &back, &[&own_key_cookie(&declined), &session_of(&owner_session)])?;
     let exchanges = s.openrouter.exchanges().len();
     s.ok(
         MODEL_CHECKS[2],
@@ -321,11 +358,13 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "back": back, "page": page.to_string(), "exchanges": exchanges }),
     );
 
-    // connecting: the browser goes to the provider's page
+    // connecting: the browser goes to the provider's page, its state bound to it
     let asked = authorize()?;
     let url = asked.body["url"].as_str().unwrap_or_default().to_string();
     let q: std::collections::BTreeMap<String, String> = reqwest::Url::parse(&url).map(|u| u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()).unwrap_or_default();
     let state = q.get("state").cloned().unwrap_or_default();
+    let bound = own_key_cookie(&asked);
+    let bound_line = asked.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.contains("fragment_own_key=")).unwrap_or("").to_string();
     s.ok(
         MODEL_CHECKS[1],
         asked.status == 200
@@ -333,14 +372,35 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
             && q.get("callback_url") == Some(&format!("{}/api/connections/{SWAP_ROUTER}/callback", api.base))
             && q.get("code_challenge_method").map(String::as_str) == Some("S256")
             && q.get("code_challenge").is_some_and(|c| c.len() == 43)
-            && fragment_core::own_signin::parse_state(&state).is_some_and(|(computer, _)| computer == w.id)
+            && fragment_core::roundtrip::valid_state(&state)
+            && !state.contains(&w.id["computer:".len()..])
+            && bound == format!("fragment_own_key={state}")
+            && bound_line.contains("HttpOnly") && bound_line.contains("SameSite=Lax") && bound_line.contains("Max-Age=600")
             && q.get("key_label").map(String::as_str) == Some(fragment_core::own_signin::KEY_LABEL),
-        json!({ "authorize": asked.body, "query": q }),
+        json!({ "authorize": asked.body, "query": q, "cookie": bound_line }),
     );
 
-    // back with a code: exchanged, the key sealed by the computer
+    // the attack (audit H3): the sign-in the owner began, sent to someone
+    // else, whose browser comes back with it; then the owner's own
     let back = sent_back(api, &url)?;
-    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let (exchanges, keys_before) = (s.openrouter.exchanges().len(), s.openrouter.keys().len());
+    let elsewhere = [
+        ("the owner's session, but another browser (no cookie)", came_back(api, &back, &[&session_of(&owner_session)])?),
+        ("the cookie, signed in to no one", came_back(api, &back, &[&bound])?),
+        ("another person's browser", came_back(api, &back, &[&session_of(&stranger_session)])?),
+        ("another person's session, with the cookie", came_back(api, &back, &[&bound, &session_of(&stranger_session)])?),
+    ];
+    let set = |keys: &crate::Keys| api.signed(keys, "GET", "/api/connections", None).map(|r| row(&r)["state"].clone()).unwrap_or(Value::Null);
+    let sealed_nowhere = s.openrouter.exchanges().len() == exchanges && s.openrouter.keys().len() == keys_before && set(w.owner) == "not_set" && set(w.stranger) != "set";
+    s.ok(
+        MODEL_CHECKS[10],
+        elsewhere.iter().all(|(_, r)| r.status == 400 && r.text.contains("Not connected")) && sealed_nowhere,
+        json!(elsewhere.iter().map(|(how, r)| format!("{how}: {r}")).collect::<Vec<_>>()),
+    );
+
+    // back with a code, in the browser that began it, signed in: exchanged,
+    // the key sealed by the person's own computer
+    let page = came_back(api, &back, &[&bound, &session_of(&owner_session)])?;
     let keys = s.openrouter.keys();
     let key = keys.last().cloned().unwrap_or_default();
     let exchanged = s.openrouter.exchanges();
@@ -378,15 +438,27 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "said": said, "calls": calls, "uses": uses() }),
     );
 
-    // once only: a replay, and a state naming no sign-in here
-    let again = api.unsigned("GET", &path_of(&back), None)?;
-    let forged = format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state={}", fragment_core::own_signin::state(w.id, &"A".repeat(43)));
-    let none = api.unsigned("GET", &forged, None)?;
-    let garbled = api.unsigned("GET", &format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope"), None)?;
+    // once only: a replay (its cookie kept), a sign-in past its time, and a
+    // state naming no sign-in here, each with a cookie that matches it
+    let again = came_back(api, &back, &[&bound, &session_of(&owner_session)])?;
+    let expiring = authorize()?;
+    let expiring_back = sent_back(api, expiring.body["url"].as_str().unwrap_or_default())?;
+    let expired = super::computers::lever_with(api, w.id, json!({ "op": "expire-sign-ins" }))?;
+    let late = came_back(api, &expiring_back, &[&own_key_cookie(&expiring), &session_of(&owner_session)])?;
+    let forged_state = "a".repeat(fragment_core::roundtrip::STATE_HEX_LEN);
+    let forged = format!("{}/api/connections/{SWAP_ROUTER}/callback?code=x&state={forged_state}", api.base);
+    let none = came_back(api, &forged, &[&format!("fragment_own_key={forged_state}"), &session_of(&owner_session)])?;
+    let garbled = came_back(api, &format!("{}/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope", api.base), &["fragment_own_key=nope", &session_of(&owner_session)])?;
     s.ok(
         MODEL_CHECKS[6],
-        again.status == 400 && none.status == 400 && garbled.status == 400 && s.openrouter.exchanges().len() == exchanged.len() && s.openrouter.keys().len() == 1,
-        json!({ "replay": again.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
+        again.status == 400
+            && expired.status == 200
+            && late.status == 400
+            && none.status == 400
+            && garbled.status == 400
+            && s.openrouter.exchanges().len() == exchanged.len()
+            && s.openrouter.keys().len() == 1,
+        json!({ "replay": again.to_string(), "expired": expired.body, "late": late.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
     );
 
     // bounded: eight under way, the ninth refused
