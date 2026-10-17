@@ -2112,20 +2112,24 @@ no second computer.
   platform's intercepts, not the internet, not the computer's own
   services: the relay, Hermes' API, the screen, another agent's
   browser), and its background servers answer its later commands.
-  `/proc` is mounted `hidepid=invisible` with the `hermes` group exempt,
-  so a fenced user sees only its own processes, never another agent's
-  command lines.
+  `/proc` is mounted `hidepid=invisible` with root's group exempt (the
+  boot watches every process, and a container's root has no
+  `CAP_SYS_PTRACE` to see past it), so a fenced user sees only its own
+  processes, never another agent's command lines, and the `hermes` user
+  sees only its own.
 - **How its commands get there.** The computer's sshd listens on
   loopback alone (`127.0.0.1:2222`), lets in only fence users by a key
   the gateway's user holds (made at each boot, under the boot's runtime
   files), forwards nothing, and runs every session through its
   `ForceCommand`, which joins the session to its user's sandbox
-  (`nsenter --preserve-credentials -U -n -m`) or refuses it when there
-  is none. The profile's terminal is Hermes' own `ssh` backend
-  (`terminal.backend: ssh` to that user), which also carries its file
-  tools and `execute_code` (Hermes runs them through the terminal's
-  environment), so every tool that reads or writes files runs as the
-  fenced user, in the sandbox.
+  (`nsenter --preserve-credentials -U -n -m`), found by its uid, never a
+  name it is told, or refuses it when there is none. Its host key is the
+  computer's, root's, under `/data`: Hermes' `ssh` backend remembers the
+  first key it meets, so it never meets another. The profile's terminal
+  is Hermes' own `ssh` backend (`terminal.backend: ssh` to that user),
+  which also carries its file tools and `execute_code` (Hermes runs them
+  through the terminal's environment), so every tool that reads or
+  writes files runs as the fenced user, in the sandbox.
 - **What is off for it.** In its profile: the browser, vision of a local
   path, video, the desktop and computer use, projects, kanban, catalog
   and connections management (`agent.disabled_toolsets`), each of which

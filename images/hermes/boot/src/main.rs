@@ -20,6 +20,7 @@
 mod agents;
 mod bots;
 mod desktop;
+mod fence;
 mod held;
 mod hermes;
 mod skills;
@@ -124,7 +125,9 @@ fn main() {
         Some("check-restore") => check_restore(),
         Some("quick-check") => quick_check(&args[2..]),
         Some("sqlite-report") => sqlite_report(&args[2..]),
-        _ => fail("hermes-boot pre-init | main | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
+        // sshd's ForceCommand for a fenced agent's user (fence.rs)
+        Some("fence-shell") => fence::shell(),
+        _ => fail("hermes-boot pre-init | main | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report | fence-shell"),
     }
 }
 
@@ -628,20 +631,21 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 /// own (step 2 of docs/durable-computers.md). A `home` or scratch that had
 /// something in it is set aside, unmoved (`hermes::link_into_work`); a
 /// browser profile that is a directory already stays where it is.
-fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
+fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>, work_ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
     let browser = work.join("browser-profile");
     if let Err(e) = std::fs::create_dir_all(&browser) {
         ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
         return;
     }
-    chown(&work, ids);
-    chown(&browser, ids);
+    chown(&work, work_ids);
+    chown(&browser, work_ids);
     for (at, to) in [(hermes::PROFILE_HOME, hermes::home_dir(&a.fragment)), (hermes::PROFILE_SCRATCH, hermes::tmp_dir(&a.fragment))] {
         match hermes::link_into_work(profile, at, &to) {
             Ok(found) => {
                 let link = profile.join(at);
-                for p in [Some(to.as_path()), link.parent(), Some(link.as_path())].into_iter().flatten() {
+                chown(&to, work_ids);
+                for p in [link.parent(), Some(link.as_path())].into_iter().flatten() {
                     chown(p, ids);
                 }
                 if let hermes::WorkLink::SetAside(aside) = found {
@@ -672,8 +676,14 @@ fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
 /// The config is written before `.env`, so the directory is a profile to
 /// Hermes (an identity file) only once its config is whole.
-async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String]) {
+async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], fence: Option<&fence::Fence>) {
     let t = Instant::now();
+    // a fenced agent's work is its user's, the `hermes` group sharing it
+    // (fence.rs); every other agent's, the `hermes` user's
+    let work_ids = match fence.filter(|_| a.fenced) {
+        Some(f) => Some((f.uid, ids.map_or(f.uid, |(_, gid)| gid))),
+        None => ids,
+    };
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     let own = move |p: &Path| chown(p, ids);
     let dir = hermes::profile_dir(home, &a.fragment);
@@ -684,11 +694,11 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         chown(&dir.join(sub), ids);
     }
     chown(&dir, ids);
-    work_dirs(&dir, a, ids);
+    work_dirs(&dir, a, ids, work_ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let title = read_title(api, a).await;
-    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &title).await;
+    let main = write_config(api, a, &dir, ids, route, credential_env, high_on, &title, fence).await;
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
@@ -728,7 +738,7 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 /// unread keeps it the same way. Answers the model it names, or none if it
 /// was left as it was.
 #[allow(clippy::too_many_arguments)]
-async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>) -> Option<hermes::MainModel> {
+async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>, fence: Option<&fence::Fence>) -> Option<hermes::MainModel> {
     let config = dir.join("config.yaml");
     let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
@@ -742,7 +752,7 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     };
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
-    let text = hermes::profile_config(a, name, &main, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    let text = hermes::profile_config(a, name, &main, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE), fence);
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
@@ -781,12 +791,12 @@ fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, title: &Result
 /// Each agent's profile at a boot, and the profiles of agents that left
 /// this computer retired: moved aside, never deleted. Only a boot retires
 /// one: no Hermes runs yet that could be winding down a turn in it.
-async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String]) {
+async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], fences: &fence::Fences) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
     for a in agents {
-        write_profile(api, a, home, ids, route, credential_env).await;
+        write_profile(api, a, home, ids, route, credential_env, fences.of(a).as_ref()).await;
     }
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
@@ -880,7 +890,8 @@ type BotChats = BTreeMap<String, String>;
 /// agent, and a computer runs at most `AGENTS_MAX` of them.
 async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bool {
     let mut found = false;
-    let missing: Vec<&Agent> = agents.iter().filter(|a| !chats.contains_key(&a.fragment)).collect();
+    // a fenced agent is in no Bot Mode roster, and lists nothing for its owner
+    let missing: Vec<&Agent> = agents.iter().filter(|a| !a.fenced && !chats.contains_key(&a.fragment)).collect();
     for a in missing {
         match api.fragments_for(&a.fragment, &a.owner).await {
             Ok(list) => {
@@ -997,23 +1008,37 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// no turn before its profile is whole. A removed agent leaves the ready
 /// file, so the bridge stops at once; its profile waits for the next boot.
 #[allow(clippy::too_many_arguments)]
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], chats: &mut BotChats, fences: &mut fence::Fences) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
-    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
+    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "fenced": names(&change.fenced), "agents": now.len() });
+    for a in &change.removed {
+        fences.removed(a);
+    }
+    // a fence first (its user and sandbox), so the profile names its user
+    fences.apply(&change.added);
+    fences.apply(&change.fenced);
+    fence::close_others(now);
     for a in &change.added {
-        write_profile(api, a, home, ids, route, credential_env).await;
+        write_profile(api, a, home, ids, route, credential_env, fences.of(a).as_ref()).await;
     }
     // an agent's credentials changed: its next turn reads them (its `.env`),
     // and its terminal's next session (its credentials file); and its model,
-    // which is its owner's only while it holds that provider's
+    // which is its owner's only while it holds that provider's. Fenced or
+    // let go: its whole profile again (its terminal, its tools, its `.env`).
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     for a in &change.credentials {
         write_credentials(a, home, ids);
         let title = read_title(api, a).await;
-        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title).await;
+        write_config(api, a, &hermes::profile_dir(home, &a.fragment), ids, route, credential_env, high_on, &title, fences.of(a).as_ref()).await;
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
+    for a in change.fenced.iter().filter(|a| !change.credentials.iter().any(|c| c.fragment == a.fragment)) {
+        write_profile(api, a, home, ids, route, credential_env, fences.of(a).as_ref()).await;
+        ev!("profile.fenced", { "agent": a.fragment, "fenced": a.fenced, "user": fences.of(a).map(|f| f.user) });
+    }
+    // a new agent's work, made just now, closed to fence users too
+    fence::close_others(now);
     if !change.added.is_empty() {
         let asked = Instant::now();
         match ask_gateway(home, "rescan-profiles").await {
@@ -1245,7 +1270,14 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    profiles(&api, &agents, &home, ids, &route, &credential_env).await;
+    // the fenced agents' users and sandboxes (fence.rs), before their
+    // profiles name them
+    let mut fences = fence::Fences::new(ids.unwrap_or((10_000, 10_000)));
+    fences.apply(&agents);
+    fence::close_others(&agents);
+    profiles(&api, &agents, &home, ids, &route, &credential_env, &fences).await;
+    // the work its profiles made, closed to fence users too
+    fence::close_others(&agents);
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
@@ -1311,6 +1343,8 @@ async fn boot_main() {
                 keeper = (keeper_restarts <= KEEPER_RESTARTS_MAX).then(|| spawn_keeper(&home)).flatten();
             }
         }
+        // a fenced agent's sandbox, or the sshd, that ended starts again
+        fences.keep(&agents);
         if let Some(b) = bridge.as_mut() {
             if let Ok(Some(status)) = b.try_wait() {
                 restarts += 1;
@@ -1364,7 +1398,7 @@ async fn boot_main() {
                         if c.credential_env != credential_env {
                             credential_env = c.credential_env.clone();
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
-                                write_profile(&api, a, &home, ids, &route, &credential_env).await;
+                                write_profile(&api, a, &home, ids, &route, &credential_env, fences.of(a).as_ref()).await;
                             }
                         }
                         // the deployment's models changed (a release): every
@@ -1374,12 +1408,12 @@ async fn boot_main() {
                             ev!("profile.model_ids", { "ids": route.ids });
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
                                 let title = read_title(&api, a).await;
-                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title).await;
+                                write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title, fences.of(a).as_ref()).await;
                             }
                         }
                         let change = agents::diff(&agents, &c.agents);
                         if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &mut chats).await;
+                            follow_agents(&api, &change, &c.agents, &home, ids, &route, &credential_env, &mut chats, &mut fences).await;
                         }
                         agents = c.agents;
                         // an agent's chat made after the agent: its Bot Chat now
@@ -1402,7 +1436,7 @@ async fn boot_main() {
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     let title = read_title(&api, a).await;
-                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, &title).await;
+                    write_config(&api, a, &dir, ids, &route, &credential_env, high_on, &title, fences.of(a).as_ref()).await;
                     write_identity(a, &dir, ids, &title);
                 }
             }

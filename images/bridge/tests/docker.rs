@@ -100,7 +100,15 @@ impl Container {
     }
 
     fn run_on(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
+        Container::run_as(runtime, tag, api, model, extra, &[])
+    }
+
+    /// As `run_on`, with Docker's own `options` before the image (a
+    /// fenced agent's sandbox needs what `wrangler dev` gives a computer:
+    /// `CAP_SYS_ADMIN`, AppArmor unconfined).
+    fn run_as(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)], options: &[&str]) -> Container {
         let mut args: Vec<String> = ["run", "-d", "--platform", "linux/amd64", "--add-host", "api.fragment.internal:host-gateway", "--add-host", "model.fragment.internal:host-gateway"].iter().map(|s| s.to_string()).collect();
+        args.extend(options.iter().map(|s| s.to_string()));
         if runtime == Runtime::Hosted {
             // the marker goes before the image's own entrypoint runs, as PID 1
             args.extend(["--ipc=none", "--entrypoint", "/bin/sh"].map(String::from));
@@ -1704,6 +1712,62 @@ async fn a_tools_temp_files_are_its_work() {
         let sent = w.fragments[&chat].blobs.get(sha).map(|(_, b)| b.clone());
         assert_eq!(sent.as_deref(), Some(&b"temp-sent\n"[..]), "the temp file Hermes sent is the one in its work: {reply}");
     });
+}
+
+/// Goal (decision 63, proposed; docs/computers.md, "A fenced agent in our
+/// Hermes image"): a fenced agent's commands run as a user of its own in a
+/// sandbox of its own, through Hermes' own `ssh` backend. Juniper, unfenced,
+/// writes a file in its work; Polish, fenced, runs as its fence user (a
+/// uid of 20000 and up, mapped root inside), writes and reads its own work
+/// and its own `/tmp`, but reads neither Juniper's file nor any profile's
+/// `.env`, lists no one's work, and reaches no network: not the platform,
+/// not the computer's own sshd. The container has what `wrangler dev` gives
+/// a computer (`CAP_SYS_ADMIN`, AppArmor unconfined).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_fenced_agent_runs_in_its_sandbox() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "polish"]).await;
+    fake.fence("polish", true);
+    let model = Model::start("0.0.0.0:0").await;
+    let (talk, pol) = (fake.chat("talk", &["juniper"]), fake.chat("pol", &["polish"]));
+    let c = Container::run_as(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &[], &["--cap-add", "SYS_ADMIN", "--security-opt", "apparmor=unconfined"]);
+    within(&fake, &talk, &c, 180_000, "Hermes' bridge to follow both chats", |w| w.live_sockets() >= 3).await;
+    // what an agent's turn's tool said, as the scripted model quotes it
+    let ran = |agent: &'static str, chat: String, text: String| {
+        let (fake, c) = (&fake, &c);
+        async move {
+            let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+            let turn = fragment_bridge::records::turn_id(&format!("{agent}--k3x9"), &chat, "chat", said["seq"].as_u64().unwrap());
+            let reply = |w: &support::fake::World| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn.as_str());
+            let t = Instant::now();
+            // bounded: four minutes
+            while fake.with(|w| reply(w).is_none()) {
+                assert!(t.elapsed() < Duration::from_secs(240), "{agent}: {text:?} not answered in 240 s; {}\n{}", told(fake, &chat, c), c.logs().lines().filter(|l| l.contains("fence")).collect::<Vec<_>>().join("\n"));
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            fake.with(|w| reply(w)).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
+        }
+    };
+    let wrote = ran("juniper", talk.clone(), "run: echo the-lead-only > /data/work/juniper--k3x9/home/lead.txt && echo wrote-1".into()).await;
+    assert!(wrote.contains("wrote-1"), "Juniper writes its own work: {wrote}");
+    let map = ran("polish", pol.clone(), "run: awk '{print \"map-\" $2}' /proc/self/uid_map".into()).await;
+    assert!(map.contains("map-2"), "Polish runs as its fence user, mapped root in its sandbox: {map}\n{}", c.logs().lines().filter(|l| l.contains("fence")).collect::<Vec<_>>().join("\n"));
+    let own = ran("polish", pol.clone(), "run: echo mine > ~/note.txt && echo tmp > /tmp/t.txt && cat ~/note.txt /tmp/t.txt | tr '\\n' ' ' | sed 's/^/own-/'".into()).await;
+    let lead = ran("polish", pol.clone(), "run: cat /data/work/juniper--k3x9/home/lead.txt 2>&1 | grep -c 'Permission denied' | sed 's/^/lead-/'".into()).await;
+    let envs = ran("polish", pol.clone(), "run: cat /data/hermes/profiles/*/.env 2>&1 | grep -c FRAGMENT_AS_AGENT | sed 's/^/envs-/'".into()).await;
+    let list = ran("polish", pol.clone(), "run: ls /data/work 2>&1 | grep -c 'Permission denied' | sed 's/^/list-/'".into()).await;
+    let net = ran("polish", pol.clone(), "run: curl -s -m 3 -o /dev/null -w 'got-%{http_code}' http://api.fragment.internal/api/computer || echo offline-1".into()).await;
+    let sshd = ran("polish", pol.clone(), "run: timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/2222' 2>&1 && echo reached || echo closed-1".into()).await;
+    assert!(own.contains("own-mine tmp"), "{own}");
+    assert!(lead.contains("lead-1"), "Juniper's file is closed to it: {lead}");
+    assert!(envs.contains("envs-0"), "every profile's .env is closed to it: {envs}");
+    assert!(list.contains("list-1"), "no one's work is listed: {list}");
+    assert!(net.contains("offline-1"), "no network, not even the platform: {net}");
+    assert!(sshd.contains("closed-1"), "not the computer's own sshd: {sshd}");
+    // Juniper is unfenced: its own, as ever
+    let unfenced = ran("juniper", talk.clone(), "run: id -u | sed 's/^/uid-/'".into()).await;
+    assert!(unfenced.contains("uid-10000"), "{unfenced}");
 }
 
 /// Goal (Paul on preview, 2026-10-16: asked its version, an agent read

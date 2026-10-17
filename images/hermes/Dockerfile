@@ -161,6 +161,16 @@ RUN apt-get -o Acquire::Retries=3 update \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 
+# A fenced agent's way in (decision 63, proposed; docs/computers.md, "A
+# fenced agent in our Hermes image"): sshd, which hermes-boot runs on
+# loopback alone for its users, and `ip`, with which its sandbox brings up
+# its own loopback. No host key is baked in: each boot makes its own, under
+# its runtime files.
+RUN apt-get -o Acquire::Retries=3 update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends openssh-server iproute2 \
+ && rm -f /etc/ssh/ssh_host_* \
+ && test -x /usr/sbin/sshd && test -x /usr/lib/openssh/sftp-server && command -v ip >/dev/null
+
 # Every agent reads the pinned Hermes skills through the boot's read-only
 # view, beside the platform skill. Move them out of Hermes' sync source:
 # stage2 and the gateway must not copy them into the default profile or an

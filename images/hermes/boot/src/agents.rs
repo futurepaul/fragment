@@ -29,11 +29,15 @@ pub struct Change {
     /// operator key offered, its owner's narrowing): its `.env` and its
     /// credentials file are written again, nothing restarted.
     pub credentials: Vec<Agent>,
+    /// Still here, fenced or let go since (decision 63, proposed): its
+    /// sandbox made or taken down, its work given to its user or back, and
+    /// its profile written again (fence.rs), nothing restarted.
+    pub fenced: Vec<Agent>,
 }
 
 impl Change {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.credentials.is_empty()
+        self.added.is_empty() && self.removed.is_empty() && self.credentials.is_empty() && self.fenced.is_empty()
     }
 }
 
@@ -49,6 +53,7 @@ pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
         added: read.iter().filter(|a| !had.contains(a.fragment.as_str())).cloned().collect(),
         removed: running.iter().filter(|a| !has.contains(a.fragment.as_str())).cloned().collect(),
         credentials: read.iter().filter(|a| running.iter().any(|r| r.fragment == a.fragment && r.credentials != a.credentials)).cloned().collect(),
+        fenced: read.iter().filter(|a| running.iter().any(|r| r.fragment == a.fragment && r.fenced != a.fenced)).cloned().collect(),
     }
 }
 
@@ -76,7 +81,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![], fenced: false }
     }
 
     fn names(agents: &[Agent]) -> Vec<&str> {
@@ -133,6 +138,21 @@ mod tests {
         assert!(diff(&[with("juniper", "fcx_google_a")], &[with("juniper", "fcx_google_a")]).is_empty());
         let c = diff(&[agent("juniper")], &[agent("juniper"), with("oak", "fcx_google_b")]);
         assert!(c.credentials.is_empty() && names(&c.added) == vec!["oak--k3x9"], "a new agent's profile is written whole anyway");
+    }
+
+    /// Valid and replay: an agent fenced or let go is named so (its
+    /// credentials too, as its connections go or come); a new agent fenced
+    /// is added, written fenced whole; the same fence again is no change.
+    #[test]
+    fn a_change_of_fence_is_named() {
+        let fenced = |label: &str| Agent { fenced: true, ..agent(label) };
+        let c = diff(&[agent("juniper"), agent("maple")], &[fenced("juniper"), agent("maple")]);
+        assert_eq!((names(&c.fenced), c.added.is_empty(), c.removed.is_empty()), (vec!["juniper--k3x9"], true, true), "fenced");
+        let c = diff(&[fenced("juniper")], &[agent("juniper")]);
+        assert_eq!(names(&c.fenced), vec!["juniper--k3x9"], "let go");
+        assert!(diff(&[fenced("juniper")], &[fenced("juniper")]).is_empty());
+        let c = diff(&[agent("juniper")], &[agent("juniper"), fenced("oak")]);
+        assert!(c.fenced.is_empty() && names(&c.added) == vec!["oak--k3x9"]);
     }
 
     #[test]

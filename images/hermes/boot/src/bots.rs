@@ -139,8 +139,11 @@ pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
 /// (`wire::session_key`), whose session the hook titles `Bot Chat`. An
 /// agent with none yet is left out: the hook and the keeper leave it alone.
 pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
+    // a fenced agent is in no roster: `message_agent` acts for its owner,
+    // which it never does (decision 63, proposed); it is reached by its chats
     let bots: Vec<serde_json::Value> = agents
         .iter()
+        .filter(|a| !a.fenced)
         .filter_map(|a| {
             let profile = wire::profile(&a.fragment);
             let chat = chats.get(&a.fragment)?;
@@ -201,7 +204,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str, name: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: name.into(), owner: "npub1paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: name.into(), owner: "npub1paul".into(), credentials: vec![], fenced: false }
     }
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
