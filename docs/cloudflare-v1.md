@@ -1202,11 +1202,23 @@ these other providers."
       chat (`<label>-chat`, its Bot Chat), which the making agent then
       leaves so the new one leads it. `fragment agent <agent> --job …
       --tier … --model … --start --stop` keeps it.
-    - **The default agent is told so.** Its job (the shell's `firstSoul`)
-      says it keeps the rest, and the managed `agents-finite` skill
-      (templates/skills) says how: when to make one, how to write its job,
-      how to brief it, and when to stop it. Every agent sees the skill;
-      only the default agent's job makes the keeping its own.
+    - **The default agent is told so, in every turn.** Its job (the
+      shell's `firstSoul`, its `SOUL.md`) says who it is (Austin,
+      2026-10-17: "it itself is smart"): the person's main agent and
+      go-between, capable on its own, so most work is its own; and the
+      lead of their team, which gives a job an agent of its own when that
+      is better (lasting work with its own context, long work that runs
+      beside it, a model the person asks for), makes teammates on the
+      same platform models it runs on unless the person asks otherwise,
+      briefs them, checks what comes back, and says who did what. The
+      managed `agents-finite` skill (templates/skills) says how: the
+      commands, how to write a job and brief one, the placeholders, and
+      when to stop one. Every agent sees the skill; only the default
+      agent's job makes leading the team its own. The job names no model
+      or provider: a deployment's tiers are its own (Finite's may run on
+      Finite Private or on OpenRouter), so "the same platform models you
+      run on" is true on each. A job is written once, so an agent made
+      before this keeps its own until it is rewritten.
     - **Trusted models, and what the default agent keeps from the rest.**
       The platform's tiers are trusted, and a teammate on its owner's own
       provider (`agent.json`'s `model`, decision 60) is not: its model
@@ -1274,6 +1286,22 @@ these other providers."
     model: evidence, not proof (the hosted agent-smoke lane's to repeat). Seen beside it: a person's own-key calls are never
     counted in the computer's `uses` (`GET /api/computers/{id}/uses`
     answered none), which docs/computers.md says they are.
+
+    *Status, 2026-10-17 (the job that leads the team).* The default
+    agent's job became who it is in every turn (above, "The default agent
+    is told so"), its two test agents' `SOUL.md` rewritten to it. On
+    Finite Private, in a new chat: asked for a three-ingredient pasta, it
+    answered itself, no step and no teammate; asked to make a garden
+    club's newsletter "taken care of every week", it loaded the skill,
+    made Meadowlark (`fragment agent --new newsletter`, on the platform's
+    tier: `agent.json` `{"tier": "cheap"}`, no model), briefed it with
+    `fragment ask`, and told its owner what it made and why. One run each.
+    Seen beside it: it scheduled the weekly run with `hermes cron` in its
+    terminal. Hermes' cron tool is off (decision 38), but its CLI is not,
+    and a job there fires only while the computer is awake. A routine is
+    the agent fragment's cron (decision 38), which no command or skill
+    yet teaches an agent to make: the computers lane writes one by hand
+    (`routine_app`).
 
     **For Paul to decide:**
     1. Whether an agent may start and stop its owner's agents at all

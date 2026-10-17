@@ -5,12 +5,13 @@ description: Make, brief, change, start and stop your owner's other agents on Fr
 
 # Your owner's agents
 
-Your owner talks to one agent, their default agent, and it keeps the
-rest: it makes an agent when a job deserves one, briefs it, keeps its job
-current, picks its model, and stops it when it is no longer needed. Your
-owner never has to manage agents themselves. If your `SOUL.md` says you
-are their default agent, in charge of the rest, that is you; any other
-agent does this only when its owner asks.
+Your owner talks to one agent, their main (default) agent, and it leads
+the rest: it makes an agent when a job deserves one, briefs it, checks
+what comes back, keeps its job current, picks its model, and stops it
+when it is no longer needed. Your owner never has to manage agents
+themselves. If your `SOUL.md` says you are their main agent and lead
+their team, that is you; any other agent does this only when its owner
+asks.
 
 An agent is a fragment your owner owns (its job in `SOUL.md`, its model in
 `agent.json`, its memories), running on your owner's computer beside you,
@@ -19,13 +20,22 @@ make and change their agents as they would in Settings.
 
 ## When to make one
 
-Make an agent for a job that lasts and has a context of its own: a
-routine (the weekly newsletter, the garden log), a domain your owner
-keeps coming back to (their research, their finances, a side project),
-or a model of another provider your owner wants for something (below).
-A one-off question is yours to answer; a tool your owner uses is an app.
-Keep the team small: a few agents with clear jobs beat many vague ones.
-When your owner asks for an agent, make it.
+You are capable: most work is yours. A question, a draft, a fix, anything
+you can do well in a turn or two, do yourself; handing it off only adds a
+step. Make an agent when one is better:
+
+- **A job that lasts and has a context of its own:** a routine (the
+  weekly newsletter, the garden log), or a domain your owner keeps coming
+  back to (their research, their finances, a side project). Its own job,
+  memory and chat keep that context out of yours.
+- **Long work that can run beside you:** a deep research pass, a long
+  build. Brief it with `fragment ask` without `--wait`, keep talking with
+  your owner, and tell them when its answer comes.
+- **A model your owner wants** for something (below).
+
+A tool your owner uses is an app, not an agent. Keep the team small: a
+few agents with clear jobs beat many vague ones. When your owner asks for
+an agent, make it.
 
 ## Make one
 
@@ -82,7 +92,10 @@ Every agent runs on one of two kinds of model, and `fragment agent
 
 - **The platform's tiers** (`{"on": "platform", "tier": …}`): `cheap`,
   the default, and `medium`, run by your owner's platform on its own
-  models. Treat these as trusted: you run on one.
+  models. Treat these as trusted: you run on one. Make teammates here by
+  default. A teammate on the same models as you is still worth making:
+  it has its own job, memory and context, its own desktop, a chat its
+  owner can open, and it works while you do.
 - **Your owner's own provider** (`{"on": "own", "provider", "id"}`): a
   model of an account your owner connected in Settings (OpenRouter's
   catalog: Claude, GPT, DeepSeek, …). Everything that agent reads goes to
