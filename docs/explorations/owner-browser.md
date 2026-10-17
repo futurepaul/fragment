@@ -31,7 +31,9 @@ unpacked. No hosted deployment was used.
   connects through the extension, and the person's computer carries the
   Chrome DevTools Protocol (CDP) between that browser and its guest. The agent's
   runtime needs nothing new: any CDP client works, Hermes' browser tools
-  and the agent-browser CLI in our image among them.
+  and the agent-browser CLI in our image among them. While the browser
+  is connected, the bridge tells the agent so, in one line beside each of
+  its owner's messages: no skill.
 - **It fits the design as it is.** The platform gains no notion of an
   agent runtime, a vendor, or CDP's meaning: it carries frames.
   - The guest reaches it the way it reaches the API and models: one more
@@ -55,11 +57,12 @@ unpacked. No hosted deployment was used.
     reads it, closes a duplicate, and opens a new window.
   - On the dev stack, a person tries it as written under "Trying it
     locally", below.
-  - **A real agent, in plain English.** Austin asked Hermes, on a real
-    model, "Use my browser to find a one-way flight from Austin to San
-    Francisco on November 3rd, and tell me the cheapest options". The
-    agent searched Google Flights in his browser and answered with the
-    fares. It needed only a skill in the agent's own fragment (below).
+  - **A real agent, in plain English.** Hermes on a real model, told by
+    the bridge's line, used the owner's browser the first time it was
+    asked: it listed the tabs it may use, and duplicated the person's
+    tabs when asked to. An earlier trial, with a skill instead, searched
+    Google Flights in Austin's browser. A fresh agent told nothing used
+    the Chromium on its own desktop (below).
 - **Not run:** anything hosted.
 
 ## The shape
@@ -132,6 +135,16 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   below it, as a browser's DevTools names one), told to the guest as
   `FRAGMENT_BROWSER=http://browser.fragment.internal`. A client given the
   full URL connects as given, with no `/json/version` lookup first.
+- `GET /json/version` there answers as a browser's DevTools does, from
+  the Computer DO: the connected browser's name (`Browser`) and its
+  socket (`webSocketDebuggerUrl`), or `not_connected`.
+- **Told.** Before each turn its owner asks, the bridge asks
+  `/json/version` (at most 2 s, beside the note's reads), and while a
+  browser is connected the agent is told so in one line beside the
+  message: which browser "my browser" means, how its terminal reaches
+  it, and what it may use (the appendix; docs/bridge.md, "Its owner's
+  browser is told"). Another asker's turn is never told, the browser
+  being the owner's; nothing is told while none is connected.
 - Accepted only while the owner's browser is connected. Otherwise 403
   `not_connected`: "your owner's browser is not connected: they connect it
   from Settings, with the Fragment extension". The stub's reply carries
@@ -192,7 +205,10 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   A tab outside the choice is never listed, attached or touched.
   Narrowing the choice detaches the agent at once from what it may no
   longer use. Only the extension's own popup sets the level, never a
-  page.
+  page. The level is kept across restarts; the agent's tabs and the
+  chosen ones for the browser's session (`chrome.storage.session`), so a
+  worker Chrome stopped while the computer was away (a laptop's sleep, a
+  long outage) still knows them.
 - **The browser's own methods** are answered by the worker:
   - `Target.*`: `setDiscoverTargets`, `getTargets`, `getTargetInfo`,
     `createTarget`, `attachToTarget` with flattened sessions,
@@ -256,7 +272,7 @@ its popup.
 ### The platform, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser`:
-33
+36
 passed, 0 failed, 0 skipped. The section takes about 11 s after the
 build (the cell, the CLI and the stub image), and no wait runs out its
 limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
@@ -272,10 +288,14 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
   - The answers reach the guest (the agent's reply reads the page's
     title), and the guest socket's end is told to the browser
     (`<socket> close`).
+  - While it is connected, the owner's turn is told so first: the
+    browser's name and its socket, as the computer answered
+    `/json/version` (the stub echoes what it was told).
 - **Invalid.**
   - No one else mints a ticket (404) or forgets the browser (404).
   - With no browser connected, the agent's reply carries the platform's
-    words.
+    words, and the owner's turns are told nothing of a browser; nor after
+    Forget.
   - A socket from a page's origin (403) and one naming no ticket (400)
     are refused.
   - A link's ticket is refused to a page (403), and to a link the
@@ -301,6 +321,11 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
   - A dropped connection (a test lever, `drop-browser`, drops it as a
     network would) comes back on its own, with the extension's link, and
     the agent uses the browser again.
+  - Its worker stopped, as Chrome stops one idle past its socket's end,
+    then woken by the platform's page: it comes back with its link, and
+    the tab the agent opened is still its own. Against the extension
+    before it kept the agent's tabs (only the chosen ones), this check
+    fails: the agent lists only a new blank tab (run).
   - What the agent may use follows the popup's level. The stub's `tabs`
     (the titles of the tabs it may use) and `close-tab <title>` stand in
     for a browser tool's `tab` and `tab close`:
@@ -325,13 +350,13 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
 The harness launches a lane's own Chrome without `--disable-extensions`
 when the lane loads one (`crates/e2e/src/browser.rs`), and finds the
 extension by the id Chrome derives from its path. A Chrome that loads no
-unpacked extension (Google Chrome from 137, CI's) makes those thirteen
+unpacked extension (Google Chrome from 137, CI's) makes those fourteen
 checks skips that say so.
 
 ### Hermes, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser-hermes`:
-7 passed, 0 failed, 0 skipped. The section runs only by name, as
+8 passed, 0 failed, 0 skipped. The section runs only by name, as
 `hermes` does, because it builds our Hermes image (v0.21.7).
 
 - A computer pinned to the Hermes image wakes and follows its chat.
@@ -341,6 +366,8 @@ checks skips that say so.
   open <the platform's page>`.
 - The tab opens in the extension's Chrome, and the tool's answer reads the
   page's title.
+- The model's request carries the bridge's line: Hermes renders the
+  inbound's `context` before its owner's message.
 - Nothing in the image changed: the agent-browser it already carries
   (0.26.0) is the client.
 
@@ -381,34 +408,57 @@ Then a second person in the same browser, who connects and browses
 
 ### A real agent, in plain English (run)
 
-The dev stack calls no real model by design. For this trial only, a
+The dev stack calls no real model by design. For these trials only, a
 local change to `cargo xtask dev`, not on this branch, gave it Finite's
 own model config (deploy/example.jsonc: GLM-5.3 Flash through
 OpenRouter, on a budgeted key of Austin's read from a file) and put new
 computers on our Hermes image.
 
-- Austin's agent, Hermes on that model, got one more file in its own
-  fragment: `skills/owner-browser/SKILL.md`, in "Appendix: the trial's
-  skill" below. Hermes installs an agent's own skills into its profile
-  (`/data/hermes/profiles/<agent>/skills/owner-browser/SKILL.md`, seen in
-  the container). Nothing in the image or the managed skills changed.
-- He connected his Chromium in Settings and asked, in plain English:
-  "Use my browser to find a one-way flight from Austin to San Francisco
-  on November 3rd, and tell me the cheapest options."
-- The agent drove his browser through agent-browser, in 3 steps. It
-  answered from Google Flights (AUS → SFO, one-way, November 3): the
-  cheapest at $164 (Frontier, one stop in Denver), the cheapest nonstop
-  at $224, with what each fare includes.
-- Without the skill, nothing Hermes is given names the socket: the
-  managed skills (`templates/skills`), the image (`images/hermes`, its
-  platform skill's page among it) and the CLI's skill were searched for
-  it (read). The trial did not ask Hermes without the skill.
+- **With a skill.** The first trial's agent carried a skill in its own
+  fragment (2.3 KB: `skills/owner-browser/SKILL.md`, this branch's
+  history before the line). Austin asked: "Use my browser to find a
+  one-way flight from Austin to San Francisco on November 3rd, and tell
+  me the cheapest options." The agent drove his browser through
+  agent-browser in 3 steps, and answered from Google Flights (AUS → SFO:
+  $164 cheapest, $224 nonstop).
+- **Told nothing.** A fresh agent of his, without the skill, was asked
+  to "create a random assortment of 20 or so duplicate tabs on my
+  chromium window here with existing tabs". It duplicated tabs in the
+  Chromium on its own desktop, said no other browser existed, and
+  Hermes' self-improvement then wrote it a skill
+  (`desktop-browser-tab-management`) that would send it there again.
+  Nothing it is given names the owner's browser: the managed skills, the
+  image and the CLI's skill were searched (read).
+- **Told by the line.** A test person's agent (Hermes on that model),
+  their browser a throwaway Chromium connected in Settings, two of
+  "their" tabs open in it. Each was its first try, in plain English:
+  - At "Only the tabs they open": "What tabs do I have open in my
+    Chromium window right now?" Its one step: `agent-browser --session
+    owner --cdp ws://browser.fragment.internal/devtools/browser tab`.
+    The line's first wording ("`tab` lists the tabs they let you use")
+    let it answer that the person had one tab open; worded "only the
+    tabs they let you use, at first just the ones you open", it said it
+    could see only one, and that the extension's icon gives it more.
+  - At "All my tabs and windows": "Please create a random assortment of
+    5 or so duplicate tabs on my chromium window here with existing
+    tabs". It read `--help`, listed the tabs, and opened 5 duplicates of
+    the person's tabs in that Chromium, in 9 s.
+  - Stopping the dev stack and starting it again lost the agent the tabs
+    it had opened: Chrome had stopped the extension's worker while the
+    computer was away, and the worker kept them only in memory. They are
+    kept for the browser's session now (the extension, above).
 
 ### Tests (run)
 
-- `cargo test -p fragment-core --lib owner_browser` (8): a frame's
+- `cargo test -p fragment-core --lib owner_browser` (9): a frame's
   rules, the guest's path, the extension's origin, a browser's name and
-  link, and which ends of its socket it comes back from.
+  link, which ends of its socket it comes back from, and
+  `/json/version`'s answer.
+- `cargo test -p fragment-bridge` (in `images/`):
+  `its_owner_is_told_their_browser_while_it_is_connected` (its owner's
+  turn told while a faked `/json/version` answers connected, another
+  asker's never, and none once it answers not), the line's own test, and
+  Relay's `context` as a line each.
 - `cargo test -p fragment-bridge --lib browse` (in `images/`): `browse`
   against an in-process browser (an event before each answer, the page
   loaded on the second read), and a refusal that says why in the
@@ -438,11 +488,13 @@ computers on our Hermes image.
   `{}`.
 - **The agent's tabs open in the background** (`active: false`), so the
   person's tab keeps the focus.
-- **How the agent learns of it.** Nothing in the image or the managed
-  skills tells Hermes the browser is there. The trial gave one agent the
-  skill in the appendix, in its own fragment (question 5).
+- **The line's cost.** It rides each turn its owner asks while the
+  browser is connected, about 100 tokens, and Hermes keeps each in its
+  session. Told once a chat, or when the browser comes or goes, would
+  cost less and keep more state (question 5).
 - **Hosted costs and bounds (unknown).** Each ping, 20 s apart, wakes the
-  DO. A WebSocket auto-response would answer it without waking it. The
+  DO, and so does the bridge's `/json/version` before each turn its
+  owner asks. A WebSocket auto-response would answer it without waking it. The
   largest frame the DO carries, against a full-page screenshot's
   base64, was not measured on Cloudflare.
 
@@ -463,14 +515,16 @@ computers on our Hermes image.
    tabs they switch on, or all their tabs and windows. Should "All" be
    offered? Should it ask again before taking effect, or carry a
    warning in Settings too?
-5. **Where the agent learns of it.** The trial's answer was a skill (the
-   appendix), and plain English then worked. Where should it live?
-   - A thirteenth managed skill. That set is Paul's.
-   - The platform skill. It has 143 bytes left of its 16 KiB, and the
-     skill is about 2.3 KB.
-   - Each agent's own skills, as in the trial.
-   - Hermes' own `browser.cdp_url` would replace the agent's desktop
-     browser for every call, connected or not.
+5. **Where the agent learns of it.** As built, the bridge tells it: one
+   line beside each of its owner's messages while the browser is
+   connected (the appendix), and nothing otherwise, so an agent whose
+   owner connects no browser carries nothing. Told nothing, an agent used
+   its own desktop's browser. Is the bridge the place? The alternatives:
+   - a skill (the first trial's, 2.3 KB): a thirteenth managed one (that
+     set is Paul's), the platform skill (143 bytes left of its 16 KiB),
+     or each agent's own;
+   - Hermes' own `browser.cdp_url`, which would put its browser tools on
+     the owner's browser for every call, connected or not.
 6. **The link.** As built, a browser's link can do two things: ask for a
    ticket to this computer's browser socket, and forget itself. It lasts
    until its owner forgets it, or eight newer browsers push it out. Should
@@ -509,7 +563,8 @@ computers on our Hermes image.
    mode, and Load unpacked: `extension/`.
 3. Settings → Computer → This browser → Connect this browser.
 4. In the agent's chat: `browse https://example.com`. A tab opens in the
-   "Agent" group, and the agent replies with its title.
+   "Agent" group, and the agent replies with its title, then what it was
+   told: `(told: its owner's browser, …)`.
 5. The extension's icon sets what your agents may use: only the tabs
    they open (the default), those and tabs you switch on, or all your
    tabs and windows. At "All", `tabs` in the chat lists every tab you
@@ -531,58 +586,25 @@ browser tool on a computer drives the same socket with
 `agent-browser --cdp ws://browser.fragment.internal/devtools/browser
 <command>`.
 
-## Appendix: the trial's skill
+## Appendix: what the agent is told
 
-What the trial's agent carried as `skills/owner-browser/SKILL.md` in
-its own fragment, as it now reads with the access levels. Each command
-was checked against agent-browser 0.26.0's own help and README.
+Before each turn its owner asks, while their browser is connected, our
+Hermes image's agent is handed this line beside the message
+(`relay::browser_told`, images/bridge), the name and socket as the
+computer answered `/json/version`:
 
-````markdown
----
-name: owner-browser
-description: "Use your owner's own browser (their Chrome or Chromium, with their sign-ins) whenever they say \"my browser\", \"my Chrome\", \"my tabs\" or \"my windows\", or a task needs a site they are signed in to: flights, shopping, their accounts, tidying their tabs. You drive it from your terminal with agent-browser."
----
+> Your owner's browser is connected: Chromium on macOS, on their own
+> computer, signed in as them. When they say "my browser", or its tabs
+> and windows, they mean this one. Drive it from your terminal with
+> `agent-browser --session owner --cdp
+> ws://browser.fragment.internal/devtools/browser <command>` (its
+> `--help` lists the commands). `tab` lists only the tabs they let you
+> use, at first just the ones you open; they give you more from the
+> Fragment extension's icon. Ask them before you pay, buy, book or type a
+> password there.
 
-# Your owner's browser
-
-"My browser", "my Chrome", "my tabs" and "my windows" always mean your
-owner's own browser, connected to this computer (Settings, This browser),
-never the browser on your own desktop. Drive it from your terminal with
-agent-browser, always with these two flags:
-
-    agent-browser --session owner --cdp ws://browser.fragment.internal/devtools/browser <command>
-
-What you may use of it is your owner's choice, in the Fragment extension
-(its icon in their browser, "What your agents may use"):
-
-- only the tabs you open (the default; yours are grouped as "Agent");
-- those, and tabs they switch on for you;
-- all their tabs and windows.
-
-`tab` lists exactly what you may use now. If they ask about tabs or
-windows you cannot see, say so plainly and tell them where to give you
-more: the extension's icon, "What your agents may use". Do not look for
-their browser any other way.
-
-The commands you need:
-
-- `open <url>`: the page, in a new tab of your own.
-- `tab` (the tabs you may use, across their windows, as `t1`, `t2`, …),
-  `tab t3` (switch to it), `tab new <url>`, `tab close t3`, `window new`.
-- `snapshot -i`: the page's interactive elements, each with a ref (`@e1`,
-  `@e2`, …). Take one before you act, and again after the page changes.
-- `click @e3`, `fill @e5 "San Francisco"`, `press Enter`, `select @e7
-  "Economy"`: act on a ref from the latest snapshot.
-- `get title`, `get url`, `get text @e4`: read the page.
-- `wait 2000`: let a page settle after a search.
-
-Work step by step: list or open, snapshot, act, snapshot again, until you
-have what was asked; then tell your owner what you found or did, with the
-links.
-
-- If a command fails saying your owner's browser is not connected, ask
-  them to connect it in Settings, then try again.
-- Never enter a password or payment details, and never buy or book
-  anything: stop and ask your owner to take that step themselves.
-- Before closing tabs of theirs, be sure which: name them in your reply.
-````
+It carries only what the agent cannot find by looking: which browser
+"my browser" means, the address, and that what `tab` lists is the
+owner's choice. The commands are agent-browser's own `--help`, and the
+access levels the extension's. Its last sentence is a guardrail, added
+after the trials: the browser is signed in as its owner.
