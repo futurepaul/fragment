@@ -200,7 +200,7 @@ async function onPage(c, { method, params = {}, sessionId }) {
 // when asked), heard of by every client that asked.
 async function open(url, inWindow) {
   const tab = inWindow ? (await chrome.windows.create({ url, focused: false })).tabs[0] : await chrome.tabs.create({ url, active: false });
-  access.own.add(tab.id);
+  await access.adopt(tab.id);
   await grouped(tab.id);
   await refresh();
   return tab.id;

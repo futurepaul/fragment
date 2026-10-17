@@ -8,16 +8,35 @@
 export const ACCESS = ["own", "chosen", "all"];
 
 // the tabs the agent opened, and the tabs the person chose
-export const own = new Set();
+const own = new Set();
 const chosen = new Set();
 let access = "own";
 
-// the person's choice, kept: the level across restarts, the chosen tabs
-// for this browser's session (a tab's id lasts only as long)
+// kept: the person's level across restarts; the agent's tabs and the
+// chosen ones for this browser's session (a tab's id lasts only as long),
+// so a worker Chrome stopped and started again (a dropped connection, a
+// laptop's sleep) still knows them
 export const ready = Promise.all([
   chrome.storage.local.get("access").then((v) => (access = ACCESS.includes(v.access) ? v.access : "own")),
-  chrome.storage.session.get("chosen").then((v) => (v.chosen ?? []).forEach((id) => chosen.add(id))),
+  chrome.storage.session.get(["own", "chosen"]).then((v) => {
+    (v.own ?? []).forEach((id) => own.add(id));
+    (v.chosen ?? []).forEach((id) => chosen.add(id));
+  }),
 ]);
+
+// saved only once loaded: a worker Chrome woke for a tab's event never
+// writes its empty sets over the kept ones
+async function keep() {
+  await ready;
+  return chrome.storage.session.set({ own: [...own], chosen: [...chosen] });
+}
+
+// A tab the agent opened: its own.
+export async function adopt(tabId) {
+  await ready;
+  own.add(tabId);
+  await keep();
+}
 
 // Whether the agent may use tab `tabId` now.
 export function allowed(tabId) {
@@ -26,12 +45,14 @@ export function allowed(tabId) {
 
 // The tabs the agent may use, as Chrome's targets (`{id, tabId, title, url}`).
 export async function usable() {
+  await ready;
   const targets = await chrome.debugger.getTargets();
   return targets.filter((t) => t.type === "page" && t.tabId !== undefined && allowed(t.tabId));
 }
 
 // The person's choice, from the popup: the level, or a tab chosen.
 export async function choose(m) {
+  await ready;
   if (m.access !== undefined) {
     if (!ACCESS.includes(m.access)) throw new Error(`no access ${m.access}`);
     access = m.access;
@@ -40,14 +61,14 @@ export async function choose(m) {
   if (m.tabId !== undefined) {
     if (m.on) chosen.add(m.tabId);
     else chosen.delete(m.tabId);
-    await chrome.storage.session.set({ chosen: [...chosen] });
+    await keep();
   }
 }
 
 // A tab closed: it is neither the agent's nor chosen any more.
 export async function closed(tabId) {
-  own.delete(tabId);
-  if (chosen.delete(tabId)) await chrome.storage.session.set({ chosen: [...chosen] });
+  await ready;
+  if ([own.delete(tabId), chosen.delete(tabId)].some(Boolean)) await keep();
 }
 
 // What the popup shows of it: the level, and every tab with whether the
