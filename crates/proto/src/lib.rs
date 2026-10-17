@@ -261,12 +261,16 @@ pub fn valid_secret_name(name: &str) -> bool {
 }
 
 /// A repo path the platform reads: relative, no `.` or `..` segments, no
-/// empty segments, no control bytes or backslashes, at most
+/// empty segments, no control bytes or backslashes, not beginning with a
+/// drive (`C:`, which Windows joins as another root), at most
 /// `PATH_MAX_BYTES` bytes of UTF-8.
 pub fn valid_repo_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
     !path.is_empty()
         && path.len() <= limits::PATH_MAX_BYTES
         && !path.starts_with('/')
+        && !drive
         && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
         && !path.bytes().any(|b| b < 0x20 || b == b'\\')
 }
@@ -366,6 +370,7 @@ impl std::borrow::Borrow<str> for RepoPath {
 /// unit of UTF-16.
 pub const VALID_REPO_PATH_JS: &str = r#"export function validRepoPath(path) {
   if (typeof path !== "string" || path.length === 0 || utf8Bytes(path) > PATH_MAX_BYTES || path.startsWith("/")) return false;
+  if (/^[A-Za-z]:/.test(path)) return false;
   if (!path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..")) return false;
   return !/[\x00-\x1f\\]/.test(path);
 }"#;
@@ -1606,6 +1611,11 @@ pub struct Run {
     /// What its paid steps were charged on the ledger that paid (micro-dollars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
+    /// Its input and error are withheld from this reader: they may hold
+    /// the record that started it (`via: channel`), of a channel the
+    /// reader's role may not read, or one no longer declared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withheld: bool,
 }
 
 /// `GET /api/f/<name>/runs` (viewer): newest first, how many runs are in
@@ -1772,14 +1782,14 @@ mod tests {
     /// refused shape by `parse` and by serde, then `under` for good paths.
     #[test]
     fn repo_path_is_made_only_of_a_valid_path() {
-        for good in ["site/index.html", "a", ".gitignore", "notes/2026/x y.md", "ünï/çode.txt"] {
+        for good in ["site/index.html", "a", ".gitignore", "notes/2026/x y.md", "ünï/çode.txt", "a/C:x", "ab:c", "1:x"] {
             let p = RepoPath::parse(good).expect(good);
             assert_eq!(p.as_str(), good);
             assert_eq!(serde_json::from_value::<RepoPath>(serde_json::json!(good)).unwrap(), p);
             assert_eq!(serde_json::to_value(&p).unwrap(), serde_json::json!(good));
         }
         let long = "a".repeat(limits::PATH_MAX_BYTES + 1);
-        for bad in ["", "/tmp/x", "/", "../x", "a/../../x", "..", ".", "a/./b", "a//b", "a/", "a\\b", "..\\x", "a\nb", "a\0b", long.as_str()] {
+        for bad in ["", "/tmp/x", "/", "../x", "a/../../x", "..", ".", "a/./b", "a//b", "a/", "a\\b", "..\\x", "a\nb", "a\0b", "C:/x", "c:x", "Z:", long.as_str()] {
             assert_eq!(RepoPath::parse(bad), Err(NotRepoPath(bad.to_string())), "{bad:?}");
             assert!(serde_json::from_value::<RepoPath>(serde_json::json!(bad)).is_err(), "{bad:?} from JSON");
         }

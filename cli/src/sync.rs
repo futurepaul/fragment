@@ -713,7 +713,11 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 report.withheld_deletions.push(p.to_string());
                 continue;
             }
-            fs::remove_file(p.under(dir)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
+            let Some(target) = place(dir, &p)? else {
+                report.refused.push(through_link(&p));
+                continue;
+            };
+            fs::remove_file(target).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
             state.files.remove(&p);
             report.deleted_local.push(p.to_string());
         }
@@ -859,15 +863,22 @@ fn record_conflicts(
             _ => false,
         };
         if !same {
-            match (conflict_path, git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b))) {
-                (Ok(copy), Ok(bytes)) => {
-                    atomic_write(&copy.under(ctx.dir), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+            let place = match &conflict_path {
+                Ok(copy) => place(ctx.dir, copy)?,
+                Err(_) => None,
+            };
+            match (conflict_path, place, git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b))) {
+                (Ok(copy), Some(target), Ok(bytes)) => {
+                    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
                     ctx.report.conflicts.push(format!("{path} (remote copy: {copy})"));
                 }
-                (Err(not), _) => {
+                (Ok(copy), None, _) => {
+                    ctx.report.conflicts.push(format!("{path} (remote copy not saved: {})", through_link(&copy)));
+                }
+                (Err(not), _, _) => {
                     ctx.report.conflicts.push(format!("{path} (remote copy not saved, its name {not}; it is in git history)"));
                 }
-                (_, Err(e)) => {
+                (_, _, Err(e)) => {
                     ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
                 }
             }
@@ -899,14 +910,48 @@ struct ConflictCtx<'a> {
     writer_id: &'a str,
 }
 
+/// Where a repo path is in the folder, for a write or a delete, or `None`
+/// when a folder on its way is a symlink. `RepoPath::under` keeps the path
+/// under `dir` as a string; a symlinked folder (`cfg` linked to
+/// `~/.config`) would carry a write outside all the same. The scan never
+/// follows one, so sync never writes or deletes through one either. `dir`
+/// itself may be a link: it is the person's to choose.
+fn place(dir: &Path, path: &RepoPath) -> Result<Option<PathBuf>, SyncError> {
+    let segments: Vec<&str> = path.as_str().split('/').collect();
+    let mut at = dir.to_path_buf();
+    // the folders on the way, every segment but the file's own: a repo
+    // path's few (at most PATH_MAX_BYTES / 2)
+    for seg in &segments[..segments.len() - 1] {
+        at.push(seg);
+        match fs::symlink_metadata(&at) {
+            Ok(md) if md.file_type().is_symlink() => return Ok(None),
+            Ok(_) => {}
+            // the rest of the way is made fresh, as folders
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(SyncError::Io(format!("{}: {e}", at.display()))),
+        }
+    }
+    let target = path.under(dir);
+    assert!(target.starts_with(&at), "the way checked leads to the target");
+    Ok(Some(target))
+}
+
+/// What sync says of a path it would write or delete through a symlink.
+fn through_link(path: &RepoPath) -> String {
+    format!("{path}: a folder on its way in this folder is a symlink, and sync writes and deletes nothing through one")
+}
+
 /// Fetches one file at `rev` (the listing's commit) into the folder.
 fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path, rev: &str, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
     let (path, commit) = (&entry.path, entry.last_commit_sha.as_str());
+    // the one join of a listing's path onto the folder, checked before
+    // anything is fetched for it
+    let Some(target) = place(dir, path)? else {
+        report.refused.push(through_link(path));
+        return Ok(());
+    };
     let bytes = blobs.resolve(storage.read_file(path.as_str(), rev)?).map_err(|e| SyncError::blob(path.as_str(), e))?;
     let sha = sha256_hex(&bytes);
-    // the one join of a listing's path onto the folder: a repo path, so
-    // it lands under `dir` (asserted in `under`)
-    let target = path.under(dir);
     atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
     let md = fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))?;
     let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
@@ -1077,6 +1122,33 @@ mod tests {
         assert!(second.pulled.is_empty() && second.pushed.is_empty() && second.deleted_remote.is_empty(), "{second:?}");
         assert_eq!(second.refused.len(), 4, "refused again, each pass");
         assert_eq!(mock.paths("t--k3x9", "main").len(), 4, "the repo is left as it was");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    /// Goal: a repo path is never written through a symlinked folder in
+    /// the sync folder (a folder `cfg` linked to `~/.config`: the path is
+    /// under the folder as a string, its bytes would not be). Method: a
+    /// link to a folder outside, a repo file beneath it and one beside it;
+    /// a mirror pass, then another.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_through_a_symlinked_folder() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"a"), ("cfg/fish/config.fish", b"owned"), ("cfg/top.txt", b"owned")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("through-link");
+        let outside = tmpdir("through-link-target");
+        std::os::unix::fs::symlink(&outside, dir.join("cfg")).unwrap();
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(first.pulled, ["a.md"], "{first:?}");
+        assert!(!outside.join("fish/config.fish").exists() && !outside.join("top.txt").exists(), "nothing is written through the link");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0, "the folder outside is left as it was");
+        assert_eq!(first.refused.len(), 2, "{:?}", first.refused);
+        assert!(first.refused.iter().all(|r| r.contains("is a symlink")), "{:?}", first.refused);
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(second.pushed.is_empty() && second.deleted_remote.is_empty() && second.pulled.is_empty(), "the repo's files are left alone: {second:?}");
+        assert_eq!(mock.paths("t--k3x9", "main").len(), 3);
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&outside).ok();
     }
