@@ -256,6 +256,44 @@ pub struct CheckoutSession {
     pub url: Option<String>,
 }
 
+/// A pending invoice item: a quantity change's proration, waiting for its
+/// customer's next invoice. A canceled subscription's are deleted, so its
+/// card is charged nothing more (Paul, 2026-10-17).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvoiceItem {
+    pub id: String,
+    #[serde(default)]
+    pub parent: Option<InvoiceItemParent>,
+}
+
+/// Where an invoice item came from (API versions since 2025-03-31.basil:
+/// `parent.subscription_details.subscription`, its `type` saying so).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvoiceItemParent {
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub subscription_details: Option<SubscriptionDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubscriptionDetails {
+    #[serde(default)]
+    pub subscription: Option<String>,
+}
+
+impl InvoiceItem {
+    /// The subscription it is a proration of, when it is one.
+    pub fn subscription(&self) -> Option<&str> {
+        let parent = self.parent.as_ref().filter(|p| p.kind.as_deref() == Some("subscription_details"))?;
+        parent.subscription_details.as_ref()?.subscription.as_deref()
+    }
+}
+
+/// Invoice items one cancel deletes at most (each page is 100; a
+/// subscription's prorations are a few a seat change).
+pub const PENDING_ITEMS_MAX: usize = 1_000;
+
 /// An event: its object is read by its type.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
@@ -322,13 +360,39 @@ impl Subscription {
 
 /// The form for `POST /v1/subscriptions/<id>` that brings its seat item to
 /// `want` seats, prorated onto the next invoice (decision 52); none when it
-/// bills them already. An org's last paid seat is never taken here (its
-/// subscription is canceled in Stripe's portal), so `want` is one at least.
+/// bills them already. No paid seat left is a cancel (`push`), never a
+/// quantity of zero, so `want` is one at least.
 pub fn quantity_form(snapshot: &Snapshot, want: u64) -> Option<Form> {
-    assert!(want >= 1, "a subscription keeps a seat: its last ends through the portal's cancel");
+    assert!(want >= 1, "a subscription keeps a seat: with none left it is canceled");
     (snapshot.seats != want).then(|| {
         Form::new().push("items[0][id]", snapshot.item.clone()).push("items[0][quantity]", want.to_string()).push("proration_behavior", "create_prorations")
     })
+}
+
+/// What an org's paid seats ask of its subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Push {
+    /// It bills them already, or it bills nothing and need not.
+    Nothing,
+    /// Its item's quantity, to the seats' count.
+    Quantity(Form),
+    /// No paid seat is left and it may still bill: it is canceled at once
+    /// (`DELETE /v1/subscriptions/<id>`, no proration: what is owed back is
+    /// a refund by hand in Stripe's dashboard). Its customer is kept.
+    Cancel,
+}
+
+/// The push that brings `snapshot` to `want` paid seats: a quantity while
+/// it is good, a cancel when none is left and it has not ended (an
+/// `unpaid` one too: it would charge again were its invoice paid).
+pub fn push(snapshot: &Snapshot, want: u64) -> Push {
+    if want == 0 {
+        return if snapshot.status.is_ended() { Push::Nothing } else { Push::Cancel };
+    }
+    if !snapshot.status.is_good() {
+        return Push::Nothing;
+    }
+    quantity_form(snapshot, want).map_or(Push::Nothing, Push::Quantity)
 }
 
 #[cfg(test)]
@@ -422,6 +486,40 @@ mod tests {
     fn the_last_seat_never_goes_through_a_quantity_form() {
         let snap = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 1, 10)])).snapshot().unwrap();
         quantity_form(&snap, 0);
+    }
+
+    /// Goal: a pending invoice item names the subscription it prorates only
+    /// through its parent of that type; anything else is no subscription's.
+    /// Method: the shape Stripe answers, another parent, and none.
+    #[test]
+    fn a_pending_item_names_its_subscription_through_its_parent() {
+        let item = |v: serde_json::Value| serde_json::from_value::<InvoiceItem>(v).unwrap();
+        let proration = item(json!({ "id": "ii_1", "object": "invoiceitem", "parent": { "type": "subscription_details", "subscription_details": { "subscription": "sub_1", "subscription_item": "si_1" } }, "proration": true }));
+        assert_eq!(proration.subscription(), Some("sub_1"));
+        let other = item(json!({ "id": "ii_2", "parent": { "type": "quote_details", "subscription_details": { "subscription": "sub_1" } } }));
+        assert_eq!(other.subscription(), None, "only a parent of the subscription's type names one");
+        assert_eq!(item(json!({ "id": "ii_3", "parent": null })).subscription(), None);
+        assert_eq!(item(json!({ "id": "ii_4" })).subscription(), None);
+    }
+
+    /// Goal: an org's seats bring its subscription to their count while it
+    /// is good, cancel it once none is left (whatever it is, unless it has
+    /// ended: an unpaid one could charge again), and touch nothing else.
+    /// Method: each status at zero, one and the count it has.
+    #[test]
+    fn no_paid_seat_left_cancels_and_a_count_is_pushed_while_good() {
+        let at = |status: &str| subscription(status, json!([item("si_a", SEAT_LOOKUP_KEY, 2, 10)])).snapshot().unwrap();
+        for s in ["active", "trialing", "past_due", "unpaid", "paused", "incomplete"] {
+            assert_eq!(push(&at(s), 0), Push::Cancel, "{s}, no seat left");
+        }
+        for s in ["canceled", "incomplete_expired"] {
+            assert_eq!(push(&at(s), 0), Push::Nothing, "{s}: it bills nothing already");
+            assert_eq!(push(&at(s), 3), Push::Nothing, "{s}: it buys again, through Checkout");
+        }
+        assert_eq!(push(&at("active"), 2), Push::Nothing, "it bills them already");
+        assert!(matches!(push(&at("past_due"), 3), Push::Quantity(_)), "past due is good");
+        assert_eq!(push(&at("unpaid"), 3), Push::Nothing, "lapsed: no count is pushed to it");
+        assert_eq!(push(&at("active"), 1), Push::Quantity(quantity_form(&at("active"), 1).unwrap()));
     }
 
     #[test]

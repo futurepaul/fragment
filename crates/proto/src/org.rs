@@ -81,14 +81,26 @@ pub struct SeatView {
     pub trial_ends: Option<i64>,
 }
 
-/// A seat waiting for a person: its org named it to their email, and they
-/// hold another seat (or belong to another org) already.
+/// An offer to a person: an org named an email of theirs for a seat, an
+/// admin's place, or both. Nothing of it is theirs until they accept it
+/// (`POST /api/seat/offers/{id}/accept`), which moves them from an org
+/// they are in; they may decline it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfferedSeat {
     pub id: String,
     pub org: OrgRef,
-    pub kind: SeatKind,
+    /// The seat offered (`None`: an admin's place alone).
+    pub kind: Option<SeatKind>,
+    pub admin: bool,
+    /// An operator's comp, outside Stripe.
+    pub comped: bool,
+    /// Who offered it: the email of the person who did (an admin, or an
+    /// operator who is a person; `None`: an operator key no one holds, or
+    /// someone since gone).
+    pub from: Option<String>,
+    /// The email of theirs it names.
+    pub email: String,
 }
 
 /// A person's seat, their org, and the seats offered them.
@@ -99,6 +111,10 @@ pub struct MySeat {
     /// The org they are in without a seat (an admin who holds none).
     pub org: Option<OrgRef>,
     pub admin: bool,
+    /// They pay for their org (their Checkout made its subscription): only
+    /// they open its billing (Stripe's portal).
+    #[serde(default)]
+    pub pays: bool,
     pub offered: Vec<OfferedSeat>,
 }
 
@@ -133,13 +149,13 @@ pub struct SetSleeps {
 }
 
 /// One of an org's people: an admin, a seat's holder, or both, held by a
-/// person (`person`) or pending on an email.
+/// person (`person`) who accepted it, or offered to an email.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrgMember {
     /// The row's id: a seat is changed or removed by it.
     pub id: String,
-    /// `None`: pending on `email` until someone signs in with it verified.
+    /// `None`: an offer to `email`, until whoever holds it accepts it.
     pub person: Option<String>,
     /// The email it was offered to; a held one shows its holder's latest.
     pub email: String,
@@ -157,6 +173,10 @@ pub struct OrgView {
     pub name: String,
     pub created_at: i64,
     pub members: Vec<OrgMember>,
+    /// Who pays: the person whose Checkout made its subscription (`None`:
+    /// comped only, or never paid). Only they step down as its admin.
+    #[serde(default)]
+    pub payer: Option<String>,
 }
 
 /// `POST /api/admin/seats`: an operator comps a seat of `kind` for

@@ -21,6 +21,16 @@ not sell it: operators' comps, and a deployment's `default_plan` (dev and
 the e2e make their people seats with it). Decision 25's status records
 it. Below, a "kind" a buyer chooses is that one kind.
 
+**Nobody joins anything without their own yes** (Paul, 2026-10-17, from
+the security audit's H1: "keep teams, but nobody joins an org without
+accepting"). An org is made only once a Checkout is paid; everything an
+org gives someone (a seat, an admin's place) is an offer, theirs once
+they accept it; signing in attaches nothing; and the card's owner always
+manages what it pays for. A wipe cancels what the wiped person would pay
+(the audit's M4): "cancel the subscription immediately, keep the Stripe
+customer" (invoices for tax and refunds) and drop the platform's link to
+it. "The model" and "A wipe", below, say how; "Build order", slice 11.
+
 Paul (2026-10-08): "before we go live, we'll need stripe billing.
 guests signups will be free, but to be able to have your own agents and
 fragments you need a paid seat. $100 for a sleeping agent without
@@ -115,22 +125,72 @@ the dashboard. Worth taking:
 ### An org is the billing account
 
 - **Every seat belongs to an org.** A person who pays for themselves
-  pays through an org of one, made at their first Checkout and named by
-  their email. A team is the same thing with more seats. One code path,
-  whatever the size.
-- **People in an org** are its admins and its seat holders, by npub.
+  pays through an org of one, named by their email. It is made when
+  their first Checkout is paid, never before: a Checkout begun and left
+  makes no org and no Stripe customer. A team is the same thing with more
+  seats. One code path, whatever the size. Only a paid Checkout and an
+  operator's comp make an org.
+- **People in an org** are its admins and its seat holders, by npub, each
+  in it by their own yes: an offer they accepted, their own paid
+  Checkout, or an operator's comp of them (operators are trusted). One
+  function writes a row's person (registry/offers.rs `enroll`), and each
+  caller names the yes it acts on.
   - An admin manages seats and billing, and need not hold a seat (a
     finance person can be a guest admin).
-  - An org keeps at least one admin.
+  - An org keeps at least one admin who said yes (an admin's place
+    offered is not one).
   - A person is in at most one org, and holds at most one seat.
-- **A seat** has a kind, and either a holder (an npub) or a pending
+- **A seat** has a kind, and either a holder (an npub) or an offer to an
   email. A paid seat's kind is `seat_always_on`, the one sold; a comped
   one may also be `seat` (a computer that sleeps).
-  - A pending seat waits on the email as a share invite does
-    (decision 48). Whoever signs in with that verified email takes it.
-    The platform mails the link through Cloudflare Email Sending.
-  - A person who already holds a seat is asked in the shell whether to
-    move. Their old seat goes, prorated.
+- **Offers.** An org's admin offers a seat, an admin's place, or both,
+  to an email, while the org pays (an org that pays for nothing offers
+  nothing: it buys again first).
+  - It waits on the email as a share invite does (decision 48), but
+    nothing of it is anyone's until whoever signs in with that email,
+    verified, accepts it; they may decline it. Signing in attaches
+    nothing: before 2026-10-17 a sign-in took the oldest row offered to
+    its email, an admin's place included, which let anyone enroll anyone
+    (the audit's H1).
+  - The platform mails it through Cloudflare Email Sending, saying who
+    offered it and where to answer (`/settings`; a guest's welcome shows
+    it too). The person sees every offer to an email of theirs, its
+    org's name and who made it (`GET /api/seat`'s `offered`).
+  - One of the org's own members given a seat has it at once: they are
+    in the org by their yes already. An admin's place is power over the
+    org, so it is offered even to one of its members (its accept joins
+    their row: the review of #367).
+  - An admin's offer is accepted only while its org pays: one that
+    lapsed buys again before anyone takes its offers (an operator's comp
+    stands alone).
+  - A paid seat offered bills from the offer (decision 52).
+- **A move.** Accepting an offer while in another org moves them: their
+  old row goes, its seat with it (prorated). Alone there (offers are no
+  one: they do not count), that org ends, every offer it made
+  withdrawn, its subscription canceled at once. Their going is refused
+  only when they are the last admin of an org other people are in (no
+  one would manage it: `fragment_core::org::moving`).
+- **Leaving.** A seat's holder who is no admin leaves by their own yes
+  (`POST /api/seat/leave`): their seat goes, prorated. An admin steps
+  down first.
+- **Who pays** is the person whose Checkout made the org's subscription
+  (the registry's `org_payers`), while it has not ended (one set to
+  cancel at its period's end still counts: it may be renewed).
+  - No other admin removes them as an admin, or takes their seat (403).
+  - **Only they open its billing** (Stripe's portal, which renews the
+    subscription and changes its card and email); its other admins
+    manage its seats in the shell, never its billing. This is the
+    default the review of #367 set, Paul's to reverse.
+  - As they go (stepping down, leaving, moving, or wiped), the
+    subscription is canceled at once, its pending prorations deleted
+    (below), and once that lands the org forgets their customer (kept at
+    Stripe for its invoices): no one left in it opens that customer's
+    portal or buys on it.
+  - Another admin buys the org again (it pays for nothing now) on a
+    customer of their own, and then pays for it.
+
+  So no card pays for an org its owner no longer manages, and no admin
+  can give themselves the paid seat and drop the card's owner.
 - **A seat is `paid` or `comped`.**
   - Paid seats are counted on the org's one Stripe subscription.
   - Comped seats are an operator's, outside Stripe: the team, friends,
@@ -174,13 +234,44 @@ A removed, lapsed or downgraded person keeps everything they own. Paying
 again restores it. Nothing is deleted by billing; the wipe stays the
 operator's.
 
+### A wipe
+
+An operator's wipe (docs/api.md, "Operators: wiping a person") has a
+`billing` step, before its last (`fragment_core::wipe::STEPS`). In one
+registry turn the person's place in their org goes, and what each org
+then asks of Stripe is queued and recorded (`wiped_orgs`), so a call cut
+anywhere (a failed cancel, a restart) goes on with it; the step is done
+once Stripe has it all (`fragment_core::org::wiped`):
+
+- **Their org ends** when no one else is in it or they are its last
+  admin: every row of it goes (the others' seats end, their plans
+  pushed; offers withdrawn), its subscription is canceled at once, and
+  the org's row is dropped once the cancel lands. Wiping the sole admin
+  of an org others hold seats in so ends their seats: no one is left to
+  manage or pay for it (they keep everything they own, and buy or are
+  offered a seat again). The operator's dry run names them, and so does
+  the step's note.
+- **An org they pay for** (their Checkout made its subscription, and it
+  has not ended) has its subscription canceled at once even when it goes
+  on without them, as when a payer goes any other way: its other paid
+  seats lapse until its admins buy again (on a customer of their own),
+  and once the cancel lands the org forgets the wiped person's customer.
+  A wiped person's card is charged nothing more.
+- **Any other** goes on without them, its seats' count pushed.
+
+The Stripe customer is never deleted: it keeps the invoices (tax,
+refunds, which stay by hand in Stripe's dashboard). The registry's link
+to it goes with the org's row, or, an org that goes on, as it forgets
+its payer.
+
 ### Where each fact lives
 
 For docs/MODEL.md's truth map:
 
 | Fact | Where | Written by |
 |---|---|---|
-| An org, its admins, its seats (holder or pending email, kind, paid or comped) | the registry | org admins and operators, through the API |
+| An org, its admins, its seats (holder or offered email, kind, paid or comped) | the registry | a paid Checkout (an org of one, its buyer), org admins (offers; their own members at once), the people offered (accept, decline, leave) and operators (comps), through the API; a wipe (its `billing` step) |
+| Who pays for an org | the registry's `org_payers`: the buyer of its current subscription | the Checkout's completion |
 | A subscription's status, trial end and period end | Stripe; the registry keeps a copy | the webhook, the Checkout return and a daily reconcile, each by fetching it from Stripe |
 | How many paid seats | the registry's seats; Stripe's item quantity is a copy | every seat change pushes it; the reconcile repairs a drift |
 | A person's plan and seat standing | their ledger | the registry alone |
@@ -199,10 +290,18 @@ the move if it ever outgrows that, not before.
 
 ### Objects
 
-- **Customer:** one per org, made at the org's first Checkout. Its
-  metadata: `fragment_org`, `fragment_deployment`. Customers are never
-  looked up by email: finite-mono has its own customers with the same
-  emails.
+- **Customer:** one per org, made by Stripe's Checkout when the org's
+  first one is paid (`customer_email`, the buyer's), never before; the
+  registry keeps the one its fetched subscription names (the only writer
+  of `orgs.customer`). An org's customer is its payer's: only its last
+  payer buys again on it, anyone else on a customer of their own (which
+  the org then keeps), and no Checkout ever names another org's (the
+  audit's H1: an org made before payment once put a victim's card on an
+  attacker's customer). The org forgets it once its payer goes.
+  Customers are never looked up by email: finite-mono has its own
+  customers with the same emails. A customer is never deleted: an org
+  that ends, or a wipe, keeps it for its invoices and drops the
+  registry's link to it.
 - **Products and prices:** two Products, the two things sold: "Fragment
   always-on seat", its Price monthly at $200 by the lookup key
   `fragment_seat_always_on_month`, and "Fragment credit, $25", its Price
@@ -217,12 +316,24 @@ the move if it ever outgrows that, not before.
   it is not fragment's (2026-10-15). Tax as finite-mono's: code
   `txcd_10103001`, tax-exclusive, automatic tax on (decision 54).
 - **Subscription:** one per org, with one item, the seat's. Its quantity
-  is the org's paid seats, pending ones included. Metadata as the
-  customer's.
+  is the org's paid seats, offered ones included. Its metadata:
+  `fragment_org`, `fragment_deployment`.
 - **Checkout** makes the subscription (`mode: subscription`).
-  - It carries `client_reference_id` (the org), the metadata, a card
-    always, and `allow_promotion_codes` (discounts are Stripe's,
-    below).
+  - It carries `client_reference_id` (the org: the one its payment will
+    make, its id minted and carried in the metadata, or the org buying
+    again), the metadata, a card always, and `allow_promotion_codes`
+    (discounts are Stripe's, below).
+  - It bills `customer_email` (a new org's buyer, or anyone but its last
+    payer buying an org again; Checkout makes the customer), or the
+    org's own `customer` when its last payer buys it again, for its paid
+    seats (`quantity`), so Stripe's page shows the whole. Only an admin
+    of their org that pays for nothing (lapsed, its payer gone, or
+    comped and ended) buys again in it.
+  - Paid, it makes the org, its buyer its admin and its paid seat's
+    holder, and who pays (`apply_checkout`). A Checkout paid whose buyer
+    can no longer take its seat (they joined another org meanwhile, left
+    theirs, are being wiped, or another subscription pays already) seats
+    no one, and its subscription is canceled at once.
   - The return URL is the shell's welcome,
     `/welcome?checkout={CHECKOUT_SESSION_ID}`, and Checkout's Back goes
     to `/welcome?checkout=canceled` ("The shell", below). A credit
@@ -239,11 +350,26 @@ the move if it ever outgrows that, not before.
     once never leave Stripe a seat short, and a push that fails is tried
     again. A subscription fetched with other counts (a webhook, the
     reconcile) is pushed back to the seats'.
+- **No paid seat left** (a member left, moved or was wiped, an offer
+  declined) cancels the subscription at once (`fragment_core::stripe::
+  push`): `DELETE /v1/subscriptions/{id}`, the subscription fetched first
+  and never one not this deployment's, no proration (what is owed back
+  is a refund by hand in Stripe's dashboard), its customer kept. Then
+  the prorations its seat changes left pending on its customer are
+  deleted (`GET /v1/invoiceitems?customer=&pending=true`, each of its
+  subscription's `DELETE /v1/invoiceitems/{id}`), so the card is charged
+  nothing more (Paul, 2026-10-17). Cancels are queued (`stripe_cancels`)
+  and tried again as pushes are, so a failed one is not lost; one Stripe
+  has no such subscription of is done. An admin's removal of the org's last paid seat
+  is still refused: the portal cancels at the period's end, and that is
+  the admin's way to stop paying. An org no one is in or offered is
+  dropped once nothing of it bills.
 - **Billing portal:** our own portal configuration, never the default
   (finite-mono's readiness audit pins the default). It offers card,
   invoices, billing address and cancel at period end. Subscription
   update stays off, because seats are ours. The shell asks the cell for
-  a portal session.
+  a portal session, which only who pays for the org gets (403 to its
+  other admins: "Who pays", above).
 - **Credit packs** (decision 25: "more credit can be bought"; decision
   55). Checkout `mode: payment` for a fixed pack, its session
   id the `GrantCredit` id on the buyer's ledger. An org admin may buy
@@ -278,6 +404,14 @@ subscription from Stripe rather than trusting what it was handed:
      `.updated` and `.deleted`.
    - An event older than the last one applied to its subscription
      changes nothing.
+   - An event for an org that is gone (it ended, its subscription
+     canceled) is answered 200 and dropped.
+   - A live subscription naming an org the registry has no row of (its
+     Checkout's completion lost, its buyer's return never made) has the
+     Checkout that made it looked up (`GET /v1/checkout/sessions?
+     subscription=`) and applied as its completion would be; with none
+     to find, it is canceled after an hour's grace, unless an org takes
+     it meanwhile, so no card pays for an org that is not there.
    - A failure answers 500, and Stripe retries for up to three days.
 3. **A daily reconcile**, on the registry's alarm. It refetches every
    org's subscription and pushes quantities that drifted. It logs what
@@ -322,8 +456,10 @@ Checked against finite-mono's code (2026-10-08):
   the webhook signing secret, bound by name. They are read only by
   `cell/src/keys.rs`, and `secrets_store.rs`'s cache bound grows by
   two.
-  - The key's grants: Customers, Checkout Sessions, Subscriptions and
-    portal sessions written; Products and Prices read.
+  - The key's grants: Customers, Checkout Sessions, Subscriptions,
+    invoice items (a cancel deletes its pending prorations, 2026-10-17:
+    Paul's to add to the live key) and portal sessions written; Products
+    and Prices read.
 - **The deployment's config** gains `stripe: {key, webhook_secret,
   portal}` (store names and the portal configuration's id). Without
   it, billing is off: seats are comped only. That covers dev, the
@@ -362,16 +498,28 @@ Checked against finite-mono's code (2026-10-08):
     - sending a foreign event (finite-mono's, or another
       deployment's).
 - **An e2e section, `billing`.** Each case below is a check:
-  - **Valid:** buy, add and remove a seat; a pending seat claimed at
-    sign-in; a 30-day trial; a pack; a comped seat.
+  - **Valid:** buy (nothing made before the payment), offer and remove a
+    seat; an offer accepted, declined, a move, a leave; a 30-day trial; a
+    pack; a comped seat.
   - **Invalid:** a forged or foreign event; a member changing seats; a
     `seat` bought, added, or made a trial code's kind; a code used twice;
-    a full code; a guest creating; a lapsed person waking.
-  - **Replay:** an event twice; events out of order.
+    a full code; a guest creating; a lapsed person waking; who pays
+    removed by another admin; a move that would strand an org.
+  - **Replay:** an event twice; events out of order; an offer accepted
+    or declined twice.
   - **Restart:**
     - the node dies between Stripe's change and our row, and the
       reconcile repairs it;
-    - no webhook at all, and the Checkout return carries it.
+    - no webhook at all, and the Checkout return carries it;
+    - a wipe's `billing` step cut by a failed cancel and a restart, then
+      finished.
+  - **The audit's H1**, each of its steps refused (`consent`): no org or
+    customer before a payment; an offer, an admin's place or a seat,
+    attaches no one, at once or at a sign-in; someone offered buys their
+    own seat on a customer of their own, never the offering org's; who
+    pays is never moved out from under the others. **Its M4** (`wiped`):
+    a wipe cancels the subscription, keeps its customer, and drops the
+    org.
 - **The hosted lane**, on a preview with the sandbox.
   - It creates subscriptions through the API with `pm_card_visa`,
     since Checkout's page needs a person.
@@ -430,7 +578,8 @@ Checked against finite-mono's code (2026-10-08):
   - **Its actions:** comp a seat, end a comp, and grant credit (built
     today). The wipe stays in the CLI.
 - **Invite.** Give an email and a kind, then either:
-  - **comp it:** a pending comped seat in a new org of one;
+  - **comp it:** a comped seat in a new org of one, theirs at once when
+    the email is a person's, else offered, theirs once they accept it;
   - **trial it:** a mail with a trial link.
 - **Trial codes.**
   - **Create:** name, days, capacity and expiry, with the code
@@ -481,10 +630,14 @@ settings page)").
     made, in the chat, its computer's phase); the person may type at
     once, and send once the agent is in the chat. Each thing is made
     once (a retry or a reload reuses what was made).
-- **Who skips it:** someone who is no guest (a seat bought, an org's
-  claimed at sign-in, or the deployment's plan) goes straight to the
-  first run, or home with a chat of their own. A Checkout's return for
-  someone with a chat of their own is applied, then home.
+- **What an org offers them** (a seat, an admin's place) shows first on
+  it, with who offered it and what accepting does (a move from an org
+  they are in), with Accept, which goes on to the first run, and Decline
+  (billing.js `offers`).
+- **Who skips it:** someone who is no guest (a seat bought, an offer
+  accepted, an operator's comp, or the deployment's plan) goes straight
+  to the first run, or home with a chat of their own. A Checkout's
+  return for someone with a chat of their own is applied, then home.
 - **An invitee** (a guest someone shared something with) lands on what
   was shared: home, with a note of what a guest may do and what a seat
   gives. Its "Get a seat" opens the welcome, whose "Not now" goes back.
@@ -505,13 +658,20 @@ for a seat once someone holds one:
   which opens the welcome.
 - **A seat holder** sees their seat, its kind, who provides it, this
   month's usage and credit, and "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
-  it adds "let it sleep".
-- **An org admin** sees the seats table: email, kind, and pending or
-  held. From it they:
-  - add a seat by email (an always-on one);
-  - remove a seat;
-  - add an admin;
-  - open "Payment and invoices" (Stripe's portal).
+  it adds "let it sleep". One who is no admin has "Leave" beside their
+  org.
+- **Anyone offered something** sees each offer, its org, who made it and
+  what accepting does, with Accept and Decline; a refusal (a move that
+  would strand an org) is said under it.
+- **An org admin** sees the seats table: email, kind, offered (shown
+  "invited") or held, and who pays. From it they:
+  - offer a seat by email (an always-on one; someone in the org has it
+    at once);
+  - remove a seat, or withdraw its offer;
+  - offer an admin's place;
+  - open "Payment and invoices" (Stripe's portal), only who pays (its
+    other admins see neither it nor a way to take who pays's seat or
+    place; who pays stepping down is warned it cancels at once).
 
   The table shows once someone besides its admin is in the org (a seat,
   held or invited, or another admin). An admin alone in it, who pays for
@@ -525,22 +685,28 @@ The shell offers a guest nothing to make.
 
 | Route | Who |
 |---|---|
-| `POST /api/billing/checkout {kind?, trialCode?}` (`kind` only `seat_always_on`, the default) | a guest, or an org admin with no subscription |
+| `POST /api/billing/checkout {kind?, trialCode?}` (`kind` only `seat_always_on`, the default) | someone in no org (an org of one, made once paid), or an admin of their org that pays for nothing |
 | `POST /api/billing/sessions/<id>` | the Checkout return |
-| `POST /api/billing/portal` | an org admin |
+| `POST /api/billing/portal` | who pays for the org (403 to its other admins: Paul's to reverse) |
 | `POST /api/billing/packs {member?}` | a seat holder, or an org admin for a member |
+| `GET /api/seat` | a person: their seat, org, and every offer to an email of theirs |
+| `POST /api/seat/offers/<id>/accept`, `/decline` | the person offered it |
+| `POST /api/seat/leave` | a seat holder who is no admin |
 | `GET /api/org` | an admin |
-| `POST /api/org/seats {email, kind?}` (`kind` as Checkout's), `DELETE /api/org/seats/<id>` | an org admin |
-| `POST /api/org/admins {email}`, `DELETE /api/org/admins/<npub>` | an org admin |
+| `POST /api/org/seats {email, kind?}` (`kind` as Checkout's; an offer), `DELETE /api/org/seats/<id>` | an org admin, while it pays |
+| `POST /api/org/admins {email}` (an offer), `DELETE /api/org/admins/<id>` | an org admin, while it pays; who pays steps down only themselves |
 | `PUT /api/computers/<id>/sleep {allowed}` | the computer's owner on `seat_always_on` |
 | `POST /api/stripe/webhook` | Stripe, signed |
 | `/api/admin/people`, `/people/<npub>`, `/invites`, `/trial-codes`, `/orgs`, `/health`, `/log` | operators |
 
 ### Limits
 
-- Seats per org: 200.
-- Admins per org: 10.
-- Pending seats mailed per org per day: 50.
+- Seats per org: 200, offered ones included.
+- Admins per org: 10, offered ones included.
+- Offers mailed per org per day (UTC): 50 (`fragment_core::org::
+  OFFER_MAILS_PER_ORG_DAILY_MAX`; the next is 429).
+- Orgs offering one email something at once: 10 (`OFFERS_PER_EMAIL_MAX`;
+  it accepts or declines one first).
 - Trial days: 1 to 30.
 - A code's capacity: 1 to 10,000.
 - Packs: a fixed list.
@@ -606,6 +772,25 @@ The shell offers a guest nothing to make.
     - docs/finite-integration.md: its "Billing, orgs, entitlements" row,
       and "organizations with several members" and Stripe leave "Not
       built in fragment, on purpose".
+11. **Consent, and a wipe's billing** (built 2026-10-17, branch
+    `claude/org-consent`; the security audit's H1 and M4, Paul's calls
+    of 2026-10-17: keep teams, nobody joins without accepting; a wipe
+    cancels and keeps the customer):
+    - orgs made only once paid; Checkout on `customer_email` or the
+      org's own customer, never another's;
+    - offers, accepted, declined, a move, a leave; signing in attaches
+      nothing; one writer of a row's person (`enroll`);
+    - who pays, guarded; offers' gates (an org that pays, a person not
+      being wiped, an email's offers, an org's mails a day);
+    - no paid seat left cancels at once (`stripe_cancels`); an org with
+      no one goes once nothing of it bills;
+    - a wipe's `billing` step;
+    - after the review of #367 (same day): who pays is whoever's card
+      may still be charged, and their going cancels at once; only they
+      open billing (a default for Paul); the org's customer is its
+      payer's, forgotten when they go; an admin's place is offered even
+      to a member; pending prorations deleted on a cancel; an orphan
+      subscription found or canceled.
 
 ## Decided (Paul, 2026-10-08)
 
@@ -615,7 +800,7 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 |---|---|---|
 | Who may buy a seat | any guest; trials and comps for the rest | 51 |
 | Orgs | a self-paying person is an org of one; one org per person; an admin may be seatless | 51 |
-| When a pending seat bills | from the invite | 52 |
+| When an offered seat bills | from the offer | 52 |
 | Upgrades and downgrades | at once, prorated | 52 |
 | Lapse | today's `canceled`; nothing deleted; paying restores; retention later | 53 |
 | A removed member's fragments | stay theirs; org-owned fragments later | 53 |
@@ -623,6 +808,9 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 | Tax | Stripe automatic tax, prices before tax | 54 |
 | Packs | one $25 pack, kept until spent | 55 |
 | What is sold (Paul, 2026-10-15) | the $200 always-on seat and the $25 pack; no $100 seat | 25 (its status) |
+| Teams (Paul, 2026-10-17) | kept: several admins, seats for others; nobody joins an org without accepting | 51 (its status) |
+| Who opens an org's billing (the review of #367, a default) | only who pays for it; its other admins manage seats, never billing; Paul's to reverse | 51 (its status) |
+| A wipe's subscription (Paul, 2026-10-17) | canceled at once; the Stripe customer kept (invoices, tax, refunds), the link to it dropped | 53 (its status) |
 | Trials | our codes on Stripe's trial; time-held places | 56 |
 | A $200 computer | awake by default, "let it sleep" | 57 |
 | Previews | `xtask deploy --branch` registers its sandbox endpoint and uploads its signing secret | 58 |

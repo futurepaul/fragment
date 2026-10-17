@@ -13,8 +13,12 @@ use fragment_proto::org::SeatKind;
 pub const SEATS_PER_ORG_MAX: u64 = 200;
 /// Admins one org has (pending ones included); it keeps at least one.
 pub const ADMINS_PER_ORG_MAX: u64 = 10;
-/// Orgs that may offer one email a seat at once (it takes one).
+/// Orgs that may offer one email a seat or an admin's place at once (it
+/// accepts one, or declines them).
 pub const OFFERS_PER_EMAIL_MAX: u64 = 10;
+/// Offers one org has mailed in a day (UTC), at most: each offer is a mail
+/// to an address its admin typed, so this bounds what an org sends.
+pub const OFFER_MAILS_PER_ORG_DAILY_MAX: u64 = 50;
 /// An org's name: an org of one is named by its email, so as long as one.
 pub const ORG_NAME_MAX_BYTES: usize = 320;
 /// People whose plans one run of the registry's alarm pushes.
@@ -70,6 +74,101 @@ impl Status {
     pub fn is_good(self) -> bool {
         matches!(self, Status::Trialing | Status::Active | Status::PastDue)
     }
+
+    /// Stripe will never bill it again: `canceled` and
+    /// `incomplete_expired` are final. Any other may still charge a card
+    /// (an `unpaid` one whose invoice is paid comes back), so an org that
+    /// ends cancels it.
+    pub fn is_ended(self) -> bool {
+        matches!(self, Status::Canceled | Status::IncompleteExpired)
+    }
+}
+
+/// A person's place in their org, as they go from it (accepting another
+/// org's offer, leaving, stepping down, or wiped): what the registry
+/// counts of its rows. Offers are no one yet: only people count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    /// They admin it.
+    pub admin: bool,
+    /// Its admins who said yes (people, not offers), them included.
+    pub admins: u64,
+    /// Its other people (members who said yes); offers waiting are not.
+    pub others: u64,
+    /// They pay for it (their Checkout made its subscription) and that has
+    /// not ended: their card may still be charged (one set to cancel at its
+    /// period's end may be renewed, so it counts).
+    pub pays: bool,
+}
+
+/// What a person's going does to their org.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Going {
+    /// Their row goes; the org stays, its seats' count pushed.
+    Leaves,
+    /// No one else is in it: it ends with them, every offer it made
+    /// withdrawn, its subscription canceled at once.
+    Ends,
+}
+
+/// A person's going, and whether it cancels their org's subscription at
+/// once: it ends, or their card pays for it. A card's owner who goes
+/// stops paying as they go, so no card pays for an org its owner no longer
+/// manages (the audit's H1, and the review of #367).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gone {
+    pub going: Going,
+    pub cancels: bool,
+}
+
+/// Why a person may not go from their org to another's offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stuck {
+    /// They are the last admin of an org other people are in: no one
+    /// would manage it.
+    LastAdmin,
+}
+
+impl Stuck {
+    pub fn message(self, org: &str) -> String {
+        match self {
+            Stuck::LastAdmin => format!("you are the last admin of {org}: make someone else its admin first"),
+        }
+    }
+}
+
+/// A person leaving their org by their own yes to another's offer: alone
+/// in it (offers aside), it ends with them; else they go, unless they are
+/// its last admin. Their card stops paying for it either way.
+pub fn moving(p: Place) -> Result<Gone, Stuck> {
+    assert!(!p.admin || p.admins >= 1, "an admin is counted among its admins");
+    let going = match (p.others, p.admin && p.admins == 1) {
+        (0, _) => Going::Ends,
+        (_, true) => return Err(Stuck::LastAdmin),
+        (_, false) => Going::Leaves,
+    };
+    let gone = Gone { going, cancels: going == Going::Ends || p.pays };
+    assert!(!p.pays || gone.cancels, "a payer who goes stops paying");
+    Ok(gone)
+}
+
+/// What a wipe of a person does to their org: never refused. It ends when
+/// no one else is in it or they are its last admin (everyone else's seat
+/// there lapses: no one is left to manage or pay for it); its subscription
+/// is canceled when it ends or their card pays for it, so a wiped person's
+/// card is charged nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wiped {
+    pub ends: bool,
+    pub cancels: bool,
+}
+
+pub fn wiped(p: Place) -> Wiped {
+    assert!(!p.admin || p.admins >= 1, "an admin is counted among its admins");
+    let ends = p.others == 0 || (p.admin && p.admins == 1);
+    let w = Wiped { ends, cancels: ends || p.pays };
+    assert!(!w.ends || w.cancels, "an org that ends bills nothing more");
+    w
 }
 
 /// A seat its holder holds, as the registry reads it.
@@ -230,6 +329,47 @@ mod tests {
         let good: Vec<_> = ALL.iter().filter(|s| s.is_good()).collect();
         assert_eq!(good, [&Status::Trialing, &Status::Active, &Status::PastDue]);
         assert_eq!(Status::parse("Active"), None);
+        // what may still charge a card is what an org that ends cancels
+        let ended: Vec<_> = ALL.iter().filter(|s| s.is_ended()).collect();
+        assert_eq!(ended, [&Status::Canceled, &Status::IncompleteExpired]);
+        assert!(ALL.iter().all(|s| !(s.is_good() && s.is_ended())), "nothing good is ended");
+    }
+
+    fn place(admin: bool, admins: u64, others: u64, pays: bool) -> Place {
+        Place { admin, admins, others, pays }
+    }
+
+    /// Goal: accepting another org's offer moves a person unless it
+    /// strands people with no admin; alone (offers aside), their org ends,
+    /// its offers withdrawn and its subscription canceled; and a card's
+    /// owner who goes stops paying at once, so no card pays for an org its
+    /// owner left. Method: each shape of place, offers counting for nothing.
+    #[test]
+    fn a_move_strands_no_one_and_a_payer_stops_paying() {
+        let gone = |going, cancels| Ok(Gone { going, cancels });
+        assert_eq!(moving(place(true, 1, 0, true)), gone(Going::Ends, true), "alone, paying for themselves: it ends");
+        assert_eq!(moving(place(true, 1, 0, false)), gone(Going::Ends, true), "alone with only offers waiting: it ends, they withdrawn");
+        assert_eq!(moving(place(false, 1, 3, false)), gone(Going::Leaves, false), "a seat holder goes");
+        assert_eq!(moving(place(true, 2, 2, false)), gone(Going::Leaves, false), "one of two admins goes");
+        assert_eq!(moving(place(true, 2, 2, true)), gone(Going::Leaves, true), "who pays goes: its subscription canceled at once");
+        assert_eq!(moving(place(false, 1, 2, true)), gone(Going::Leaves, true), "who pays, no admin now, goes: the same");
+        assert_eq!(moving(place(true, 1, 1, false)), Err(Stuck::LastAdmin), "the last admin of someone else");
+        assert_eq!(moving(place(true, 1, 4, true)), Err(Stuck::LastAdmin), "paying frees no one from managing it");
+        assert!(Stuck::LastAdmin.message("Acme").contains("Acme"));
+    }
+
+    /// Goal: a wipe is never refused; its org ends when no one is left to
+    /// manage it, and its subscription is canceled when it ends or the
+    /// wiped person's card pays for it; otherwise it goes on, its count
+    /// pushed. Method: each shape of place.
+    #[test]
+    fn a_wipe_cancels_what_the_wiped_would_pay() {
+        assert_eq!(wiped(place(true, 1, 0, true)), Wiped { ends: true, cancels: true }, "an org of one");
+        assert_eq!(wiped(place(true, 1, 3, false)), Wiped { ends: true, cancels: true }, "the sole admin: the others' seats lapse");
+        assert_eq!(wiped(place(true, 2, 3, true)), Wiped { ends: false, cancels: true }, "the payer of an org another admin keeps");
+        assert_eq!(wiped(place(true, 2, 3, false)), Wiped { ends: false, cancels: false }, "one admin of two, someone else's card");
+        assert_eq!(wiped(place(false, 1, 2, false)), Wiped { ends: false, cancels: false }, "a seat holder");
+        assert_eq!(wiped(place(false, 0, 0, false)), Wiped { ends: true, cancels: true }, "the last row");
     }
 
     fn held(kind: SeatKind, comped: bool, status: Option<Status>, sleeps: bool) -> Option<Held> {

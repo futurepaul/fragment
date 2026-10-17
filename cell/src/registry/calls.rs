@@ -385,6 +385,9 @@ pub(crate) struct WipeFacts {
     pub sessions: u64,
     pub pictures: Vec<WipePicture>,
     pub done: Option<u32>,
+    /// The orgs its `billing` step settles (their own, and any whose
+    /// subscription their card pays), and what it does to each.
+    pub orgs: Vec<fragment_proto::wipe::OrgFound>,
 }
 
 impl Call for WipeLook {
@@ -425,6 +428,27 @@ pub(crate) struct WipeDone {
 impl Call for WipeStep {
     const PATH: &'static str = "/wipe/step";
     type Answer = WipeDone;
+}
+
+/// `POST /wipe/billing`: the `billing` step of a wipe of `identity`, as far
+/// as one call goes (registry/wipe.rs `wipe_billing`): done once Stripe has
+/// what each org it settled asks; `note` says what it did, or waits for.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeBilling {
+    pub identity: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeBilled {
+    pub done: bool,
+    /// The orgs it settled.
+    pub orgs: u64,
+    pub note: Option<String>,
+}
+
+impl Call for WipeBilling {
+    const PATH: &'static str = "/wipe/billing";
+    type Answer = WipeBilled;
 }
 
 /// `POST /test`: the levers of a fleet with a test secret

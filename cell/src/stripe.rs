@@ -49,6 +49,12 @@ impl Stripe {
         self.send(Method::Get, path, None, None).await
     }
 
+    /// A DELETE: Stripe's take no idempotency key, each being idempotent of
+    /// itself (a subscription's cancel; its caller fetches it first).
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> CellResult<T> {
+        self.send(Method::Delete, path, None, None).await
+    }
+
     /// A POST, once by `idempotency` (Stripe answers a repeat as the first).
     pub async fn post<T: DeserializeOwned>(&self, path: &str, form: &Form, idempotency: &str) -> CellResult<T> {
         assert!(!idempotency.is_empty() && idempotency.len() <= 255, "an idempotency key is 1-255 characters");

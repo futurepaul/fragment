@@ -76,6 +76,28 @@ pub struct Found {
     /// The rows their and their agents' lists hold (each a fragment's,
     /// with a role or the one they left).
     pub lists: u64,
+    /// The orgs the `billing` step settles: theirs, and any whose
+    /// subscription their card pays (docs/billing.md).
+    #[serde(default)]
+    pub orgs: Vec<OrgFound>,
+}
+
+/// An org a wipe settles, and what it does to it (`fragment_core::org::
+/// wiped`): it ends (no one else in it, or they its last admin: every row
+/// goes, its subscription canceled), or it goes on without them, its
+/// subscription canceled when their card pays for it, else its seats'
+/// count pushed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgFound {
+    pub org: String,
+    pub name: String,
+    pub ends: bool,
+    /// Its subscription is canceled at once (its Stripe customer kept).
+    pub cancels: bool,
+    /// The others whose seats there lapse, by the email each was offered
+    /// at (at most an org's seats).
+    pub lapses: Vec<String>,
 }
 
 impl Found {
@@ -92,6 +114,7 @@ impl Found {
             && computer
             && !self.ledger
             && self.lists == 0
+            && self.orgs.is_empty()
     }
 }
 

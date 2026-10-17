@@ -189,7 +189,7 @@ impl RegistryCell {
         }
         let rows = self.rows::<Row>(
             "SELECT o.id, o.name, o.created_at, o.status, o.customer, o.subscription, o.period_end, o.cancel_at_end,
-               (SELECT COUNT(*) FROM org_members WHERE org = o.id AND admin = 1) AS admins,
+               (SELECT COUNT(*) FROM org_members WHERE org = o.id AND admin = 1 AND person IS NOT NULL) AS admins,
                (SELECT COUNT(*) FROM org_members WHERE org = o.id AND seat IS NOT NULL AND comped = 0) AS paid_seats,
                (SELECT COUNT(*) FROM org_members WHERE org = o.id AND seat IS NOT NULL AND comped = 1) AS comped_seats,
                (SELECT COUNT(*) FROM org_members WHERE org = o.id AND person IS NULL) AS pending
@@ -253,6 +253,7 @@ impl RegistryCell {
             .rows::<F>(
                 "SELECT 'plan' AS queue, person AS target, tries, due FROM plan_syncs WHERE tries > 0
                  UNION ALL SELECT 'quantity' AS queue, org AS target, tries, due FROM quantity_syncs WHERE tries > 0
+                 UNION ALL SELECT 'cancel' AS queue, subscription AS target, tries, due FROM stripe_cancels WHERE tries > 0
                  ORDER BY tries DESC LIMIT 50",
                 vec![],
             )?

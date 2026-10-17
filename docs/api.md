@@ -439,8 +439,8 @@ learns the page is there. Its API decides again on every call.
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves) |
 | `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Stable and canary") |
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
-| `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
-| `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
+| `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
+| `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` (`queue`: `plan`, `quantity`, or `cancel`, a subscription whose cancel failed) |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
@@ -483,8 +483,13 @@ agents' in other people's fragments, `<fragment> (<role>, <identity>)`)
 each `{count, names, more}` (at most 50 names), `computer` `{computer,
 phase, saves, backups, more, snapshot}` (`backups`: the objects under its
 saves' prefix in R2, one page's count), `ledger` whether their ledger
-holds anything, `lists` the rows their and their agents' lists hold. A
-dry run's is what a wipe deletes; a wiped person's, what is left.
+holds anything, `lists` the rows their and their agents' lists hold, and
+`orgs` the orgs its `billing` step settles, each `OrgFound {org, name,
+ends, cancels, lapses}` (`ends`: no one else is in it, or they are its
+last admin; `cancels`: its subscription is canceled at once, as it ends
+or their card pays for it; `lapses`: the emails of the others whose
+seats there end). A dry run's is what a wipe deletes; a wiped person's,
+what is left.
 
 **The steps** (`fragment_core::wipe::STEPS`, run by the router:
 cell/src/wipe.rs), each idempotent and recorded done in the Registry only
@@ -543,6 +548,17 @@ once it is whole:
   and their agents' lists (`Principal`s) emptied the same way: a change
   still on its way from a fragment is taken and kept nowhere.
 - `pictures`: their picture's bytes, unless another identity set the same.
+- `billing` (docs/billing.md, "A wipe"; the security audit's M4): in one
+  registry turn their place in their org goes, and every row of an org
+  that ends with them (no one else in it, or they its last admin: the
+  others' seats end, their plans pushed); then Stripe has what each org
+  asks: the subscription of an org that ends, or that their card pays
+  for, canceled at once (its customer kept; the org's row, its link to
+  it, dropped once the cancel lands), any other's seats' count pushed.
+  Each is recorded as it is queued, so a call cut anywhere (a cancel
+  Stripe failed, a restart) goes on with it; done once none waits. Its
+  `note` says what it did (each org, whose seats end), or what it waits
+  for.
 - `registry`, in one turn: every row naming them or their agents
   (identities, keys, sign-in subjects and emails, picture, agent fragments,
   sessions, consents). The wipe's own row stays: the identity, its times,
@@ -560,8 +576,9 @@ person, signed in with the same account, finds them connected: they go at
 WorkOS); the computer's container snapshot, until Cloudflare expires it
 (30 days, never restored); the history Cloudflare keeps of their jobs'
 Workflow instances, and its Workers logs, for their retention;
-code.storage's soft-deleted repos, until it cleans them; what they wrote
-in other people's fragments; a push their browser subscribed to on a
+code.storage's soft-deleted repos, until it cleans them; their org's
+Stripe customer and its invoices (tax, refunds by hand), its
+subscription canceled; what they wrote in other people's fragments; a push their browser subscribed to on a
 fragment they were not in (a public one), until its push service says it
 is gone; and the wipe's row. A fragment none of their lists names (its
 owner's list never took its create) is not found (the debt ledger).
@@ -1929,12 +1946,24 @@ that names a kind to buy (Checkout's, an org admin's seat, a trial code)
 takes `seat_always_on`, its default; `seat` is 400 (not sold). Every seat is in an org, the one
 who pays; a person is in at most one org and holds at most one seat. An
 org's members (`OrgMember`) are its admins, its seats' holders, or both,
-each a person (`person`, an npub) or an email a seat waits on until
-someone signs in with it verified, who then takes it (the oldest offer
-first, if they are in no org yet). A seat is **comped** (an operator's,
-outside Stripe; always good) or **paid** (counted on the org's Stripe
-subscription, good while it is `trialing`, `active` or `past_due`: not
-built yet).
+each a person (`person`, an npub) who said yes, or an **offer** to an
+email (`person` null): nobody joins an org without their own yes
+(docs/billing.md, "The model"; the security audit's H1). Whoever signs
+in with an offer's email, verified, sees it and accepts or declines it;
+signing in attaches nothing. Accepting while in another org moves them
+(alone there, that org ends, its subscription canceled at once), unless
+they are the last admin of an org others are in or offered, or pay for
+one others are in while it bills on (409). A seat is **comped** (an
+operator's, outside Stripe; always good) or **paid** (counted on the
+org's Stripe subscription, offered ones included, good while it is
+`trialing`, `active` or `past_due`). An org is made only by a paid
+Checkout (Billing, below) or an operator's comp. Who pays is the person
+whose Checkout made its subscription (`OrgView`'s `payer`; `MySeat`'s
+`pays`), while it has not ended: no other admin removes them or takes
+their seat (403); only they open its billing (the portal: a default, Paul's
+to reverse); and as they go (stepping down, leaving, moving, wiped) its
+subscription is canceled at once, its pending prorations deleted, and
+the org forgets their customer.
 
 The registry is the one writer of a seat holder's plan and seat. Each
 change to a seat pushes, within seconds (the registry's alarm, tried
@@ -1952,16 +1981,19 @@ fails, and made again, asks again).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}], guest, offer: {kind, seatMicros, includedMicros, packMicros}}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org (`MySeat`); `guest`, whether they are a guest (decision 49: they make nothing, and are offered a seat): they hold no seat, and their ledger gives them no plan of its own, its plan `guest` (a new person's on a deployment whose plan is guest, or an operator's) or a seat's plan kept after the seat ended (`canceled`; `fragment_core::org::guest`); and `offer`, what is sold, in micro-dollars: the one seat (`seat_always_on`), its monthly price and the credit it includes each month, and a credit pack's price, core's constants (`fragment_core::stripe::offer`), which every page shows them from |
+| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, pays, offered: [OfferedSeat {id, org: {id, name}, kind?, admin, comped, from?, email}], guest, offer: {kind, seatMicros, includedMicros, packMicros}}`: their seat, the org they are in, and every offer to an email of theirs (`MySeat`; `kind` null: an admin's place alone; `from`, the email of the person who made it: an admin, or an operator signed in as one; null for an operator key no one holds), oldest first; `guest`, whether they are a guest (decision 49: they make nothing, and are offered a seat): they hold no seat, and their ledger gives them no plan of its own, its plan `guest` (a new person's on a deployment whose plan is guest, or an operator's) or a seat's plan kept after the seat ended (`canceled`; `fragment_core::org::guest`); and `offer`, what is sold, in micro-dollars: the one seat (`seat_always_on`), its monthly price and the credit it includes each month, and a credit pack's price, core's constants (`fragment_core::stripe::offer`), which every page shows them from |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
-| `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
-| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`), held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
-| `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes (an admin's row stays, seatless), its holder's seat canceled, the count pushed. The org's last paid seat is 400: its subscription is canceled in the portal |
-| `POST /api/org/admins` | the same | `{email}` → `{admin: OrgMember, created}`: an admin too (a seat they hold stays), or waiting on the email; at most 10 |
-| `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes). The last admin is 400 |
-| `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
+| `POST /api/seat/offers/{id}/accept` | the person an offer names (an email of theirs; anyone else, or none: 404) | `{}` or no body (anything else is 400) → `MySeat`: the offer is theirs: its seat held, its admin's place taken, in its org; from another org, a move (409 when they are the last admin of an org other people are in; alone there, it ends, its offers withdrawn; its payer's move cancels its subscription at once); an admin's offer of an org that pays for nothing now is 400 (a comp's stands). One of their own org's (an admin's place) joins their row. Accepted already, the same answer (a replay, a merged one's too) |
+| `POST /api/seat/offers/{id}/decline` | the same | `{}` or no body → `MySeat`: the offer goes (a paid one bills no more). Declined already, or accepted, 404 |
+| `POST /api/seat/leave` | a seat's holder who is no admin | `{}` or no body → `MySeat`: they leave their org, their seat canceled, its count pushed. An admin is 400 (they step down first); in no org, 400 |
+| `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}], payer?}` (a held seat shows its holder's latest sign-in's email; `person` null: an offer; `payer`, who pays); anyone else is 403 |
+| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`) offered to the email (an admin's place offered it already gains the seat), mailed with who offered it; one of the org's members has it at once (409 holding a seat here). Refused for a person being wiped (404), an email `OFFERS_PER_EMAIL_MAX` (10) orgs offer something already (400), and past 50 offers mailed by the org that day, UTC (429). It bills from the offer: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
+| `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes, or its offer is withdrawn (an admin's row stays, seatless), its holder's seat canceled, the count pushed. Who pays's own seat is 403 to anyone but them; the org's last paid seat is 400: its subscription is canceled in the portal |
+| `POST /api/org/admins` | the same, while the org pays | `{email}` → `{admin: OrgMember, created, mailed}`: an admin's place offered to the email (a seat offered it already gains it), one of the org's own members' too (an admin's place is theirs only by their yes), mailed, its gates as a seat's; an admin already is answered as they are; at most 10, offered ones included |
+| `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes), or an admin's place offered withdrawn. The last admin who said yes is 400; who pays is 403 to anyone but themselves, and stepping down themselves cancels its subscription at once |
+| `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person's comp is theirs at once (operators are trusted); an email no one signs in with is offered it, theirs once they accept it. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
 | `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
-| `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
+| `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes, an offer's whole. None is 404 |
 | `GET /api/admin/orgs/{id}` | the same | → `OrgView` |
 | `POST /api/admin/trials` | the same | `NewTrialCode {name, kind?, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `kind` only `seat_always_on`, the default (`seat` is 400); `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
 | `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
@@ -1969,8 +2001,10 @@ fails, and made again, asks again).
 | `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
 
 `/api/admin/*` takes an operator's signature, or the shell's session of
-a person the deployment's `operators` names (decision 59). A wipe takes
-the person's rows, and an org it leaves empty.
+a person the deployment's `operators` names (decision 59). A wipe's
+`billing` step takes the person's place in their org, ends an org it
+leaves with no one or no admin, and cancels what they pay for
+(Operators: wiping a person, below).
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 
@@ -1979,13 +2013,25 @@ On a deployment that sells seats (its config's `stripe`; else these are
 Checkout: a monthly subscription to one always-on seat, $200, at its
 price's lookup key (`fragment_seat_always_on_month`; the only seat sold,
 Paul, 2026-10-15), a card always, Stripe's automatic tax unless the
-deployment turns it off, and promotion codes allowed. Their org is made,
-of one, if they are in none; its admin may buy again once its
-subscription has ended (their lapsed seat becomes the always-on one). A
-subscription with any other item is not fragment's. An org has one Stripe customer and one
-subscription; everything fragment makes carries `fragment_deployment`
-(the platform's origin) in its metadata, and nothing without this
-deployment's is touched (the account is finite-mono's too).
+deployment turns it off, and promotion codes allowed. Nothing is made
+before it is paid: someone in no org buys an org of one, its id minted
+into the session and the org made once paid (its customer the one
+Checkout makes for their `customer_email`); an admin of their org that
+pays for nothing (lapsed, its payer gone, or comped and ended) buys again
+in it, for its paid seats (their lapsed seat becomes the always-on one),
+on its own customer when they are its last payer, else on one of their
+own, which the org then keeps. No Checkout names another org's customer
+or another person's. A live subscription whose event names an org the
+registry lacks (its completion lost, no return) has its Checkout looked
+up and applied; with none, it is canceled after an hour's grace. A Checkout
+paid whose buyer can no longer take its seat (they joined another org
+meanwhile, left theirs, are being wiped, or another subscription pays)
+seats no one, and its subscription is canceled at once. A subscription
+with any other item is not fragment's. An org has one Stripe customer
+and one subscription; everything fragment makes carries
+`fragment_deployment` (the platform's origin) in its metadata, and
+nothing without this deployment's is touched (the account is
+finite-mono's too).
 
 An org's paid seats are the registry's, and the subscription's one
 item's quantity a copy of their count, held and pending: each change
@@ -1993,7 +2039,12 @@ queues the org, and the registry's alarm pushes the count read fresh
 (`POST /v1/subscriptions/{id}`, `create_prorations`), so two changes at
 once never leave Stripe a seat short; a subscription fetched with
 another count (changed in Stripe's dashboard) is pushed back to the
-seats'.
+seats'. No paid seat left (a member left, moved or was wiped, an offer
+declined) cancels the subscription at once (`DELETE
+/v1/subscriptions/{id}`, fetched first and only this deployment's, no
+proration, its customer kept), queued and tried again as pushes are; an
+org no one is in or offered is dropped once nothing of it bills, and a
+later event of it is answered and dropped.
 
 The registry writes an org's subscription only as fetched from Stripe:
 by the Checkout's return, by the webhook, and daily by the registry's
@@ -2005,10 +2056,10 @@ and orgs).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat, for 31 minutes. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes; nothing is made until it is paid. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
-| `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
+| `POST /api/billing/portal` | who pays for the asker's org (`MySeat`'s `pays`; anyone else, its other admins included, 403) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
 | `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |
 
 ### Jobs and triggers

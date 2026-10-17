@@ -8,11 +8,18 @@
 //!
 //! A Checkout page stands where Stripe's would (`GET /pay/<session>`, its
 //! "Pay" a POST to the same): `cargo xtask dev` people pay there by hand.
-//! Levers: complete a session as a card would (`complete`), move a
-//! subscription to a status (`set_status`: a trial's end, a decline, a
-//! cancel), hold events back and let them go (`hold_events`,
-//! `release_events`), send any body to the endpoint (`deliver_raw`), and
-//! read what was asked of it (`requests`, `subscription`).
+//! A Checkout names a customer, or an email for the one its completion
+//! makes (`customer_email`), and is found by the subscription it made; a
+//! subscription is canceled at once by its `DELETE`; a prorated quantity
+//! change leaves a pending invoice item, listed and deleted as Stripe's
+//! (`/v1/invoiceitems`). Levers: complete a session as a card would
+//! (`complete`), move a subscription to a status (`set_status`: a trial's
+//! end, a decline, a cancel) or to cancel at its period's end
+//! (`set_cancel_at_end`), hold events back, lose some, and let the rest go
+//! (`hold_events`, `drop_held`, `release_events`), send any body to the
+//! endpoint (`deliver_raw`), read what was asked of it (`requests`,
+//! `subscription`, `customers`, `pending_items`), and fail requests as an
+//! outage would (`fail`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -47,7 +54,10 @@ pub struct Sub {
 struct Session {
     id: String,
     mode: String,
-    customer: String,
+    /// The customer it bills: one named at its making, or (none named) the
+    /// one its completion makes for `customer_email`, as Stripe's does.
+    customer: Option<String>,
+    customer_email: Option<String>,
     /// (lookup key's price id, quantity)
     lines: Vec<(String, u64)>,
     metadata: BTreeMap<String, String>,
@@ -91,6 +101,11 @@ struct State {
     held: Option<Vec<Value>>,
     /// Events an API call made, delivered once its answer is on its way.
     pending: Vec<Value>,
+    /// Requests answered 500 while set (`fail`): (method, path prefix).
+    failing: Vec<(String, String)>,
+    /// Pending invoice items: id → (customer, subscription, amount), the
+    /// prorations a quantity change made, waiting for an invoice.
+    items: BTreeMap<String, (String, String, i64)>,
     delivered: Vec<(String, String, u16)>,
 }
 
@@ -152,6 +167,16 @@ impl State {
             return Err(format!("{session} is {}", s.status));
         }
         let mut events = vec![];
+        // none named at its making: a subscription's Checkout makes one for
+        // the email it was given, as Stripe's does (a payment's too, here)
+        if s.customer.is_none() {
+            let id = self.next("cus");
+            let mut fields = BTreeMap::new();
+            fields.insert("email".to_string(), s.customer_email.clone().unwrap_or_default());
+            self.customers.insert(id.clone(), fields);
+            s.customer = Some(id);
+        }
+        let customer = s.customer.clone().expect("a session completes with its customer");
         if s.mode == "subscription" {
             let id = self.next("sub");
             let mut items = vec![];
@@ -165,7 +190,7 @@ impl State {
             };
             let sub = Sub {
                 id: id.clone(),
-                customer: s.customer.clone(),
+                customer,
                 status: status.into(),
                 items,
                 metadata: s.sub_metadata.clone(),
@@ -260,6 +285,9 @@ impl Stripe {
             let f = form(&req.body);
             let mut s = st.lock().expect("stripe state");
             s.asked.push(Asked { method: req.method.clone(), path: req.path.clone(), form: f.clone() });
+            if s.failing.iter().any(|(m, p)| *m == req.method && req.path.starts_with(p.as_str())) {
+                return error(500, "api_error", "the fake fails this request (a lever)");
+            }
             let idem = (req.method == "POST").then(|| req.header("idempotency-key").map(|k| format!("{}:{k}", req.path))).flatten();
             if let Some((status, v)) = idem.as_ref().and_then(|k| s.idempotent.get(k)).cloned() {
                 return Response::json(status, &v);
@@ -378,6 +406,52 @@ impl Stripe {
         self.state.lock().expect("stripe state").subs.get(id).cloned()
     }
 
+    /// The customers it holds, by id (a wipe keeps an org's: invoices, tax).
+    pub fn customers(&self) -> Vec<String> {
+        self.state.lock().expect("stripe state").customers.keys().cloned().collect()
+    }
+
+    /// The pending invoice items (prorations) of `subscription`, by amount.
+    pub fn pending_items(&self, subscription: &str) -> Vec<i64> {
+        self.state.lock().expect("stripe state").items.values().filter(|(_, s, _)| s == subscription).map(|(_, _, a)| *a).collect()
+    }
+
+    /// A subscription is set to cancel at its period's end, as the portal
+    /// sets it, or not, and its event is delivered.
+    pub fn set_cancel_at_end(&self, sub: &str, on: bool) -> Result<(), String> {
+        let event = {
+            let mut s = self.state.lock().expect("stripe state");
+            let object = {
+                let sb = s.subs.get_mut(sub).ok_or_else(|| format!("no subscription {sub}"))?;
+                sb.cancel_at_period_end = on;
+                sb.clone()
+            };
+            let object = s.sub_json(&object);
+            s.event("customer.subscription.updated", object)
+        };
+        self.deliver(vec![event]);
+        Ok(())
+    }
+
+    /// The events held back of `kind` are lost, as a webhook Stripe gave up
+    /// on is; the rest stay held.
+    pub fn drop_held(&self, kind: &str) {
+        let mut s = self.state.lock().expect("stripe state");
+        if let Some(held) = s.held.as_mut() {
+            held.retain(|e| e["type"] != kind);
+        }
+    }
+
+    /// Requests of `method` under `prefix` are answered 500 while `on` (a
+    /// cancel that fails, as an outage would), or answered again.
+    pub fn fail(&self, method: &str, prefix: &str, on: bool) {
+        let mut s = self.state.lock().expect("stripe state");
+        s.failing.retain(|(m, p)| !(m == method && p == prefix));
+        if on {
+            s.failing.push((method.to_string(), prefix.to_string()));
+        }
+    }
+
     /// A subscription's JSON, as the API answers it.
     pub fn subscription_json(&self, id: &str) -> Option<Value> {
         let s = self.state.lock().expect("stripe state");
@@ -441,9 +515,19 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
         }
         ("POST", "/v1/checkout/sessions") => {
             let mode = f.get("mode").cloned().unwrap_or_default();
-            let customer = f.get("customer").cloned().unwrap_or_default();
-            if !s.customers.contains_key(&customer) {
-                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such customer: '{customer}'") } }));
+            // a customer named, or an email for the one its completion makes
+            // (Stripe takes one or the other, and `customer_update` only
+            // with a customer)
+            let customer = f.get("customer").cloned();
+            let customer_email = f.get("customer_email").cloned();
+            match (&customer, &customer_email) {
+                (Some(c), None) if s.customers.contains_key(c) => {}
+                (Some(c), None) => return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such customer: '{c}'") } })),
+                (Some(_), Some(_)) => return (400, json!({ "error": { "type": "invalid_request_error", "message": "You may only specify one of these parameters: customer, customer_email." } })),
+                (None, _) if f.keys().any(|k| k.starts_with("customer_update[")) => {
+                    return (400, json!({ "error": { "type": "invalid_request_error", "message": "customer_update can only be used with customer." } }));
+                }
+                (None, _) => {}
             }
             let lines: Vec<(String, u64)> = rows(f, "line_items").into_iter().map(|r| (r.get("price").cloned().unwrap_or_default(), r.get("quantity").and_then(|q| q.parse().ok()).unwrap_or(1))).collect();
             if mode == "subscription" && lines.iter().any(|(p, _)| s.key_of_price(p).is_none()) {
@@ -455,6 +539,7 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
                 id: s.next("cs"),
                 mode,
                 customer,
+                customer_email,
                 lines,
                 metadata: nested(f, "metadata"),
                 sub_metadata: f.iter().filter_map(|(k, v)| k.strip_prefix("subscription_data[metadata][").and_then(|r| r.strip_suffix(']')).map(|m| (m.to_string(), v.clone()))).collect(),
@@ -470,6 +555,31 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             s.sessions.insert(session.id.clone(), session);
             (200, v)
         }
+        // the Checkout Session that made a subscription (`?subscription=`)
+        ("GET", "/v1/checkout/sessions") => {
+            let wanted = req.pairs.iter().find(|(k, _)| k == "subscription").map(|(_, v)| v.clone());
+            let data: Vec<Value> = s.sessions.values().filter(|x| wanted.is_some() && x.subscription == wanted).map(|x| s.session_json(x, base)).collect();
+            (200, json!({ "object": "list", "data": data, "has_more": false }))
+        }
+        // a customer's pending invoice items (`?customer=&pending=true`), as
+        // API versions since basil name their subscription: in their parent
+        ("GET", "/v1/invoiceitems") => {
+            let customer = req.pairs.iter().find(|(k, _)| k == "customer").map(|(_, v)| v.clone()).unwrap_or_default();
+            let data: Vec<Value> = s
+                .items
+                .iter()
+                .filter(|(_, (c, _, _))| *c == customer)
+                .map(|(id, (c, sub, amount))| {
+                    json!({ "id": id, "object": "invoiceitem", "customer": c, "amount": amount, "proration": true, "invoice": null,
+                            "parent": { "type": "subscription_details", "subscription_details": { "subscription": sub } } })
+                })
+                .collect();
+            (200, json!({ "object": "list", "data": data, "has_more": false }))
+        }
+        ("DELETE", p) if p.starts_with("/v1/invoiceitems/") => match s.items.remove(&p["/v1/invoiceitems/".len()..]) {
+            Some(_) => (200, json!({ "id": &p["/v1/invoiceitems/".len()..], "object": "invoiceitem", "deleted": true })),
+            None => (404, json!({ "error": { "type": "invalid_request_error", "message": "No such invoiceitem" } })),
+        },
         ("GET", p) if p.starts_with("/v1/checkout/sessions/") => match s.sessions.get(&p["/v1/checkout/sessions/".len()..]) {
             Some(session) => (200, s.session_json(session, base)),
             None => (404, json!({ "error": { "type": "invalid_request_error", "message": "No such checkout.session" } })),
@@ -486,13 +596,24 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             if matches!(sub.status.as_str(), "canceled" | "incomplete_expired") {
                 return (400, json!({ "error": { "type": "invalid_request_error", "message": "A canceled subscription can only update its cancellation_details and metadata." } }));
             }
+            let prorated = f.get("proration_behavior").map(String::as_str) == Some("create_prorations");
             for row in rows(f, "items") {
                 let q = row.get("quantity").and_then(|q| q.parse::<u64>().ok());
                 match (row.get("id"), row.get("price")) {
                     (Some(item), _) if row.get("deleted").map(String::as_str) == Some("true") => sub.items.retain(|(i, _, _)| i != item),
                     (Some(item), _) => {
                         if let Some(it) = sub.items.iter_mut().find(|(i, _, _)| i == item) {
+                            let was = it.2;
                             it.2 = q.unwrap_or(it.2);
+                            // a prorated change leaves its difference pending,
+                            // for the customer's next invoice (a seat's whole
+                            // price here: the fake prorates no days)
+                            if prorated && it.2 != was {
+                                let unit = s.prices.get(&it.1).map_or(0, |(_, a)| *a);
+                                let amount = (it.2 as i64 - was as i64) * unit;
+                                let ii = s.next("ii");
+                                s.items.insert(ii, (sub.customer.clone(), id.clone(), amount));
+                            }
                         }
                     }
                     (None, Some(price)) => {
@@ -511,6 +632,23 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             let v = s.sub_json(&sub);
             s.subs.insert(id, sub);
             let event = s.event("customer.subscription.updated", v.clone());
+            s.pending.push(event);
+            (200, v)
+        }
+        // a cancel, at once (Stripe's `DELETE /v1/subscriptions/{id}`): its
+        // customer kept; one ended already is refused, as Stripe refuses it
+        ("DELETE", p) if p.starts_with("/v1/subscriptions/") => {
+            let id = p["/v1/subscriptions/".len()..].to_string();
+            let Some(mut sub) = s.subs.get(&id).cloned() else {
+                return (404, json!({ "error": { "type": "invalid_request_error", "message": "No such subscription" } }));
+            };
+            if matches!(sub.status.as_str(), "canceled" | "incomplete_expired") {
+                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such subscription: '{id}' is canceled already") } }));
+            }
+            sub.status = "canceled".into();
+            let v = s.sub_json(&sub);
+            s.subs.insert(id, sub);
+            let event = s.event("customer.subscription.deleted", v.clone());
             s.pending.push(event);
             (200, v)
         }

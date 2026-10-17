@@ -132,6 +132,17 @@ fn print_found(f: &Found) {
         println!("  computer {} ({}): {} saves, {}{more} objects in R2{snapshot}", c.computer, c.phase.as_deref().unwrap_or("none"), c.saves, c.backups);
     }
     println!("  ledger: {}; list rows: {}", if f.ledger { "holds entries" } else { "empty" }, f.lists);
+    // what the `billing` step does to each org (docs/billing.md)
+    for o in &f.orgs {
+        let what = match (o.ends, o.cancels) {
+            (true, true) => "ends: its subscription canceled at once",
+            (true, false) => "ends",
+            (false, true) => "goes on without them: its subscription, which they pay, canceled at once",
+            (false, false) => "goes on without them: its seats' count pushed",
+        };
+        let lapses = if o.lapses.is_empty() { String::new() } else { format!("; seats that end: {}", o.lapses.join(", ")) };
+        println!("  org {} ({}): {what}{lapses}", o.name, o.org);
+    }
 }
 
 #[cfg(test)]
