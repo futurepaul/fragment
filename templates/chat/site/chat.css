@@ -359,6 +359,8 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .composer textarea:disabled { opacity: .6; }
 .composer-actions { display: flex; align-items: center; gap: 6px; min-height: 36px; }
 .composer-actions .note { flex: 1; min-width: 0; font-size: 13px; color: var(--text-tertiary); padding-left: 4px; }
+.composer-actions .note[data-outside] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note .outside-mark { width: 12px; height: 12px; margin-right: 5px; vertical-align: -1px; fill: none; stroke: currentColor; stroke-width: 2; }
 .composer-actions .note:empty { display: none; }
 .composer-actions .note a { color: var(--accent-blue); }
 .send { margin-left: auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; display: grid; place-items: center; background: var(--primary); color: var(--primary-foreground); transition: opacity .14s, transform .12s; }

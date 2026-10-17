@@ -601,6 +601,14 @@ the roster has stays an ordinary step: a card never says something was
 done that asked no one. An underscore opens or closes emphasis only at a
 word's edge, so `[SISTER_NAME]` and `snake_case` read as written.
 
+**A chat led outside the platform says so.** When the shell's roster
+says the chat's lead runs on its owner's own provider (`runsOn: {on:
+"own", model}`), the composer's note reads "<model> · outside the
+platform", its title saying what goes there: what the person sends in
+this chat goes to that provider, with no agent of theirs taking their
+private things out first (decision 62, proposed). Only on a note no
+other line holds (signing in, read-only, setup).
+
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
 frame of a fragment its person owns (docs/api.md, The shell), so in its

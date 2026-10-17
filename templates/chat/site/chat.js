@@ -1015,6 +1015,33 @@ export function mount(root) {
       input.placeholder = "Write your first message…";
       $("note").textContent = "Send turns on once your agent is in this chat.";
     } else if (setup) $("note").textContent = "";
+    outsideNote(first);
+  }
+  // A chat whose lead runs outside the platform (the shell's roster says
+  // where: decision 62, proposed) says so where its person writes: what
+  // they send goes to that model's provider, and no agent of theirs takes
+  // their private things out first. Only on a note no other line holds.
+  function outsideNote(first) {
+    const note = $("note");
+    const shown = note.dataset.outside;
+    const ours = shown !== undefined && note.textContent === shown;
+    if (shown !== undefined && !ours) {
+      delete note.dataset.outside;
+      note.removeAttribute("title");
+    }
+    if (note.childNodes.length && !ours) return;
+    const r = first ? state.roster.find((x) => x.identity === first)?.runsOn : null;
+    const text = canPost() && !setupHolds() && r?.on === "own" ? `${r.model} · outside the platform` : "";
+    if (ours && shown === text) return;
+    if (!text) {
+      delete note.dataset.outside;
+      note.removeAttribute("title");
+      return note.replaceChildren();
+    }
+    note.dataset.outside = text;
+    note.title = `${who(first).name} runs on ${r.model}, outside the platform: what you send in this chat goes to that provider.`;
+    note.innerHTML = svg("globe", "outside-mark");
+    note.append(text);
   }
 
   function messageNode(m) {
