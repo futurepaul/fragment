@@ -9,7 +9,7 @@
 // encoder and decoders the cell uses; this file is the transport.
 use crate::api::{encode_q, send_retrying, timeout_for, Client as HostClient, CodedError, Failed, Replay, CONNECT_TIMEOUT};
 use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
-use fragment_proto::StorageToken;
+use fragment_proto::{NotRepoPath, RepoPath, StorageToken};
 use serde_json::Value;
 use std::fmt;
 
@@ -126,8 +126,16 @@ pub struct CommitInfo {
 
 /// One staged file operation for the commit builder.
 pub enum Change {
-    Upsert { path: String, bytes: Vec<u8> },
-    Delete { path: String },
+    Upsert { path: RepoPath, bytes: Vec<u8> },
+    Delete { path: RepoPath },
+}
+
+/// A whole listing at a ref: its blobs, and the paths in it that are not
+/// repo paths (`TreePage::refused`), which nothing pulls.
+#[derive(Debug, Default)]
+pub struct Listed {
+    pub entries: Vec<TreeEntry>,
+    pub refused: Vec<NotRepoPath>,
 }
 
 pub struct Author {
@@ -257,8 +265,8 @@ impl CodeStorage {
     /// Full recursive file listing at a ref, cursor-paginated (bounded).
     /// Every entry names its path, size, and last commit, or the listing
     /// fails: a missing commit read as "" made every file look changed.
-    pub fn list_files(&self, git_ref: &str) -> Result<Vec<TreeEntry>, CsError> {
-        let mut out = Vec::new();
+    pub fn list_files(&self, git_ref: &str) -> Result<Listed, CsError> {
+        let mut out = Listed::default();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_LIST_PAGES {
             let mut path = format!("/files/metadata?ref={}&limit={LIST_PAGE}", encode_q(git_ref));
@@ -267,9 +275,10 @@ impl CodeStorage {
             }
             let (status, body) = self.req("GET", &path, None, None)?;
             self.check(status, &body)?;
-            let (entries, next) = core_cs::tree_page(&Self::json(&body)?).map_err(CsError::Malformed)?;
-            out.extend(entries);
-            match next {
+            let page = core_cs::tree_page(&Self::json(&body)?).map_err(CsError::Malformed)?;
+            out.entries.extend(page.entries);
+            out.refused.extend(page.refused);
+            match page.next {
                 Some(c) => cursor = Some(c),
                 None => return Ok(out),
             }
@@ -297,8 +306,8 @@ impl CodeStorage {
         let files: Vec<FileChange> = changes
             .iter()
             .map(|change| match change {
-                Change::Upsert { path, bytes } => FileChange::Upsert { path, bytes },
-                Change::Delete { path } => FileChange::Delete { path },
+                Change::Upsert { path, bytes } => FileChange::Upsert { path: path.as_str(), bytes },
+                Change::Delete { path } => FileChange::Delete { path: path.as_str() },
             })
             .collect();
         let pack = core_cs::commit_pack(MAIN, expected, message, (&author.name, &author.email), &files);
@@ -397,7 +406,7 @@ mod tests {
     }
 
     fn upsert(path: &str, bytes: &[u8]) -> Change {
-        Change::Upsert { path: path.into(), bytes: bytes.to_vec() }
+        Change::Upsert { path: RepoPath::parse(path).unwrap(), bytes: bytes.to_vec() }
     }
 
     /// The idempotency triple on the raw commit path, per the engineering
@@ -463,7 +472,7 @@ mod tests {
         // a body bigger than one 4 MiB chunk exercises the chunker
         let big = vec![7u8; CHUNK_MAX + 1024];
         let tip = cs
-            .commit(Some(&head), "big", &author(), &[upsert("huge.bin", &big), Change::Delete { path: "small.txt".into() }])
+            .commit(Some(&head), "big", &author(), &[upsert("huge.bin", &big), Change::Delete { path: RepoPath::parse("small.txt").unwrap() }])
             .unwrap();
         assert!(!tip.is_empty());
         assert_eq!(cs.read_file("huge.bin", MAIN).unwrap().len(), CHUNK_MAX + 1024);
@@ -478,6 +487,8 @@ mod tests {
         mock.seed_repo("t--k3x9", &refs);
         let cs = cs_for(&mock, "t--k3x9");
         let listed = cs.list_files(MAIN).unwrap();
+        assert!(listed.refused.is_empty());
+        let listed = listed.entries;
         let mut paths: Vec<&str> = listed.iter().map(|f| f.path.as_str()).collect();
         paths.sort();
         assert_eq!(paths, vec!["f0.txt", "f1.txt", "f2.txt", "f3.txt", "f4.txt"]);
