@@ -439,16 +439,31 @@ impl FragmentCell {
         // visibility, or an agent of theirs that is a member, none of
         // which makes them this fragment's member of any kind
         let Some(row) = rows.into_iter().next() else { return Err(refused()) };
+        // The registry's identity, as the router resolved it: who asks, and
+        // what kind they are (an identity's kind never changes).
+        let Some(asker) = caller.kind() else { return Err(refused()) };
         // `members.kind` is nullable: it came (2026-09-24) by a migration
         // that left the rows before it NULL, and the owner's row is still
-        // written from an Option (fragment.rs `create`). A row with none
-        // proves no kind, so it matches none (fail closed), as a trigger's
-        // `from_kind = (SELECT kind …)` matches no NULL.
-        let Some(text) = row.kind else { return Err(refused()) };
-        let kind = IdentityKind::parse(&text).ok_or_else(|| CellError::host(format!("member {}'s stored kind {text:?} does not decode", signed.id)))?;
+        // written from an Option (fragment.rs `create`). A row without one
+        // takes its identity's now, from the registry's word, so a chat whose
+        // agent joined before then still takes its agent's posts (and its
+        // triggers' `from`, which read the row, agree from here on).
+        let kind = match row.kind {
+            Some(text) => IdentityKind::parse(&text).ok_or_else(|| CellError::host(format!("member {}'s stored kind {text:?} does not decode", signed.id)))?,
+            None => {
+                self.exec(
+                    "UPDATE members SET kind = ? WHERE principal = ? AND kind IS NULL",
+                    vec![asker.as_str().into(), signed.id.as_str().into()],
+                )?;
+                asker
+            }
+        };
         // the row is written from the registry's identity (members.rs
-        // `put_member`), and an identity's kind never changes
-        assert_eq!(Some(kind), caller.kind(), "a member row's kind is its identity's");
+        // `put_member`): a row naming another kind is corrupt, and refuses
+        // (never a panic: the object serves everyone else meanwhile)
+        if kind != asker {
+            return Err(CellError::host(format!("member {}'s row says {} and its identity {}: the row is corrupt", signed.id, kind.as_str(), asker.as_str())));
+        }
         if kind != from {
             return Err(refused());
         }

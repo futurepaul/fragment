@@ -66,13 +66,19 @@ pub enum Effect {
 
 /// Checks a record an app publishes, from a mutation or a job step: only to
 /// a channel its fragment.json declares (never `events`, `ops`, or `inbox`,
-/// which are the platform's), with a valid kind and a bounded body.
+/// which are the platform's), never to one that says `from` (its records
+/// are its posters' own: a member of that kind, posting as itself; an
+/// app's record would be named for whoever called it), with a valid kind
+/// and a bounded body.
 pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<(), String> {
     if BUILTIN_CHANNELS.contains(&channel) {
         return Err(format!("channel {channel:?} is the platform's; an app publishes to the channels its fragment.json declares"));
     }
-    if !declared.contains_key(channel) {
+    let Some(decl) = declared.get(channel) else {
         return Err(format!("channel {channel:?} is not declared in fragment.json"));
+    };
+    if let Some(from) = decl.from {
+        return Err(format!("channel {channel:?} takes posts from the fragment's {} members only, each as itself: an app publishes none there", from.as_str()));
     }
     if !valid_kind(kind) {
         return Err("kind must match ^[a-z][a-z0-9._-]{0,63}$".into());
@@ -212,6 +218,21 @@ mod tests {
         // the job step's check is this one
         assert!(check_record("room", "k", &json!("x".repeat(100)), &declared()).is_ok());
         assert!(check_record("inbox", "k", &Value::Null, &declared()).is_err());
+    }
+
+    /// Goal: a channel that says `from` holds only its posters' own records
+    /// (audit M7: a chat's `work` is its agents'), so neither a mutation's
+    /// effect nor a job step may publish there; the same channel without
+    /// `from` takes them.
+    #[test]
+    fn an_app_publishes_nothing_to_a_from_channel() {
+        let mut channels = declared();
+        channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent) });
+        channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None });
+        let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), &channels).expect_err("an app's record on an agents' channel");
+        assert!(refused.contains("agent members only"), "{refused}");
+        assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels).is_err(), "a mutation's effect is refused there");
+        assert!(check_record("notes", "note", &json!({}), &channels).is_ok(), "a channel without from takes an app's record");
     }
 
     #[test]

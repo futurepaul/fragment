@@ -157,13 +157,20 @@ From anyone else it is ignored. A waiting turn named by Stop never runs.
 **A prompt's answer:**
 
 ```json
-{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>", "text": "purple" }
+{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>",
+  "agent": "npub1…", "turn": "<turn>", "text": "purple" }
 ```
 
 Only the agent's owner answers its prompts (decision 42); anyone else's
 is ignored. The first answer on the channel wins; later ones are
-ignored. A page posts it with the id `pr:<prompt>`, so a second tap is
-the same record (or 409, for another option). `text`, only for an option
+ignored. `agent` and `turn` name the card it answers (both, or neither):
+prompt ids are each agent's own, so two agents of a chat may show cards
+of one id, and a bridge ignores an answer naming another agent or
+another turn of its own. The page always names them; an answer naming
+neither (the API's) is matched by its prompt alone. A page posts it with
+the id `pr:<32 hex of SHA-256 of "<agent> <turn>:<prompt>">`, so a second
+tap is the same record (or 409, for another option) and an answer to one
+card never blocks another's. `text`, only for an option
 answered in words (`words`, below): what was typed, trimmed, at most 32
 KiB (more is cut); with any other option it is ignored, and without it
 such an option is answered as a question in words is (its runtime asks

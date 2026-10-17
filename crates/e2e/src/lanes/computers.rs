@@ -1044,7 +1044,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
         s.ok("a prompt is a card on work, asking the agent's owner", asked && card["body"]["asks"] == api.identity(&owner)?.as_str(), &card);
-        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
         let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
         s.ok("its owner answers it", r.status == 200, &r);
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.contains("(approved)"))));
@@ -1386,7 +1386,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(PINS[4], asked && held.as_u64().is_some_and(|n| n > 0) && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "keepalives": held, "view": mid }));
         let card = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
         api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
         replies_so_far += 1;

@@ -7,10 +7,12 @@
 //   - `chat`: what is said. People's messages (`{text, to?, attachments?}`,
 //     posted here with an id of their own), agents' replies (`{text, turn,
 //     attachments?}`), Stop (`{kind: "stop", turn}`), and prompt answers
-//     (`{kind: "prompt_response", prompt, option}`, id `pr:<prompt>`).
-//   - `work`: an agent's progress, which only editors (the chat's agents)
-//     post: `turn.start`, `turn.step`, `turn.prompt`, `turn.prompt.closed`,
-//     `turn.end`.
+//     (`{kind: "prompt_response", prompt, option, agent, turn}`: the card's
+//     own agent and turn, so an answer to one agent's card is never another
+//     agent's that reused its prompt id; id `pr:<a hash of the three>`).
+//   - `work`: an agent's progress, which only the chat's agents post
+//     (`"from": "agent"`): `turn.start`, `turn.step`, `turn.prompt`,
+//     `turn.prompt.closed`, `turn.end`.
 //
 // The page follows both (`subscribe`, from near their ends), and the chat's
 // drafts: a turn's draft shows after the turn's last record, and the reply
@@ -331,9 +333,9 @@ export function mount(root) {
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
     drafts: new Map(), // `turnKey(poster, turn)` -> { principal, turn, text, at }: a reply as it streams
-    answers: new Map(), // prompt -> Map(poster -> option): each poster's first prompt_response on `chat`
-    answering: new Map(), // prompt -> the option this page posted, until its card closes
-    typed: new Map(), // prompt -> what is typed in its card's field (an option answered in words)
+    answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
+    answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
+    typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
@@ -590,6 +592,9 @@ export function mount(root) {
     return state.turns.get(key);
   }
   const started = (t) => t.startAt !== null;
+  // A card by its turn and its prompt: prompt ids are each agent's own, so
+  // two agents' cards may share one.
+  const cardKey = (turnKey, prompt) => `${turnKey}:${prompt}`;
   // the turn's latest record, by time then arrival: its draft shows after it
   function touch(t, at, n) {
     if (t.lastAt === null || at > t.lastAt || (at === t.lastAt && n > t.lastN)) {
@@ -625,12 +630,15 @@ export function mount(root) {
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
     const n = record.seq;
     if (body.kind === "prompt_response") {
-      // each poster's first answer; a card counts only its asker's (the
-      // agent closes the card with the first of those), so no one else's
-      // answer can disable or answer it here
+      // each poster's first answer, for the card it names (its agent's turn
+      // and prompt; an answer naming none, the API's, is the prompt's); a
+      // card counts only its asker's, so no one else's answer can disable
+      // or answer it here
       if (typeof body.prompt === "string") {
-        if (!state.answers.has(body.prompt)) state.answers.set(body.prompt, new Map());
-        const by = state.answers.get(body.prompt);
+        const named = typeof body.agent === "string" && typeof body.turn === "string";
+        const key = named ? cardKey(turnKey(body.agent, body.turn), body.prompt) : body.prompt;
+        if (!state.answers.has(key)) state.answers.set(key, new Map());
+        const by = state.answers.get(key);
         if (!by.has(record.principal)) by.set(record.principal, body.option);
       }
       return schedule();
@@ -700,8 +708,8 @@ export function mount(root) {
       expiryTimer();
     } else if (b.kind === "turn.prompt.closed" && typeof b.prompt === "string") {
       t.closed.set(b.prompt, b);
-      state.answering.delete(b.prompt);
-      state.typed.delete(b.prompt);
+      state.answering.delete(cardKey(t.key, b.prompt));
+      state.typed.delete(cardKey(t.key, b.prompt));
     } else if (b.kind === "turn.end") {
       t.end = { outcome: b.outcome, error: typeof b.error === "string" ? b.error : "", at: record.at, n };
       state.drafts.delete(t.key);
@@ -1284,7 +1292,8 @@ export function mount(root) {
     const key = `p:${t.key}:${p.prompt}`;
     const closed = t.closed.get(p.prompt) ?? null;
     // only the card's asker's answer counts here, as only theirs counts to the agent
-    const sent = state.answering.get(p.prompt) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
+    const card = cardKey(t.key, p.prompt);
+    const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
     const gone = !closed && (expired(p) || !!t.end);
     const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
     const asks = who(p.asks);
@@ -1311,7 +1320,7 @@ export function mount(root) {
           for (const o of p.options) {
             if (o.words) {
               // answered in words: typed on the card, Enter sends them with it
-              options.append(wordsField(p.prompt, o, !mayAnswer || sent !== null));
+              options.append(wordsField(t, p.prompt, o, !mayAnswer || sent !== null));
               continue;
             }
             const b = el("button", o.style === "primary" || o.style === "danger" ? o.style : "", o.label || o.id);
@@ -1319,7 +1328,7 @@ export function mount(root) {
             b.dataset.option = o.id;
             b.disabled = !mayAnswer || sent !== null;
             if (sent === o.id) b.classList.add("chosen");
-            b.onclick = () => answer(p.prompt, o.id);
+            b.onclick = () => answer(t, p.prompt, o.id);
             options.append(b);
           }
           card.append(options);
@@ -1332,7 +1341,8 @@ export function mount(root) {
   }
   // An option answered in words (a clarify's "Other"): a field on the card,
   // its label the hint; what is typed outlives the card's redraws.
-  function wordsField(prompt, o, disabled) {
+  function wordsField(t, prompt, o, disabled) {
+    const card = cardKey(t.key, prompt);
     const form = el("form", "words");
     const field = el("input");
     field.type = "text";
@@ -1341,7 +1351,7 @@ export function mount(root) {
     field.setAttribute("aria-label", o.label || o.id);
     field.maxLength = TEXT_MAX_BYTES;
     field.enterKeyHint = "send";
-    field.value = state.typed.get(prompt) ?? "";
+    field.value = state.typed.get(card) ?? "";
     field.disabled = disabled;
     const go = el("button", "send");
     go.type = "submit";
@@ -1350,14 +1360,14 @@ export function mount(root) {
     go.replaceChildren(icon("send"));
     const ready = () => (go.disabled = disabled || !field.value.trim());
     field.oninput = () => {
-      state.typed.set(prompt, field.value);
+      state.typed.set(card, field.value);
       ready();
     };
     ready();
     form.onsubmit = (e) => {
       e.preventDefault();
       const words = cutBytes(field.value.trim(), TEXT_MAX_BYTES);
-      if (words && !disabled) answer(prompt, o.id, words);
+      if (words && !disabled) answer(t, prompt, o.id, words);
     };
     form.append(field, go);
     return form;
@@ -2226,15 +2236,22 @@ export function mount(root) {
 
   // Answering a card: one record, its id the card's, so a second tap is the same.
   // An option answered in words carries them (`text`).
-  async function answer(prompt, option, text) {
-    state.answering.set(prompt, option);
+  // An answer to turn `t`'s card `prompt`, naming the card's agent and turn
+  // (its bridge takes no answer naming another). Its id is the card's own,
+  // a second tap the same record: a hash, as an npub, a turn and a prompt
+  // together pass a post id's 128 characters.
+  async function answer(t, prompt, option, text) {
+    const card = cardKey(t.key, prompt);
+    state.answering.set(card, option);
     schedule();
     try {
-      await fragment.post("chat", { kind: "prompt_response", prompt, option, ...(text ? { text } : {}) }, { id: `pr:${prompt}` });
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(card)));
+      const id = `pr:${[...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, ...(text ? { text } : {}) }, { id });
     } catch (err) {
       // 409: another option was sent first, from another page: the card says which once closed
       if (err.status !== 409) {
-        state.answering.delete(prompt);
+        state.answering.delete(card);
         problem(`Your answer was not sent: ${err.message}`);
       }
       schedule();

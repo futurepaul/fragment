@@ -344,7 +344,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let card = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
     s.ok("a question with choices is a card asking the agent's owner", carded && card["body"]["asks"] == owner_id.as_str() && card["body"]["text"].as_str().is_some_and(|t| t.starts_with("Which pot")), &card);
     let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0" } });
+    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0", "agent": card["principal"], "turn": card["body"]["turn"] } });
     api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
     let heard = s.eventually(TURN, || reply_of(&asking).is_some_and(|t| t.contains("clay")));
     let closed = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();

@@ -11,7 +11,7 @@
 // (one note's bytes), carrying the page's `?view=` token when it has one,
 // and follows the room the page hands it (`window.fragment.room`), whose
 // state says which files changed.
-import { markdown, withoutFrontMatter } from "../__markdown.js";
+import { markdown, resolvePath, scheme, withoutFrontMatter } from "../__markdown.js";
 
 const $ = (sel) => document.querySelector(sel);
 function el(tag, cls, text) {
@@ -72,44 +72,41 @@ function resolveWiki(target) {
   return files.find((f) => f.path.toLowerCase().endsWith("/" + t + ".md"))?.path ?? null;
 }
 
-// A relative path from `at`, the note's folder ("" at the root).
-function relative(at, rel) {
-  const parts = rel.startsWith("/") ? [] : at.split("/").filter(Boolean);
-  for (const seg of rel.split("/")) {
-    if (seg === "..") parts.pop();
-    else if (seg && seg !== ".") parts.push(seg);
-  }
-  return parts.join("/");
-}
-
-// a browser drops controls and spaces from a URL ("java\tscript:" is javascript:)
-const read = (url) => url.replace(/[\x00-\x20\x7f]/g, "");
-const scheme = (url) => /^[a-z][a-z\d+.-]*:|^\/\//i.test(url);
-
-// Where a note's link goes: another note (opened here) or the web (http(s)
-// and mailto); anything else is no link.
-function resolveLink(target, kind) {
-  if (kind === "wiki") {
-    const path = resolveWiki(target.split("#")[0]);
+// Where a note's links go, from the note's folder `at`: another note (by
+// its path from that folder or the root, with or without .md, else by its
+// name: opened here) or the web (http(s) and mailto); anything else is no
+// link.
+function linksFrom(at) {
+  return (target, kind) => {
+    if (kind === "wiki") {
+      const path = resolveWiki(target.split("#")[0]);
+      return path ? { href: hashOf(path), path } : null;
+    }
+    // the scheme as a browser reads it (the renderer's one reading)
+    const s = scheme(target);
+    if (s !== null) return ["http", "https", "mailto"].includes(s) ? { href: target } : null;
+    const rel = decode(target.split("#")[0]);
+    if (!rel) return null;
+    const exact = [resolvePath(at, rel), resolvePath("", rel)].flatMap((p) => [p.toLowerCase(), `${p.toLowerCase()}.md`]).map((p) => byPath.get(p)).find(Boolean);
+    const path = exact ?? resolveWiki(rel);
     return path ? { href: hashOf(path), path } : null;
-  }
-  const url = read(target);
-  if (scheme(url)) return /^(?:https?:|mailto:|\/\/)/i.test(url) ? { href: url } : null;
-  const path = url.split("#")[0] && resolveWiki(decode(url.split("#")[0]));
-  return path ? { href: hashOf(path), path } : null;
+  };
 }
 
 // A note's picture: one of the vault's (from the note's folder, else the
-// root), or one on the web.
+// root), or one on the web. A picture on the web is fetched by each
+// reader's browser, so its host learns who opened the note and when (an
+// editor can watch a note's readers this way); keeping pictures to the
+// vault's own is Paul's call, not made here.
 function picture(at) {
   return (src, kind) => {
     if (kind === "wiki") {
       const path = resolveWiki(src);
       return path && IMG.test(path) ? { src: fileUrl(path) } : null;
     }
-    const url = read(src);
-    if (scheme(url)) return /^(?:https?:)?\/\//i.test(url) ? { src: url } : null;
-    const path = [relative(at, decode(url)), relative("", decode(url))].map((p) => byPath.get(p.toLowerCase())).find(Boolean);
+    const s = scheme(src);
+    if (s !== null) return ["http", "https"].includes(s) ? { src } : null;
+    const path = [resolvePath(at, decode(src)), resolvePath("", decode(src))].map((p) => byPath.get(p.toLowerCase())).find(Boolean);
     return path && IMG.test(path) ? { src: fileUrl(path) } : null;
   };
 }
@@ -236,7 +233,7 @@ async function open(path) {
   if (n !== opening) return;
   if (/\.(md|markdown)$/i.test(path)) {
     const note = el("div", "note md");
-    note.append(markdown(withoutFrontMatter(text), { resolve: resolveLink, image: picture(folder(path)) }));
+    note.append(markdown(withoutFrontMatter(text), { resolve: linksFrom(folder(path)), image: picture(folder(path)) }));
     show(note);
     document.title = path.split("/").pop().replace(/\.md$/i, "") + " — vault";
     return;

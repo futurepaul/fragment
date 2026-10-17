@@ -66,7 +66,36 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an open page shows a new note without a reload", chrome.until(&page, &has("third"), wait), "");
     chrome.eval(&page, "location.hash = '#/notes/third.md'; true")?;
     s.ok("and opens it", chrome.until(&page, "document.getElementById('content')?.textContent.includes('third')", wait), "");
-    hostile(s, api, &home, &name, &dir, &mut chrome, &page)
+    hostile(s, api, &home, &name, &dir, &mut chrome, &page)?;
+    links(s, api, &home, &name, &dir, &mut chrome, &page)
+}
+
+/// The viewer's own hooks into the renderer, in Chrome: a [[wikilink]]
+/// opens its note in the viewer, an ![[embed]] is the vault's picture
+/// through the app (with the page's share link), a relative link and a
+/// reference link resolve to notes, and front matter is left out.
+fn links(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std::path::Path, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    std::fs::write(dir.join("notes/linked.md"), "---\ntitle: Linked\nsecret: in the front matter\n---\n# Linked note\n\nGo [[welcome|home]], to [the second](second.md), or to [the third][3].\n\n![[pic.svg|40]]\n\n[3]: third.md\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
+    chrome.eval(page, "location.hash = '#/notes/linked.md'; true")?;
+    let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'Linked note'", wait);
+    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.width ?? 0, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
+    s.ok(
+        "the viewer leaves out front matter, shows an embed through the app with its share link, and resolves wikilinks, relative and reference links to notes",
+        shown
+            && read["front"] == false
+            && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg") && u.contains("view="))
+            && read["width"] == 40
+            && read["home"] == "#/notes%2Fwelcome.md"
+            && read["second"] == "notes/second.md"
+            && read["third"] == "notes/third.md",
+        &read,
+    );
+    chrome.click(page, "#content .md a.md-wikilink")?;
+    let opened = chrome.until(page, "location.hash === '#/notes%2Fwelcome.md' && document.getElementById('content')?.textContent.includes('welcome to your notes')", wait);
+    s.ok("a click on a wikilink opens its note in the viewer", opened, chrome.eval(page, "location.hash + ' ' + (document.getElementById('content')?.innerText.slice(0, 120) ?? '')")?);
+    Ok(())
 }
 
 /// What a note, an editor's or an agent's, holds is data (audit H2: the

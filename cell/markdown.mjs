@@ -2,15 +2,18 @@
 // ./__markdown.js: markdown to DOM through the DOM's own constructors and
 // setters, never through markup, so the text of a file or a message can add
 // no element, attribute or script to the page's origin. HTML in it shows as
-// the text it is. The files viewer (`__files`), the chat template and the
-// notes viewer render with it; any page may.
+// the text it is (a `<br>` is a line break, an HTML comment block is left
+// out, a character reference is its character). The files viewer
+// (`__files`), the chat template and the notes viewer render with it; any
+// page may.
 //
 // It renders headings (each with a `data-anchor`, its `slug`), paragraphs,
 // lists (ordered, nested, tight or loose, and tasks), quotes and Obsidian's
-// callouts, fenced code, rules and pipe tables; inline code, bold, italic,
-// strikethrough, highlights, links (with titles), autolinks, bare URLs and
-// emails, pictures, [[wikilinks]] and ![[embeds]], hard breaks and a
-// backslash's escapes.
+// callouts, fenced and indented code, rules and pipe tables; inline code,
+// bold, italic, strikethrough, highlights, links (with titles, `<a path
+// with spaces>`, and reference links with their definitions), autolinks,
+// bare URLs and emails, pictures, [[wikilinks]] and ![[embeds]], hard
+// breaks and a backslash's escapes.
 //
 // Its caller decides three things (`options`):
 // - `resolve(target, kind)`: where a link goes, `kind` "link" (a
@@ -21,21 +24,37 @@
 //   and mailto links only.
 // - `image(src, kind)`: a picture's `{src, href?}` (`href`: the picture is
 //   a link too), or null: its words shown instead. Unset: no pictures.
-// - `code(text, lang)`: a fenced block's node. Unset: `<pre><code>`.
+// - `code(text, lang)`: a code block's node. Unset: `<pre><code>`.
 // and `breaks`: every newline in a paragraph breaks its line, as in a chat
 // (else only a hard break does, two spaces or a backslash before it).
 //
 // Whatever a hook answers, the renderer holds every link to http(s), mailto
 // or a relative URL and every picture to http(s) or a relative URL: no
 // hook's mistake makes a `javascript:` link. Its own elements are a fixed
-// set (`ELEMENTS`), and it sets only their plain properties.
+// set (`ELEMENTS`), and it sets only their plain properties. A page that
+// resolves links itself reads a URL's scheme with `scheme`, as the
+// renderer does, and a relative path with `resolvePath`.
+//
+// Its time is linear in its text: no pattern here backtracks over a run of
+// one character (a heading's closing marks are found by string operations,
+// a table's separator row by its cells), inline spans run only on text of
+// at most INLINE_MAX_CHARS, and a table is at most COLUMNS_MAX columns and
+// CELLS_MAX cells. xtask's markdown_dom test times hostile text against it.
 
 /// Nesting (quotes, lists, emphasis) stops here: deeper text shows as text.
 export const DEPTH_MAX = 32;
-/// A run of inline text longer than this shows as plain text: the inline
-/// patterns' lazy spans would otherwise take quadratic time on a hostile
-/// run of delimiters.
-export const INLINE_MAX_CHARS = 20_000;
+/// A paragraph (or a heading, a cell) longer than this shows as plain text:
+/// inline spans are lazy patterns, so their time on a hostile run of
+/// delimiters grows with the square of the text they read.
+export const INLINE_MAX_CHARS = 4096;
+/// Text longer than this shows as itself, in one block, unparsed.
+export const TEXT_MAX_CHARS = 1 << 20;
+/// A table wider than this is no table; one of more cells than this shows
+/// as its text (each row makes a cell per column, whatever it holds).
+export const COLUMNS_MAX = 64;
+export const CELLS_MAX = 8192;
+/// Reference definitions a text may give (`[label]: url`).
+export const REFS_MAX = 1024;
 /// The elements the renderer makes (its unit test holds it to them).
 export const ELEMENTS = [
   "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "input", "blockquote", "div", "pre", "code", "hr",
@@ -47,24 +66,37 @@ const SRC_SCHEMES = ["http", "https"];
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+// a heading's opening marks; its words and closing marks are read by `headingOf`
+const HEADING_OPEN = /^ {0,3}(#{1,6})(?=[ \t]|$)/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}>/;
 const ITEM = /^( *)([-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$/;
-const ROW_SEP = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+const SEP_CELL = /^:?-+:?$/;
+const COMMENT_OPEN = /^ {0,3}<!--/;
+const DEFINITION = /^ {0,3}\[([^\[\]\n]{1,999})\]:[ \t]*(?:<([^<>\n]*)>|([^\s<>]+))(?:[ \t]+"([^"\n]*)")?[ \t]*$/;
 const FRONT_MATTER = /^---\n[\s\S]*?\n---(?:\n|$)/;
-const interrupts = (line) => FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(line);
+const ENTITY = /&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([a-zA-Z]{2,8}));/g;
+const BREAK_TAG = /<br\s*\/?>/i;
+const NAMED = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", copy: "©", reg: "®", trade: "™", hellip: "…",
+  mdash: "—", ndash: "–", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", laquo: "«", raquo: "»", middot: "·",
+  bull: "•", times: "×", divide: "÷", deg: "°", plusmn: "±", para: "¶", sect: "§", euro: "€", pound: "£", yen: "¥", cent: "¢",
+};
+const interrupts = (line) => FENCE.test(line) || HEADING_OPEN.test(line) || RULE.test(line) || QUOTE.test(line) || /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(line);
 
 // Inline spans, the one that starts earliest winning (and of those the
 // first listed): `code`, [[a wikilink]] or ![[an embed]], ![a picture](src),
-// [a link](href "title"), <https://an.autolink> or <an@email>, a bare
-// https:// URL or email, **bold** or __bold__, ~~struck~~, ==marked==,
-// *italic* or _italic_, and a backslash's escape.
+// [a link](href "title") or (<a href with spaces>), [a link][its
+// reference], <https://an.autolink> or <an@email>, a bare https:// URL or
+// email, **bold** or __bold__, ~~struck~~, ==marked==, *italic* or
+// _italic_, and a backslash's escape. A wikilink's target and a label's
+// nested brackets stop at the next `[`, so a run of brackets is read once.
 const INLINE = new RegExp(
   [
     /(?<ticks>`+)(?<code>[\s\S]*?[^`])\k<ticks>(?!`)/,
-    /(?<embed>!?)\[\[(?<wiki>[^\]\n]+)\]\]/,
-    /(?<bang>!?)\[(?<label>(?:[^\][\n]|\[[^\]\n]*\])*)\]\(\s*<?(?<href>[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)>?(?:\s+"(?<title>[^"]*)")?\s*\)/,
+    /(?<embed>!?)\[\[(?<wiki>[^\[\]\n]+)\]\]/,
+    /(?<bang>!?)\[(?<label>(?:[^\][\n]|\[[^\[\]\n]*\])*)\]\(\s*(?:<(?<hrefa>[^<>\n]*)>|(?<href>[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*))(?:\s+"(?<title>[^"]*)")?\s*\)/,
+    /(?<rbang>!?)\[(?<rtext>(?:[^\][\n]|\[[^\[\]\n]*\])*)\]\[(?<rref>[^\[\]\n]{0,999})\]/,
     /<(?<auto>(?:https?:\/\/|mailto:)[^\s<>]+)>/,
     /<(?<automail>[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,})>/,
     /(?<bare>https?:\/\/[^\s<>]*[^\s<>.,;:!?'")\]*_~])/,
@@ -85,10 +117,14 @@ const INLINE = new RegExp(
 /// `text` as DOM: a DocumentFragment of its blocks.
 export function markdown(text, options = {}) {
   const o = settled(options);
-  const lines = String(text ?? "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((l) => l.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length)));
+  const all = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (all.length > TEXT_MAX_CHARS) {
+    const out = document.createDocumentFragment();
+    out.append(el("pre", null, all));
+    return out;
+  }
+  const lines = all.split("\n").map((l) => l.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length)));
+  o.refs = definitions(lines);
   return blocks(lines, o, 0, false);
 }
 
@@ -103,6 +139,26 @@ export const slug = (text) => text.toLowerCase().trim().replace(/[^\p{L}\p{N}\s-
 /// A file's text without its YAML front matter.
 export const withoutFrontMatter = (text) => String(text).replace(/\r\n?/g, "\n").replace(FRONT_MATTER, "");
 
+/// A URL's scheme as a browser reads it (lower case; it drops controls and
+/// spaces as it reads one, so "java\tscript:" is javascript:), or null for
+/// a relative URL. A protocol-relative one (`//host`) is the web's: "https".
+export function scheme(url) {
+  const read = String(url).replace(/[\x00-\x20\x7f]/g, "");
+  if (read.startsWith("//")) return "https";
+  return read.match(/^([a-z][a-z\d+.-]*):/i)?.[1].toLowerCase() ?? null;
+}
+
+/// A relative path from `at`, a folder ("" at the root): `..` and `.`
+/// followed, a leading `/` from the root.
+export function resolvePath(at, rel) {
+  const parts = rel.startsWith("/") ? [] : at.split("/").filter(Boolean);
+  for (const seg of rel.split("/")) {
+    if (seg === "..") parts.pop();
+    else if (seg && seg !== ".") parts.push(seg);
+  }
+  return parts.join("/");
+}
+
 function settled(options) {
   for (const hook of ["resolve", "image", "code"]) {
     if (options[hook] !== undefined && typeof options[hook] !== "function") throw new TypeError(`markdown: options.${hook} is a function`);
@@ -112,10 +168,11 @@ function settled(options) {
     image: options.image ?? (() => null),
     code: options.code ?? plainCode,
     breaks: options.breaks === true,
+    refs: new Map(),
   };
 }
 
-const webLink = (target, kind) => (kind === "link" && /^(?:https?:|mailto:)/i.test(target) ? { href: target } : null);
+const webLink = (target, kind) => (kind === "link" && ["http", "https", "mailto"].includes(scheme(target)) ? { href: target } : null);
 
 function plainCode(text, lang) {
   const pre = el("pre");
@@ -131,16 +188,11 @@ function el(tag, cls, text) {
   return node;
 }
 
-// `href` if it is a URL of one of `schemes` or a relative one, else null. A
-// browser drops controls and spaces as it reads a scheme ("java\tscript:"
-// is javascript:), so the scheme is read as the browser will.
+// `href` if it is a URL of one of `schemes` or a relative one, else null.
 function safe(href, schemes) {
-  if (typeof href !== "string") return null;
-  const read = href.replace(/[\x00-\x20\x7f]/g, "");
-  if (!read) return null;
-  const scheme = read.match(/^([a-z][a-z\d+.-]*):/i);
-  if (scheme) return schemes.includes(scheme[1].toLowerCase()) ? href : null;
-  return href;
+  if (typeof href !== "string" || !href.replace(/[\x00-\x20\x7f]/g, "")) return null;
+  const s = scheme(href);
+  return s === null || schemes.includes(s) ? href : null;
 }
 
 // A hook's answer for a link, held to the safe schemes: {href, path?} or null.
@@ -151,6 +203,32 @@ function destination(answer) {
   if (href === null) return null;
   if (answer.path !== undefined && typeof answer.path !== "string") throw new TypeError("markdown: a link's path is a string");
   return { href, path: answer.path };
+}
+
+// The reference definitions (`[label]: url "title"`) outside code, each line
+// taken out of the text; labels match without case.
+function definitions(lines) {
+  const refs = new Map();
+  let fence = null;
+  // bounded by the lines: one look each
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const f = line.match(FENCE);
+    if (fence) {
+      if (closes(line, fence)) fence = null;
+      continue;
+    }
+    if (f) {
+      fence = f[1];
+      continue;
+    }
+    const d = line.length <= 2048 ? line.match(DEFINITION) : null;
+    if (!d || refs.size >= REFS_MAX) continue;
+    const label = d[1].trim().toLowerCase();
+    if (!refs.has(label)) refs.set(label, { href: d[2] ?? d[3], title: d[4] });
+    lines[i] = "";
+  }
+  return refs;
 }
 
 // `tight`: a tight list item's lines, whose paragraphs get no <p>.
@@ -164,20 +242,29 @@ function blocks(lines, o, depth, tight) {
   for (let i = 0; i < lines.length; ) {
     const line = lines[i];
     let m;
+    let h;
     if (!line.trim()) {
       i++;
     } else if ((m = line.match(FENCE))) {
       const text = [];
       for (i++; i < lines.length && !closes(lines[i], m[1]); i++) text.push(lines[i]);
       i++;
-      const node = o.code(text.join("\n"), m[2].match(/^[\w+#.-]{1,40}/)?.[0] ?? "");
-      if (!(node instanceof Node)) throw new TypeError("markdown: options.code answers a node");
-      out.append(node);
-    } else if ((m = line.match(HEADING))) {
-      out.append(heading(m[1].length, m[2] || "", o, depth));
+      out.append(codeBlock(text.join("\n"), m[2].match(/^[\w+#.-]{1,40}/)?.[0] ?? "", o));
+    } else if (line.startsWith("    ")) {
+      // indented code: its lines and the blank ones between them
+      const text = [];
+      for (; i < lines.length && (lines[i].startsWith("    ") || !lines[i].trim()); i++) text.push(lines[i].slice(4));
+      while (text.length && !text.at(-1).trim()) text.pop();
+      out.append(codeBlock(text.join("\n"), "", o));
+    } else if ((h = headingOf(line))) {
+      out.append(heading(h.level, h.text, o, depth));
       i++;
     } else if (RULE.test(line)) {
       out.append(el("hr"));
+      i++;
+    } else if (COMMENT_OPEN.test(line)) {
+      // an HTML comment block is left out, to its end
+      for (; i < lines.length && !lines[i].includes("-->"); i++);
       i++;
     } else if (QUOTE.test(line)) {
       const inner = [];
@@ -186,8 +273,9 @@ function blocks(lines, o, depth, tight) {
     } else if ((m = line.match(ITEM)) && m[1].length < 4) {
       i = list(lines, i, out, o, depth);
     } else if (tableAt(lines, i)) {
+      // its rows: to a blank line, a line with no pipe, or another block
       const rows = [];
-      for (; i < lines.length && lines[i].trim() && lines[i].includes("|"); i++) rows.push(lines[i]);
+      for (; i < lines.length && lines[i].trim() && lines[i].includes("|") && (rows.length < 2 || !interrupts(lines[i])); i++) rows.push(lines[i]);
       out.append(table(rows, o, depth));
     } else {
       const para = [line.trimStart()];
@@ -212,6 +300,25 @@ function blocks(lines, o, depth, tight) {
 function closes(line, fence) {
   const m = line.match(FENCE_CLOSE);
   return !!m && m[1][0] === fence[0] && m[1].length >= fence.length;
+}
+
+function codeBlock(text, lang, o) {
+  const node = o.code(text, lang);
+  if (!(node instanceof Node)) throw new TypeError("markdown: options.code answers a node");
+  return node;
+}
+
+// A heading's level and words, or null: its closing marks are cut by
+// string operations (a pattern for them backtracks over a run of spaces).
+function headingOf(line) {
+  const m = line.match(HEADING_OPEN);
+  if (!m) return null;
+  let text = line.slice(m[0].length).trim();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "#") end--;
+  if (end === 0) text = "";
+  else if (end < text.length && (text[end - 1] === " " || text[end - 1] === "\t")) text = text.slice(0, end).trimEnd();
+  return { level: m[1].length, text };
 }
 
 function heading(level, text, o, depth) {
@@ -299,10 +406,14 @@ function list(lines, i, out, o, depth) {
   return i;
 }
 
-// A table starts at `i`: a row with a pipe over a separator row of as many cells.
+// A table starts at `i`: a row with a pipe over a separator row of as many
+// cells, at most COLUMNS_MAX.
 function tableAt(lines, i) {
   const next = lines[i + 1];
-  return lines[i].includes("|") && next !== undefined && ROW_SEP.test(next) && cells(lines[i]).length === cells(next).length;
+  if (!lines[i].includes("|") || next === undefined || !next.includes("-")) return false;
+  const separators = cells(next);
+  if (separators.length > COLUMNS_MAX || !separators.every((c) => SEP_CELL.test(c))) return false;
+  return cells(lines[i]).length === separators.length;
 }
 
 // A row's cells: an escaped pipe, and a pipe in a code span, are text.
@@ -337,6 +448,8 @@ function cells(row) {
 
 function table(rows, o, depth) {
   const header = cells(rows[0]);
+  // a cell per column for each row, whatever it holds: past CELLS_MAX, its text
+  if (header.length * (rows.length - 1) > CELLS_MAX) return el("p", null, rows.join("\n"));
   const align = cells(rows[1]).map((c) => (c.endsWith(":") ? (c.startsWith(":") ? "center" : "right") : ""));
   const row = (texts, tag) => {
     const tr = el("tr");
@@ -378,24 +491,61 @@ function spans(parent, text, o, depth, linked) {
   return parent;
 }
 
-// Text, with a line break at each newline (`breaks`), else at a hard break.
+// Text: a line break at each newline (`breaks`), else where a line ends in
+// two spaces or a backslash; and at a `<br>`. Its character references are
+// their characters. Each line is read once, by string operations.
 function plain(parent, text, o) {
-  const parts = o.breaks ? text.split("\n") : text.split(/(?: {2,}|\\)\n/);
-  parts.forEach((part, n) => {
-    if (n) parent.append(el("br"));
-    parent.append(part);
+  const lines = text.split("\n");
+  for (let n = 0; n < lines.length; n++) {
+    let line = lines[n];
+    const last = n === lines.length - 1;
+    let broken = !last && o.breaks;
+    if (!last && !o.breaks && line.endsWith("\\")) {
+      line = line.slice(0, -1);
+      broken = true;
+    } else if (!last && !o.breaks && line.endsWith("  ")) {
+      line = line.trimEnd();
+      broken = true;
+    }
+    const parts = line.includes("<") ? line.split(BREAK_TAG) : [line];
+    parts.forEach((part, k) => {
+      if (k) parent.append(el("br"));
+      if (part) parent.append(characters(part));
+    });
+    if (broken) parent.append(el("br"));
+    else if (!last) parent.append("\n");
+  }
+}
+
+// `text` with its character references as their characters (a name this
+// does not know stays as it is).
+function characters(text) {
+  if (!text.includes("&")) return text;
+  return text.replace(ENTITY, (whole, dec, hex, name) => {
+    if (name !== undefined) return Object.hasOwn(NAMED, name) ? NAMED[name] : whole;
+    const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
+    const valid = code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+    return valid ? String.fromCodePoint(code) : "�";
   });
 }
 
 function span(m, o, depth, linked) {
   const g = m.groups;
   if (g.code !== undefined) return el("code", null, g.code.replace(/\n/g, " ").replace(/^ (.+) $/, "$1"));
-  const linkish = g.wiki !== undefined || (g.href !== undefined && !g.bang) || g.auto !== undefined || g.automail !== undefined || g.bare !== undefined || g.mail !== undefined;
+  const href = g.hrefa ?? g.href;
+  const linkish = g.wiki !== undefined || (href !== undefined && !g.bang) || (g.rref !== undefined && !g.rbang) || g.auto !== undefined || g.automail !== undefined || g.bare !== undefined || g.mail !== undefined;
   // a link's label may hold a picture (a badge), never another link
   if (linkish && linked) return document.createTextNode(m[0]);
   if (g.wiki !== undefined) return wikilink(g.wiki, g.embed === "!", o);
-  if (g.href !== undefined && g.bang) return image(g.href, g.label, "link", o, 0) ?? el("span", "md-missing", g.label || g.href);
-  if (g.href !== undefined) return link(g.href, g.label, g.title, o, depth);
+  if (href !== undefined && g.bang) return image(href, g.label, "link", o, 0) ?? el("span", "md-missing", g.label || href);
+  if (href !== undefined) return link(href, g.label, g.title, o, depth);
+  if (g.rref !== undefined) {
+    // a reference link: its definition's, or the words it was written with
+    const def = o.refs.get((g.rref || g.rtext).trim().toLowerCase());
+    if (!def) return document.createTextNode(m[0]);
+    if (g.rbang) return image(def.href, g.rtext, "link", o, 0) ?? el("span", "md-missing", g.rtext || def.href);
+    return link(def.href, g.rtext, def.title, o, depth);
+  }
   if (g.auto !== undefined || g.bare !== undefined) return link(g.auto ?? g.bare, null, null, o, depth);
   if (g.automail !== undefined || g.mail !== undefined) {
     const address = g.automail ?? g.mail;

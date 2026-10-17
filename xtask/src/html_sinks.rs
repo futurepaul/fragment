@@ -15,18 +15,32 @@
 //! in one, and the words never appear). A name is found where it starts a
 //! word, and ends one when it ends in a letter (`retrieval(` is no `eval(`).
 //!
+//! Besides the names, a few shapes are sinks only by what follows them
+//! (`SHAPED`): an `on…` attribute set by `setAttribute`, a timer handed a
+//! string, a `<script>` the page makes. `eval` and `Function` are found
+//! with space before their `(` too, and `srcdoc` in any case.
+//!
 //! An exception is a place that must turn a string into code or markup:
 //! `ALLOWED`, each with why. Like `js_syntax`'s lists, an entry that no
 //! longer matches fails the check, so a stale one never waves a new use
 //! through.
+//!
+//! What a text scan cannot see, and review must: a name built at run time
+//! (`el["inner" + "HTML"]`, `Reflect.set`, `document[name]`), a sink taken
+//! into a variable first (`const write = document.write`), a URL of
+//! `javascript:` set on a link or `location` (the renderer's links are held
+//! to safe schemes, and a page's own must be), code loaded from a string's
+//! URL (`import()` or a `Worker` of a `data:` or `blob:` URL), and the text
+//! of a `<script>` the page did not make here.
 
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
 /// The names that turn a string into markup or code, each with what it
-/// does.
-pub const REFUSED: [(&str, &str); 11] = [
+/// does. A name ending in `(` is found with space before its `(` too; one
+/// in lower case (an attribute's) is found in any case.
+pub const REFUSED: [(&str, &str); 12] = [
     ("innerHTML", "parses a string as markup"),
     ("outerHTML", "parses a string as markup"),
     ("insertAdjacentHTML", "parses a string as markup"),
@@ -36,9 +50,38 @@ pub const REFUSED: [(&str, &str); 11] = [
     ("DOMParser", "parses a string as markup (its event handlers run once inserted)"),
     ("createContextualFragment", "parses a string as markup"),
     ("setHTMLUnsafe", "parses a string as markup"),
+    ("parseHTMLUnsafe", "parses a string as markup"),
     ("eval(", "runs a string as code"),
     ("Function(", "runs a string as code"),
 ];
+
+/// A test of the text after a name's `(` and any space.
+pub type Follows = fn(&str) -> bool;
+
+/// The shapes that are sinks by what follows a name: `(name, after, what)`.
+pub const SHAPED: [(&str, Follows, &str); 4] = [
+    ("setAttribute", event_attribute, "sets an event handler (on…) from a string"),
+    ("setTimeout", string_first, "runs a string as code"),
+    ("setInterval", string_first, "runs a string as code"),
+    ("createElement", script_element, "makes a <script>, whose text runs"),
+];
+
+// `"on…` or `'on…`: an attribute that is an event handler.
+fn event_attribute(after: &str) -> bool {
+    let mut chars = after.chars();
+    matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..2).is_some_and(|on| on.eq_ignore_ascii_case("on"))
+}
+
+// a string literal first: the timer runs it as code
+fn string_first(after: &str) -> bool {
+    after.starts_with(['"', '\'', '`'])
+}
+
+// `"script"`, in any case and quote
+fn script_element(after: &str) -> bool {
+    let mut chars = after.chars();
+    matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..7).is_some_and(|s| s[..6].eq_ignore_ascii_case("script") && s[6..].starts_with(['"', '\'', '`']))
+}
 
 /// The places that must, each `(path, name, why)`.
 pub const ALLOWED: [(&str, &str, &str); 2] = [
@@ -94,7 +137,7 @@ pub fn inline_scripts(path: &str, html: &str) -> Result<Vec<Source>> {
     while let Some(open) = lower[at..].find("<script").map(|i| at + i) {
         let tag_end = lower[open..].find('>').map(|i| open + i + 1).with_context(|| format!("{path}: a <script> tag that never closes"))?;
         let body_end = lower[tag_end..].find("</script").map(|i| tag_end + i).with_context(|| format!("{path}: a <script> with no </script>"))?;
-        if !lower[open..tag_end].contains("src=") {
+        if !has_attribute(&lower[open..tag_end], "src") {
             let first_line = html[..tag_end].matches('\n').count() + 1;
             out.push(Source { path: path.to_string(), text: html[tag_end..body_end].to_string(), first_line });
         }
@@ -104,23 +147,61 @@ pub fn inline_scripts(path: &str, html: &str) -> Result<Vec<Source>> {
     Ok(out)
 }
 
-/// Every refused name in `source`, by line.
+// Whether a tag (lower case) has the attribute `name`: preceded by space,
+// followed by `=` or the tag's end (so `data-src` is no `src`).
+fn has_attribute(tag: &str, name: &str) -> bool {
+    tag.match_indices(name).any(|(i, _)| {
+        let before = tag[..i].chars().next_back().is_some_and(|c| c.is_ascii_whitespace());
+        let after = after_space(&tag[i + name.len()..]);
+        before && (after.starts_with('=') || after.starts_with('>') || after.starts_with('/'))
+    })
+}
+
+/// Every refused name and shape in `source`, by line.
 pub fn sinks(source: &Source) -> Vec<Sink> {
-    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
     let mut found = vec![];
     for (n, line) in source.text.lines().enumerate() {
+        let lower = line.to_ascii_lowercase();
         for (name, _) in REFUSED {
-            // bounded by the line: each match moves past the one before
-            for (i, _) in line.match_indices(name) {
-                let starts_word = line[..i].chars().next_back().is_none_or(|c| !ident(c));
-                let ends_word = !name.ends_with(ident) || line[i + name.len()..].chars().next().is_none_or(|c| !ident(c));
-                if starts_word && ends_word {
-                    found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
-                }
+            let call = name.strip_suffix('(');
+            let word = call.unwrap_or(name);
+            // a lower-case name is an attribute's, which HTML reads in any case
+            let (hay, needle) = if word.bytes().all(|b| !b.is_ascii_uppercase()) { (lower.as_str(), word) } else { (line, word) };
+            let hit = match call {
+                Some(_) => words(hay, needle).any(|i| after_space(&hay[i + needle.len()..]).starts_with('(')),
+                None => words(hay, needle).next().is_some(),
+            };
+            if hit {
+                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
+            }
+        }
+        for (name, follows, _) in SHAPED {
+            let shaped = words(line, name).any(|i| {
+                let rest = after_space(&line[i + name.len()..]);
+                rest.strip_prefix('(').is_some_and(|args| follows(after_space(args)))
+            });
+            if shaped {
+                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
             }
         }
     }
     found
+}
+
+// Where `word` stands as a word in `line`: no identifier character before
+// it, nor after it when it ends in one. Bounded by the line: each match
+// moves past the one before.
+fn words<'a>(line: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    line.match_indices(word).map(|(i, _)| i).filter(move |&i| {
+        let starts = line[..i].chars().next_back().is_none_or(|c| !ident(c));
+        let ends = !word.ends_with(ident) || line[i + word.len()..].chars().next().is_none_or(|c| !ident(c));
+        starts && ends
+    })
+}
+
+fn after_space(text: &str) -> &str {
+    text.trim_start_matches([' ', '\t'])
 }
 
 /// Fails on every refused name `allowed` does not name, and on an
@@ -134,7 +215,7 @@ pub fn check(sources: &[Source], allowed: &[(&str, &str, &str)]) -> Result<()> {
             None => refused.push(sink),
         }
     }
-    let why = |name: &str| REFUSED.iter().find(|(n, _)| *n == name).map_or("", |(_, why)| why);
+    let why = |name: &str| REFUSED.iter().find(|(n, _)| *n == name).map(|(_, why)| *why).or_else(|| SHAPED.iter().find(|(n, _, _)| *n == name).map(|(_, _, why)| *why)).unwrap_or("");
     let listed: Vec<String> = refused.iter().map(|s| format!("{}:{}: {} ({})", s.path, s.line, s.name, why(s.name))).collect();
     ensure!(
         listed.is_empty(),
@@ -162,7 +243,10 @@ mod tests {
     /// comment, beside clean code and names that only contain one.
     #[test]
     fn a_planted_sink_fails_the_check_naming_its_line() {
-        let clean = source("site/clean.js", "const p = document.createElement(\"p\");\np.textContent = text;\nretrieval(1);\nconst innerHTMLish = 1;\nisFunction(x);\n");
+        let clean = source(
+            "site/clean.js",
+            "const p = document.createElement(\"p\");\np.textContent = text;\nretrieval(1);\nconst innerHTMLish = 1;\nisFunction(x);\nsetTimeout(() => tick(), 10);\np.setAttribute(\"aria-label\", text);\nconst f = function (x) { return x; };\ndocument.createElement(\"scripts-list\");\n",
+        );
         check(&[source("site/clean.js", &clean.text)], &[]).expect("clean code passes");
         assert!(sinks(&clean).is_empty(), "{:?}", sinks(&clean));
         let planted = [
@@ -178,6 +262,14 @@ mod tests {
             ("j.js", "eval(text);\n", 1, "eval("),
             ("k.js", "const run = new Function(\"return 1\");\n", 1, "Function("),
             ("l.js", "// one must never write el.innerHTML here\n", 1, "innerHTML"),
+            ("m.js", "eval (text);\n", 1, "eval("),
+            ("n.js", "frame.setAttribute(\"srcDoc\", page);\n", 1, "srcdoc"),
+            ("o.js", "Document.parseHTMLUnsafe(text);\n", 1, "parseHTMLUnsafe"),
+            ("p.js", "el.setAttribute(\"onclick\", code);\n", 1, "setAttribute"),
+            ("q.js", "el.setAttribute( 'OnLoad', code);\n", 1, "setAttribute"),
+            ("r.js", "setTimeout(\"tick()\", 10);\n", 1, "setTimeout"),
+            ("s.js", "setInterval (`tick()`, 10);\n", 1, "setInterval"),
+            ("t.js", "const s = document.createElement(\"SCRIPT\");\n", 1, "createElement"),
         ];
         for (path, text, line, name) in planted {
             let s = source(path, text);
@@ -199,6 +291,8 @@ mod tests {
         assert_eq!(scripts[0].first_line, 4);
         assert_eq!(sinks(&scripts[0]), [Sink { path: "site/index.html".into(), line: 6, name: "innerHTML" }]);
         assert!(inline_scripts("x.html", "<script>never closed").is_err(), "a script with no end is an error, not a pass");
+        let data_src = inline_scripts("y.html", "<script data-src=\"x.js\">a.innerHTML = b;</script><script defer src=x.js></script>").expect("scripts");
+        assert_eq!(data_src.len(), 1, "a data-src is no src: its body is scanned, and a real src's is not");
     }
 
     /// Goal: an exception exempts its file's name and nothing else, and a

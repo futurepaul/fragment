@@ -81,13 +81,25 @@ pub enum Said {
     Message(Message),
     /// Stop the turn it names (or the asker's running one).
     Stop { turn: Option<String> },
-    /// An answer to a prompt: its id, the option picked, and the words of
-    /// an option answered in words.
-    PromptResponse { prompt: String, option: String, text: Option<String> },
+    /// An answer to a prompt: its id, the option picked, the words of an
+    /// option answered in words, and the card it answers (`card`: its
+    /// agent's identity and its turn, as the chat's page names them). Prompt
+    /// ids are each agent's own, so two agents of a chat may show cards of
+    /// one id: an answer naming another agent's card is not this agent's.
+    PromptResponse { prompt: String, option: String, text: Option<String>, card: Option<Card> },
     /// A command for an agent's runtime.
     Command(CommandSaid),
     /// Anything else: a page's own kind, or a body that is not a message.
     Other,
+}
+
+/// The card a prompt's answer names: whose turn asked it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Card {
+    /// The asking agent's identity (an npub).
+    pub agent: String,
+    /// Its turn's id.
+    pub turn: String,
 }
 
 /// What a `tasks` record asks of an agent.
@@ -173,8 +185,14 @@ pub fn said(body: &Value) -> Said {
                 Some(Value::String(t)) => Some(cut_bytes(t.trim(), limits::MESSAGE_TEXT_MAX_BYTES)),
                 Some(_) => return Said::Other,
             };
+            // a card named whole, or not at all (the API's bare answer)
+            let card = match (o.get("agent"), o.get("turn")) {
+                (None, None) => None,
+                (Some(Value::String(agent)), Some(Value::String(turn))) if is_identity(agent) && agent.len() <= 128 && valid_post_id(turn) => Some(Card { agent: agent.clone(), turn: turn.clone() }),
+                _ => return Said::Other,
+            };
             match (prompt, option) {
-                (Some(p), Some(opt)) if valid_token(&p, 64) && valid_token(&opt, 32) => Said::PromptResponse { prompt: p, option: opt, text },
+                (Some(p), Some(opt)) if valid_token(&p, 64) && valid_token(&opt, 32) => Said::PromptResponse { prompt: p, option: opt, text, card },
                 _ => Said::Other,
             }
         }
@@ -689,10 +707,20 @@ mod tests {
         assert_eq!(said(&json!({ "kind": "stop" })), Said::Stop { turn: None });
         assert_eq!(said(&json!({ "kind": "stop", "turn": "t1" })), Said::Stop { turn: Some("t1".into()) });
         assert_eq!(said(&json!({ "kind": "stop", "turn": 1 })), Said::Other);
-        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once" })), Said::PromptResponse { prompt: "ab.12".into(), option: "once".into(), text: None });
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once" })), Said::PromptResponse { prompt: "ab.12".into(), option: "once".into(), text: None, card: None });
+        assert_eq!(
+            said(&json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once", "agent": "npub1a", "turn": "t1" })),
+            Said::PromptResponse { prompt: "ab.12".into(), option: "once".into(), text: None, card: Some(Card { agent: "npub1a".into(), turn: "t1".into() }) },
+            "the card it answers: its agent and turn"
+        );
+        for half in [json!({ "agent": "npub1a" }), json!({ "turn": "t1" }), json!({ "agent": "paul", "turn": "t1" }), json!({ "agent": "npub1a", "turn": "a b" }), json!({ "agent": 7, "turn": "t1" })] {
+            let mut body = json!({ "kind": "prompt_response", "prompt": "ab.12", "option": "once" });
+            body.as_object_mut().unwrap().extend(half.as_object().unwrap().clone());
+            assert_eq!(said(&body), Said::Other, "a card named in part, or not as one, is no answer: {half}");
+        }
         // an option answered in words carries them, trimmed; blank words are none
-        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": " purple \n" })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: Some("purple".into()) });
-        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "  " })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: None });
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": " purple \n" })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: Some("purple".into()), card: None });
+        assert_eq!(said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "  " })), Said::PromptResponse { prompt: "q.1".into(), option: "other".into(), text: None, card: None });
         let long = said(&json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "a".repeat(limits::MESSAGE_TEXT_MAX_BYTES + 9) }));
         assert!(matches!(long, Said::PromptResponse { text: Some(t), .. } if t.len() == limits::MESSAGE_TEXT_MAX_BYTES), "cut as a message's text is");
         for bad in [json!({ "kind": "prompt_response", "prompt": "ab" }), json!({ "kind": "prompt_response", "prompt": "a b", "option": "x" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "x", "text": 3 })] {

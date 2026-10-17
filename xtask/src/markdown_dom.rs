@@ -121,18 +121,70 @@ check("only the renderer's own elements are ever made", made.every((t) => m.ELEM
   check("a script link is its words, marked missing, even when a hook allows it", e.length === 2 && e[1].tag === "span" && e[1].props.className === "md-missing" && root.textContent === "x", JSON.stringify(e.map((x) => [x.tag, x.props])));
 }
 {
-  const t0 = Date.now();
   const deep = render("> ".repeat(5000) + "deep");
   check("5000 nested quotes stop at DEPTH_MAX, as text", depth(deep) <= m.DEPTH_MAX + 4 && deep.textContent.endsWith("deep"), depth(deep));
   const list = render(Array.from({ length: 2000 }, (_, i) => "  ".repeat(i) + "- item").join("\n"));
   check("2000 nested list items stop at DEPTH_MAX", depth(list) <= 2 * m.DEPTH_MAX + 4, depth(list));
   const emphasis = render("*".repeat(3000) + "x" + "*".repeat(3000));
   check("a run of emphasis marks stops at DEPTH_MAX", depth(emphasis) <= m.DEPTH_MAX + 4, depth(emphasis));
-  render("*a ".repeat(40000));
-  render("[".repeat(20000) + "](".repeat(20000));
-  render("`".repeat(30000));
-  render("> - ".repeat(3000) + "x\n".repeat(3000));
-  check("hostile delimiter runs render in bounded time", Date.now() - t0 < 10000, `${Date.now() - t0} ms`);
+}
+// Time: each hostile run just under the inline cap, a megabyte of such
+// paragraphs, and a megabyte line of it. The renderer is linear in its
+// text, so each takes milliseconds (half a second for the worst megabyte);
+// the budgets are generous for a slow runner, and a quadratic pattern
+// blows through them by orders of magnitude (it took 11.7 s on 100 KB).
+{
+  const N = m.INLINE_MAX_CHARS - 8;
+  const BIG = 1 << 20;
+  const runs = {
+    "a heading's run of spaces": "# a" + " ".repeat(N) + "b",
+    "a heading's run of tabs": "# a" + "\t".repeat(N) + "b",
+    "a heading-like line in a paragraph": "text\n# a" + " ".repeat(N) + "b",
+    "a separator-like row after a pipe": "a|b\n-" + " ".repeat(N) + "x",
+    "a rule-like run": "-" + " ".repeat(N) + "x",
+    "spaces before a hard break": "a" + " ".repeat(N) + "b\nc",
+    "bold openers": "**a ".repeat(N / 4),
+    "italic openers": "*a ".repeat(N / 3),
+    "backtick runs": "`a ``b ".repeat(N / 7),
+    "link openers": "[a](".repeat(N / 4),
+    "brackets": "[".repeat(N / 2) + "](".repeat(N / 4),
+    "highlight openers": "==a ".repeat(N / 4),
+    "underscores": "_a ".repeat(N / 3),
+    "wikilink openers": "[[a".repeat(N / 3),
+    "reference openers": "[a][".repeat(N / 4),
+    "autolink openers": "<http://a".repeat(N / 9),
+    "emails": "a@b.c".repeat(N / 5),
+    "references to characters": "&amp".repeat(N / 4),
+    "hard breaks": "a  \n".repeat(N / 4),
+    "indented lines": "    a\n".repeat(N / 6),
+  };
+  for (const [name, para] of Object.entries(runs)) {
+    let t = Date.now();
+    render(para);
+    const one = Date.now() - t;
+    t = Date.now();
+    render((para + "\n\n").repeat(Math.floor(BIG / (para.length + 2))));
+    const doc = Date.now() - t;
+    t = Date.now();
+    render(para.slice(0, 64).repeat(Math.floor(BIG / 64)));
+    const line = Date.now() - t;
+    check(`${name}: under the inline cap, a megabyte of them, and a megabyte line, in linear time`, one < 500 && doc < 4000 && line < 4000, `${one} ms, ${doc} ms, ${line} ms`);
+  }
+  let t = Date.now();
+  const wide = render("|" + "a|".repeat(9000) + "\n|" + "-|".repeat(9000) + "\n" + ("|" + "b|".repeat(9000) + "\n").repeat(100));
+  check("a table wider than COLUMNS_MAX is no table: its text, quickly", Date.now() - t < 2000 && elements(wide).every((e) => e.tag !== "td"), `${Date.now() - t} ms`);
+  t = Date.now();
+  const long = render("|a|b|\n|-|-|\n" + "|c|d|\n".repeat(200000));
+  check("a table of more than CELLS_MAX cells is its text, quickly", Date.now() - t < 2000 && elements(long).length < 10, `${Date.now() - t} ms`);
+  // its header row's cells count toward CELLS_MAX too
+  const body = Math.floor(m.CELLS_MAX / m.COLUMNS_MAX) - 1;
+  const capped = render("|" + "a|".repeat(m.COLUMNS_MAX) + "\n|" + "-|".repeat(m.COLUMNS_MAX) + "\n" + ("|" + "b|".repeat(m.COLUMNS_MAX) + "\n").repeat(body));
+  const tds = elements(capped).filter((e) => e.tag === "td").length;
+  const ths = elements(capped).filter((e) => e.tag === "th").length;
+  check("a table at both its caps renders, a cell per column a row", tds === m.COLUMNS_MAX * body && ths === m.COLUMNS_MAX, `${ths} + ${tds}`);
+  t = Date.now();
+  const huge = render("x\n".repeat(m.TEXT_MAX_CHARS));
+  check("text past TEXT_MAX_CHARS is one block of itself, unparsed", Date.now() - t < 2000 && elements(huge).length === 1 && elements(huge)[0].tag === "pre", `${Date.now() - t} ms`);
 }
 {
   let threw = 0;
@@ -178,6 +230,27 @@ check("only the renderer's own elements are ever made", made.every((t) => m.ELEM
   m.inline(q, "line one\nline two");
   check("without breaks a newline is soft", !q.childNodes.some((c) => c.nodeName === "BR"));
   check("front matter is dropped", m.withoutFrontMatter("---\ntitle: x\n---\n# Body") === "# Body");
+}
+{
+  const root = render("intro\n\n    let a = '<b>';\n    a += 1;\n\nafter", {});
+  const pre = elements(root).find((e) => e.tag === "pre");
+  check("indented lines are code, literal, after a blank line", pre?.textContent === "let a = '<b>';\na += 1;" && !elements(root).some((e) => e.tag === "b"), root.textContent);
+  const para = render("text\n    more text");
+  check("an indented line continues a paragraph", !elements(para).some((e) => e.tag === "pre"));
+  const refs = render("See [the docs][docs] and [Docs][] and ![logo][pic].\n\n[docs]: https://example.com/d \"Its docs\"\n[pic]: https://example.com/p.png\n[bad]: javascript:alert(1)\n\nAnd [this][bad].", { image: (src) => ({ src }) });
+  const links = elements(refs).filter((e) => e.tag === "a");
+  check("reference links resolve to their definitions, which show nothing themselves", links.length === 2 && links.every((a) => a.props.href === "https://example.com/d") && links[0].props.title === "Its docs" && elements(refs).some((e) => e.tag === "img" && e.props.src === "https://example.com/p.png") && !refs.textContent.includes("[docs]:"), JSON.stringify(links.map((a) => a.props)));
+  check("a reference to a script URL is its words, marked missing", elements(refs).some((e) => e.props.className === "md-missing" && e.textContent === "this"), refs.textContent);
+  const spaced = render("[a note](<notes/a note.md>)", { resolve: (t) => ({ href: "#/" + t, path: t }) });
+  check("a link's <target> keeps its spaces", elements(spaced).find((e) => e.tag === "a")?.dataset.path === "notes/a note.md");
+  const chars = render("Tom &amp; Jerry &lt;b&gt; &#169; &#x1F600; &bogus; &#0; line<br>two<BR/>three");
+  check("character references are their characters, and <br> a line break", chars.textContent.startsWith("Tom & Jerry <b> © 😀 &bogus; � line") && elements(chars).filter((e) => e.tag === "br").length === 2, chars.textContent);
+  const comment = render("before\n\n<!-- a comment\nthat spans -->\n\nafter");
+  check("an HTML comment block is left out", comment.textContent === "beforeafter", comment.textContent);
+  const ends = render("| a | b |\n| - | - |\n| 1 | 2 |\n> a quote | with a pipe\n# a heading | too");
+  check("a table ends at another block, even one with a pipe", elements(ends).filter((e) => e.tag === "tr").length === 2 && elements(ends).some((e) => e.tag === "blockquote") && elements(ends).some((e) => e.tag === "h1"), ends.textContent);
+  check("scheme reads a URL as a browser does", m.scheme("java\tscript:x") === "javascript" && m.scheme(" HTTPS://a") === "https" && m.scheme("//a.b/c") === "https" && m.scheme("notes/a.md") === null && m.scheme("a b:c") === "ab");
+  check("resolvePath follows .. and . from a folder", m.resolvePath("a/b", "../c/./d.md") === "a/c/d.md" && m.resolvePath("a/b", "/x.md") === "x.md");
 }
 console.log(JSON.stringify(results));
 "##;

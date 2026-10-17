@@ -282,6 +282,31 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         from_of("work") == Some(json!("agent")) && from_of("notes") == Some(Value::Null) && from_of("events") == Some(Value::Null),
         &r,
     );
+
+    // A chat whose agent joined before member rows named their kind (its
+    // row's kind NULL) still takes its agent's posts: the row takes the
+    // kind of the identity the registry resolved, and keeps it.
+    let kind_of = |who: &str| -> Result<Value> {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
+        Ok(r.body["members"].as_array().and_then(|l| l.iter().find(|m| m["principal"] == who).map(|m| m["kind"].clone())).unwrap_or(Value::Null))
+    };
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": agent_id })))?;
+    let legacy = kind_of(&agent_id)?;
+    let r = post(api, &agent, &name, "work", "w-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 1 }))?;
+    let filled = kind_of(&agent_id)?;
+    s.ok(
+        "an agent member whose row predates its kind posts there all the same, and its row takes the agent's kind",
+        lever.status == 200 && lever.body["members"] == 1 && legacy.is_null() && r.status == 200 && r.body["record"]["principal"] == agent_id.as_str() && filled == "agent",
+        json!({ "lever": lever.body, "before": legacy, "post": r.body, "after": filled }),
+    );
+    let editor_id = api.identity(&editor)?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": editor_id })))?;
+    let r = post(api, &editor, &name, "work", "p-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 2 }))?;
+    s.ok(
+        "a person whose row predates its kind is still refused there, its row taking the person's kind",
+        r.status == 403 && kind_of(&editor_id)? == "person",
+        &r,
+    );
     Ok(())
 }
 

@@ -1384,9 +1384,11 @@ pub struct ChannelDecl {
     pub signed_in: bool,
     /// Only this kind of member posts (`"from": "agent"`): a poster who is
     /// no member of the fragment, a member of the other kind, or an agent
-    /// acting for someone is refused (403), so a record there is that
-    /// kind's own (a chat's `work`: its agents' steps, never a person's
-    /// forgery of one). The same fact a channel trigger's `from` reads.
+    /// acting for someone is refused (403), and an app publishes nothing
+    /// there (a mutation's effect or a job step names whoever called it:
+    /// `effects::check_record`), so a record there is that kind's own (a
+    /// chat's `work`: its agents' steps, never a person's forgery of one).
+    /// The same fact a channel trigger's `from` reads.
     /// `None`: whoever holds the `post` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<IdentityKind>,

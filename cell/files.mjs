@@ -17,7 +17,7 @@
 // the reader's bar also offers to open a file as a pane of its own: it asks
 // the page around it, `{fragment: "open", url, title}`.
 
-import { markdown as render, slug, withoutFrontMatter } from "./__markdown.js";
+import { markdown as render, resolvePath, scheme, slug, withoutFrontMatter } from "./__markdown.js";
 
 // Each icon's shapes, on a 24-unit grid (files.css strokes them).
 const ICON = {
@@ -440,7 +440,11 @@ async function refresh() {
 
 // ---- markdown, through the platform's renderer: its links and pictures
 // are this fragment's files (from the linking file's folder, else the
-// root; opened here) or the web's (http(s) and mailto), and nothing else ----
+// root; opened here) or the web's (http(s) and mailto), and nothing else.
+// A picture on the web is fetched by each reader's browser, so its host
+// learns who opened the file and when (a note's author can watch its
+// readers this way); keeping pictures to the fragment's own files is
+// Paul's call, not made here ----
 
 function markdown(text, at) {
   const doc = el("article", "doc");
@@ -457,13 +461,13 @@ function markdown(text, at) {
 // or an http(s) or mailto URL; anything else (javascript:, data:, a path
 // that names no file here) is no link: null.
 function destination(href, at) {
-  // a browser drops controls and spaces from a URL: "java\tscript:" is javascript:
-  const url = href.replace(/[\x00-\x20\x7f]/g, "");
-  if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(url)) return /^(?:https?:|mailto:|\/\/)/i.test(url) ? { href: url } : null;
-  const [p, hash] = url.split("#");
+  // the scheme as a browser reads it (the renderer's one reading)
+  const s = scheme(href);
+  if (s !== null) return ["http", "https", "mailto"].includes(s) ? { href } : null;
+  const [p, hash] = href.split("#");
   const anchor = hash ? decode(hash) : undefined;
   if (!p) return anchor && current ? internal(current, anchor) : null;
-  const path = [resolve(at, decode(p)), resolve("", decode(p))]
+  const path = [resolvePath(at, decode(p)), resolvePath("", decode(p))]
     .flatMap((t) => [t.toLowerCase(), `${t.toLowerCase()}.md`])
     .map((t) => lower.get(t))
     .find(Boolean);
@@ -473,21 +477,11 @@ function destination(href, at) {
 // A link the viewer opens: a file here, and a heading in it.
 const internal = (path, anchor) => ({ href: route(path, anchor), path });
 
-// A relative path from `at`, the linking file's folder ("" at the root).
-function resolve(at, rel) {
-  const parts = rel.startsWith("/") ? [] : at.split("/").filter(Boolean);
-  for (const seg of rel.split("/")) {
-    if (seg === "..") parts.pop();
-    else if (seg && seg !== ".") parts.push(seg);
-  }
-  return parts.join("/");
-}
-
 // A [[wikilink]]'s file: its path from the root or from this file's folder,
 // with or without .md, else a file of that name (this folder's first).
 function wiki(target, at) {
   const t = target.trim().replace(/^\.?\//, "").toLowerCase();
-  for (const p of [t, resolve(at, t).toLowerCase()]) {
+  for (const p of [t, resolvePath(at, t).toLowerCase()]) {
     const path = lower.get(p) ?? lower.get(`${p}.md`);
     if (path) return path;
   }
@@ -510,7 +504,7 @@ function picture(src, how, at) {
   }
   const to = destination(src, at);
   if (to?.path) return { src: fileUrl(to.path) };
-  return to && /^(?:https?:)?\/\//i.test(to.href) ? { src: to.href } : null;
+  return to && ["http", "https"].includes(scheme(to.href)) ? { src: to.href } : null;
 }
 
 // ---- start ----
