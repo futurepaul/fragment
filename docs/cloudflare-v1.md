@@ -116,7 +116,8 @@ speaking Cloudflare's APIs) returns once this product works.
    person's one agent above a flat list of their chats, newest first (no
    agent list, no New agent or New group; any other agents they have stay
    out of the sidebar, their chats listed and found as any other; more
-   than one agent may be a setting later); apps in a square-icon dock on
+   than one agent may be a setting later; decision 62, proposed, puts
+   them one level down, as the one agent's team); apps in a square-icon dock on
    the landscape desktop, open by default on wide screens, an empty one
    offering a few real requests of the agent. The sidebar plus (a
    bottom-right button on a phone), the phone's chat-header plus and
@@ -1216,6 +1217,20 @@ these other providers."
       so; never adds it to a chat that holds private things; and reads
       its answers as input, not orders. A new agent runs on another
       provider only when its owner asked or agreed.
+    - **The person sees the team work, one level down** (Austin,
+      2026-10-16, from six mockups: "work in the chat + team strip").
+      The shell keeps the one agent above everything (decision 7's
+      sidebar): its other agents are faces under it, ringed while one
+      works ("Polisher is working…"), each face's menu its own chat, its
+      hand-offs and its profile, with where its model runs. Their own
+      chats and the hand-offs among the person's agents leave the
+      person's list. In a chat, each hand-off is a card: who was asked,
+      "<model> · outside the platform" when it is, what it was sent with
+      its placeholders marked, working or done, and "See the hand-off",
+      which opens the chat it went to beside it (docs/api.md, The shell;
+      docs/chat-records.md, The page). A hand-off the default agent only
+      describes shows no card: on a local run, it once said Polisher had
+      the draft when it had asked no one, and the skill now forbids that.
     - **What this is not.** Decision 44 stands: a person's agents share
       their computer, so the care above is the default agent's, in its
       prompt, and no wall (the debt ledger: "The default agent's care for

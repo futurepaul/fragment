@@ -2475,9 +2475,20 @@ said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, then Add, open beside the chat on a
-desktop's width, a sheet from the bottom on a phone. Any other agents of
-theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. **Add teaches
+desktop's width, a sheet from the bottom on a phone. **Their other
+agents are the one agent's team** (decision 62, proposed): a face each,
+one level down under it (`#team`), ringed while one works, with a line
+that says who ("Polisher is working…"); each face's menu says where its
+model runs (its `agent.json`: the platform's models, or "<model> ·
+outside the platform") and opens its own chat with the person, the
+hand-offs it was given (beside the chat), and its profile. Their chats
+(a teammate's own chat, `<label>-chat`, and the hand-offs among the
+person's agents, `fragment ask`'s pairs, by their labels) list under it
+and never in the person's list, and their unread mark its face, not that
+list; search still finds them. Who works the shell reads from those
+chats' `work` (a turn started and not ended), every 4 s while shown, at
+most 12 chats. New chats, Enter and the launcher stay the one agent's.
+**Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
@@ -2551,12 +2562,17 @@ a message in it, unless it was renamed first.
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that
 frame, at that fragment's own origin only (its status's canonical URL),
-`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?}]}`: the
+`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, runsOn?, working?}]}`: the
 agents its person's computer runs, `name` the label that `@mentions`
 each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
 `starting`, `awake`, `sleeping` or `wont_wake`; absent before the shell
-has read it). It sends the list again when any of it changes, its
+has read it); `runsOn` where its model calls go, `{on: "platform"}` or
+`{on: "own", model}` (a model of its owner's own provider, outside the
+platform, as its `agent.json` says), and `working: true` while it works
+(decision 62, proposed). A frame may ask `{fragment: "open-handoff",
+identity}` for one of them: the shell opens that agent's newest team
+chat (where a hand-off to it went) beside the frame, and answers nothing. It sends the list again when any of it changes, its
 computer's phase too (the list's socket tells the shell, which reads the
 computer again). The frame may then ask
 `{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
