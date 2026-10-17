@@ -1361,9 +1361,9 @@ fragment.club until cutover (decisions 34–35).
 
 ## A fenced agent shares its computer's kernel and Hermes' process
 
-- **Observed:** decision 63 (proposed; branch `claude/fenced`). A fenced
-  agent's commands and file tools run as a user of its own in a sandbox
-  of its own, but its model runs in the one Hermes gateway, as the
+- **Observed:** decision 63 (proposed; branch `claude/orchestrator`). A
+  fenced agent's commands and file tools run as a user of its own in a
+  sandbox of its own, but its model runs in the one Hermes gateway, as the
   `hermes` user, beside every other agent's, and its sandbox is
   namespaces on the one kernel.
 - **Risk:** a tool that reads files or reaches services in the gateway's

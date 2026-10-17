@@ -1366,7 +1366,7 @@ it". And on a computer of its own each: "that cost would scale terribly
 native boundary that we can leverage here?"
 
 63. **A teammate on another provider is fenced** (proposed; a prototype
-    on branch `claude/fenced`, from decision 62's, not merged). It
+    on decision 62's branch, `claude/orchestrator`, not merged). It
     answers decision 62's third question with a wall that costs no
     computer: the agent stays on its owner's computer, in its own Hermes
     profile, and reaches only what is its own or is handed to it.
@@ -1421,6 +1421,21 @@ native boundary that we can leverage here?"
     a profile's `.env` were refused, `/data/work` could not be listed, the
     platform and the computer's own services were unreachable, `su` and
     `sudo` failed, and sshd refused a tunnel.
+
+    *Status, 2026-10-17 (built, local).* The platform's fence (the
+    registry, the router, the CLI's `--fence` and `--no-fence`, the
+    shell's menu and its dialog), the image's (a user and sandbox per
+    fenced agent, its profile's `ssh` terminal and tools), and a fence
+    put up or let go while the computer is awake: Hermes keeps a session's
+    terminal for the session's life, so the image's
+    `fragment-terminal-follows` plugin ends the one its profile no longer
+    names before the next tool runs (docs/computers.md). Tested by the
+    orchestrator and shell-ui lanes, the images' Docker lane
+    (`a_fenced_agent_runs_in_its_sandbox`, `a_fence_follows_an_awake_agent`)
+    and the real-Hermes lane, where the lead fences a teammate from its
+    terminal and the teammate's next turns run as its own user, offline,
+    reading neither the lead's work nor any `.env`. Not yet on a preview
+    (question 2).
 
     **For Paul to decide:**
     1. Whether a teammate on another provider is fenced, and by default
