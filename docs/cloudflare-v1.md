@@ -1240,9 +1240,17 @@ these other providers."
     sending placeholders (`[NAME]`, `[DOB]`, …), the details put back by
     the default agent; asked again, in a new chat, about a note to a
     landlord (a bank account, an address, a phone number), it sent
-    Polisher placeholders alone, put the details back, and said so. One
-    run each, on one model: evidence, not proof (the hosted agent-smoke
-    lane's to repeat). Seen beside it: a person's own-key calls are never
+    Polisher placeholders alone, put the details back, and said so. Then
+    the tiers on Finite Private (`models-finite-private`, its canary key):
+    the default agent's calls settled on `glm-5-3-flash` there, none fell
+    back. Asked about an email to an insurer (a policy number, a Social
+    Security number, a medicine), it polished it itself, sent Polisher
+    nothing, and told its owner to leave the SSN out, but not that it had
+    not used Polisher; the skill now says to hand the named teammate the
+    placeholders, and to say who did the work. Asked about a text to a
+    sister (names, a custody hearing, a courthouse, a loan, a bank), it
+    sent Polisher placeholders alone and said so. One run each, on one
+    model: evidence, not proof (the hosted agent-smoke lane's to repeat). Seen beside it: a person's own-key calls are never
     counted in the computer's `uses` (`GET /api/computers/{id}/uses`
     answered none), which docs/computers.md says they are.
 

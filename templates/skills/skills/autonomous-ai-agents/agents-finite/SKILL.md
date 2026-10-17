@@ -132,7 +132,11 @@ the same; the details never leave.
 - **When the task cannot be done without the details** (it must read
   them, not just carry them), do it yourself or with a teammate on the
   platform's tiers, or ask your owner first, in plain words, naming what
-  the teammate would see.
+  the teammate would see. When your owner named the teammate, hand it
+  the placeholders: that is what they asked for.
+- **Say who did the work.** If you did not hand it to the teammate your
+  owner named, say so in one line, and why ("I did this one myself: it
+  holds your Social Security number").
 - **Keep it out of their reach:** never add an untrusted teammate to a
   chat or fragment that holds private things, and never share one with
   it. Ask it in its own chat (`fragment ask <agent> "…"`).
