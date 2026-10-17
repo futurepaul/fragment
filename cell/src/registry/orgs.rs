@@ -1,9 +1,11 @@
 //! Orgs and seats (docs/billing.md; docs/cloudflare-v1.md, decisions 51 to
 //! 53), in the registry beside the people they name. An org is who pays;
 //! its members are rows of `org_members`: an admin, a seat's holder, or
-//! both, held by a person or pending on an email until someone signs in
-//! with it verified (`claim_seats`, from sign-in's turn). A person is in at
-//! most one org (`person` is UNIQUE) and holds at most one seat.
+//! both, each a person who said yes (offers.rs `enroll`), or an offer to an
+//! email, no one's until whoever holds it accepts it (offers.rs). Signing
+//! in attaches nothing. A person is in at most one org (`person` is
+//! UNIQUE) and holds at most one seat. An org is made only by a Checkout
+//! paid (billing.rs) or an operator's comp (`comp_seat`).
 //!
 //! The registry is the one writer of a seat holder's plan and seat. A
 //! change to a seat queues its holder in `plan_syncs` (one row a person),
@@ -21,12 +23,13 @@
 //! seats, and an org's own admins changing them, come with Stripe.
 
 use fragment_core::ledger::Refused;
-use fragment_core::org::{self, Held, Status, OFFERS_PER_EMAIL_MAX, SEATS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
+use fragment_core::org::{self, Held, Status, SEATS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
 use fragment_proto::ledger::{SetPlan, SetSeat};
-use fragment_proto::org::{CompSeat, Comped, MySeat, OfferedSeat, OrgMember, OrgRef, OrgView, SeatKind, SeatView};
+use fragment_proto::org::{CompSeat, Comped, MySeat, OrgMember, OrgRef, OrgView, SeatKind, SeatView};
 use serde::Serialize;
 
 use super::calls::{Call, By};
+use super::offers::Yes;
 use super::*;
 
 pub(super) const SCHEMA: &str = "
@@ -291,9 +294,13 @@ impl RegistryCell {
         Ok(())
     }
 
-    pub(super) fn new_org(&self, name: &str, by: &str) -> CellResult<OrgRow> {
+    /// A new org, `id` (a Checkout's carries the one its session named;
+    /// a comp's is new). Only a Checkout paid (billing.rs) and an
+    /// operator's comp make one.
+    pub(super) fn new_org(&self, id: &str, name: &str, by: &str) -> CellResult<OrgRow> {
+        assert!(org::valid_org_id(id), "an org's id is org- and 16 hex");
         let name = org::org_name(name).ok_or_else(|| CellError::invalid("an org's name is 1-320 bytes, no control characters"))?;
-        let row = OrgRow { id: fresh_id("org-"), name, created_at: js::now_ms(), status: None };
+        let row = OrgRow { id: id.to_string(), name, created_at: js::now_ms(), status: None };
         self.exec(
             "INSERT INTO orgs (id, name, created_at, created_by, status) VALUES (?, ?, ?, ?, NULL)",
             vec![row.id.as_str().into(), row.name.as_str().into(), SqlStorageValue::Integer(row.created_at), by.into()],
@@ -301,40 +308,13 @@ impl RegistryCell {
         Ok(row)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn insert_member(&self, org: &str, person: Option<&str>, email: &str, admin: bool, seat: Option<SeatKind>, comped: bool, by: &str) -> CellResult<MemberRow> {
-        let row = MemberRow {
-            id: fresh_id("mem-"),
-            org: org.to_string(),
-            person: person.map(str::to_string),
-            email: email.to_string(),
-            admin: i64::from(admin),
-            seat: seat.map(|k| k.as_str().to_string()),
-            comped: i64::from(comped),
-            sleeps: 0,
-            added_at: js::now_ms(),
-        };
-        self.exec(
-            "INSERT INTO org_members (id, org, person, email, admin, seat, comped, sleeps, added_at, added_by) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-            vec![
-                row.id.as_str().into(),
-                org.into(),
-                person.map_or(SqlStorageValue::Null, |p| p.into()),
-                email.into(),
-                SqlStorageValue::Integer(row.admin),
-                seat.map_or(SqlStorageValue::Null, |k| k.as_str().into()),
-                SqlStorageValue::Integer(row.comped),
-                SqlStorageValue::Integer(row.added_at),
-                by.into(),
-            ],
-        )?;
-        Ok(row)
-    }
-
     /// An operator's comp: in `org` when named, else in the org the email's
     /// person is in, else in a new org of one, named by the email, whose
-    /// seat's holder is its admin. A person who holds a seat already is
-    /// refused, unless it is this same comp (a replay answers it again).
+    /// seat's holder is its admin. A person's is theirs at once (operators
+    /// are trusted: `Yes::Comped`); an email no one signs in with yet is
+    /// offered it, theirs once they accept it. A person who holds a seat
+    /// already is refused, unless it is this same comp (a replay answers it
+    /// again).
     fn comp_seat(&self, b: CompSeatCall) -> CellResult<Comped> {
         let email = super::signin::email_of(&b.comp.email).ok_or_else(|| CellError::invalid(format!("{:?} is not an email", b.comp.email)))?;
         let kind = b.comp.kind;
@@ -346,53 +326,73 @@ impl RegistryCell {
         let person = self.person_by_email(&email)?;
         if let Some(p) = &person {
             self.not_wiping_id(p)?;
-        }
-        // whatever row already names them: theirs, or one pending on the email
-        let existing = match &person {
-            Some(p) => self.member_of(p)?,
-            None => match &named {
-                Some(o) => self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.org = ? AND m.email = ?"), vec![o.id.as_str().into(), email.as_str().into()])?,
-                None => self.row(
-                    &format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person IS NULL AND m.email = ? AND m.seat IS NOT NULL AND m.comped = 1 ORDER BY m.added_at LIMIT 1"),
-                    vec![email.as_str().into()],
-                )?,
-            },
-        };
-        if let Some(m) = existing {
-            if named.as_ref().is_some_and(|o| o.id != m.org) {
-                return Err(conflict(format!("{email} is in another org already")));
-            }
-            let org_row = self.stored_org(&m.org)?;
-            match m.seat()? {
-                Some(k) if m.comped != 0 && k == kind => return Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: false, mailed: false }),
-                Some(_) => return Err(conflict(format!("{email} holds a seat already: change its kind, or end it first"))),
-                None => {
-                    // an admin without a seat takes the comped one
-                    self.check_seats_room(&m.org)?;
-                    self.exec("UPDATE org_members SET seat = ?, comped = 1 WHERE id = ?", vec![kind.as_str().into(), m.id.as_str().into()])?;
-                    if let Some(p) = &m.person {
-                        self.queue_sync(p)?;
-                    }
-                    self.log_admin(&b.by, "comp", &m.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
-                    let m = self.member(&m.id)?;
-                    return Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: true, mailed: false });
+            // in an org already (by their own yes): the comp is in theirs
+            if let Some(m) = self.member_of(p)? {
+                if named.as_ref().is_some_and(|o| o.id != m.org) {
+                    return Err(conflict(format!("{email} is in another org already")));
                 }
+                return self.comp_member(&b.by, m, kind, &email);
             }
         }
-        if person.is_none() && self.count("SELECT COUNT(*) AS n FROM org_members WHERE person IS NULL AND email = ?", vec![email.as_str().into()])? >= OFFERS_PER_EMAIL_MAX {
-            return Err(CellError::invalid(format!("{OFFERS_PER_EMAIL_MAX} orgs have offered {email} a seat already")));
-        }
-        let (org_row, admin) = match named {
-            Some(o) => (o, false),
-            None => (self.new_org(&email, &b.by)?, true),
+        // an offer waiting on the email: in the org named, or a comp's own org of one
+        let waiting = match &named {
+            Some(o) => self.offer_in(&o.id, &email)?,
+            None => self.row(
+                &format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person IS NULL AND m.email = ? AND m.seat IS NOT NULL AND m.comped = 1 ORDER BY m.added_at LIMIT 1"),
+                vec![email.as_str().into()],
+            )?,
         };
-        self.check_seats_room(&org_row.id)?;
-        let m = self.insert_member(&org_row.id, person.as_deref(), &email, admin, Some(kind), true, &b.by)?;
-        if let Some(p) = &person {
-            self.queue_sync(p)?;
+        let (offer, created) = match waiting {
+            Some(w) => match w.seat()? {
+                Some(k) if w.comped != 0 && k == kind => (w, false),
+                Some(_) => return Err(conflict(format!("{email} is offered a seat there already: it accepts or declines it first"))),
+                None => {
+                    // an admin's place offered: the comped seat joins it
+                    self.check_seats_room(&w.org)?;
+                    self.exec("UPDATE org_members SET seat = ?, comped = 1 WHERE id = ?", vec![kind.as_str().into(), w.id.as_str().into()])?;
+                    self.log_admin(&b.by, "comp", &w.id, &format!("{} seat for {email} in {}", kind.as_str(), self.stored_org(&w.org)?.name))?;
+                    (self.member(&w.id)?, true)
+                }
+            },
+            None => {
+                if person.is_none() {
+                    self.check_offer_room(&email)?;
+                }
+                let (org_row, admin) = match named {
+                    Some(o) => (o, false),
+                    None => (self.new_org(&fresh_id("org-"), &email, &b.by)?, true),
+                };
+                self.check_seats_room(&org_row.id)?;
+                let o = self.insert_offer(&org_row.id, &email, admin, Some(kind), true, &b.by)?;
+                self.log_admin(&b.by, "comp", &o.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
+                (o, true)
+            }
+        };
+        let seat = match &person {
+            Some(p) => self.enroll(&offer, Yes::Comped(p))?,
+            None => offer,
+        };
+        let org_row = self.stored_org(&seat.org)?;
+        Ok(Comped { seat: seat.wire(None)?, org: org_row.reference(), created, mailed: false })
+    }
+
+    /// An operator's comp for a member of an org (theirs, by their yes):
+    /// the same comp again is answered again; a seat of another kind, or a
+    /// paid one, is refused; an admin without a seat takes it.
+    fn comp_member(&self, by: &str, m: MemberRow, kind: SeatKind, email: &str) -> CellResult<Comped> {
+        let person = m.person.clone().ok_or_else(|| CellError::host(format!("{} is an offer, not a member", m.id)))?;
+        let org_row = self.stored_org(&m.org)?;
+        match m.seat()? {
+            Some(k) if m.comped != 0 && k == kind => Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: false, mailed: false }),
+            Some(_) => Err(conflict(format!("{email} holds a seat already: change its kind, or end it first"))),
+            None => {
+                self.check_seats_room(&m.org)?;
+                self.exec("UPDATE org_members SET seat = ?, comped = 1 WHERE id = ?", vec![kind.as_str().into(), m.id.as_str().into()])?;
+                self.queue_sync(&person)?;
+                self.log_admin(by, "comp", &m.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
+                Ok(Comped { seat: self.member(&m.id)?.wire(None)?, org: org_row.reference(), created: true, mailed: false })
+            }
         }
-        self.log_admin(&b.by, "comp", &m.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
-        Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: true, mailed: false })
     }
 
     /// A comped seat, by its row's id: refused for a paid one (Stripe's).
@@ -417,9 +417,11 @@ impl RegistryCell {
         self.member(&m.id)?.wire(None)
     }
 
+    /// An admin who holds it keeps their place, seatless; anyone else's
+    /// row goes, an offer's whole (an org left with no one ends: seats.rs).
     fn end_comp(&self, b: EndComp) -> CellResult<OrgMember> {
         let (m, _) = self.comped(&b.seat)?;
-        if m.admin != 0 {
+        if m.admin != 0 && m.person.is_some() {
             self.exec("UPDATE org_members SET seat = NULL, comped = 0, sleeps = 0 WHERE id = ?", vec![m.id.as_str().into()])?;
         } else {
             self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?;
@@ -427,27 +429,9 @@ impl RegistryCell {
         if let Some(p) = &m.person {
             self.queue_sync(p)?;
         }
+        self.queue_quantities(&m.org)?;
         self.log_admin(&b.by, "comp-end", &m.id, &format!("{} seat of {}", m.seat.as_deref().unwrap_or("?"), m.email))?;
         m.wire(None)
-    }
-
-    /// Sign-in's turn: a person not yet in an org takes the oldest seat (or
-    /// admin's place) offered to the email they signed in with. Answers
-    /// whether a push was queued.
-    pub(super) fn claim_seats(&self, person: &str, email: &str) -> CellResult<bool> {
-        if self.member_of(person)?.is_some() {
-            return Ok(false);
-        }
-        let offered = self.row::<MemberRow>(
-            &format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person IS NULL AND m.email = ? ORDER BY m.added_at, m.id LIMIT 1"),
-            vec![email.into()],
-        )?;
-        let Some(m) = offered else { return Ok(false) };
-        self.exec("UPDATE org_members SET person = ? WHERE id = ?", vec![person.into(), m.id.as_str().into()])?;
-        if m.seat.is_some() {
-            self.queue_sync(person)?;
-        }
-        Ok(m.seat.is_some())
     }
 
     /// The person a call names, a person (an agent holds no seat).
@@ -484,20 +468,9 @@ impl RegistryCell {
                 (seat, Some(o.reference()), m.admin != 0)
             }
         };
-        // bounded: a person signs in with at most SUBJECTS_MAX emails, each offered by at most OFFERS_PER_EMAIL_MAX orgs
-        let rows = self.rows::<MemberRow>(
-            &format!(
-                "SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.person IS NULL AND m.seat IS NOT NULL
-                 AND m.email IN (SELECT email FROM subjects WHERE identity = ?) ORDER BY m.added_at, m.id"
-            ),
-            vec![person.into()],
-        )?;
-        let mut offered = vec![];
-        for r in rows {
-            let kind = r.seat()?.ok_or_else(|| CellError::host("an offer selected for its seat has none"))?;
-            offered.push(OfferedSeat { id: r.id.clone(), org: self.stored_org(&r.org)?.reference(), kind });
-        }
-        Ok(MySeat { seat, org: org_ref, admin, offered })
+        // every offer to an email of theirs, an admin's place alone too:
+        // nothing of one is theirs until they accept it
+        Ok(MySeat { seat, org: org_ref, admin, offered: self.offers_to(person)? })
     }
 
     fn sleeps(&self, b: Sleeps) -> CellResult<MySeat> {
@@ -541,7 +514,8 @@ impl RegistryCell {
             vec![org_row.id.as_str().into()],
         )?;
         let members = rows.into_iter().map(|r| r.m.wire(r.latest)).collect::<CellResult<Vec<_>>>()?;
-        Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members })
+        let payer = self.payer_of(&org_row.id)?;
+        Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer })
     }
 
     fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {
@@ -639,17 +613,16 @@ impl RegistryCell {
         Ok(self.state.storage().set_alarm(super::signin::alarm_at(js::now_ms() + SYNC_RETRY_MS)).await?)
     }
 
-    /// The wipe's registry step: the person's rows here go, and an org left
-    /// with no one in it goes with them.
+    /// The wipe's registry step, for orgs: the `billing` step before it
+    /// took the person's place in their org (wipe.rs `wipe_billing`), so a
+    /// row of theirs here is a contradiction; their queued pushes and
+    /// what named them as a payer go.
     pub(super) fn wipe_orgs(&self, person: &str) -> CellResult<()> {
-        let org_id = self.member_of(person)?.map(|m| m.org);
-        self.exec("DELETE FROM org_members WHERE person = ?", vec![person.into()])?;
-        self.exec("DELETE FROM plan_syncs WHERE person = ?", vec![person.into()])?;
-        if let Some(o) = org_id {
-            if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ?", vec![o.as_str().into()])? == 0 {
-                self.exec("DELETE FROM orgs WHERE id = ?", vec![o.as_str().into()])?;
-            }
+        if let Some(m) = self.member_of(person)? {
+            return Err(CellError::host(format!("{person} is still in {} at the wipe's last step: its billing step did not take their place", m.org)));
         }
+        self.exec("DELETE FROM plan_syncs WHERE person = ?", vec![person.into()])?;
+        self.exec("DELETE FROM org_payers WHERE person = ?", vec![person.into()])?;
         Ok(())
     }
 

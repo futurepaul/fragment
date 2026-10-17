@@ -1,11 +1,16 @@
 //! Seats bought through Stripe (docs/billing.md; docs/api.md, Billing), on
-//! the Stripe fake: a person's Checkout for their own seat, in an org of
-//! their own; the seat theirs once Stripe says it is paid, by its webhook
-//! or by the Checkout's return when no webhook comes; the subscription's
-//! lapse and a second purchase; the portal. Every subscription the
-//! platform writes is fetched from Stripe again, so a forged, stale,
-//! foreign, repeated or out-of-order event changes nothing it should not.
-//! Valid, invalid, replay, and a webhook lost.
+//! the Stripe fake: a person's Checkout for their own seat, which makes
+//! nothing until it is paid, then an org of their own; the seat theirs
+//! once Stripe says it is paid, by its webhook or by the Checkout's return
+//! when no webhook comes; the subscription's lapse and a second purchase,
+//! on the org's own customer; the portal. Every subscription the platform
+//! writes is fetched from Stripe again, so a forged, stale, foreign,
+//! repeated or out-of-order event changes nothing it should not. An org's
+//! seats and admins are offers, no one's until they accept them; who pays
+//! is no other admin's to remove. Valid, invalid, replay, and a webhook
+//! lost. Then the security audit's H1, each of its steps refused
+//! (`consent`), and its M4: a wipe cancels what the wiped would pay, its
+//! customer kept, across a restart mid-step (`wiped`).
 
 use std::time::Duration;
 
@@ -42,10 +47,15 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("billing", &[Need::Fakes]) {
         return Ok(());
     }
+    let op_session = api.sign_in("operator@e2e.test")?;
+    // the ledger section approves the operator's key when it runs first
+    let _ = api.approve(&op_session, &s.operator);
 
-    // ---- a person buys a $200 seat
+    // ---- a person buys a $200 seat: nothing is made until they pay
     let ann = api.person()?;
     let ann_id = api.identity(&ann)?;
+    let ann_email = Api::email_of(&ann);
+    let customers = s.stripe.customers().len();
     let r = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat_always_on" })))?;
     let session = r.body["session"].as_str().unwrap_or("").to_string();
     s.ok(
@@ -57,11 +67,14 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     let org = f("metadata[fragment_org]");
     s.ok(
-        "it takes a card always, its tax, promotion codes, one seat at its lookup key's price, names this deployment, its org and its buyer, and returns to the welcome, paid or canceled",
+        "it takes a card always, its tax, promotion codes, one seat at its lookup key's price, names this deployment, the org it will make and its buyer, bills a customer Stripe makes for the buyer's email (none named), and returns to the welcome, paid or canceled",
         f("mode") == "subscription"
             && f("payment_method_collection") == "always"
             && f("automatic_tax[enabled]") == "true"
             && f("allow_promotion_codes") == "true"
+            && f("customer_email") == ann_email
+            && !asked.form.contains_key("customer")
+            && !asked.form.keys().any(|k| k.starts_with("customer_update"))
             && f("line_items[0][quantity]") == "1"
             && f("metadata[fragment_deployment]") == api.base
             && f("subscription_data[metadata][fragment_deployment]") == api.base
@@ -74,17 +87,30 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", asked.form),
     );
     let before = seat(api, &ann);
-    s.ok("before they pay, they hold no seat; they admin their new org", before["seat"].is_null() && before["admin"] == true && before["org"]["id"] == org.as_str(), &before);
+    let none = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}"), None)?;
+    s.ok(
+        "before they pay, nothing is made: they hold no seat and are in no org, the org their Checkout names is none (404), and Stripe made no customer",
+        before["seat"].is_null() && before["org"].is_null() && before["admin"] == false && none.status == 404 && s.stripe.customers().len() == customers,
+        json!({ "seat": before, "org": none.status, "customers": [customers, s.stripe.customers().len()] }),
+    );
     s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
     let pushed = s.eventually(PUSHED, || {
         let v = ledger(api, &ann);
         v["plan"] == "seat_always_on" && v["seat"] == "active"
     });
     let mine = seat(api, &ann);
+    let view = api.signed(&ann, "GET", "/api/org", None)?;
     s.ok(
-        "paid, Stripe's webhook gives them the seat, paid not comped, and its plan reaches their ledger",
-        pushed && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["comped"] == false && mine["seat"]["good"] == true,
-        json!([mine, ledger(api, &ann)]),
+        "paid, Stripe's webhook makes the org their Checkout named: they admin it and hold its seat, paid not comped, they pay for it, and its plan reaches their ledger",
+        pushed
+            && mine["seat"]["kind"] == "seat_always_on"
+            && mine["seat"]["comped"] == false
+            && mine["seat"]["good"] == true
+            && mine["admin"] == true
+            && mine["org"]["id"] == org.as_str()
+            && view.body["payer"] == ann_id.as_str()
+            && view.body["members"].as_array().map(Vec::len) == Some(1),
+        json!([mine, ledger(api, &ann), view.body]),
     );
     let delivered = s.stripe.delivered();
     s.ok("each event was answered 200", !delivered.is_empty() && delivered.iter().all(|(_, _, status)| *status == 200), format!("{delivered:?}"));
@@ -139,19 +165,29 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
         json!([seat(api, &ann), ledger(api, &ann)]),
     );
 
-    // ---- buying again: a new subscription replaces the one that ended
+    // ---- buying again: a new subscription replaces the one that ended,
+    // on the org's own customer, for its paid seats
     let hundred = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
     let r = api.signed(&ann, "POST", "/api/billing/checkout", Some(&json!({})))?;
     let session2 = r.body["session"].as_str().unwrap_or("").to_string();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a second Checkout was asked for")?;
+    let own = s.stripe.subscription(&sub).map(|x| x.customer).context("the ended subscription's customer")?;
+    let reused = asked.form.get("customer") == Some(&own) && !asked.form.contains_key("customer_email") && asked.form.get("line_items[0][quantity]").map(String::as_str) == Some("1");
     s.stripe.complete(&session2).map_err(anyhow::Error::msg)?;
     let restored = s.eventually(PUSHED, || {
         let v = ledger(api, &ann);
         v["seat"] == "active" && v["plan"] == "seat_always_on"
     });
     s.ok(
-        "their org's admin buys again, naming no kind (the seat sold; a $100 one is refused, 400): the new subscription replaces the ended one, and the seat is good",
-        hundred.status == 400 && hundred.message().contains("not sold") && r.status == 200 && restored && seat(api, &ann)["seat"]["kind"] == "seat_always_on" && seat(api, &ann)["org"]["id"] == org.as_str(),
-        json!([hundred.body, seat(api, &ann), ledger(api, &ann)]),
+        "their org's admin buys again, naming no kind (the seat sold; a $100 one is refused, 400), on its own customer (none made) for its one paid seat: the new subscription replaces the ended one, and the seat is good",
+        hundred.status == 400
+            && hundred.message().contains("not sold")
+            && r.status == 200
+            && reused
+            && restored
+            && seat(api, &ann)["seat"]["kind"] == "seat_always_on"
+            && seat(api, &ann)["org"]["id"] == org.as_str(),
+        json!([hundred.body, seat(api, &ann), ledger(api, &ann), format!("{:?}", asked.form)]),
     );
     let old = s.stripe.subscription_json(&sub).context("the old subscription")?;
     let (b, sig) = s.stripe.signed_event("customer.subscription.updated", old, None);
@@ -197,7 +233,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let cy_seat = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
     let replay = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat_always_on" })))?;
     s.ok(
-        "an org's admin adds a seat for an email, the always-on one sold (a $100 seat is refused, 400): it waits on it, mailed, and again is the same seat",
+        "an org's admin offers a seat to an email, the always-on one sold (a $100 seat is refused, 400): an offer, no one's, mailed; again it is the same offer",
         hundred.status == 400
             && hundred.message().contains("not sold")
             && r.status == 200
@@ -211,15 +247,47 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     );
     if !s.hosted() {
         let sent = s.mail.sent_to(&cy_email);
-        s.ok("the email is mailed where to sign in to take it", r.body["mailed"] == true && sent.len() == 1 && sent[0].text.contains("Sign in with this email address to take it"), format!("{sent:?}"));
+        s.ok(
+            "the email is mailed who offers it, and where to accept or decline it: nothing is theirs until they accept",
+            r.body["mailed"] == true && sent.len() == 1 && sent[0].text.contains("offers you") && sent[0].text.contains(&ann_email) && sent[0].text.contains("accept or decline"),
+            format!("{sent:?}"),
+        );
     }
     let billed = s.eventually(PUSHED, || quantities(s) == seat_q(2));
-    s.ok("Stripe bills it from the invite: the subscription's quantity follows the seats", billed, format!("{:?}", quantities(s)));
+    s.ok("Stripe bills it from the offer: the subscription's quantity follows the seats", billed, format!("{:?}", quantities(s)));
     let cy = Keys::generate();
     let cy_session = api.sign_in(&cy_email)?;
     api.approve(&cy_session, &cy)?;
+    let waiting = seat(api, &cy);
+    let offer = &waiting["offered"][0];
+    s.ok(
+        "signing in with the email attaches nothing: no seat, no org; they see the offer, its org's name, the seat, and who made it",
+        waiting["seat"].is_null()
+            && waiting["org"].is_null()
+            && waiting["offered"].as_array().map(Vec::len) == Some(1)
+            && offer["id"] == cy_seat.as_str()
+            && offer["org"]["id"] == org.as_str()
+            && offer["kind"] == "seat_always_on"
+            && offer["admin"] == false
+            && offer["from"] == ann_email.as_str()
+            && ledger(api, &cy)["plan"] != "seat_always_on",
+        &waiting,
+    );
+    let accepted = api.signed(&cy, "POST", &format!("/api/seat/offers/{cy_seat}/accept"), Some(&json!({})))?;
     let held = s.eventually(PUSHED, || ledger(api, &cy)["seat"] == "active" && ledger(api, &cy)["plan"] == "seat_always_on");
-    s.ok("whoever signs in with it holds it, paid, and their ledger follows", held && seat(api, &cy)["seat"]["id"] == cy_seat.as_str() && seat(api, &cy)["seat"]["admin"] == false, seat(api, &cy));
+    s.ok(
+        "they accept it: the seat is theirs, paid, in its org, and their ledger follows",
+        accepted.status == 200 && accepted.body["seat"]["id"] == cy_seat.as_str() && accepted.body["seat"]["admin"] == false && accepted.body["offered"] == json!([]) && held,
+        json!([accepted.body, ledger(api, &cy)]),
+    );
+    let again = api.signed(&cy, "POST", &format!("/api/seat/offers/{cy_seat}/accept"), Some(&json!({})))?;
+    let declined = api.signed(&cy, "POST", &format!("/api/seat/offers/{cy_seat}/decline"), Some(&json!({})))?;
+    let stranger_takes = api.signed(&api.person()?, "POST", &format!("/api/seat/offers/{cy_seat}/accept"), Some(&json!({})))?;
+    s.ok(
+        "accepting it again answers the same seat (a replay); declining it now, or anyone else accepting it, finds no offer (404)",
+        again.status == 200 && again.body["seat"] == accepted.body["seat"] && declined.status == 404 && stranger_takes.status == 404 && seat(api, &cy)["seat"]["id"] == cy_seat.as_str(),
+        json!([again.status, declined.status, stranger_takes.status]),
+    );
     let r = api.signed(&ann, "PATCH", &format!("/api/org/seats/{cy_seat}"), Some(&json!({ "kind": "seat" })))?;
     s.ok("a paid seat's kind changes nowhere: one seat is sold, so there is no route (404)", r.status == 404 && seat(api, &cy)["seat"]["kind"] == "seat_always_on", &r);
     let prorated = s.stripe.requests().iter().filter(|a| a.path == format!("/v1/subscriptions/{sub2}") && a.method == "POST").all(|a| a.form.get("proration_behavior").map(String::as_str) == Some("create_prorations"));
@@ -242,20 +310,41 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let last = api.signed(&ann, "DELETE", &format!("/api/org/seats/{own}"), None)?;
     s.ok("the org's last paid seat is not removed here: its subscription is canceled in the portal (400)", last.status == 400 && last.message().contains("cancel"), &last);
 
-    // admins: one at least
+    // ---- admins: offered too, one at least, and who pays steps down only themselves
     let dee = api.person()?;
     let r = api.signed(&ann, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&dee) })))?;
     let dee_row = r.body["admin"]["id"].as_str().unwrap_or("").to_string();
+    let offered = seat(api, &dee);
+    let unseen = api.signed(&dee, "GET", "/api/org", None)?;
+    s.ok(
+        "an admin offers someone in no org an admin's place: an offer only; they are in no org, see it offered (an admin's place, no seat), and nothing of the org (403)",
+        r.status == 200
+            && r.body["created"] == true
+            && r.body["admin"]["person"].is_null()
+            && offered["org"].is_null()
+            && offered["admin"] == false
+            && offered["offered"][0]["id"] == dee_row.as_str()
+            && offered["offered"][0]["admin"] == true
+            && offered["offered"][0]["kind"].is_null()
+            && unseen.status == 403,
+        json!([r.body, offered, unseen.status]),
+    );
+    let accepted = api.signed(&dee, "POST", &format!("/api/seat/offers/{dee_row}/accept"), Some(&json!({})))?;
     let sees = api.signed(&dee, "GET", "/api/org", None)?;
-    s.ok("an admin adds another, who sees the org (and holds no seat)", r.status == 200 && r.body["created"] == true && sees.status == 200 && seat(api, &dee)["seat"].is_null(), &sees);
+    s.ok("they accept it: an admin, who sees the org and holds no seat", accepted.status == 200 && accepted.body["admin"] == true && sees.status == 200 && seat(api, &dee)["seat"].is_null(), &sees);
     let ann_row = sees.body["members"].as_array().into_iter().flatten().find(|m| m["person"] == ann_id.as_str()).and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
-    let r = api.signed(&dee, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
-    let kept = seat(api, &ann);
-    s.ok("an admin removes another; one with a seat keeps it", r.status == 200 && kept["admin"] == false && kept["seat"]["good"] == true, &kept);
-    let last_admin = api.signed(&dee, "DELETE", &format!("/api/org/admins/{dee_row}"), None)?;
+    let removed = api.signed(&dee, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
+    let stepped = api.signed(&ann, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
+    s.ok(
+        "who pays for the org is no other admin's to remove (403), and steps down only once their card bills no more (400): they stay its admin",
+        removed.status == 403 && removed.message().contains("pays for this org") && stepped.status == 400 && stepped.message().contains("cancel its subscription") && seat(api, &ann)["admin"] == true,
+        json!([removed.body, stepped.body]),
+    );
+    let r = api.signed(&ann, "DELETE", &format!("/api/org/admins/{dee_row}"), None)?;
+    let gone = api.signed(&dee, "GET", "/api/org", None)?;
+    s.ok("who pays removes another admin; one with no seat leaves the org with it", r.status == 200 && gone.status == 403 && seat(api, &dee)["org"].is_null(), &r);
+    let last_admin = api.signed(&ann, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
     s.ok("the last admin stays (400)", last_admin.status == 400, &last_admin);
-    let r = api.signed(&dee, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&ann) })))?;
-    s.ok("and makes them admin again", r.status == 200 && seat(api, &ann)["admin"] == true, &r);
 
     // ---- credit packs: $25, kept until spent, once by their Checkout
     let purchased = |k: &Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
@@ -277,6 +366,13 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let fay = api.person()?;
     let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&fay) })))?;
     let fay_row = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let waits = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
+    let took = api.signed(&fay, "POST", &format!("/api/seat/offers/{fay_row}/accept"), Some(&json!({})))?;
+    s.ok(
+        "a seat offered to someone in no org is theirs once they accept it (no credit is bought for it before: 400)",
+        r.status == 200 && r.body["seat"]["person"].is_null() && waits.status == 400 && took.status == 200 && took.body["seat"]["id"] == fay_row.as_str(),
+        json!([r.body, waits.body, took.body]),
+    );
     let fay_before = purchased(&fay);
     let r = api.signed(&ann, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
     let pack2 = r.body["session"].as_str().unwrap_or("").to_string();
@@ -293,10 +389,294 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
         ("a kind that is no seat's (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "guest" })))?, 400),
         ("a field it does not take (400)", api.signed(&stranger, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat_always_on", "quantity": 3 })))?, 400),
         ("unsigned (401)", api.unsigned("POST", "/api/billing/checkout", Some(&json!({})))?, 401),
+        ("an offer that is none (404)", api.signed(&stranger, "POST", "/api/seat/offers/mem-0000000000000000/accept", Some(&json!({})))?, 404),
+        ("an offer's id that is no id (404)", api.signed(&stranger, "POST", "/api/seat/offers/nonesuch/decline", Some(&json!({})))?, 404),
+        ("an answer with a body (400)", api.signed(&stranger, "POST", &format!("/api/seat/offers/{cy_seat}/accept"), Some(&json!({ "seat": "seat_always_on" })))?, 400),
+        ("an answer unsigned (401)", api.unsigned("POST", &format!("/api/seat/offers/{cy_seat}/accept"), Some(&json!({})))?, 401),
+        ("leaving with no org (400)", api.signed(&stranger, "POST", "/api/seat/leave", Some(&json!({})))?, 400),
     ];
     for (what, r, status) in refused {
         s.ok(&format!("refused: {what}"), r.status == status, &r);
     }
+    let payer = consent(s, api)?;
+    wiped(s, api, &payer)
+}
+
+/// The id of the org `keys` is in (`GET /api/seat`'s), or "".
+fn org_of(api: &Api, keys: &Keys) -> String {
+    seat(api, keys)["org"]["id"].as_str().unwrap_or("").to_string()
+}
+
+/// `keys` buys their own seat on the fake's Checkout and holds it, paid.
+/// Answers the org it made.
+fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
+    let r = api.signed(keys, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200, "a Checkout: {r}");
+    s.stripe.complete(r.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(s.eventually(PUSHED, || seat(api, keys)["seat"]["good"] == true), "the seat bought holds: {}", seat(api, keys));
+    Ok(org_of(api, keys))
+}
+
+/// `who` answers the offer `id` (`accept` or `decline`).
+fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
+    api.signed(who, "POST", &format!("/api/seat/offers/{id}/{verb}"), Some(&json!({})))
+}
+
+/// The security audit's H1 (2026-10-17), each step refused: no org or
+/// customer before a payment; an admin's place or a seat offered attaches
+/// no one, at an offer or a sign-in, until they accept; someone offered
+/// buys their own seat on a customer of their own, never the offering
+/// org's; they decline; and their own yes elsewhere moves them only when
+/// that strands no one (whoever pays for an org others are in, or its last
+/// admin, is refused), an org of one ending with them, its subscription
+/// canceled. A seat's holder leaves by their own yes. Answers a person
+/// whose org pays, for `wiped`'s offers.
+fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
+    let mal = api.person()?;
+    let mal_email = Api::email_of(&mal);
+    let vic = api.person()?;
+    let vic_email = Api::email_of(&vic);
+
+    // 1. a Checkout begun and left makes nothing, so it offers no one anything
+    let customers = s.stripe.customers().len();
+    let r = api.signed(&mal, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    let session = r.body["session"].as_str().unwrap_or("").to_string();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a Checkout was asked for")?;
+    let named = asked.form.get("metadata[fragment_org]").cloned().unwrap_or_default();
+    let looked = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{named}"), None)?;
+    let forced = api.signed(&mal, "POST", "/api/org/admins", Some(&json!({ "email": vic_email })))?;
+    let seated = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": vic_email })))?;
+    s.ok(
+        "H1: a Checkout begun and left makes no org (the one it names is none: 404) and no customer, so its buyer admins nothing and offers no one an admin's place or a seat (403)",
+        r.status == 200 && seat(api, &mal)["org"].is_null() && looked.status == 404 && s.stripe.customers().len() == customers && forced.status == 403 && seated.status == 403,
+        json!({ "org": looked.status, "admins": forced.body, "seats": seated.body }),
+    );
+
+    // 2. paid, its admin offers; an offer attaches no one, at once or at a sign-in
+    s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(s.eventually(PUSHED, || seat(api, &mal)["seat"]["good"] == true), "the attacker's seat holds");
+    let a_org = org_of(api, &mal);
+    let r = api.signed(&mal, "POST", "/api/org/admins", Some(&json!({ "email": vic_email })))?;
+    let theirs = seat(api, &vic);
+    let unseen = api.signed(&vic, "GET", "/api/org", None)?;
+    let again = api.sign_in(&vic_email).map(|_| seat(api, &vic))?;
+    s.ok(
+        "H1: an admin's place offered to someone in no org attaches nothing: they are in none, and see the offer, its org and who made it, and nothing of the org (403); signing in again attaches nothing",
+        r.status == 200
+            && r.body["admin"]["person"].is_null()
+            && theirs["org"].is_null()
+            && theirs["admin"] == false
+            && theirs["offered"][0]["org"]["id"] == a_org.as_str()
+            && theirs["offered"][0]["admin"] == true
+            && theirs["offered"][0]["from"] == mal_email.as_str()
+            && unseen.status == 403
+            && again["org"].is_null(),
+        json!([r.body, theirs, unseen.status, again]),
+    );
+    let new_email = format!("billing-new-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
+    let r = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": new_email })))?;
+    let nu = Keys::generate();
+    let nu_session = api.sign_in(&new_email)?;
+    api.approve(&nu_session, &nu)?;
+    let fresh = seat(api, &nu);
+    s.ok(
+        "H1: a seat offered to an email no one signs in with attaches no one at their first sign-in: they hold none, in no org, until they accept",
+        r.status == 200 && fresh["seat"].is_null() && fresh["org"].is_null() && fresh["offered"][0]["kind"] == "seat_always_on" && ledger(api, &nu)["plan"] != "seat_always_on",
+        &fresh,
+    );
+
+    // 3. offered, they buy their own seat: never on the offering org's customer
+    let a_customer = subscription_of(s, &a_org).and_then(|id| s.stripe.subscription(&id)).map(|x| x.customer).context("the attacker's org's customer")?;
+    let r = api.signed(&vic, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("the victim's Checkout")?;
+    let mal_id = api.identity(&mal)?;
+    let none_other = s.stripe.requests().iter().filter(|q| q.path == "/v1/checkout/sessions").all(|q| q.form.get("customer") != Some(&a_customer) || q.form.get("metadata[fragment_person]") == Some(&mal_id));
+    s.ok(
+        "H1: with an offer waiting, they buy their own seat: a Checkout for a new org of theirs, on a customer Stripe makes for their email, and no Checkout but its buyer's own ever bills the offering org's customer",
+        r.status == 200
+            && !asked.form.contains_key("customer")
+            && asked.form.get("customer_email") == Some(&vic_email)
+            && asked.form.get("metadata[fragment_org]").is_some_and(|o| *o != a_org)
+            && none_other,
+        format!("{:?}", asked.form),
+    );
+    s.stripe.complete(r.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    let paid = s.eventually(PUSHED, || seat(api, &vic)["seat"]["good"] == true);
+    let b_org = org_of(api, &vic);
+    let b_sub = subscription_of(s, &b_org).context("the victim's subscription")?;
+    s.ok(
+        "paid, they admin an org of their own, its customer their own, and the offer still waits on their answer",
+        paid && b_org != a_org && seat(api, &vic)["admin"] == true && seat(api, &vic)["offered"].as_array().map(Vec::len) == Some(1) && s.stripe.subscription(&b_sub).is_some_and(|x| x.customer != a_customer),
+        seat(api, &vic),
+    );
+
+    // 4. they decline it
+    let offer = seat(api, &vic)["offered"][0]["id"].as_str().unwrap_or("").to_string();
+    let declined = answer(api, &vic, &offer, "decline")?;
+    let twice = answer(api, &vic, &offer, "decline")?;
+    s.ok(
+        "they decline it: it is gone; declining it again finds none (404); they stay in their own org",
+        declined.status == 200 && declined.body["offered"] == json!([]) && twice.status == 404 && org_of(api, &vic) == b_org,
+        json!([declined.body, twice.status]),
+    );
+
+    // 5. whoever pays for an org others are in, or offered, is not moved from it
+    let r = api.signed(&vic, "POST", "/api/org/seats", Some(&json!({ "email": mal_email })))?;
+    let to_mal = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let moved = answer(api, &mal, &to_mal, "accept")?;
+    s.ok(
+        "someone whose card pays for an org another is offered is refused a move (409: it would go on paying for an org they no longer manage), and stays",
+        r.status == 200 && moved.status == 409 && moved.message().contains("cancel its subscription") && org_of(api, &mal) == a_org,
+        &moved,
+    );
+    answer(api, &mal, &to_mal, "decline")?;
+
+    // 6. alone in their own org, a move ends it, its subscription canceled
+    let r = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": vic_email })))?;
+    let to_vic = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let b_customer = s.stripe.subscription(&b_sub).map(|x| x.customer).unwrap_or_default();
+    let moved = answer(api, &vic, &to_vic, "accept")?;
+    let canceled = s.eventually(PUSHED, || s.stripe.subscription(&b_sub).is_some_and(|x| x.status == "canceled"));
+    let ended = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{b_org}"), None).is_ok_and(|r| r.status == 404));
+    s.ok(
+        "alone in their own org, they accept another's seat: their org ends with them, its subscription canceled at once, its Stripe customer kept, and they hold the seat offered",
+        moved.status == 200 && moved.body["seat"]["id"] == to_vic.as_str() && moved.body["org"]["id"] == a_org.as_str() && canceled && ended && s.stripe.customers().contains(&b_customer),
+        json!({ "moved": moved.body, "subscription": s.stripe.subscription(&b_sub).map(|x| x.status) }),
+    );
+
+    // 7. a seat's holder leaves by their own yes; an admin steps down first
+    let left = api.signed(&vic, "POST", "/api/seat/leave", Some(&json!({})))?;
+    let gone = s.eventually(PUSHED, || ledger(api, &vic)["seat"] == "canceled");
+    let twice = api.signed(&vic, "POST", "/api/seat/leave", Some(&json!({})))?;
+    let admin_leaves = api.signed(&mal, "POST", "/api/seat/leave", Some(&json!({})))?;
+    s.ok(
+        "a seat's holder who is no admin leaves: their seat ends and they are in no org; leaving again is 400; an admin leaves only by stepping down first (400)",
+        left.status == 200 && left.body["org"].is_null() && gone && twice.status == 400 && admin_leaves.status == 400 && admin_leaves.message().contains("step down"),
+        json!([left.body, twice.status, admin_leaves.body]),
+    );
+
+    // 8. the last admin of an org others are in is not moved from it, and
+    // an org that pays for nothing (an operator's comp) offers nothing
+    let quinn = api.person()?;
+    let rae = api.person()?;
+    let comp = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&quinn), "kind": "seat" })))?;
+    let q_org = comp.body["org"]["id"].as_str().unwrap_or("").to_string();
+    let rae_comp = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&rae), "kind": "seat", "org": q_org })))?;
+    let r = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&quinn) })))?;
+    let moved = answer(api, &quinn, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
+    let offers = api.signed(&quinn, "POST", "/api/org/admins", Some(&json!({ "email": vic_email })))?;
+    s.ok(
+        "the last admin of an org someone else is in is refused a move (409: no one would manage it); an org that pays for nothing offers no admin's place (400)",
+        comp.status == 200 && rae_comp.status == 200 && rae_comp.body["seat"]["person"].is_string() && moved.status == 409 && moved.message().contains("last admin") && org_of(api, &quinn) == q_org && offers.status == 400,
+        json!([moved.body, offers.body]),
+    );
+    Ok(mal)
+}
+
+/// The audit's M4 (2026-10-17): a wipe cancels what the wiped would pay.
+/// Its `billing` step, of the sole admin of an org someone else holds a
+/// seat in: the dry run says it ends, its subscription canceled and the
+/// other seat ending; Stripe failing the cancel, the step waits (an offer
+/// to the person meanwhile refused: they are being wiped), the node
+/// restarts mid-step, and the wipe run again finishes it: the subscription
+/// canceled, its customer kept, the org gone, the other seat ended. A seat
+/// holder wiped leaves their org going on, its count pushed down.
+/// `payer`'s org pays.
+fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
+    const ENDS: &str = "M4: the dry run of the sole admin of an org someone else holds a seat in says the wipe ends it: its subscription canceled, the other's seat ending";
+    const WAITS: &str = "M4: Stripe failing its cancel, the billing step takes their place, says it waits on Stripe, and is not done; an offer to them meanwhile is refused (404: being wiped)";
+    const RESUMED: &str = "M4: run again (after a restart mid-step, locally), the billing step goes on where it stopped and the wipe finishes: the subscription canceled, its Stripe customer kept, the org gone, and the other's seat ended";
+    const LEAVES: &str = "M4: a seat's holder wiped leaves their org going on: the dry run says so, and its seats' count is pushed down";
+    if !s.runs("billing", &[Need::Operator]) {
+        for label in [ENDS, WAITS, RESUMED, LEAVES] {
+            s.skip(label, "it needs an operator key no person holds (a wipe's)");
+        }
+        return Ok(());
+    }
+    let wiper = s.wiper.clone().context("Need::Operator lends an operator key")?;
+    let wes = api.person()?;
+    let wes_email = Api::email_of(&wes);
+    let wes_id = api.identity(&wes)?;
+    let w_org = buys(s, api, &wes)?;
+    let xi = api.person()?;
+    let xi_email = Api::email_of(&xi);
+    let r = api.signed(&wes, "POST", "/api/org/seats", Some(&json!({ "email": xi_email })))?;
+    answer(api, &xi, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
+    anyhow::ensure!(s.eventually(PUSHED, || ledger(api, &xi)["seat"] == "active"), "the other's seat holds");
+    let w_sub = subscription_of(s, &w_org).context("the org's subscription")?;
+    let w_customer = s.stripe.subscription(&w_sub).map(|x| x.customer).unwrap_or_default();
+
+    let dry = api.signed(&wiper, "GET", &format!("/api/people/{wes_email}/wipe"), None)?;
+    let found = &dry.body["found"]["orgs"];
+    s.ok(
+        ENDS,
+        dry.status == 200 && found.as_array().map(Vec::len) == Some(1) && found[0]["org"] == w_org.as_str() && found[0]["ends"] == true && found[0]["cancels"] == true && found[0]["lapses"] == json!([xi_email]),
+        &dry,
+    );
+
+    // the cancel fails: the step waits on Stripe, the person locked
+    s.stripe.fail("DELETE", "/v1/subscriptions/", true);
+    let steps = fragment_core::wipe::Step::Billing.index() + 1;
+    let r = api.signed(&wiper, "POST", &format!("/api/people/{wes_id}/wipe"), Some(&json!({ "confirm": wes_id, "steps": steps })))?;
+    let billing = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "billing")).cloned().unwrap_or(Value::Null);
+    let refused = api.signed(payer, "POST", "/api/org/seats", Some(&json!({ "email": wes_email })))?;
+    s.ok(
+        WAITS,
+        r.status == 200
+            && r.body["next"] == "billing"
+            && billing["done"] == false
+            && billing["note"].as_str().is_some_and(|n| n.contains("waiting on Stripe") && n.contains(&xi_email))
+            && refused.status == 404
+            && s.stripe.subscription(&w_sub).is_some_and(|x| x.status == "active"),
+        json!({ "report": r.body, "offer": refused.body }),
+    );
+
+    // the node restarts mid-step (locally), then the wipe is run again
+    let restarted;
+    let api = if s.runs("billing", &[Need::Node]) {
+        s.stop()?;
+        restarted = s.start(false)?;
+        &restarted
+    } else {
+        api
+    };
+    s.stripe.fail("DELETE", "/v1/subscriptions/", false);
+    let r = api.signed(&wiper, "POST", &format!("/api/people/{wes_id}/wipe"), Some(&json!({ "confirm": wes_id })))?;
+    let billing = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "billing")).cloned().unwrap_or(Value::Null);
+    let org_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{w_org}"), None).is_ok_and(|r| r.status == 404));
+    let lapsed = s.eventually(PUSHED, || ledger(api, &xi)["seat"] == "canceled");
+    s.ok(
+        RESUMED,
+        r.status == 200
+            && r.body["state"] == "wiped"
+            && billing["done"] == true
+            && s.stripe.subscription(&w_sub).is_some_and(|x| x.status == "canceled")
+            && s.stripe.customers().contains(&w_customer)
+            && org_gone
+            && lapsed
+            && seat(api, &xi)["org"].is_null(),
+        json!({ "report": r.body, "subscription": s.stripe.subscription(&w_sub).map(|x| x.status), "xi": seat(api, &xi) }),
+    );
+
+    // a seat's holder wiped: their org goes on without them, its count pushed
+    let p_org = org_of(api, payer);
+    let p_sub = subscription_of(s, &p_org).context("the payer's org's subscription")?;
+    let yuki = api.person()?;
+    let yuki_id = api.identity(&yuki)?;
+    let r = api.signed(payer, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&yuki) })))?;
+    answer(api, &yuki, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
+    let count = |s: &Suite| s.stripe.subscription(&p_sub).and_then(|x| x.items.first().map(|(_, _, q)| *q)).unwrap_or(0);
+    let paid = api.signed(payer, "GET", "/api/org", None)?.body["members"].as_array().map(|m| m.iter().filter(|m| m["seat"].is_string() && m["comped"] == false).count() as u64).unwrap_or(0);
+    let pushed = s.eventually(PUSHED, || count(s) == paid);
+    let dry = api.signed(&wiper, "GET", &format!("/api/people/{yuki_id}/wipe"), None)?;
+    let found = dry.body["found"]["orgs"][0].clone();
+    let r = api.signed(&wiper, "POST", &format!("/api/people/{yuki_id}/wipe"), Some(&json!({ "confirm": yuki_id })))?;
+    let down = s.eventually(PUSHED, || count(s) == paid - 1);
+    s.ok(
+        LEAVES,
+        pushed && found["org"] == p_org.as_str() && found["ends"] == false && found["cancels"] == false && r.body["state"] == "wiped" && down && s.stripe.subscription(&p_sub).is_some_and(|x| x.status == "active"),
+        json!({ "found": found, "count": count(s), "paid": paid }),
+    );
     Ok(())
 }
 
@@ -418,17 +798,19 @@ fn page_of(b: &mut Lease, api: &Api, session: &str, path: &str) -> Result<Page> 
 /// Stripe's page (the fake's), Checkout's return comes back to it, applies
 /// the seat and makes their first agent; that return again goes home.
 /// Billing then manages the seat: its org's seats wait until they ask for
-/// seats for others, they add one, and buy credit. An invited guest lands
-/// on what was shared with them, titled as its owner titled it, a seat
-/// offered beside it. Another's Checkout returned is refused, and leads
-/// back to the seats; the node restarts while a buyer is at Checkout, no
-/// webhook comes, and the return alone seats them; a reload mid-wait makes
-/// nothing twice, and the webhook come late changes nothing. A trial mailed
-/// brings a signed-out person through sign-in and back with its code. A
-/// guest given a seat goes straight to the first run. Stripe's pages are
-/// the fake's own. A step that acts on the page does so only on what is
-/// there: one that finds nothing is a FAIL saying where the page is and
-/// what it has, not an error thrown in the page.
+/// seats for others, they add one, and buy credit. A guest an org offers a
+/// seat sees the offer first on the welcome, accepts it, and goes on to
+/// their first run. An invited guest lands on what was shared with them,
+/// titled as its owner titled it, a seat offered beside it. Another's
+/// Checkout returned is refused, and leads back to the seats; the node
+/// restarts while a buyer is at Checkout, no webhook comes, and the return
+/// alone seats them; a reload mid-wait makes nothing twice, and the webhook
+/// come late changes nothing. A trial mailed brings a signed-out person
+/// through sign-in and back with its code. A guest given a seat goes
+/// straight to the first run. Stripe's pages are the fake's own. A step
+/// that acts on the page does so only on what is there: one that finds
+/// nothing is a FAIL saying where the page is and what it has, not an
+/// error thrown in the page.
 pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("billing-page", &[Need::Chrome, Need::Fakes, Need::Deployment, Need::Node]) {
         return Ok(());
@@ -615,6 +997,32 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         &format!("they buy {pack} of credit on Stripe's page, and it is theirs as they land back in settings"),
         at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + offer.pack_micros),
         ledger(api, &gus),
+    );
+    b.close(page)?;
+
+    // ---- a guest offered a seat: the welcome shows the offer first (its
+    // org, who made it, Accept and Decline); accepted, on to their first run
+    let kai = guest(api, "billing-page-offered")?;
+    let r = api.signed(&gus, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&kai) })))?;
+    anyhow::ensure!(r.status == 200, "offering the guest a seat: {r}");
+    let session = api.sign_in(&Api::email_of(&kai))?;
+    let page = page_of(&mut b, api, &session, "/")?;
+    let offered = format!(
+        "{WELCOMED} && (() => {{ const o = document.querySelector('#first-run-card .billing-offer'); return !!o && o.innerText.includes({:?}) && o.innerText.includes('offers you an always-on seat') && [...o.querySelectorAll('button')].map((b) => b.textContent).join() === 'Accept,Decline'; }})()",
+        Api::email_of(&gus)
+    );
+    let shown = view(&mut b, &page, &offered, wait);
+    let _ = b.screenshot(&page, &shots.join("5b-offered.png"));
+    let seen = b.eval(&page, SEEN)?;
+    if !act(s, &mut b, &page, "the welcome's Accept", &press("Accept"))? {
+        return Ok(());
+    }
+    let seated = view(&mut b, &page, SEATED, wait);
+    let made = s.eventually(wait, || owned(api, &kai, "agent") == 1);
+    s.ok(
+        "a guest offered a seat lands on the welcome, the offer first: its org, who made it, Accept and Decline; accepted, the seat is theirs and their first run makes their agent",
+        shown && seated && made && seat(api, &kai)["seat"]["good"] == true && seat(api, &kai)["offered"] == json!([]),
+        json!({ "seen": seen, "seat": seat(api, &kai) }),
     );
     b.close(page)?;
 

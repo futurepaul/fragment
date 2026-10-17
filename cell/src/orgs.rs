@@ -14,7 +14,8 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, Mined, OrgOf, Sleeps, SyncSeat};
-use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat};
+use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
+use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
 use crate::registry::admin;
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
 use crate::{acting_for, ask_registry, caller, json_answer, read_body, Caller};
@@ -35,13 +36,42 @@ fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     })
 }
 
-/// `/api/seat`: `GET` the asker's seat, org and the seats offered them,
+/// `/api/seat…`: `GET` the asker's seat, org and what is offered them,
 /// whether they are a guest, and what is sold; `PUT {sleeps}` lets their
-/// always-on computer sleep, or not.
-pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+/// always-on computer sleep, or not. Their own answers: accept or decline
+/// an offer (`offers/{id}/accept|decline`), and leave their org (`leave`, a
+/// seat's holder who is no admin). Nobody joins an org but by these.
+pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = by(env, &req, url, &bytes)?;
-    match req.method() {
+    let empty = || -> CellResult<()> {
+        // a body is `{}` or none: what is answered is in the path
+        match bytes.is_empty() || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).is_ok_and(|m| m.is_empty()) {
+            true => Ok(()),
+            false => Err(CellError::invalid("this takes no body (or {})")),
+        }
+    };
+    match (req.method(), rest) {
+        (Method::Post, ["offers", offer, "accept"]) => {
+            empty()?;
+            json_answer(&ask_registry(env, &AcceptOffer { by, offer: offer.to_string() }).await?)
+        }
+        (Method::Post, ["offers", offer, "decline"]) => {
+            empty()?;
+            json_answer(&ask_registry(env, &DeclineOffer { by, offer: offer.to_string() }).await?)
+        }
+        (Method::Post, ["leave"]) => {
+            empty()?;
+            json_answer(&ask_registry(env, &LeaveOrg { by }).await?)
+        }
+        (_, [_, ..]) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/seat/{}", req.method().as_ref(), rest.join("/")))),
+        (m, []) => seat_itself(env, &bytes, by, m).await,
+    }
+}
+
+/// `GET` or `PUT /api/seat`.
+async fn seat_itself(env: &Env, bytes: &[u8], by: By, method: Method) -> CellResult<Response> {
+    match method {
         Method::Get => {
             let Mined { person, mine } = ask_registry(env, &Mine { by }).await?;
             // holding none, their ledger says whether a plan of its own gives them one
@@ -55,16 +85,17 @@ pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url) -> CellResult<R
             json_answer(&SeatStatus { mine, guest, offer: fragment_core::stripe::offer() })
         }
         Method::Put => {
-            let set: SetSleeps = body(&bytes)?;
+            let set: SetSleeps = body(bytes)?;
             json_answer(&ask_registry(env, &Sleeps { by, sleeps: set.sleeps }).await?)
         }
         m => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/seat", m.as_ref()))),
     }
 }
 
-/// `/api/org…`, for the asker's org's admins: `GET` it; add a paid seat
-/// by email (the one sold, `seat_always_on`), remove one; add or remove an
-/// admin.
+/// `/api/org…`, for the asker's org's admins: `GET` it; offer a paid seat
+/// by email (the one sold, `seat_always_on`), remove one; offer or remove
+/// an admin's place. An offer is mailed; it is no one's until they accept
+/// it. One of the org's members is given it at once.
 pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -85,14 +116,15 @@ pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, re
         (Method::Post, ["seats"]) => {
             let b: NewSeat = body(&bytes)?;
             let added = ask_registry(env, &AddSeat { by, email: b.email, kind: b.kind }).await?;
-            let mailed = added.created && cfg.mail_from.is_some() && mail_seat(env, cfg, &added.member, &added.org_name).await;
+            let mailed = added.created && cfg.mail_from.is_some() && mail_offer(env, cfg, &added).await;
             json_answer(&serde_json::json!({ "seat": added.member, "created": added.created, "mailed": mailed }))
         }
         (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &RemoveSeat { by, seat: seat.to_string() }).await?),
         (Method::Post, ["admins"]) => {
             let b: NewAdmin = body(&bytes)?;
             let added = ask_registry(env, &AddAdmin { by, email: b.email }).await?;
-            json_answer(&serde_json::json!({ "admin": added.member, "created": added.created }))
+            let mailed = added.created && cfg.mail_from.is_some() && mail_offer(env, cfg, &added).await;
+            json_answer(&serde_json::json!({ "admin": added.member, "created": added.created, "mailed": mailed }))
         }
         (Method::Delete, ["admins", member]) => json_answer(&ask_registry(env, &RemoveAdmin { by, member: member.to_string() }).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/org/{}", m.as_ref(), rest.join("/")))),
@@ -251,28 +283,48 @@ async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serd
     Ok(view)
 }
 
-/// A new seat's mail to its email, from its org: where to sign in.
-async fn mail_seat(env: &Env, cfg: &Config, seat: &OrgMember, org: &str) -> bool {
-    let kind = match seat.seat {
-        Some(SeatKind::SeatAlwaysOn) => "a seat with an always-on computer",
-        _ => "a seat",
+/// What an org's row gives, as a mail says it.
+fn what(m: &OrgMember) -> &'static str {
+    match (m.seat, m.admin) {
+        (Some(SeatKind::SeatAlwaysOn), true) => "a seat with an always-on computer, and a place as its admin",
+        (Some(_), true) => "a seat, and a place as its admin",
+        (Some(SeatKind::SeatAlwaysOn), false) => "a seat with an always-on computer",
+        (Some(_), false) => "a seat",
+        (None, _) => "a place as its admin (managing its seats and billing)",
+    }
+}
+
+/// An offer's mail (or, to one of the org's members, what they were
+/// given): from whom, and where to accept or decline it. The offer is
+/// made whatever this answers; a mail that fails is logged and said.
+async fn mail_offer(env: &Env, cfg: &Config, added: &Added) -> bool {
+    let m = &added.member;
+    let from = added.from.as_deref().map(|f| format!(" ({f})")).unwrap_or_default();
+    let text = match m.person {
+        Some(_) => format!("{}{from} gave you {} on {PRODUCT}.\n\nIt is yours now: {}/settings\n", added.org_name, what(m), cfg.platform()),
+        None => format!(
+            "{}{from} offers you {} on {PRODUCT}.\n\nNothing is yours until you accept it. Sign in with this email address to accept or decline it: {}/settings\n",
+            added.org_name,
+            what(m),
+            cfg.platform()
+        ),
     };
-    let held = match seat.person {
-        Some(_) => "It is yours now",
-        None => "Sign in with this email address to take it",
+    let subject = match m.person {
+        Some(_) => format!("{} gave you a place on {PRODUCT}", added.org_name),
+        None => format!("{} offers you a place on {PRODUCT}", added.org_name),
     };
-    let text = format!("{org} gave you {kind} on {PRODUCT}.\n\n{held}: {}/\n", cfg.platform());
-    let mail = crate::mail::Mail { to: seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };
+    let mail = crate::mail::Mail { to: m.email.clone(), subject, text };
     match crate::mail::send(env, cfg, &mail).await {
         Ok(_) => true,
         Err(e) => {
-            console_error!("{}", serde_json::json!({ "seat-mail": seat.id, "failed": e.message }));
+            console_error!("{}", serde_json::json!({ "offer-mail": m.id, "failed": e.message }));
             false
         }
     }
 }
 
-/// A new comp's mail to its email: where to sign in to use it. The seat
+/// A new comp's mail to its email: where to sign in to use it, or to
+/// accept it (an email no one signs in with yet is offered it). The seat
 /// is made whatever this answers; a mail that fails is logged and said.
 async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
     let kind = match comped.seat.seat {
@@ -281,7 +333,7 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
     };
     let held = match comped.seat.person {
         Some(_) => "It is yours now",
-        None => "Sign in with this email address to take it",
+        None => "Sign in with this email address to accept it",
     };
     let text = format!("You have {kind} on {PRODUCT}, in {}.\n\n{held}: {}/\n", comped.org.name, cfg.platform());
     let mail = crate::mail::Mail { to: comped.seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };

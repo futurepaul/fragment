@@ -39,7 +39,7 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::registry::calls::{self, WipeBegin, WipeFacts, WipeLook, WipeStep};
+use crate::registry::calls::{self, WipeBegin, WipeBilling, WipeFacts, WipeLook, WipeStep};
 use crate::registry::wipe::refused;
 use crate::{acting_for, ask_registry, authenticate, js, json_answer, read_body, routed};
 
@@ -292,6 +292,12 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             }
             Ok(Did::finished(keys.len() as u64))
         }
+        // their org: their place taken in one registry turn, then what each
+        // org it settled asks of Stripe (a cancel, or its seats' count)
+        Step::Billing => {
+            let b = ask_registry(env, &WipeBilling { identity: person.to_string() }).await?;
+            Ok(Did { done: b.done, deleted: b.orgs, note: b.note, ..Did::default() })
+        }
         // its rows go as the registry records it done (`WipeStep`)
         Step::Registry => Ok(Did::finished(0)),
     }
@@ -417,5 +423,6 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
         }),
         ledger: ledger["held"] == true,
         lists,
+        orgs: facts.orgs.clone(),
     })
 }

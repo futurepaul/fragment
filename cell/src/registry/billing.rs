@@ -3,12 +3,25 @@
 //! seat a Checkout buys its buyer. Stripe holds the payment state; the
 //! registry keeps a copy (`orgs`' columns), only ever written from a
 //! subscription fetched from Stripe (by the Checkout's return, a webhook,
-//! or the daily reconcile), never from an event's own copy of it.
+//! or the daily reconcile), never from an event's own copy of it. An org's
+//! customer is written only so, from its subscription: never before a
+//! payment.
+//!
+//! An org is made only once paid (the audit's H1): a person's first
+//! Checkout writes nothing but a trial's place, and names in its session
+//! the org it will make (`checkout_begin`); its completion makes it, its
+//! buyer its admin and its paid seat's holder (`apply_checkout`). Its
+//! customer is the one Stripe's Checkout made. Only an admin of their org
+//! that pays for nothing (lapsed, or comped and ended) buys again in it, on
+//! its own customer. A Checkout paid whose buyer can no longer take its
+//! seat (they joined another org meanwhile, left this one, or are being
+//! wiped) is canceled at once (seats.rs `queue_cancel`): it seats no one.
 //!
 //! An org has one subscription. A newer one replaces it only once it has
 //! ended (a lapsed org that buys again); an event older than the last one
 //! applied changes nothing. A change to whether the org pays queues a plan
-//! push for each of its paid seats' holders (orgs.rs).
+//! push for each of its paid seats' holders (orgs.rs). Who pays for it is
+//! the buyer whose Checkout made the subscription it has (`org_payers`).
 
 use fragment_core::org::{self, Status};
 use fragment_core::stripe::Snapshot;
@@ -16,7 +29,8 @@ use fragment_proto::org::SeatKind;
 use serde::Serialize;
 
 use super::calls::{By, Call};
-use super::orgs::{not_found, MemberRow, MEMBER_COLUMNS};
+use super::offers::Yes;
+use super::orgs::{fresh_id, not_found, MemberRow, MEMBER_COLUMNS};
 use super::*;
 
 /// Orgs one run of the alarm reconciles.
@@ -53,8 +67,9 @@ impl From<Snapshot> for SubscriptionCopy {
     }
 }
 
-/// `POST /billing/checkout`: a person is to buy a seat. Their org (made,
-/// of one, if they are in none), and what Stripe needs to sell it.
+/// `POST /billing/checkout`: a person is to buy a seat. The org it buys in
+/// (their own that buys again, or the id of the one its payment will
+/// make: nothing is made before), and what Stripe needs to sell it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckoutBegin {
     pub by: By,
@@ -73,8 +88,14 @@ pub(crate) struct CheckoutPlan {
     pub email: String,
     pub org: String,
     pub org_name: String,
+    /// The org's own customer, when it buys again; `None`: Checkout makes
+    /// one for the buyer's email (a new org's), never another's.
     pub customer: Option<String>,
     pub kind: SeatKind,
+    /// The seats it bills from the start: a new org's one, or an org that
+    /// buys again's paid seats, the buyer's own included (Stripe's page
+    /// shows the whole).
+    pub quantity: u64,
     pub trial: Option<super::trials::TrialOffer>,
 }
 
@@ -108,22 +129,9 @@ impl Call for PackBegin {
     type Answer = PackPlan;
 }
 
-/// `POST /billing/customer`: an org's Stripe customer, once: the first
-/// named is kept, and answered.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SetCustomer {
-    pub org: String,
-    pub customer: String,
-}
-
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Customer {
     pub customer: String,
-}
-
-impl Call for SetCustomer {
-    const PATH: &'static str = "/billing/customer";
-    type Answer = Customer;
 }
 
 /// `POST /billing/checked-out`: a Checkout that completed, and the
@@ -179,6 +187,9 @@ impl Call for CustomerOf {
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS checkouts (
   session TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS org_payers (
+  org TEXT PRIMARY KEY, person TEXT NOT NULL, subscription TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS org_payers_person ON org_payers (person);
 ";
 
 /// An org's billing columns.
@@ -195,8 +206,41 @@ fn good(status: Option<&str>) -> bool {
 }
 
 impl RegistryCell {
-    fn billing_row(&self, org: &str) -> CellResult<BillingRow> {
-        self.row::<BillingRow>("SELECT customer, subscription, status, event_at FROM orgs WHERE id = ?", vec![org.into()])?.ok_or_else(|| not_found(format!("no org {org}")))
+    /// An org's billing columns; `None`: no such org (one that ended).
+    fn billing_row(&self, org: &str) -> CellResult<Option<BillingRow>> {
+        self.row::<BillingRow>("SELECT customer, subscription, status, event_at FROM orgs WHERE id = ?", vec![org.into()])
+    }
+
+    /// Who pays for `org`: the buyer whose Checkout made the subscription
+    /// it has now, if one did (`None`: never paid, or comped only).
+    pub(super) fn payer_of(&self, org: &str) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            person: String,
+        }
+        let q = "SELECT p.person FROM org_payers p JOIN orgs o ON o.id = p.org AND o.subscription = p.subscription WHERE p.org = ?";
+        Ok(self.row::<Row>(q, vec![org.into()])?.map(|r| r.person))
+    }
+
+    /// Whether `person` pays for `org` and its subscription bills on: good,
+    /// and not set to cancel at its period's end.
+    pub(super) fn bills(&self, org: &str, person: &str) -> CellResult<bool> {
+        if self.payer_of(org)?.as_deref() != Some(person) {
+            return Ok(false);
+        }
+        let sub = self.org_sub(org)?.ok_or_else(|| CellError::host(format!("{person} pays for an org that is gone: {org}")))?;
+        Ok(good(sub.status.as_deref()) && sub.cancel_at_end == 0)
+    }
+
+    /// `person`'s Checkout made `org`'s subscription: they pay for it.
+    fn set_payer(&self, org: &str, person: &str, subscription: &str) -> CellResult<()> {
+        self.exec(
+            "INSERT INTO org_payers (org, person, subscription) VALUES (?, ?, ?)
+             ON CONFLICT (org) DO UPDATE SET person = excluded.person, subscription = excluded.subscription",
+            vec![org.into(), person.into(), subscription.into()],
+        )?;
+        assert_eq!(self.payer_of(org)?.as_deref(), Some(person), "who pays is the org's subscription's buyer");
+        Ok(())
     }
 
     /// The email a person signed in with last.
@@ -208,41 +252,49 @@ impl RegistryCell {
         Ok(self.row::<Row>("SELECT email FROM subjects WHERE identity = ? ORDER BY signed_in_at DESC LIMIT 1", vec![person.into()])?.map(|r| r.email))
     }
 
+    /// A person's Checkout, before it is paid: everything checked, nothing
+    /// written but a trial's place (no org, no customer: the audit's H1).
+    /// Someone in no org buys a new org of one, named in the session and
+    /// made once it is paid; an admin of their org that pays for nothing
+    /// buys again in it, on its own customer, for its paid seats.
     fn checkout_begin(&self, b: CheckoutBegin) -> CellResult<CheckoutPlan> {
         let kind = fragment_core::stripe::for_sale(b.kind)?;
         let who = self.person_by(&b.by)?;
         let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a seat is bought by someone who signs in, with their email"))?;
-        // everything is checked before anything is written: a refusal leaves no org behind
-        let existing = match self.member_of(&who.id)? {
+        let again = match self.member_of(&who.id)? {
             Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already")),
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
-                let paying = good(self.billing_row(&o.id)?.status.as_deref());
+                let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref());
                 match (paying, m.admin != 0) {
                     (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already")),
                     (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name))),
                     (true, false) | (false, false) => return Err(conflict(format!("you are in {}: its admins give you a seat", o.name))),
-                    // an admin of an org that pays for nothing (new, or
-                    // lapsed) buys again: their lapsed seat, if they had one
-                    (false, true) => Some(o),
+                    // an admin of their org that pays for nothing (lapsed, or
+                    // comped and ended) buys again: their seat, if they had one
+                    (false, true) => Some((o, m)),
                 }
             }
             None => None,
         };
-        let trial = b.trial.as_deref().map(|raw| self.trial_offer(&who.id, raw, existing.as_ref().map(|o| o.id.as_str()))).transpose()?;
-        let org = match existing {
-            Some(o) => o,
-            None => {
-                let o = self.new_org(&email, &who.id)?;
-                self.insert_member(&o.id, Some(&who.id), &email, true, None, false, &who.id)?;
-                o
+        let trial = b.trial.as_deref().map(|raw| self.trial_offer(&who.id, raw, again.as_ref().map(|(o, _)| o.id.as_str()))).transpose()?;
+        let plan = match again {
+            None => CheckoutPlan { person: who.id.clone(), email: email.clone(), org: fresh_id("org-"), org_name: email, customer: None, kind, quantity: 1, trial },
+            Some((o, mine)) => {
+                // their own lapsed paid seat is counted; a seatless admin buys one
+                let quantity = self.paid_seats(&o.id)? + u64::from(mine.seat.is_none());
+                if trial.is_some() && quantity != 1 {
+                    return Err(conflict("a trial is for a seat of one"));
+                }
+                let customer = self.billing_row(&o.id)?.and_then(|r| r.customer);
+                CheckoutPlan { person: who.id.clone(), email, org: o.id, org_name: o.name, customer, kind, quantity, trial }
             }
         };
-        if let Some(t) = &trial {
+        assert!(plan.quantity >= 1 && plan.quantity <= fragment_core::org::SEATS_PER_ORG_MAX, "a Checkout bills one seat at least, an org's at most");
+        if let Some(t) = &plan.trial {
             self.hold_trial_place(&t.id, &who.id, b.until_ms)?;
         }
-        let customer = self.billing_row(&org.id)?.customer;
-        Ok(CheckoutPlan { person: who.id, email, org: org.id, org_name: org.name, customer, kind, trial })
+        Ok(plan)
     }
 
     fn pack_begin(&self, b: PackBegin) -> CellResult<PackPlan> {
@@ -263,31 +315,23 @@ impl RegistryCell {
             (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins buy credit for its members")),
         };
         let o = self.stored_org(&org)?;
-        let customer = self.billing_row(&org)?.customer;
+        let customer = self.billing_row(&org)?.and_then(|r| r.customer);
         Ok(PackPlan { buyer: who.id, person, email, org, org_name: o.name, customer })
-    }
-
-    fn set_customer(&self, b: SetCustomer) -> CellResult<Customer> {
-        let row = self.billing_row(&b.org)?;
-        if let Some(c) = row.customer {
-            return Ok(Customer { customer: c });
-        }
-        self.exec("UPDATE orgs SET customer = ? WHERE id = ?", vec![b.customer.as_str().into(), b.org.as_str().into()])?;
-        Ok(Customer { customer: b.customer })
     }
 
     fn customer_of(&self, b: CustomerOf) -> CellResult<Customer> {
         let who = self.person_by(&b.by)?;
         let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins manage its payment"))?;
-        let customer = self.billing_row(&m.org)?.customer.ok_or_else(|| CellError::invalid("your org has never paid: buy a seat first"))?;
+        let customer = self.billing_row(&m.org)?.and_then(|r| r.customer).ok_or_else(|| CellError::invalid("your org has never paid: buy a seat first"))?;
         Ok(Customer { customer })
     }
 
     /// Writes `s` as `org`'s subscription, when it may (module docs). A
     /// change in whether the org pays queues a push for each paid seat's
-    /// holder. Answers whether it was written.
+    /// holder. Answers whether it was written: an org that is gone (it
+    /// ended, its subscription canceled) takes nothing.
     pub(super) fn apply_subscription_copy(&self, org: &str, s: &SubscriptionCopy, at: Option<i64>) -> CellResult<bool> {
-        let row = self.billing_row(org)?;
+        let Some(row) = self.billing_row(org)? else { return Ok(false) };
         let status = Status::parse(&s.status).ok_or_else(|| CellError::invalid(format!("a subscription's status is Stripe's, not {:?}", s.status)))?;
         match row.subscription.as_deref() {
             Some(current) if current != s.id => {
@@ -343,7 +387,13 @@ impl RegistryCell {
         Ok(Applied { applied: self.apply_subscription_copy(&b.org, &b.subscription, b.at)? })
     }
 
-    /// The seat a completed Checkout bought its buyer, once by its session.
+    /// The seat a completed Checkout bought its buyer, once by its session:
+    /// a new org it names made, its buyer its admin and its paid seat's
+    /// holder (`Yes::Bought`), or their org that bought again paying, their
+    /// seat the kind bought. A Checkout whose buyer can no longer take it
+    /// (in another org now, no longer their org's admin, being wiped, or
+    /// another subscription pays already) seats no one, and its
+    /// subscription is canceled at once.
     fn apply_checkout(&self, b: ApplyCheckout) -> CellResult<Applied> {
         if self.count("SELECT COUNT(*) AS n FROM checkouts WHERE session = ?", vec![b.session.as_str().into()])? > 0 {
             return Ok(Applied { applied: false });
@@ -351,21 +401,66 @@ impl RegistryCell {
         if !org::valid_org_id(&b.org) {
             return Err(not_found(format!("no org {}", b.org)));
         }
-        self.apply_subscription_copy(&b.org, &b.subscription, None)?;
-        // the buyer takes the seat (a lapsed paid one of theirs becomes the
-        // kind bought), unless they came to hold a comped one meanwhile
-        if let Some(m) = self.member_of(&b.person)?.filter(|m| m.org == b.org && m.comped == 0) {
-            self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
-            self.queue_sync(&b.person)?;
-        }
-        if let Some(code) = &b.trial {
-            self.trial_bought(code, &b.person, &b.subscription.id)?;
-        }
+        let applied = match self.seat_bought(&b)? {
+            true => {
+                if let Some(code) = &b.trial {
+                    self.trial_bought(code, &b.person, &b.subscription.id)?;
+                }
+                true
+            }
+            false => {
+                console_log!("{}", json!({ "checkout-stray": b.session, "org": b.org, "subscription": b.subscription.id }));
+                self.queue_cancel(&b.subscription.id, &b.org, "a paid Checkout whose buyer could not take its seat")?;
+                false
+            }
+        };
         self.exec(
             "INSERT INTO checkouts (session, org, person, kind, at) VALUES (?, ?, ?, ?, ?)",
             vec![b.session.as_str().into(), b.org.as_str().into(), b.person.as_str().into(), b.kind.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        Ok(Applied { applied: true })
+        Ok(Applied { applied })
+    }
+
+    /// `b`'s seat, its buyer's, when they can take it: answers whether they did.
+    fn seat_bought(&self, b: &ApplyCheckout) -> CellResult<bool> {
+        let buyer = self.identity(&b.person)?;
+        if !buyer.as_ref().is_some_and(|i| i.kind == IdentityKind::Person) || self.wiping(&b.person)? {
+            return Ok(false);
+        }
+        let mine = self.member_of(&b.person)?;
+        match self.org_row(&b.org)? {
+            // a new org: its buyer's alone, once paid
+            None => {
+                if mine.is_some() {
+                    return Ok(false);
+                }
+                let email = self.latest_email(&b.person)?.ok_or_else(|| CellError::host(format!("{} bought a seat and signs in with no email", b.person)))?;
+                self.new_org(&b.org, &email, &b.person)?;
+                let offer = self.insert_offer(&b.org, &email, true, Some(b.kind), false, &b.person)?;
+                self.enroll(&offer, Yes::Bought(&b.person))?;
+                if !self.apply_subscription_copy(&b.org, &b.subscription, None)? {
+                    return Err(CellError::host(format!("a new org {} refused its first subscription {}", b.org, b.subscription.id)));
+                }
+            }
+            // their org buying again: its admin still, and nothing else pays
+            Some(_) => {
+                let Some(m) = mine.filter(|m| m.org == b.org && m.admin != 0) else { return Ok(false) };
+                self.apply_subscription_copy(&b.org, &b.subscription, None)?;
+                if self.billing_row(&b.org)?.and_then(|r| r.subscription).as_deref() != Some(b.subscription.id.as_str()) {
+                    return Ok(false);
+                }
+                // their seat is the kind bought (a lapsed paid one of theirs,
+                // or none), unless they came to hold a comped one meanwhile
+                if m.comped == 0 {
+                    self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
+                    self.queue_sync(&b.person)?;
+                    self.queue_quantities(&b.org)?;
+                }
+            }
+        }
+        self.set_payer(&b.org, &b.person, &b.subscription.id)?;
+        assert!(self.member_of(&b.person)?.is_some_and(|m| m.org == b.org), "a buyer seated is in the org they bought in");
+        Ok(true)
     }
 
     /// The reconcile: orgs whose copy of their subscription is a day old
@@ -410,7 +505,6 @@ impl RegistryCell {
         Some(match path {
             CheckoutBegin::PATH => reply::<CheckoutBegin>(body(bytes).and_then(|b| self.checkout_begin(b))),
             PackBegin::PATH => reply::<PackBegin>(body(bytes).and_then(|b| self.pack_begin(b))),
-            SetCustomer::PATH => reply::<SetCustomer>(body(bytes).and_then(|b| self.set_customer(b))),
             CustomerOf::PATH => reply::<CustomerOf>(body(bytes).and_then(|b| self.customer_of(b))),
             ApplyCheckout::PATH => reply::<ApplyCheckout>(self.armed_billing(|| self.apply_checkout(body(bytes)?)).await),
             ApplySubscription::PATH => reply::<ApplySubscription>(self.armed_billing(|| self.apply_subscription(body(bytes)?)).await),

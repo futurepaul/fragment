@@ -160,8 +160,9 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let owned = names(&f["fragments"]);
     let elsewhere = names(&f["memberships"]);
     s.ok(
-        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, computer and ledger",
+        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, computer and ledger, and (locally) their org of one, which ends with them, nothing of it billed",
         d["identity"] == paul_id.as_str()
+            && org.as_ref().is_none_or(|o| f["orgs"].as_array().map(Vec::len) == Some(1) && f["orgs"][0]["org"] == o.as_str() && f["orgs"][0]["ends"] == true && f["orgs"][0]["cancels"] == false)
             && d["state"] == "live"
             && d["done"] == false
             && ours.iter().all(|n| owned.contains(n))

@@ -899,6 +899,11 @@ Paul's (its slice 10).
     org's admins manage its seats and billing, need not hold a seat
     themselves, and number at least one. Prices are monthly; there is
     no annual plan.
+    *Status (Paul, 2026-10-17, from the security audit's H1):* teams are
+    kept, and nobody joins an org without accepting. An org is made only
+    once its first Checkout is paid; an org's seats and admins' places
+    are offers, theirs once they accept them; who pays is no other
+    admin's to remove (docs/billing.md, "The model").
 52. **Seats are paid or comped, held or pending.** A seat is `seat`
     ($100) or `seat_always_on` ($200; since 2026-10-15 the only one
     sold, decision 25's status), held by an npub or pending on an
@@ -908,6 +913,9 @@ Paul's (its slice 10).
     removing and changing a seat's kind take effect at once, prorated
     onto the next invoice. Comped seats are an operator's, outside
     Stripe, and replace decision 49's "operator's grant".
+    *Status (2026-10-17):* a pending seat is an offer: someone who signs
+    in with its email sees it and accepts or declines it; signing in
+    takes nothing. It still bills from the offer.
 53. **Standing is Stripe's status.** `trialing`, `active` and
     `past_due` are good (Stripe's retries are the grace period);
     anything else lapses the org's paid seats. A lapsed or removed seat
@@ -916,6 +924,11 @@ Paul's (its slice 10).
     is deleted, and paying again restores it. A removed member's
     fragments stay theirs. How long a lapsed person's data stays is
     decided later.
+    *Status (Paul, 2026-10-17, from the audit's M4):* a wipe cancels the
+    subscription of an org it ends, or that the wiped person pays for, at
+    once, and keeps its Stripe customer (invoices, tax, refunds),
+    dropping the platform's link to it; an org with no paid seat left
+    has its subscription canceled at once (docs/billing.md, "A wipe").
 54. **Stripe automatic tax, prices before tax** ("$100 + tax"), as
     finite-mono's.
 55. **One credit pack, $25, kept until spent**, bought through

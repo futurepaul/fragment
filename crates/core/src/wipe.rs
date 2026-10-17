@@ -129,14 +129,24 @@ pub enum Step {
     Lists,
     /// Their picture's bytes (where no one else's is the same picture).
     Pictures,
+    /// Their org (docs/billing.md): their place in it goes; an org it ends
+    /// (no one else in it, or they its last admin) loses every row and its
+    /// subscription, canceled at once, its Stripe customer kept (invoices,
+    /// tax, refunds) and the registry's link to it dropped; one whose
+    /// subscription their card pays has it canceled; any other has its
+    /// seats' count pushed. Done once Stripe has what the seats say.
+    Billing,
     /// The Registry's rows: identities, keys, sign-ins, sessions.
     Registry,
 }
 
-/// Every step, in order.
-pub const STEPS: [Step; 8] = [Step::Computer, Step::Fragments, Step::Memberships, Step::Cleanup, Step::Ledger, Step::Lists, Step::Pictures, Step::Registry];
+/// Every step, in order. `Billing` is before `Registry`, so a wipe begun
+/// before it was a step (2026-10-17) runs it too; one finished then stays
+/// finished (`Progress::recorded`).
+pub const STEPS: [Step; 9] =
+    [Step::Computer, Step::Fragments, Step::Memberships, Step::Cleanup, Step::Ledger, Step::Lists, Step::Pictures, Step::Billing, Step::Registry];
 
-const _: () = assert!(STEPS.len() == 8 && STEPS.len() <= u8::MAX as usize, "the steps fit a small count");
+const _: () = assert!(STEPS.len() == 9 && STEPS.len() <= u8::MAX as usize, "the steps fit a small count");
 
 impl Step {
     pub fn name(self) -> &'static str {
@@ -148,6 +158,7 @@ impl Step {
             Step::Ledger => "ledger",
             Step::Lists => "lists",
             Step::Pictures => "pictures",
+            Step::Billing => "billing",
             Step::Registry => "registry",
         }
     }
@@ -200,12 +211,28 @@ impl Progress {
         Progress { done: 0 }
     }
 
-    /// As the Registry stored it.
+    /// As a report counts it (`WipeFacts::done`): every step done is
+    /// finished.
     pub fn stored(done: i64) -> Result<Progress, Corrupt> {
         match u32::try_from(done) {
             Ok(n) if (n as usize) <= STEPS.len() => Ok(Progress { done: n }),
             _ => Err(Corrupt(done)),
         }
+    }
+
+    /// As the Registry's row keeps it: its count, and whether it finished
+    /// (`finished_at`). A finished wipe stays finished when a step is added
+    /// after it ran (`Billing`, 2026-10-17: it ran the steps there were);
+    /// an unfinished one has a step left.
+    pub fn recorded(done: i64, finished: bool) -> Result<Progress, Corrupt> {
+        let n = u32::try_from(done).map_err(|_| Corrupt(done))?;
+        let p = match (finished, n as usize) {
+            (true, n) if n <= STEPS.len() => Progress { done: STEPS.len() as u32 },
+            (false, n) if n < STEPS.len() => Progress { done: n as u32 },
+            _ => return Err(Corrupt(done)),
+        };
+        assert_eq!(p.finished(), finished, "a row's finish and its count agree");
+        Ok(p)
     }
 
     /// The count to store.
@@ -401,7 +428,7 @@ mod tests {
         assert_eq!(p.done(), STEPS.len() as u32);
         assert!(STEPS.iter().all(|s| p.has_done(*s)));
         let names: Vec<&str> = STEPS.iter().map(|s| s.name()).collect();
-        assert_eq!(names, ["computer", "fragments", "memberships", "cleanup", "ledger", "lists", "pictures", "registry"]);
+        assert_eq!(names, ["computer", "fragments", "memberships", "cleanup", "ledger", "lists", "pictures", "billing", "registry"]);
         assert!(STEPS.iter().enumerate().all(|(i, s)| s.index() as usize == i));
     }
 
@@ -446,6 +473,28 @@ mod tests {
         assert!(Progress::stored(i64::from(p.done())).unwrap().finished());
         for bad in [-1, STEPS.len() as i64 + 1, i64::MAX] {
             assert_eq!(Progress::stored(bad), Err(Corrupt(bad)));
+        }
+    }
+
+    /// Goal: the registry's row reads back as the wipe it records: an
+    /// unfinished one at the step it stopped before, a finished one
+    /// finished, also one that finished before `billing` was a step (eight
+    /// steps done of nine now); a count no wipe makes is corrupt. A wipe
+    /// begun before then, stopped before `registry`, runs `billing` next.
+    /// Method: each count, finished and not.
+    #[test]
+    fn a_wipe_finished_before_a_step_was_added_stays_finished() {
+        for n in 0..STEPS.len() as i64 {
+            let p = Progress::recorded(n, false).unwrap();
+            assert_eq!(p, Progress::stored(n).unwrap(), "unfinished: as counted");
+            assert!(!p.finished());
+        }
+        let old = Progress::recorded(8, true).unwrap();
+        assert!(old.finished() && old.next().is_none(), "eight steps done, all there were then: finished");
+        assert!(Progress::recorded(STEPS.len() as i64, true).unwrap().finished());
+        assert_eq!(Progress::recorded(7, false).unwrap().next(), Some(Step::Billing), "stopped before registry, billing runs first");
+        for (bad, finished) in [(STEPS.len() as i64, false), (STEPS.len() as i64 + 1, true), (-1, true), (-1, false)] {
+            assert_eq!(Progress::recorded(bad, finished), Err(Corrupt(bad)), "{bad} {finished}");
         }
     }
 

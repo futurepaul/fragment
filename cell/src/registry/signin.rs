@@ -482,7 +482,6 @@ impl RegistryCell {
             )?
             .ok_or_else(stale_login)?;
         let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref(), key)?;
-        self.claim_seats(&id, email)?;
         let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged::SignedIn { token, return_to: login.return_to })
     }
@@ -570,7 +569,6 @@ impl RegistryCell {
             self.count_e2e_day(!known, paid_calls)?;
         }
         let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None, key)?;
-        self.claim_seats(&identity, email)?;
         let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
         self.meet_invites(email, &identity).await?;
         self.arm_syncs().await?;

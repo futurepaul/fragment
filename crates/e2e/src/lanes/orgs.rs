@@ -1,8 +1,9 @@
 //! Orgs and seats (docs/billing.md; docs/api.md, Seats and orgs): an
 //! operator comps a seat for an email, in a new org of one or in an org
-//! named; a person who signs in with an email a seat waits on takes it; the
-//! registry pushes each seat's plan to its holder's ledger (a comped seat is
-//! active whatever its org pays; one that ends is canceled, the plan kept).
+//! named; a person who signs in with an email a seat is offered accepts it
+//! (signing in attaches nothing); the registry pushes each seat's plan to
+//! its holder's ledger (a comped seat is active whatever its org pays; one
+//! that ends is canceled, the plan kept).
 //! A seat's holder reads it and lets their always-on computer sleep; an
 //! org's admins see it. The registry is the seat's one writer: a ledger an
 //! operator's old `seat` command left ahead of its order takes its pushes
@@ -96,16 +97,16 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
     let woke = api.signed(&alice, "PUT", "/api/seat", Some(&json!({ "sleeps": false })))?;
     s.ok("they let its computer sleep, and take it back", slept.status == 200 && slept.body["seat"]["sleeps"] == true && woke.body["seat"]["sleeps"] == false, json!([slept.body, woke.body]));
 
-    // ---- an email no one has signed in with: the seat waits on it
+    // ---- an email no one has signed in with: the seat is offered it
     let bob_email = email("bob");
     let r = comp(json!({ "email": bob_email, "kind": "seat_always_on" }))?;
     let bob_seat = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
-    s.ok("a comp for an email no one signs in with waits on it", r.status == 200 && r.body["seat"]["person"].is_null() && r.body["seat"]["admin"] == true, &r);
+    s.ok("a comp for an email no one signs in with is offered it, in a new org of one", r.status == 200 && r.body["seat"]["person"].is_null() && r.body["seat"]["admin"] == true, &r);
     let replay = comp(json!({ "email": bob_email, "kind": "seat_always_on" }))?;
-    s.ok("and again is the same waiting seat", replay.status == 200 && replay.body["created"] == false && replay.body["seat"]["id"] == bob_seat.as_str(), &replay);
+    s.ok("and again is the same offer", replay.status == 200 && replay.body["created"] == false && replay.body["seat"]["id"] == bob_seat.as_str(), &replay);
     if !s.hosted() {
         let sent = s.mail.sent_to(&bob_email);
-        s.ok("the email is mailed where to sign in to take it", r.body["mailed"] == true && sent.len() == 1 && sent[0].text.contains("Sign in with this email address to take it"), format!("{sent:?}"));
+        s.ok("the email is mailed where to sign in to accept it", r.body["mailed"] == true && sent.len() == 1 && sent[0].text.contains("Sign in with this email address to accept it"), format!("{sent:?}"));
         s.mail.fail_next("E_RATE_LIMIT_EXCEEDED");
         let failed = comp(json!({ "email": email("dave"), "kind": "seat" }))?;
         s.ok("a mail that fails leaves the seat made, and says it was not mailed", failed.status == 200 && failed.body["created"] == true && failed.body["mailed"] == false, &failed);
@@ -114,11 +115,24 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
     let bob_session = api.sign_in(&bob_email)?;
     let me = api.approve(&bob_session, &bob)?;
     let bob_id = me.body["id"].as_str().unwrap_or("").to_string();
+    let waiting = api.signed(&bob, "GET", "/api/seat", None)?;
+    let accepted = api.signed(&bob, "POST", &format!("/api/seat/offers/{bob_seat}/accept"), Some(&json!({})))?;
     let mine = api.signed(&bob, "GET", "/api/seat", None)?;
     s.ok(
-        "whoever signs in with that email takes it, and admins its org",
-        fragment_core::npub::is_identity(&bob_id) && mine.status == 200 && mine.body["seat"]["id"] == bob_seat.as_str() && mine.body["seat"]["kind"] == "seat_always_on" && mine.body["admin"] == true,
-        &mine,
+        "whoever signs in with that email is offered the comp (given, with its admin's place), attached to nothing until they accept it; accepted, they hold it and admin its org",
+        fragment_core::npub::is_identity(&bob_id)
+            && waiting.body["seat"].is_null()
+            && waiting.body["org"].is_null()
+            && waiting.body["offered"][0]["id"] == bob_seat.as_str()
+            && waiting.body["offered"][0]["comped"] == true
+            && waiting.body["offered"][0]["admin"] == true
+            && waiting.body["offered"][0]["from"] == "operator@e2e.test"
+            && accepted.status == 200
+            && mine.status == 200
+            && mine.body["seat"]["id"] == bob_seat.as_str()
+            && mine.body["seat"]["kind"] == "seat_always_on"
+            && mine.body["admin"] == true,
+        json!([waiting.body, accepted.body, mine.body]),
     );
     let pushed = s.eventually(PUSHED, || ledger(api, &bob)["plan"] == "seat_always_on");
     s.ok("its plan reaches their ledger too", pushed, ledger(api, &bob));

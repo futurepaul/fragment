@@ -8,11 +8,13 @@
 //!
 //! A Checkout page stands where Stripe's would (`GET /pay/<session>`, its
 //! "Pay" a POST to the same): `cargo xtask dev` people pay there by hand.
-//! Levers: complete a session as a card would (`complete`), move a
+//! A Checkout names a customer, or an email for the one its completion
+//! makes (`customer_email`); a subscription is canceled at once by its
+//! `DELETE`. Levers: complete a session as a card would (`complete`), move a
 //! subscription to a status (`set_status`: a trial's end, a decline, a
 //! cancel), hold events back and let them go (`hold_events`,
-//! `release_events`), send any body to the endpoint (`deliver_raw`), and
-//! read what was asked of it (`requests`, `subscription`).
+//! `release_events`), send any body to the endpoint (`deliver_raw`), read what was asked of it (`requests`, `subscription`, `customers`), and
+//! fail requests as an outage would (`fail`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -47,7 +49,10 @@ pub struct Sub {
 struct Session {
     id: String,
     mode: String,
-    customer: String,
+    /// The customer it bills: one named at its making, or (none named) the
+    /// one its completion makes for `customer_email`, as Stripe's does.
+    customer: Option<String>,
+    customer_email: Option<String>,
     /// (lookup key's price id, quantity)
     lines: Vec<(String, u64)>,
     metadata: BTreeMap<String, String>,
@@ -91,6 +96,8 @@ struct State {
     held: Option<Vec<Value>>,
     /// Events an API call made, delivered once its answer is on its way.
     pending: Vec<Value>,
+    /// Requests answered 500 while set (`fail`): (method, path prefix).
+    failing: Vec<(String, String)>,
     delivered: Vec<(String, String, u16)>,
 }
 
@@ -152,6 +159,16 @@ impl State {
             return Err(format!("{session} is {}", s.status));
         }
         let mut events = vec![];
+        // none named at its making: a subscription's Checkout makes one for
+        // the email it was given, as Stripe's does (a payment's too, here)
+        if s.customer.is_none() {
+            let id = self.next("cus");
+            let mut fields = BTreeMap::new();
+            fields.insert("email".to_string(), s.customer_email.clone().unwrap_or_default());
+            self.customers.insert(id.clone(), fields);
+            s.customer = Some(id);
+        }
+        let customer = s.customer.clone().expect("a session completes with its customer");
         if s.mode == "subscription" {
             let id = self.next("sub");
             let mut items = vec![];
@@ -165,7 +182,7 @@ impl State {
             };
             let sub = Sub {
                 id: id.clone(),
-                customer: s.customer.clone(),
+                customer,
                 status: status.into(),
                 items,
                 metadata: s.sub_metadata.clone(),
@@ -260,6 +277,9 @@ impl Stripe {
             let f = form(&req.body);
             let mut s = st.lock().expect("stripe state");
             s.asked.push(Asked { method: req.method.clone(), path: req.path.clone(), form: f.clone() });
+            if s.failing.iter().any(|(m, p)| *m == req.method && req.path.starts_with(p.as_str())) {
+                return error(500, "api_error", "the fake fails this request (a lever)");
+            }
             let idem = (req.method == "POST").then(|| req.header("idempotency-key").map(|k| format!("{}:{k}", req.path))).flatten();
             if let Some((status, v)) = idem.as_ref().and_then(|k| s.idempotent.get(k)).cloned() {
                 return Response::json(status, &v);
@@ -378,6 +398,21 @@ impl Stripe {
         self.state.lock().expect("stripe state").subs.get(id).cloned()
     }
 
+    /// The customers it holds, by id (a wipe keeps an org's: invoices, tax).
+    pub fn customers(&self) -> Vec<String> {
+        self.state.lock().expect("stripe state").customers.keys().cloned().collect()
+    }
+
+    /// Requests of `method` under `prefix` are answered 500 while `on` (a
+    /// cancel that fails, as an outage would), or answered again.
+    pub fn fail(&self, method: &str, prefix: &str, on: bool) {
+        let mut s = self.state.lock().expect("stripe state");
+        s.failing.retain(|(m, p)| !(m == method && p == prefix));
+        if on {
+            s.failing.push((method.to_string(), prefix.to_string()));
+        }
+    }
+
     /// A subscription's JSON, as the API answers it.
     pub fn subscription_json(&self, id: &str) -> Option<Value> {
         let s = self.state.lock().expect("stripe state");
@@ -441,9 +476,19 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
         }
         ("POST", "/v1/checkout/sessions") => {
             let mode = f.get("mode").cloned().unwrap_or_default();
-            let customer = f.get("customer").cloned().unwrap_or_default();
-            if !s.customers.contains_key(&customer) {
-                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such customer: '{customer}'") } }));
+            // a customer named, or an email for the one its completion makes
+            // (Stripe takes one or the other, and `customer_update` only
+            // with a customer)
+            let customer = f.get("customer").cloned();
+            let customer_email = f.get("customer_email").cloned();
+            match (&customer, &customer_email) {
+                (Some(c), None) if s.customers.contains_key(c) => {}
+                (Some(c), None) => return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such customer: '{c}'") } })),
+                (Some(_), Some(_)) => return (400, json!({ "error": { "type": "invalid_request_error", "message": "You may only specify one of these parameters: customer, customer_email." } })),
+                (None, _) if f.keys().any(|k| k.starts_with("customer_update[")) => {
+                    return (400, json!({ "error": { "type": "invalid_request_error", "message": "customer_update can only be used with customer." } }));
+                }
+                (None, _) => {}
             }
             let lines: Vec<(String, u64)> = rows(f, "line_items").into_iter().map(|r| (r.get("price").cloned().unwrap_or_default(), r.get("quantity").and_then(|q| q.parse().ok()).unwrap_or(1))).collect();
             if mode == "subscription" && lines.iter().any(|(p, _)| s.key_of_price(p).is_none()) {
@@ -455,6 +500,7 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
                 id: s.next("cs"),
                 mode,
                 customer,
+                customer_email,
                 lines,
                 metadata: nested(f, "metadata"),
                 sub_metadata: f.iter().filter_map(|(k, v)| k.strip_prefix("subscription_data[metadata][").and_then(|r| r.strip_suffix(']')).map(|m| (m.to_string(), v.clone()))).collect(),
@@ -511,6 +557,23 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             let v = s.sub_json(&sub);
             s.subs.insert(id, sub);
             let event = s.event("customer.subscription.updated", v.clone());
+            s.pending.push(event);
+            (200, v)
+        }
+        // a cancel, at once (Stripe's `DELETE /v1/subscriptions/{id}`): its
+        // customer kept; one ended already is refused, as Stripe refuses it
+        ("DELETE", p) if p.starts_with("/v1/subscriptions/") => {
+            let id = p["/v1/subscriptions/".len()..].to_string();
+            let Some(mut sub) = s.subs.get(&id).cloned() else {
+                return (404, json!({ "error": { "type": "invalid_request_error", "message": "No such subscription" } }));
+            };
+            if matches!(sub.status.as_str(), "canceled" | "incomplete_expired") {
+                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such subscription: '{id}' is canceled already") } }));
+            }
+            sub.status = "canceled".into();
+            let v = s.sub_json(&sub);
+            s.subs.insert(id, sub);
+            let event = s.event("customer.subscription.deleted", v.clone());
             s.pending.push(event);
             (200, v)
         }

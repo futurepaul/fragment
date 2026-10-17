@@ -13,8 +13,12 @@ use fragment_proto::org::SeatKind;
 pub const SEATS_PER_ORG_MAX: u64 = 200;
 /// Admins one org has (pending ones included); it keeps at least one.
 pub const ADMINS_PER_ORG_MAX: u64 = 10;
-/// Orgs that may offer one email a seat at once (it takes one).
+/// Orgs that may offer one email a seat or an admin's place at once (it
+/// accepts one, or declines them).
 pub const OFFERS_PER_EMAIL_MAX: u64 = 10;
+/// Offers one org has mailed in a day (UTC), at most: each offer is a mail
+/// to an address its admin typed, so this bounds what an org sends.
+pub const OFFER_MAILS_PER_ORG_DAILY_MAX: u64 = 50;
 /// An org's name: an org of one is named by its email, so as long as one.
 pub const ORG_NAME_MAX_BYTES: usize = 320;
 /// People whose plans one run of the registry's alarm pushes.
@@ -70,6 +74,95 @@ impl Status {
     pub fn is_good(self) -> bool {
         matches!(self, Status::Trialing | Status::Active | Status::PastDue)
     }
+
+    /// Stripe will never bill it again: `canceled` and
+    /// `incomplete_expired` are final. Any other may still charge a card
+    /// (an `unpaid` one whose invoice is paid comes back), so an org that
+    /// ends cancels it.
+    pub fn is_ended(self) -> bool {
+        matches!(self, Status::Canceled | Status::IncompleteExpired)
+    }
+}
+
+/// A person's place in their org, as they go from it (accepting another
+/// org's offer, or wiped): what the registry counts of its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    /// They admin it.
+    pub admin: bool,
+    /// Its admins who said yes (members, not offers), them included.
+    pub admins: u64,
+    /// Its rows besides theirs: other members, and offers waiting.
+    pub others: u64,
+    /// They pay for it (their Checkout made its subscription) and it bills
+    /// on: good, and not set to cancel at its period's end.
+    pub pays: bool,
+}
+
+/// What a person's going does to their org.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Going {
+    /// Their row goes; the org stays, its seats' count pushed.
+    Leaves,
+    /// No one else is in it, or offered it: it ends with them, its
+    /// subscription canceled at once.
+    Ends,
+}
+
+/// Why a person may not go from their org to another's offer (H1's other
+/// half: going never leaves someone else stranded, or a card paying).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stuck {
+    /// They are the last admin of an org others are in or offered: no one
+    /// would manage it.
+    LastAdmin,
+    /// Their card pays for an org others are in: it would go on paying
+    /// for an org they no longer manage.
+    Pays,
+}
+
+impl Stuck {
+    pub fn message(self, org: &str) -> String {
+        match self {
+            Stuck::LastAdmin => format!("you are the last admin of {org}: make someone else its admin first"),
+            Stuck::Pays => format!("you pay for {org}: cancel its subscription in Payment and invoices first (it ends with the period)"),
+        }
+    }
+}
+
+/// A person leaving their org by their own yes to another's offer: alone
+/// in it, it ends with them; else they go, unless that strands it.
+pub fn moving(p: Place) -> Result<Going, Stuck> {
+    assert!(!p.admin || p.admins >= 1, "an admin is counted among its admins");
+    if p.others == 0 {
+        return Ok(Going::Ends);
+    }
+    if p.pays {
+        return Err(Stuck::Pays);
+    }
+    if p.admin && p.admins == 1 {
+        return Err(Stuck::LastAdmin);
+    }
+    Ok(Going::Leaves)
+}
+
+/// What a wipe of a person does to their org: never refused. It ends when
+/// no one else is in it or they are its last admin (everyone else's seat
+/// there lapses: no one is left to manage or pay for it); its subscription
+/// is canceled when it ends or their card pays for it, so a wiped person's
+/// card is charged nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wiped {
+    pub ends: bool,
+    pub cancels: bool,
+}
+
+pub fn wiped(p: Place) -> Wiped {
+    assert!(!p.admin || p.admins >= 1, "an admin is counted among its admins");
+    let ends = p.others == 0 || (p.admin && p.admins == 1);
+    let w = Wiped { ends, cancels: ends || p.pays };
+    assert!(!w.ends || w.cancels, "an org that ends bills nothing more");
+    w
 }
 
 /// A seat its holder holds, as the registry reads it.
@@ -230,6 +323,46 @@ mod tests {
         let good: Vec<_> = ALL.iter().filter(|s| s.is_good()).collect();
         assert_eq!(good, [&Status::Trialing, &Status::Active, &Status::PastDue]);
         assert_eq!(Status::parse("Active"), None);
+        // what may still charge a card is what an org that ends cancels
+        let ended: Vec<_> = ALL.iter().filter(|s| s.is_ended()).collect();
+        assert_eq!(ended, [&Status::Canceled, &Status::IncompleteExpired]);
+        assert!(ALL.iter().all(|s| !(s.is_good() && s.is_ended())), "nothing good is ended");
+    }
+
+    fn place(admin: bool, admins: u64, others: u64, pays: bool) -> Place {
+        Place { admin, admins, others, pays }
+    }
+
+    /// Goal: accepting another org's offer moves a person only when their
+    /// going strands no one: alone, their org ends (its subscription
+    /// canceled); a seat holder or one of several admins goes; the last
+    /// admin of an org others are in, or whoever pays for it while it
+    /// bills on, is refused. Method: each shape of place.
+    #[test]
+    fn a_move_strands_no_one() {
+        assert_eq!(moving(place(true, 1, 0, true)), Ok(Going::Ends), "alone, paying for themselves: it ends");
+        assert_eq!(moving(place(false, 0, 0, false)), Ok(Going::Ends), "the last row of an org with no admin");
+        assert_eq!(moving(place(false, 1, 3, false)), Ok(Going::Leaves), "a seat holder goes");
+        assert_eq!(moving(place(true, 2, 2, false)), Ok(Going::Leaves), "one of two admins goes");
+        assert_eq!(moving(place(true, 1, 1, false)), Err(Stuck::LastAdmin), "an offer waiting is someone too");
+        assert_eq!(moving(place(true, 2, 2, true)), Err(Stuck::Pays), "their card pays for the others");
+        assert_eq!(moving(place(true, 1, 4, true)), Err(Stuck::Pays), "paying is said first: cancelling is what frees them");
+        assert!(Stuck::Pays.message("Acme").contains("cancel its subscription"));
+        assert!(Stuck::LastAdmin.message("Acme").contains("Acme"));
+    }
+
+    /// Goal: a wipe is never refused; its org ends when no one is left to
+    /// manage it, and its subscription is canceled when it ends or the
+    /// wiped person's card pays for it; otherwise it goes on, its count
+    /// pushed. Method: each shape of place.
+    #[test]
+    fn a_wipe_cancels_what_the_wiped_would_pay() {
+        assert_eq!(wiped(place(true, 1, 0, true)), Wiped { ends: true, cancels: true }, "an org of one");
+        assert_eq!(wiped(place(true, 1, 3, false)), Wiped { ends: true, cancels: true }, "the sole admin: the others' seats lapse");
+        assert_eq!(wiped(place(true, 2, 3, true)), Wiped { ends: false, cancels: true }, "the payer of an org another admin keeps");
+        assert_eq!(wiped(place(true, 2, 3, false)), Wiped { ends: false, cancels: false }, "one admin of two, someone else's card");
+        assert_eq!(wiped(place(false, 1, 2, false)), Wiped { ends: false, cancels: false }, "a seat holder");
+        assert_eq!(wiped(place(false, 0, 0, false)), Wiped { ends: true, cancels: true }, "the last row");
     }
 
     fn held(kind: SeatKind, comped: bool, status: Option<Status>, sleeps: bool) -> Option<Held> {

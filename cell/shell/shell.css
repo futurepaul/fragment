@@ -568,6 +568,9 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .billing-seats { border-collapse: collapse; width: 100%; font-size: 14px; }
 .billing-seats td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-strong); vertical-align: middle; }
 .billing-seats td:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+/* an org's offer to the person, to accept or decline (billing.js `offers`) */
+.billing-offer { padding: 8px 0 10px; border-bottom: 1px solid var(--border-strong); }
+.billing-offer p { margin: 0 0 6px; }
 
 /* One agent, a quiet list of conversations, and an app dock on the desktop. */
 .sidebar-agent-toolbar { --edge-light: 0; display: flex; align-items: center; flex: none; margin: 6px 0 8px; }

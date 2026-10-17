@@ -47,6 +47,7 @@ pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
 mod invites;
+pub(crate) mod offers;
 pub(crate) mod orgs;
 pub(crate) mod seats;
 pub(crate) mod trials;
@@ -54,7 +55,7 @@ mod signin;
 pub(crate) mod wipe;
 use calls::{
     Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
-    ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
+    ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -112,6 +113,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
         state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
         state.storage().sql().exec(seats::SCHEMA, None).expect("the seats' schema applies");
+        state.storage().sql().exec(offers::SCHEMA, None).expect("the offers' schema applies");
         state.storage().sql().exec(trials::SCHEMA, None).expect("the trials' schema applies");
         state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
         let cfg = Config::from_env(&env);
@@ -144,6 +146,9 @@ impl DurableObject for RegistryCell {
         }
         if let Err(e) = self.quantity_alarm().await {
             console_error!("the registry's pushes of seat counts to Stripe failed ({:?}): {}", e.code, e.message);
+        }
+        if let Err(e) = self.cancel_alarm().await {
+            console_error!("the registry's cancels of subscriptions failed ({:?}): {}", e.code, e.message);
         }
         if let Err(e) = self.sync_alarm().await {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
@@ -760,6 +765,9 @@ impl RegistryCell {
         if let Some(answer) = self.seats_route(&path, &bytes).await {
             return answer;
         }
+        if let Some(answer) = self.offers_route(&path, &bytes).await {
+            return answer;
+        }
         if let Some(answer) = self.trials_route(&path, &bytes) {
             return answer;
         }
@@ -792,6 +800,7 @@ impl RegistryCell {
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
+            WipeBilling::PATH => reply::<WipeBilling>(self.wipe_billing(body(&bytes)?).await),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

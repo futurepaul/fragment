@@ -4,14 +4,17 @@
 // what is sold, its prices core's). A guest's seat and trial code are the
 // welcome's (`seatOffer`, for shell.js `welcome`), which Billing links to;
 // a seat's holder sees it, lets an always-on seat's computer sleep, and
-// buys credit; an org's admin adds and removes seats and admins, and opens
-// Stripe's portal for card and invoices. One seat is sold, always on
-// (Paul, 2026-10-15); a `seat` is an operator's comp. An org is shown once
-// someone besides its admin is in it (a
-// seat, held or invited, or another admin): its admin alone, who pays for
-// themselves, sees only Payment and invoices, and asks for the org's seats
-// to add one for someone else. Stripe's Checkout and portal are Stripe's
-// pages: the shell goes there; a seat's Checkout returns to the welcome
+// buys credit; an org's admin offers and removes seats and admins, and
+// opens Stripe's portal for card and invoices. One seat is sold, always on
+// (Paul, 2026-10-15); a `seat` is an operator's comp. Nobody joins an org
+// but by their own yes: what an org offers someone (a seat, an admin's
+// place) shows here and on the welcome, with who offered it, to Accept or
+// Decline (`offers`), and a seat's holder who is no admin may Leave. An org
+// is shown once someone besides its admin is in it (a seat, held or
+// offered, or another admin): its admin alone, who pays for themselves,
+// sees only Payment and invoices, and asks for the org's seats to offer one
+// to someone else. Stripe's Checkout and portal are Stripe's pages: the
+// shell goes there; a seat's Checkout returns to the welcome
 // (`/welcome?checkout=…`), a credit pack's here (`/settings?pack=…`,
 // `returning`). Every value is text, never markup.
 
@@ -38,7 +41,8 @@ function button(text, onclick) {
     try {
       await onclick();
     } catch (e) {
-      note(b.closest("section"), e.message);
+      // said beside it: under its offer, or at the end of its section
+      note(b.closest(".billing-offer, section"), e.message);
     } finally {
       b.disabled = false;
     }
@@ -56,6 +60,43 @@ function note(box, text) {
 async function goCheckout(body) {
   const v = await h.api("POST", "/api/billing/checkout", body);
   location.assign(v.url);
+}
+
+/** What an offer gives, in words (`OfferedSeat`). */
+function offered(o) {
+  const seat = o.kind ? (o.kind === "seat_always_on" ? "an always-on seat" : "a seat") + (o.comped ? ", given" : "") : null;
+  return [seat, o.admin ? "a place as its admin" : null].filter(Boolean).join(" and ");
+}
+
+/**
+ * The offers made to the person (`mine.offered`), each with who made it,
+ * what accepting does, and Accept and Decline; `done(seat)` runs once one
+ * is answered (`seat`: their `MySeat` then). A refusal (the last admin of
+ * an org others are in, one whose card pays for it) is said under it.
+ */
+function offers(mine, done) {
+  const { el } = h;
+  return mine.offered.map((o) => {
+    const box = el("div", "billing-offer");
+    box.dataset.offer = o.id;
+    const from = o.from ? ` (${o.from})` : "";
+    box.append(el("p", null, `${o.org.name}${from} offers you ${offered(o)}.`));
+    const away = mine.org && mine.org.id !== o.org.id;
+    const alone = mine.admin ? "; if no one else is in it, it ends too, its subscription canceled at once" : "";
+    const said = away
+      ? `Accepting moves you: your place in ${mine.org.name} ends${mine.seat ? ", with its seat" : ""}${alone}.`
+      : "Nothing of it is yours until you accept it.";
+    box.append(el("p", "muted", said));
+    const answer = (verb) => async () => {
+      if (verb === "accept" && away && !confirm(`Leave ${mine.org.name} for ${o.org.name}?`)) return;
+      const seat = await h.api("POST", `/api/seat/offers/${encodeURIComponent(o.id)}/${verb}`, {});
+      await done(seat);
+    };
+    const actions = el("div", "settings-actions");
+    actions.append(button("Accept", answer("accept")), button("Decline", answer("decline")));
+    box.append(actions);
+    return box;
+  });
 }
 
 /**
@@ -80,13 +121,16 @@ export async function returning(helpers) {
  * The welcome's seat for a guest (`mine`: `GET /api/seat`'s), to Stripe's
  * Checkout, and a trial code (`trial`: one a mailed link named); what
  * Checkout or a code refuses is said under them, then what more credit
- * costs. Someone in an org whose admins give its seats is told so instead.
+ * costs. What an org offers them comes first, to accept (then on to their
+ * first run, at `/`) or decline. Someone in an org whose admins give its
+ * seats is told so instead of the seat.
  */
 export function seatOffer(helpers, mine, trial) {
   h = helpers;
   const { el } = h;
   if (!mine) return [el("p", "form-error", "The seat could not be read: reload to try again.")];
-  if (mine.org && !mine.admin) return [el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
+  const offering = mine.offered.length ? [el("h2", null, "Offered to you"), ...offers(mine, async () => location.assign("/"))] : [];
+  if (mine.org && !mine.admin) return [...offering, el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
   const { offer } = mine;
   const said = el("p", "form-error");
   said.hidden = true;
@@ -131,6 +175,7 @@ export function seatOffer(helpers, mine, trial) {
     go({ trialCode: code.value });
   };
   return [
+    ...offering,
     plans,
     form,
     said,
@@ -153,7 +198,15 @@ export async function billingSections(helpers, ledger, mine, back) {
   if (seat) {
     const kind = KIND[seat.kind] + (seat.comped ? " (given)" : seat.kind === offer.kind ? `, ${price(offer.seatMicros)} a month` : "");
     billing.append(line("Seat", kind));
-    if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : "")));
+    // a seat's holder who is no admin leaves by their own yes, as they joined
+    const leave = seat.admin
+      ? null
+      : button(`Leave ${seat.org.name}`, async () => {
+          if (!confirm(`Leave ${seat.org.name}? Your seat there ends, and your agents stop. Nothing of yours is deleted.`)) return;
+          await h.api("POST", "/api/seat/leave", {});
+          await h.reopen();
+        });
+    if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
@@ -186,7 +239,8 @@ export async function billingSections(helpers, ledger, mine, back) {
     // no seat of theirs: the deployment's plan gives everyone one
     billing.append(line("Seat", `${KIND[ledger?.plan] ?? "A seat"}, given to everyone here`));
   }
-  for (const o of mine.offered) billing.append(el("p", "muted", `${o.org.name} offered you a ${KIND[o.kind].toLowerCase()}; you are in another org.`));
+  // what orgs offer them: theirs to accept (a move, from an org they are in) or decline
+  for (const box of offers(mine, () => h.reopen())) billing.append(box);
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
   if (ledger && !mine.guest) {
@@ -223,7 +277,8 @@ function orgSection(org, offer) {
   for (const m of org.members) {
     const tr = el("tr");
     const who = el("td", null, m.email + (m.person ? "" : " (invited)"));
-    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : ""].filter(Boolean).join(", "));
+    // who pays steps down as its admin only themselves, once their card bills no more
+    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : "", m.person && m.person === org.payer ? "pays" : ""].filter(Boolean).join(", "));
     const actions = el("td");
     if (m.seat && !m.comped) {
       actions.append(button("Remove seat", async () => {
@@ -278,6 +333,11 @@ function orgSection(org, offer) {
   };
   const pay = el("div", "settings-actions");
   pay.append(portal());
-  box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", `A seat added, ${price(offer.seatMicros)} a month and always on, bills from now, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices.`), actionLine("Payment", pay));
+  box.append(
+    actionLine("Add a seat", add),
+    actionLine("Add an admin", admin),
+    el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org has it at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices.`),
+    actionLine("Payment", pay),
+  );
   return box;
 }
