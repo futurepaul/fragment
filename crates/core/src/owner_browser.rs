@@ -147,7 +147,7 @@ pub fn guest_path(path: &str) -> bool {
 /// extension's own sockets and fetches: `chrome-extension://` and its id,
 /// 32 letters `a` to `p`. Only an extension opens the owner's socket, or
 /// comes back with its link; a page holding either could not. Any
-/// extension: which one is the platform's own is question 7's (the
+/// extension: which one is the platform's own is question 3's (the
 /// write-up), as is shipping it.
 pub fn extension_origin(origin: &str) -> bool {
     origin.strip_prefix("chrome-extension://").is_some_and(|id| id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b)))

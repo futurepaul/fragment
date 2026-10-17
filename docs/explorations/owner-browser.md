@@ -3,12 +3,12 @@
 Exploration, 2026-10-16, on branch `claude/owner-browser` from master at
 `ddd88f6f`. Austin asked for it on 2026-10-16: "I want to explore the
 possibility of allowing an agent to access your browser on your machine
-… I think Chrome extension is the right call." Nothing here is decided:
-the branch's draft PR is a spike, not to be merged. Where this file
-disagrees with docs/cloudflare-v1.md, that file wins until Paul decides.
-An agent driving its owner's signed-in browser is privacy posture, which
-is Paul's (docs/cloudflare-v1.md, "Escalations"); "Questions for Paul",
-below, lists what is his to say.
+… I think Chrome extension is the right call." The branch's draft PR is
+a spike, not to be merged. Where this file disagrees with
+docs/cloudflare-v1.md, that file wins. Austin decided four of its
+questions on 2026-10-17, among them that an agent may use its owner's
+browser once its owner opts in ("Decided", below); "Questions for
+Paul" lists what is still open.
 
 Every claim is marked with how it was checked:
 
@@ -189,8 +189,8 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
     calls this browser connected only on the person's own computer; for
     any other it offers Connect, which replaces it.
   - While the extension comes back with its link, Settings says
-    "Reconnecting this browser…" and the popup "Reconnecting to your
-    computer…", from its first try. Its Disconnect forgets the browser.
+    "Reconnecting this browser…" and the popup "Reconnecting…", from its
+    first try. Its Disconnect forgets the browser.
   - Not connected, both say why in a person's words: "this browser was
     forgotten in Settings", "another browser connected in its place",
     "your account was wiped", or, for a link the computer does not know
@@ -198,13 +198,13 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
     computer no longer knows this browser".
   - Without the extension, the line says to add it.
 - **What an agent may use: the person's choice.** The popup is the
-  extension's settings ("What your agents may use"). It offers three
-  levels:
-  - "Only the tabs they open", the default: the agent's own tabs,
-    grouped as "Agent" (inferred: every run was headless, which has no
-    tab strip).
-  - "Those, and tabs I choose": the popup lists the person's open tabs,
-    each with a switch.
+  extension's settings ("Your agents can use"). It offers three levels,
+  each with a line saying what it gives, and ends "On every site,
+  they're signed in as you.":
+  - "Only tabs they open", the default: the agent's own tabs, grouped as
+    "Agent" (inferred: every run was headless, which has no tab strip).
+  - "Their tabs, plus tabs I pick": the popup lists the person's open
+    tabs, each with a box to tick.
   - "All my tabs and windows": every tab in every window, to list, read,
     drive, switch to and close. A new window is the person's too: an
     extension can make no browser profile apart from theirs, so
@@ -231,7 +231,7 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   shows its own bar, "Fragment started debugging this browser", while a
   debugger is attached. The extension detaches once no guest socket is
   left. The person's closing that bar forgets the browser: they said
-  stop, so it connects again only from Settings (question 3).
+  stop, so it connects again only from Settings.
 
 ## Evidence
 
@@ -342,13 +342,13 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
   - What the agent may use follows the popup's level. The stub's `tabs`
     (the titles of the tabs it may use) and `close-tab <title>` stand in
     for a browser tool's `tab` and `tab close`:
-    - at "Only the tabs they open" (the default), the agent lists its
-      own tab and none of the person's;
-    - at "Those, and tabs I choose", the popup lists the person's tabs,
-      and the one switched on joins the agent's;
+    - at "Only tabs they open" (the default), the agent lists its own
+      tab and none of the person's;
+    - at "Their tabs, plus tabs I pick", the popup lists the person's
+      tabs, and the one ticked joins the agent's;
     - at "All my tabs and windows", the agent lists every tab and closes
       one of the person's;
-    - back at "Only the tabs they open", the person's tabs leave the
+    - back at "Only tabs they open", the person's tabs leave the
       list.
   - Reloaded (its owner's Reload in `chrome://extensions`), the extension
     comes back on its own, with its link. The Settings page open from
@@ -399,7 +399,7 @@ now opens the platform's own page.
 Hermes v0.21.7 also reads a CDP endpoint from `BROWSER_CDP_URL` or the
 profile's `browser.cdp_url`. A full `ws://…/devtools/browser…` URL
 passes through as given (`tools/browser_tool_cdp.py` at v0.21.7; read),
-so its own browser tools could be pointed here too (question 5).
+so its own browser tools could be pointed here too (question 2).
 
 ### On the dev stack, as a person tries it (run)
 
@@ -450,7 +450,7 @@ computers on our Hermes image.
 - **Told by the line.** A test person's agent (Hermes on that model),
   their browser a throwaway Chromium connected in Settings, two of
   "their" tabs open in it. Each was its first try, in plain English:
-  - At "Only the tabs they open": "What tabs do I have open in my
+  - At "Only tabs they open": "What tabs do I have open in my
     Chromium window right now?" Its one step: `agent-browser --session
     owner --cdp ws://browser.fragment.internal/devtools/browser tab`.
     The line's first wording ("`tab` lists the tabs they let you use")
@@ -504,7 +504,7 @@ computers on our Hermes image.
   deployment. Fragments share a branch preview's zone, so the extension
   must trust the platform's exact origin, never its zone. The cell takes
   any extension's origin: which one is the platform's own is question
-  7's.
+  3's.
 - **A page's own targets.** Cross-origin frames and workers (CDP's child
   sessions) are not offered: `Target.setAutoAttach` on a page answers
   `{}`.
@@ -513,51 +513,69 @@ computers on our Hermes image.
 - **The line's cost.** It rides each turn its owner asks while the
   browser is connected, about 100 tokens, and Hermes keeps each in its
   session. Told once a chat, or when the browser comes or goes, would
-  cost less and keep more state (question 5).
+  cost less and keep more state (question 2).
 - **Hosted costs and bounds (unknown).** Each ping, 20 s apart, wakes the
   DO, and so does the bridge's `/json/version` before each turn its
   owner asks. A WebSocket auto-response would answer it without waking it. The
   largest frame the DO carries, against a full-page screenshot's
   base64, was not measured on Cloudflare.
 
+## Decided (Austin, 2026-10-17)
+
+- **An agent may use its owner's browser, once its owner opts in.**
+  Connecting it in Settings is the opt-in: no browser its owner did not
+  connect is reached.
+- **Connecting is the consent.** The agent does not ask again before its
+  first use in a chat; Chrome's own bar and the "Agent" tab group show
+  it in use. The line's last sentence, to ask before paying or typing a
+  password, is a guardrail on what the agent does there, not a second
+  consent, and stays.
+- **"All my tabs and windows" is offered,** with no second step and no
+  warning in Settings. Each level's line in the popup says plainly what
+  it gives (the extension, above).
+- **A link does not lapse.** It lasts until the person disconnects it:
+  Disconnect in the popup, Forget in Settings, or closing Chrome's bar.
+  The one bound is `LINKS_MAX`: an owner's ninth browser pushes out the
+  one heard from longest ago.
+
 ## Questions for Paul
 
-1. **May an agent use its owner's own browser at all?** It carries the
-   person's whole web identity (mail, bank, accounts), far beyond the
-   agent's role on the platform (R17, decision 36).
-2. **Whose agents, and whose turns.** Every agent on the computer, as
-   built (decision 44 makes a per-agent list no boundary), or only agents
-   the owner names? And any turn: only the owner's turns are told of the
-   browser, but a turn another chat member asks can still reach it, as
-   can a later turn of a session the owner's line was in.
-3. **The consent.** As built: the person connects the browser in
-   Settings, and Chrome's own bar and the "Agent" tab group show it in
-   use. Should the agent also ask, as a card, before its first use in a
-   chat? That is a question about an outcome, which Paul's rule of
-   2026-10-14 allows.
-4. **How much of the browser.** As built, the person chooses in the
-   extension: only the tabs the agent opens (the default), those and
-   tabs they switch on, or all their tabs and windows. Should "All" be
-   offered? Should it ask again before taking effect, or carry a
-   warning in Settings too?
-5. **Where the agent learns of it.** As built, the bridge tells it: one
-   line beside each of its owner's messages while the browser is
-   connected (the appendix), and nothing otherwise, so an agent whose
-   owner connects no browser carries nothing. Told nothing, an agent used
-   its own desktop's browser. Is the bridge the place? The alternatives:
+1. **Whose agents, and whose turns (open).** As built, any agent on the
+   computer can drive the browser (decision 44 makes a per-agent list no
+   boundary), and so can any turn. Only the owner's turns are told of
+   it, but the socket's address is fixed and in every guest's
+   environment (`FRAGMENT_BROWSER`), so a turn another chat member asks
+   reaches it too if the agent tries, as does a later turn of a session
+   the owner's line was in. In a shared chat, another member could ask
+   the agent to act in the owner's signed-in browser. Closing that would
+   take the computer telling the socket's callers apart by turn, which
+   nothing does today. Should only the owner's agents, or only the
+   owner's turns, reach it?
+2. **Where the agent learns of it.** As built, the bridge tells it: no
+   new tool and no skill, but one line of text beside each of its
+   owner's messages while the browser is connected (the appendix), and
+   nothing otherwise. The agent drives the browser with the
+   agent-browser command its terminal already has. Told nothing, an
+   agent used its own desktop's browser. Is the bridge the place? The
+   alternatives:
    - a skill (the first trial's, 2.3 KB): a thirteenth managed one (that
      set is Paul's), the platform skill (143 bytes left of its 16 KiB),
      or each agent's own;
    - Hermes' own `browser.cdp_url`, which would put its browser tools on
      the owner's browser for every call, connected or not.
-6. **The link.** As built, a browser's link can do two things: ask for a
-   ticket to this computer's browser socket, and forget itself. It lasts
-   until its owner forgets it, or eight newer browsers push it out. Should
-   a link also lapse after a time unheard, or need Connect again after a
-   new sign-in?
-7. **Shipping it.** The Chrome Web Store (a vendor account), and which
-   platform origins a build trusts.
-8. **The inventory.** It would be a surface that is not a fragment
+3. **How it ships (open).** An extension, or built into the CLI or a
+   native app (Austin); an extension would go on the Chrome Web Store (a
+   vendor account). Since Chrome 136, Chrome ignores
+   `--remote-debugging-port` on its default profile (read: Chrome's
+   blog, "Changes to remote debugging switches to improve security"), so
+   a CLI or an app cannot start the person's everyday, signed-in profile
+   for debugging; an extension reaches it, as built. Whether newer
+   Chrome's own switch for it, in `chrome://inspect`, would serve is
+   unknown. The computer's side (the ticket, the link, the relay, the
+   bridge's line) carries CDP from whatever holds a ticket. Whichever
+   ships: which platform origins a build trusts, and which extension the
+   cell trusts (any, as built).
+4. **The inventory.** It would be a surface that is not a fragment
    (`SPECIAL-CASE-INVENTORY.md`). A row is proposed below.
 
 ## What it would change, if kept
@@ -591,7 +609,7 @@ computers on our Hermes image.
    "Agent" group, and the agent replies with its title, then what it was
    told: `(told: its owner's browser, …)`.
 5. The extension's icon sets what your agents may use: only the tabs
-   they open (the default), those and tabs you switch on, or all your
+   they open (the default), those and tabs you pick, or all your
    tabs and windows. At "All", `tabs` in the chat lists every tab you
    have open.
 6. Let your laptop sleep, or stop the dev stack and start it again: the
@@ -602,8 +620,8 @@ computers on our Hermes image.
    connected.
 
 Loaded into a browser you use, the agent's tabs carry your own sign-ins:
-that is the point, and question 1. To try it without them, start
-Chromium with a profile of its own (`--user-data-dir=<a new
+that is the point, and why only you connect it. To try it without them,
+start Chromium with a profile of its own (`--user-data-dir=<a new
 directory>`) and load the extension there.
 
 The dev stack runs the stub image, whose `browse` is the guest. A real
