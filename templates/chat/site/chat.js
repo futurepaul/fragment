@@ -246,6 +246,14 @@ function el(tag, cls, text) {
 
 const time = (at) => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+/// Where an agent's model calls go, as the shell's roster says it
+/// (decision 62, proposed): the platform's models, or a model of its
+/// owner's own provider, outside the platform; none when it says neither.
+function runsOnOf(v) {
+  if (v?.on === "platform") return { on: "platform" };
+  if (v?.on === "own" && typeof v.model === "string" && v.model.length <= 80) return { on: "own", model: v.model };
+  return null;
+}
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 function size(bytes) {
@@ -780,7 +788,9 @@ export function mount(root) {
     const out = [];
     for (const it of items) {
       const prev = out[out.length - 1];
-      if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) prev.steps.push(it.s);
+      const handoff = it.type === "step" ? handoffOf(it.s) : null;
+      if (handoff) out.push({ type: "handoff", t: it.t, s: it.s, h: handoff });
+      else if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) prev.steps.push(it.s);
       else if (it.type === "step") out.push({ type: "steps", t: it.t, steps: [it.s] });
       else out.push(it);
     }
@@ -815,6 +825,8 @@ export function mount(root) {
         return messageNode(it.m);
       case "steps":
         return stepsNode(it.t, it.steps);
+      case "handoff":
+        return handoffNode(it.t, it.s, it.h);
       case "prompt":
         return promptNode(it.t, it.p);
       case "end":
@@ -1209,6 +1221,101 @@ export function mount(root) {
     update();
     note.append(preview, body, button);
     return note;
+  }
+
+  // ---- a hand-off (decision 62, proposed): a step that asks another of
+  // the owner's agents, `fragment ask <agent> …` in its terminal or Hermes'
+  // `message_agent`, is a card of its own: who was asked, where its model
+  // runs (the shell's roster says, when it framed this page), what the
+  // step says it was sent (its placeholders marked: what stood in for a
+  // detail), and how it goes. "See the hand-off" asks the shell to open the
+  // chat it happened in, beside this one. ----
+  function askedOne(name) {
+    const n = String(name ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (!n) return null;
+    return state.roster.find((r) => r.identity === name || r.fragment === n || r.name.toLowerCase() === n || r.title.toLowerCase() === n || (r.fragment ?? "").replace(/--[a-z0-9]{4}$/, "") === n) ?? null;
+  }
+  function handoffOf(s) {
+    const args = typeof s.args === "string" ? s.args : "";
+    if (s.tool === "message_agent") {
+      const to = args.trim().replace(/^["'@]+|["']+$/g, "");
+      if (!to) return null;
+      const r = askedOne(to);
+      if (!r && state.roster.length) return null;
+      return { r, name: r?.title ?? capital(to), brief: "" };
+    }
+    const m = /^\s*fragment\s+ask\s+["']?([A-Za-z0-9._-]+)["']?\s*([\s\S]*)$/.exec(args);
+    if (!m) return null;
+    const r = askedOne(m[1]);
+    // one the owner's agents (the shell's roster) do not answer to asked no
+    // one: an ordinary step, never a card that says it was done
+    if (!r && state.roster.length) return null;
+    return { r, name: r?.title ?? capital(m[1].replace(/--[a-z0-9]{4}$/, "")), brief: briefOf(m[2]) };
+  }
+  // the question as its command line says it: its quoted words, unescaped,
+  // without what follows them; cut where the step's arguments were
+  function briefOf(rest) {
+    let t = rest.trim();
+    const q = t.charAt(0);
+    if (q === '"' || q === "'") {
+      t = t.slice(1);
+      const end = t.search(new RegExp(`(?<!\\\\)${q}(\\s|$)`));
+      if (end >= 0) t = t.slice(0, end);
+    }
+    t = t.replace(/\\(["'\\])/g, "$1").replace(/\.\.\.$/, "…").trim();
+    // a quote cut where the step's arguments were says nothing of it: end
+    // where the words before it end; a word cut, before it
+    if (/(?:[:,]\s*["'“]?|\s*["'“])…$/.test(t)) return t.replace(/[:,]?\s*["'“]?…$/, "…");
+    return t.replace(/(\s)[^\s\]]{1,15}…$/, "$1…").replace(/\s+…$/, "…");
+  }
+  function briefNode(text) {
+    const b = el("div", "handoff-brief");
+    for (const part of text.split(/(\[[A-Z][A-Z0-9_]{1,40}\])/)) {
+      if (part) b.append(/^\[[A-Z][A-Z0-9_]{1,40}\]$/.test(part) ? el("span", "ph", part) : part);
+    }
+    return b;
+  }
+  // the newest hand-off to `identity` in this chat: the one its teammate's
+  // work (the shell's roster says) is for
+  function newestHandoff(identity) {
+    let newest = null;
+    for (const t of state.turns.values()) for (const s of t.steps.values()) if (handoffOf(s)?.r?.identity === identity && (!newest || s.n > newest.n)) newest = s;
+    return newest;
+  }
+  function handoffNode(t, s, h) {
+    const key = `h:${t.id}:${s.step}`;
+    // the step returns once the question is posted (or, with `--wait`, its
+    // answer read): its teammate's own work, while it lasts, is the card's
+    const theirs = !!h.r?.working && newestHandoff(h.r.identity) === s;
+    const how = s.ok === false ? "failed" : theirs || (s.ok !== true && running(t)) ? "running" : "done";
+    const where = h.r?.runsOn ?? null;
+    const sig = JSON.stringify([how, h.name, h.brief, where, h.r?.identity ?? null, !!rosterOrigin]);
+    return [
+      key,
+      cached(key, sig, () => {
+        const card = el("div", `handoff ${how}`);
+        card.dataset.turn = t.id;
+        const head = el("div", "handoff-head");
+        if (h.r) head.append(face(h.r.identity));
+        const title = el("span", "handoff-title");
+        title.append("Asked ", el("strong", null, h.name));
+        head.append(title);
+        if (where) head.append(el("span", `handoff-where${where.on === "own" ? " own" : ""}`, where.on === "own" ? `${where.model} · outside the platform` : "On the platform"));
+        const said = el("span", "handoff-state");
+        said.innerHTML = svg(how === "failed" ? "x" : how === "done" ? "check" : "loader", how === "running" ? "spin" : "");
+        said.append(how === "failed" ? "Didn't go through" : how === "done" ? "Done" : "Working on it…");
+        head.append(said);
+        card.append(head);
+        if (h.brief) card.append(briefNode(h.brief));
+        if (h.r && rosterOrigin) {
+          const open = el("button", "handoff-open", "See the hand-off");
+          open.type = "button";
+          open.onclick = () => window.parent.postMessage({ fragment: "open-handoff", identity: h.r.identity }, rosterOrigin);
+          card.append(open);
+        }
+        return card;
+      }),
+    ];
   }
 
   let stepWidth = 0;
@@ -2005,7 +2112,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+        .map((a) => ({ identity: a.identity, name: a.name, working: a.working === true, fragment: typeof a.fragment === "string" ? a.fragment : null, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null, runsOn: runsOnOf(a.runsOn) }));
       if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
         setup = {
           steps: d.setup.steps

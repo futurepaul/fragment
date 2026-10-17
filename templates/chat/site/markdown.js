@@ -169,7 +169,9 @@ function table(header, alignment, rows, depth) {
   return wrap;
 }
 
-const INLINE = /(?<escape>\\[\\`*{}\[\]()#+.!_>~|\-])|(?<code>(?<ticks>`+)([^`]|(?!\k<ticks>)`)+\k<ticks>)|(?<strong>\*\*[^*]+\*\*|__[^_]+__)|(?<strike>~~[^~]+~~)|(?<em>\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(?<image>!\[(?<alt>[^\]]*)\]\((?<src>(?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(?<link>\[(?<label>[^\]]+)\]\((?<href>https?:\/\/[^)\s]+|mailto:[^)\s]+)\))|<(?<auto>https?:\/\/[^<>\s]+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})>|(?<html><[^>\n]*>)|(?<url>https?:\/\/[^\s<>()]+[^\s<>().,;:!?'\"])|(?<email>\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b)/g;
+// An underscore opens or closes emphasis only at a word's edge (CommonMark):
+// `[SISTER_NAME]` and `snake_case` stay as written.
+const INLINE = /(?<escape>\\[\\`*{}\[\]()#+.!_>~|\-])|(?<code>(?<ticks>`+)([^`]|(?!\k<ticks>)`)+\k<ticks>)|(?<strong>\*\*[^*]+\*\*|(?<!\w)__[^_]+__(?!\w))|(?<strike>~~[^~]+~~)|(?<em>\*[^*\s][^*]*\*|(?<!\w)_[^_\s][^_]*_(?!\w))|(?<image>!\[(?<alt>[^\]]*)\]\((?<src>(?:\.\/)?(?:__file\?path=[^)\s]+|__blob\/[0-9a-f]{64}))\))|(?<link>\[(?<label>[^\]]+)\]\((?<href>https?:\/\/[^)\s]+|mailto:[^)\s]+)\))|<(?<auto>https?:\/\/[^<>\s]+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})>|(?<html><[^>\n]*>)|(?<url>https?:\/\/[^\s<>()]+[^\s<>().,;:!?'\"])|(?<email>\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b)/g;
 
 export function inline(parent, text, depth = 0) {
   text = String(text);
