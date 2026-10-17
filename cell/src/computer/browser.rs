@@ -21,7 +21,11 @@
 //!   and its socket closed `FORGOTTEN`.
 //! - **Carrying.** The guest dials `browser.fragment.internal` for a CDP
 //!   socket, accepted only while a browser is connected; each of its
-//!   frames goes to the browser named by its guest socket, and back.
+//!   frames goes to the browser named by its guest socket, and back. It
+//!   asks first, if it likes, as a CDP client asks a browser (`GET
+//!   /json/version`): the connected browser's name and its socket, or
+//!   that none is connected. The bridge asks before each of its owner's
+//!   turns, and tells the agent.
 //! - **Told.** Its view lists the browsers linked, which is connected and
 //!   when each was last heard (`browsers`), and its owner's open pages are
 //!   told each time that changes.
@@ -183,7 +187,7 @@ impl ComputerCell {
             return Err(CellError::invalid("the owner's browser is a CDP WebSocket"));
         }
         if self.owner_socket()?.is_none() {
-            return Err(CellError::new(ErrorCode::NotConnected, "your owner's browser is not connected: they connect it from Settings, with the Fragment extension"));
+            return Err(not_connected());
         }
         if self.state.get_websockets_with_tag(GUEST_TAG).len() >= GUESTS_MAX {
             return Err(CellError::new(ErrorCode::RateLimited, format!("at most {GUESTS_MAX} sockets to the owner's browser at once")));
@@ -198,6 +202,16 @@ impl ComputerCell {
         let pair = WebSocketPair::new()?;
         self.state.accept_websocket_with_tags(&pair.server, &[GUEST_TAG, &format!("cdp-{socket}")]);
         Ok(Response::from_websocket(pair.client)?)
+    }
+
+    /// Whether its owner's browser is there, answered as a browser's
+    /// DevTools answers `GET /json/version`: the connected one's name and
+    /// the guest's socket, or the platform's words that none is connected.
+    fn browser_version(&self) -> CellResult<Response> {
+        match self.browsers()?.into_iter().find(|b| b.connected) {
+            Some(b) => json_response(&owner_browser::version(&b.name)),
+            None => Err(not_connected()),
+        }
     }
 
     /// Its owner's connected browser's socket, if one is.
@@ -329,6 +343,7 @@ impl ComputerCell {
                 json_response(&json!({ "forgotten": link }))
             }
             "browser-guest" => self.browser_guest(req).await,
+            "browser-version" => self.browser_version(),
             k => unreachable!("a browser kind the router named: {k}"),
         }
     }
@@ -336,7 +351,7 @@ impl ComputerCell {
 
 /// Whether `kind` is one `browser_route` answers.
 pub(super) fn is_browser_kind(kind: &str) -> bool {
-    matches!(kind, "browser" | "browser-link-ticket" | "browser-link-forget" | "browser-guest")
+    matches!(kind, "browser" | "browser-link-ticket" | "browser-link-forget" | "browser-guest" | "browser-version")
 }
 
 /// `/api/computers/{id}/browser…`, from its owner (`who`): a ticket to
@@ -398,12 +413,16 @@ async fn link_route(env: &Env, url: &Url, id: &str, link: &str) -> CellResult<Re
 
 /// The guest's CDP socket to its owner's browser
 /// (`ws://browser.fragment.internal/devtools/browser`): the Computer DO
-/// takes it, and carries it while that browser is connected. Any of the
+/// takes it, and carries it while that browser is connected; and its ask
+/// first (`GET /json/version`), which the Computer DO answers. Any of the
 /// computer's agents may use it: one person's agents share their computer,
 /// and are not fenced from each other (decision 44).
 pub(super) async fn egress_browser(req: Request, env: &Env, computer: &str) -> CellResult<Response> {
+    if req.method() == Method::Get && req.path() == owner_browser::VERSION_PATH {
+        return to_computer(env, computer, object_request("browser-version", &[])?).await;
+    }
     if !owner_browser::guest_path(&req.path()) {
-        return Err(CellError::new(ErrorCode::NotFound, format!("the owner's browser is a CDP socket at {}", owner_browser::GUEST_PATH)));
+        return Err(CellError::new(ErrorCode::NotFound, format!("the owner's browser is a CDP socket at {}, asked after at {}", owner_browser::GUEST_PATH, owner_browser::VERSION_PATH)));
     }
     to_computer(env, computer, upgrade_request(&req, "browser-guest", &[])?).await
 }
@@ -418,6 +437,11 @@ fn object_request(kind: &str, extra: &[(&str, &str)]) -> CellResult<Request> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers);
     Ok(Request::new_with_init(&format!("https://computer.internal/{kind}"), &init)?)
+}
+
+/// The guest's answer while no browser of its owner's is connected.
+fn not_connected() -> CellError {
+    CellError::new(ErrorCode::NotConnected, "your owner's browser is not connected: they connect it from Settings, with the Fragment extension")
 }
 
 async fn to_computer(env: &Env, id: &str, req: Request) -> CellResult<Response> {

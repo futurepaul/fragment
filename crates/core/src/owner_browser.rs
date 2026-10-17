@@ -9,10 +9,18 @@
 
 use serde_json::Value;
 
-/// Where a guest opens a CDP socket on `browser.fragment.internal`, as a
-/// browser's DevTools serves one: a client given the full URL connects to
-/// it as given, with no `/json/version` lookup first.
+/// The host a guest reaches its owner's browser on (`FRAGMENT_BROWSER` is
+/// `http://` and it): the computer's own intercept, never a network's.
+pub const GUEST_HOST: &str = "browser.fragment.internal";
+/// Where a guest opens a CDP socket on `GUEST_HOST`, as a browser's
+/// DevTools serves one: a client given the full URL connects to it as
+/// given, with no `VERSION_PATH` lookup first.
 pub const GUEST_PATH: &str = "/devtools/browser";
+/// Where a guest asks whether its owner's browser is there (`GET`), as a
+/// CDP client asks a browser's DevTools before it connects: while one is
+/// connected, `version`; otherwise the platform's words that it is not.
+/// The bridge asks before each of its owner's turns, and tells the agent.
+pub const VERSION_PATH: &str = "/json/version";
 /// The ping an extension sends to keep its service worker alive (Chrome
 /// keeps one alive while its socket carries a message every 30 s), which
 /// the computer answers with `PONG` and carries nowhere.
@@ -118,6 +126,13 @@ pub fn read(frame: &str) -> Option<Said<'_>> {
     Some(if message == CLOSE { Said::Close { socket } } else { Said::Message { socket, message } })
 }
 
+/// `VERSION_PATH`'s answer while browser `name` is connected, in a
+/// browser's own fields: the protocol the extension speaks, and where a
+/// CDP client opens its socket (`webSocketDebuggerUrl`).
+pub fn version(name: &str) -> Value {
+    serde_json::json!({ "Browser": name, "Protocol-Version": "1.3", "webSocketDebuggerUrl": format!("ws://{GUEST_HOST}{GUEST_PATH}") })
+}
+
 /// Whether a guest's request names the CDP socket: `GUEST_PATH`, or a path
 /// of visible characters below it.
 pub fn guest_path(path: &str) -> bool {
@@ -173,6 +188,16 @@ mod tests {
         for bad in ["/", "/json/version", "/devtools/browserx", "/devtools/page/1", "/devtools/browser/a b", long.as_str()] {
             assert!(!guest_path(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_connected_browser_answers_as_a_browsers_devtools_does() {
+        let v = version("Chromium on macOS");
+        assert_eq!(v["Browser"], "Chromium on macOS");
+        assert_eq!(v["Protocol-Version"], "1.3");
+        assert_eq!(v["webSocketDebuggerUrl"], "ws://browser.fragment.internal/devtools/browser");
+        let at = v["webSocketDebuggerUrl"].as_str().unwrap().strip_prefix(&format!("ws://{GUEST_HOST}")).unwrap();
+        assert!(guest_path(at) && !guest_path(VERSION_PATH), "its socket is the guest's, and the lookup is not one");
     }
 
     #[test]

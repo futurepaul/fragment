@@ -1028,7 +1028,7 @@ impl ComputerCell {
             "FRAGMENT_COMPUTER": id,
             "FRAGMENT_API": "http://api.fragment.internal",
             "FRAGMENT_MODEL": "http://model.fragment.internal",
-            "FRAGMENT_BROWSER": "http://browser.fragment.internal",
+            "FRAGMENT_BROWSER": format!("http://{}", fragment_core::owner_browser::GUEST_HOST),
             "FRAGMENT_IMAGE": image,
         });
         if restoring {
