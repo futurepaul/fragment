@@ -15,8 +15,9 @@ use crate::limits;
 /// The chat's channel for what is said: people's messages, agents' replies,
 /// Stop, and prompt answers.
 pub const CHAT: &str = "chat";
-/// The chat's channel for an agent's progress (editors post: so a person
-/// cannot forge a step or a prompt).
+/// The chat's channel for an agent's progress: only the chat's agent
+/// members post, each as itself (`"from": "agent"`), so a person cannot
+/// forge a step or a prompt.
 pub const WORK: &str = "work";
 /// An agent fragment's channel for what is asked of it outside a chat.
 pub const TASKS: &str = "tasks";

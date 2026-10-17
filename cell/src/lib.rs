@@ -860,9 +860,44 @@ fn unmarked(resp: Response) -> CellResult<Response> {
     Ok(resp.with_headers(h))
 }
 
-/// A request on a fragment's site; a refusal a browser navigated to is
-/// answered as a page: the router's own here, the fragment's in `site`.
+/// A request on a fragment's site, whatever answers it (a page, a file, the
+/// app, a socket's upgrade, a refusal, an error), with the origin's own
+/// headers (`fragment_origin`). An error is answered here, not at `fetch`,
+/// so its JSON carries them too.
 async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str) -> CellResult<Response> {
+    let resp = match served(req, env, cfg, url, name, rest).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    fragment_origin(resp)
+}
+
+/// The headers every answer on a fragment's origin carries, set over any
+/// the fragment's app sent so it cannot weaken them: no type sniffing (a
+/// browser takes bytes as the type they name, never a page or a script
+/// guessed from them), and no referrer beyond the origin (a page's URL may
+/// hold its share link, `?view=`, and every fragment is another origin;
+/// a page's own `<meta name="referrer">` still governs its own links).
+/// Scriptable media (an SVG, the XML types: `site::opened_as`) is sandboxed
+/// besides, so opened directly it runs no script and has an opaque origin,
+/// while a page's `<img>` of it is unaffected (a subresource's policy is
+/// ignored); appended, so an app's own policy still applies beside it. A
+/// Durable Object's or a fetch's answer has immutable headers: cloned, as
+/// `bound` does, which keeps a socket's 101 and its WebSocket.
+fn fragment_origin(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.set("x-content-type-options", "nosniff")?;
+    h.set("referrer-policy", "same-origin")?;
+    let content_type = h.get("content-type")?.unwrap_or_default();
+    if fragment_core::site::opened_as(&content_type) == fragment_core::site::Opened::ScriptableMedia {
+        h.append("content-security-policy", "sandbox")?;
+    }
+    Ok(resp.with_headers(h))
+}
+
+/// `serve`'s answer: a refusal a browser navigated to is answered as a
+/// page, the router's own here, the fragment's in `site`.
+async fn served(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str) -> CellResult<Response> {
     check_name(name)?;
     let fetched = fetched(&req)?;
     let page = shows_page(&req, fetched)?;

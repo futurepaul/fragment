@@ -101,6 +101,11 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let post = d.post.map_or(SqlStorageValue::Null, |p| p.as_str().into());
         let signed_in = SqlStorageValue::Integer(d.signed_in.into());
         sql.exec("INSERT INTO code_channels (channel, read, post, signed_in) VALUES (?, ?, ?, ?)", vec![channel.as_str().into(), d.read.as_str().into(), post, signed_in])?;
+        // its posters' kind, a table of its own (fragment.rs `SCHEMA`)
+        if let Some(from) = d.from {
+            assert!(d.post.is_some(), "a checked manifest names its posters' kind beside a post role");
+            sql.exec("INSERT INTO code_channel_from (channel, from_kind) VALUES (?, ?)", vec![channel.as_str().into(), from.as_str().into()])?;
+        }
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -115,12 +120,13 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_ops")?, code.operations.len(), "every operation is stored");
     assert_eq!(count("code_op_descriptions")?, code.operations.values().filter(|d| d.description.is_some()).count(), "every description is stored");
     assert_eq!(count("code_channels")?, code.channels.len(), "every channel is stored");
+    assert_eq!(count("code_channel_from")?, code.channels.values().filter(|d| d.from.is_some()).count(), "every channel's posters' kind is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
     Ok(())
 }
 
 fn clear_installed(sql: &SqlStorage) -> Result<()> {
-    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_triggers"] {
+    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_triggers"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
     Ok(())
@@ -163,13 +169,23 @@ struct ChannelRow {
     read: String,
     post: Option<String>,
     signed_in: i64,
+    /// From `code_channel_from`, joined (`CHANNELS`).
+    from_kind: Option<String>,
 }
+
+/// The installed channels' rows, each with its posters' kind (a table of
+/// its own: fragment.rs `SCHEMA`).
+const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel";
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
     let read = role("read", &row.read)?;
     let post = row.post.as_deref().map(|p| role("post", p)).transpose()?;
-    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0 }))
+    let from = match row.from_kind.as_deref() {
+        None => None,
+        Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("from {k:?}")))?),
+    };
+    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from }))
 }
 
 #[derive(Deserialize)]
@@ -872,13 +888,13 @@ impl FragmentCell {
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>("SELECT channel, read, post, signed_in FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).collect()
     }
 
     /// An app channel the live code declares (who reads it, who may post
-    /// to it); `None` when it declares no such channel.
+    /// to it, and of what kind); `None` when it declares no such channel.
     pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<ChannelDecl>> {
-        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read, post, signed_in FROM code_channels WHERE channel = ?", vec![channel.into()])?;
+        let rows: Vec<ChannelRow> = self.typed(&format!("{CHANNELS} WHERE c.channel = ?"), vec![channel.into()])?;
         Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 

@@ -7,20 +7,19 @@
 // panes closing.
 import Split from "./vendor/split-grid.js";
 import { store, reducedMotion, springFrames, frameWriter } from "./layout.js";
-import { LUCIDE_ICON } from "./lucide-icons.js";
+import { icon } from "./icons.js";
 
 const KEY = "finite.viewer.v1";
 const MIN_ROW = 96;
-const ICON = LUCIDE_ICON;
-const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name] || name}</svg>`;
 
-function button(icon, title, onClick) {
+// An action of a pane's header: `glyph` names one of the shell's icons.
+function button(glyph, title, onClick) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "icon-button pane-action";
   b.title = title;
   b.setAttribute("aria-label", title);
-  b.innerHTML = svg(icon);
+  b.replaceChildren(icon(glyph));
   b.onclick = (e) => { e.stopPropagation(); onClick(e); };
   return b;
 }
@@ -312,7 +311,7 @@ export function createViewer({ stack, onChange = () => {} }) {
     solo = key;
     for (const p of panes) {
       const on = p.key === solo;
-      p.max.innerHTML = svg(on ? "restore" : "max");
+      p.max.replaceChildren(icon(on ? "restore" : "max"));
       p.max.title = on ? "Restore" : "Maximize";
       p.max.setAttribute("aria-label", p.max.title);
     }

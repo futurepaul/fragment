@@ -54,8 +54,8 @@ image's agent runtime.
 The cell (`cell/`, Rust on Workers), the CLI (`cli/`), and the harness
 (`xtask/`, `crates/`). All tooling is Rust; the repo has no shell or
 Python tooling. Its JavaScript from npm is wrangler and the Sandbox SDK
-the cell's shim bundles, pinned in `package.json` (the notes viewer's
-prebuilt bundle is in the debt ledger).
+the cell's shim bundles, pinned in `package.json`; every page's script is
+first-party source.
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles

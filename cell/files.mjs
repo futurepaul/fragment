@@ -1,12 +1,13 @@
 // The files viewer, served by the platform on every fragment as __files
 // (with ./__files.js and ./__files.css): the fragment's content files, on
 // live and main, as a tree beside a reader, the way the notes template's
-// vault viewer shows them, without its bundle. Markdown renders, and its
-// [[wikilinks]] and relative links open here; any other text shows with
-// line numbers; pictures, video, and sound play inline; anything else is a
-// download. A file's text becomes DOM through textContent only (no
-// innerHTML), as the chat's page renders an agent's: a file can never add
-// markup or script to this origin, and HTML in one shows as text.
+// vault viewer shows them. Markdown renders through the platform's renderer
+// (./__markdown.js), and its [[wikilinks]] and relative links open here; any
+// other text shows with line numbers; pictures, video, and sound play
+// inline; anything else is a download. A file's text becomes DOM through
+// the DOM's constructors only, never as markup, as the chat's page renders
+// an agent's: a file can never add markup or script to this origin, and
+// HTML in one shows as text (xtask's check refuses an HTML sink here).
 //
 // A file opens by the hash (`#/notes/a.md`, or `#/notes/a.md#a-heading`),
 // README.md or index.md at the root when none is named. The list is
@@ -16,20 +17,37 @@
 // the reader's bar also offers to open a file as a pane of its own: it asks
 // the page around it, `{fragment: "open", url, title}`.
 
+import { markdown as render, slug, withoutFrontMatter } from "./__markdown.js";
+
+// Each icon's shapes, on a 24-unit grid (files.css strokes them).
 const ICON = {
-  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
-  search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
-  chevron: '<path d="m9 6 6 6-6 6"/>',
-  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
-  text: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
-  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-5-5-9 9"/>',
-  media: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/>',
-  raw: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
-  pane: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/>',
-  download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  menu: [["path", { d: "M4 7h16M4 12h16M4 17h16" }]],
+  search: [["circle", { cx: 11, cy: 11, r: 6.5 }], ["path", { d: "m20 20-4.2-4.2" }]],
+  chevron: [["path", { d: "m9 6 6 6-6 6" }]],
+  folder: [["path", { d: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" }]],
+  file: [["path", { d: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" }], ["path", { d: "M14 3v5h5" }]],
+  text: [["path", { d: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" }], ["path", { d: "M14 3v5h5M9 13h6M9 17h4" }]],
+  image: [["rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }], ["circle", { cx: 9, cy: 10, r: 1.6 }], ["path", { d: "m21 16-5-5-9 9" }]],
+  media: [["rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }], ["path", { d: "m10 9 5 3-5 3z" }]],
+  raw: [["path", { d: "M14 4h6v6M20 4l-9 9" }], ["path", { d: "M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" }]],
+  pane: [["rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }], ["path", { d: "M14 4v16" }]],
+  download: [["path", { d: "M12 4v11M7 10l5 5 5-5M5 20h14" }]],
 };
-const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
+const SVG_NS = "http://www.w3.org/2000/svg";
+// An icon as DOM: an <svg> of its shapes, hidden from assistive technology.
+function icon(name) {
+  const shapes = ICON[name];
+  if (!shapes) throw new Error(`files: no icon ${name}`);
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [tag, attrs] of shapes) {
+    const shape = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) shape.setAttribute(key, String(value));
+    svg.append(shape);
+  }
+  return svg;
+}
 
 // What a file is, by its extension; "text" is a guess the bytes confirm.
 const KINDS = {
@@ -56,6 +74,17 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
+// An element with its attributes and children: the page is built of these.
+function h(tag, attrs, ...children) {
+  const e = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") e.className = value;
+    else if (key === "hidden") e.hidden = value;
+    else e.setAttribute(key, value);
+  }
+  e.append(...children);
+  return e;
+}
 const decode = (s) => {
   try {
     return decodeURIComponent(s);
@@ -68,7 +97,6 @@ const route = (path, anchor) => `#/${path.split("/").map(encodeURIComponent).joi
 const folder = (path) => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
 const base = (path) => path.slice(path.lastIndexOf("/") + 1);
 const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
-const slug = (text) => text.toLowerCase().trim().replace(/[^\p{L}\p{N}\s-]/gu, "").replace(/\s+/g, "-");
 
 const fragmentName = document.body.dataset.fragment || "";
 const framed = parent !== window;
@@ -84,28 +112,29 @@ const texts = new Map();       // a hovered file's read, taken by its open
 
 // ---- the page ----
 
-document.body.innerHTML = `
-  <div class="files" id="files">
-    <aside class="side">
-      <div class="side-top">
-        <div class="brand" id="brand"></div>
-        <label class="filter">${svg("search")}<input id="filter" type="search" placeholder="Filter files" autocomplete="off" spellcheck="false" aria-label="Filter files"></label>
-      </div>
-      <nav class="tree" id="tree" aria-label="Files"></nav>
-      <div class="side-foot" id="count"></div>
-    </aside>
-    <div class="scrim" id="scrim"></div>
-    <main class="main">
-      <header class="bar">
-        <button class="icon menu" id="menu" type="button" title="Files" aria-label="Show the files">${svg("menu")}</button>
-        <div class="crumbs" id="crumbs"></div>
-        <span class="meta" id="meta"></span>
-        <a class="icon" id="raw" target="_blank" rel="noopener" title="The file itself" aria-label="The file itself" hidden>${svg("raw")}</a>
-        <button class="icon" id="pop" type="button" title="Open in a pane of its own" aria-label="Open in a pane of its own" hidden>${svg("pane")}</button>
-      </header>
-      <div class="reader" id="reader"></div>
-    </main>
-  </div>`;
+document.body.replaceChildren(
+  h("div", { class: "files", id: "files" },
+    h("aside", { class: "side" },
+      h("div", { class: "side-top" },
+        h("div", { class: "brand", id: "brand" }),
+        h("label", { class: "filter" }, icon("search"), h("input", { id: "filter", type: "search", placeholder: "Filter files", autocomplete: "off", spellcheck: "false", "aria-label": "Filter files" })),
+      ),
+      h("nav", { class: "tree", id: "tree", "aria-label": "Files" }),
+      h("div", { class: "side-foot", id: "count" }),
+    ),
+    h("div", { class: "scrim", id: "scrim" }),
+    h("main", { class: "main" },
+      h("header", { class: "bar" },
+        h("button", { class: "icon menu", id: "menu", type: "button", title: "Files", "aria-label": "Show the files" }, icon("menu")),
+        h("div", { class: "crumbs", id: "crumbs" }),
+        h("span", { class: "meta", id: "meta" }),
+        h("a", { class: "icon", id: "raw", target: "_blank", rel: "noopener", title: "The file itself", "aria-label": "The file itself", hidden: true }, icon("raw")),
+        h("button", { class: "icon", id: "pop", type: "button", title: "Open in a pane of its own", "aria-label": "Open in a pane of its own", hidden: true }, icon("pane")),
+      ),
+      h("div", { class: "reader", id: "reader" }),
+    ),
+  ),
+);
 $("brand").textContent = fragmentName;
 const drawer = (open) => $("files").classList.toggle("nav", open);
 const narrow = () => matchMedia("(max-width: 640px)").matches;
@@ -149,7 +178,7 @@ function tree() {
       row.type = "button";
       row.dataset.dir = path;
       row.setAttribute("aria-expanded", String(open));
-      row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}`;
+      row.append(h("span", { class: "chev" }, icon("chevron")), icon("folder"));
       row.append(el("span", "name", name));
       row.style.setProperty("--depth", depth);
       rows.push(row);
@@ -160,7 +189,7 @@ function tree() {
       row.href = route(f.path);
       row.dataset.path = f.path;
       row.title = `${f.path} · ${bytes(f.size)}`;
-      row.innerHTML = svg(ICON_OF[kind(f.path)]);
+      row.append(icon(ICON_OF[kind(f.path)]));
       row.append(el("span", "name", base(f.path)));
       row.style.setProperty("--depth", depth);
       rows.push(row);
@@ -272,8 +301,7 @@ function download(f, why) {
   const a = el("a", "button");
   a.href = fileUrl(f.path);
   a.download = base(f.path);
-  a.innerHTML = svg("download");
-  a.append("Download");
+  a.append(icon("download"), "Download");
   box.append(a);
   return box;
 }
@@ -410,258 +438,40 @@ async function refresh() {
   else if (!current) go();
 }
 
-// ---- markdown → DOM, with textContent only: front matter dropped;
-// headings, paragraphs, nested and task lists, quotes (and Obsidian's
-// callouts), fenced code, rules, pipe tables; inline code, bold, italic,
-// strikethrough, highlights, links, images, and [[wikilinks]] (![[embeds]]
-// of pictures). A link to one of this fragment's files opens here; any
-// other keeps only http(s) and mailto. ----
-
-const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
-const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-const QUOTE = /^ {0,3}>/;
-const ITEM = /^( *)([-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$/;
-const ROW_SEP = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
-const interrupts = (line) => FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(line);
-const cells = (row) => row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "").split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+// ---- markdown, through the platform's renderer: its links and pictures
+// are this fragment's files (from the linking file's folder, else the
+// root; opened here) or the web's (http(s) and mailto), and nothing else ----
 
 function markdown(text, at) {
-  const lines = text
-    .replace(/\r\n?/g, "\n")
-    .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, "")
-    .split("\n")
-    .map((l) => l.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length)));
   const doc = el("article", "doc");
-  doc.append(blocks(lines, at));
+  doc.append(
+    render(withoutFrontMatter(text), {
+      resolve: (target, how) => (how === "wiki" ? wikiTarget(target, at) : destination(target, at)),
+      image: (src, how) => picture(src, how, at),
+    }),
+  );
   return doc;
 }
 
-// `tight`: a tight list item's paragraphs, without <p>.
-function blocks(lines, at, tight = false) {
-  const out = document.createDocumentFragment();
-  for (let i = 0; i < lines.length; ) {
-    const line = lines[i];
-    let m;
-    if (!line.trim()) {
-      i++;
-    } else if ((m = line.match(FENCE))) {
-      const close = new RegExp(`^ {0,3}\\${m[1][0]}{${m[1].length},}[ \\t]*$`);
-      const text = [];
-      for (i++; i < lines.length && !close.test(lines[i]); i++) text.push(lines[i]);
-      i++;
-      const pre = el("pre");
-      if (m[2]) pre.dataset.lang = m[2];
-      pre.append(el("code", null, text.join("\n")));
-      out.append(pre);
-    } else if ((m = line.match(HEADING))) {
-      out.append(heading(m[1].length, m[2] || "", at));
-      i++;
-    } else if (RULE.test(line)) {
-      out.append(el("hr"));
-      i++;
-    } else if (QUOTE.test(line)) {
-      const inner = [];
-      for (; i < lines.length && (QUOTE.test(lines[i]) || (lines[i].trim() && inner.at(-1)?.trim() && !interrupts(lines[i]))); i++) inner.push(lines[i].replace(/^ {0,3}> ?/, ""));
-      out.append(quote(inner, at));
-    } else if ((m = line.match(ITEM)) && m[1].length < 4) {
-      i = list(lines, i, out, at);
-    } else if (line.includes("|") && ROW_SEP.test(lines[i + 1] || "") && cells(line).length === cells(lines[i + 1]).length) {
-      const rows = [];
-      for (; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
-      out.append(table(rows, at));
-    } else {
-      const para = [line.trimStart()];
-      let level = 0;
-      for (i++; i < lines.length && lines[i].trim(); i++) {
-        level = /^ {0,3}=+[ \t]*$/.test(lines[i]) ? 1 : /^ {0,3}-+[ \t]*$/.test(lines[i]) ? 2 : 0;
-        if (level) {
-          i++;
-          break;
-        }
-        if (interrupts(lines[i])) break;
-        para.push(lines[i].trimStart());
-      }
-      const text = para.join("\n");
-      out.append(level ? heading(level, text.trim(), at) : inline(tight ? document.createDocumentFragment() : el("p"), text.trimEnd(), at));
-    }
-  }
-  return out;
-}
-
-function heading(level, text, at) {
-  const h = inline(el(`h${level}`), text, at);
-  h.dataset.anchor = slug(h.textContent);
-  return h;
-}
-
-// A quote; `> [!note] Title` makes it one of Obsidian's callouts.
-function quote(lines, at) {
-  const bq = el("blockquote");
-  const callout = lines[0].match(/^\[!([\w-]+)\][+-]?[ \t]*(.*)$/);
-  if (callout) {
-    bq.className = "callout";
-    bq.dataset.kind = callout[1].toLowerCase();
-    bq.append(inline(el("div", "callout-title"), callout[2] || callout[1], at));
-    lines = lines.slice(1);
-  }
-  bq.append(blocks(lines, at));
-  return bq;
-}
-
-// A list from line `i`, each item's lines handed to `blocks` (a nested list
-// is an item's indented lines); returns the line after it. A blank line
-// inside makes it loose: its items' paragraphs get <p>.
-function list(lines, i, out, at) {
-  const first = lines[i].match(ITEM);
-  const indent = first[1].length;
-  const ordered = /\d/.test(first[2]);
-  const sibling = (m) => m && m[1].length < indent + 2;
-  const items = [];
-  let loose = false;
-  let col = 0;
-  for (; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(ITEM);
-    const lead = line.length - line.trimStart().length;
-    if (sibling(m) && !RULE.test(line)) {
-      if (/\d/.test(m[2]) !== ordered) break;
-      col = m[3] === undefined ? m[1].length + m[2].length + 1 : line.length - m[3].length;
-      items.push([m[3] ?? ""]);
-    } else if (!line.trim()) {
-      const next = lines.slice(i + 1).find((l) => l.trim());
-      const nm = next?.match(ITEM);
-      if (next === undefined || !((sibling(nm) && /\d/.test(nm[2]) === ordered) || next.length - next.trimStart().length >= indent + 2)) break;
-      loose = true;
-      items.at(-1).push("");
-    } else if (lead >= indent + 2) {
-      items.at(-1).push(line.slice(Math.min(lead, col)));
-    } else if (items.at(-1).at(-1)?.trim() && !interrupts(line)) {
-      items.at(-1).push(line);
-    } else {
-      break;
-    }
-  }
-  const ul = el(ordered ? "ol" : "ul");
-  const start = parseInt(first[2], 10);
-  if (ordered && start !== 1) ul.start = start;
-  for (const item of items) {
-    const li = el("li");
-    const task = item[0].match(/^\[([ xX])\](?:[ \t]+|$)/);
-    if (task) {
-      const box = el("input");
-      box.type = "checkbox";
-      box.checked = task[1] !== " ";
-      box.disabled = true;
-      li.className = "task";
-      li.append(box);
-      item[0] = item[0].slice(task[0].length);
-    }
-    li.append(blocks(item, at, !loose));
-    ul.append(li);
-  }
-  out.append(ul);
-  return i;
-}
-
-function table(rows, at) {
-  const align = cells(rows[1]).map((c) => (c.endsWith(":") ? (c.startsWith(":") ? "center" : "right") : ""));
-  const t = el("table");
-  rows.forEach((row, n) => {
-    if (n === 1) return;
-    const tr = el("tr");
-    cells(row).forEach((c, k) => {
-      const cell = inline(el(n ? "td" : "th"), c, at);
-      if (align[k]) cell.style.textAlign = align[k];
-      tr.append(cell);
-    });
-    t.append(tr);
-  });
-  const wrap = el("div", "table");
-  wrap.append(t);
-  return wrap;
-}
-
-// Inline spans, the first that starts earliest winning: `code`, [[a
-// wikilink]] or ![[an embed]], ![an image](src), [a link](href "title"),
-// <https://an.autolink>, a bare https:// URL, **bold** or __bold__,
-// ~~struck~~, ==marked==, *italic* or _italic_, and a backslash's escape.
-const INLINE = new RegExp(
-  [
-    /(?<ticks>`+)(?<code>[\s\S]*?[^`])\k<ticks>(?!`)/,
-    /(?<embed>!?)\[\[(?<wiki>[^\]\n]+)\]\]/,
-    /(?<bang>!?)\[(?<label>(?:[^\][\n]|\[[^\]\n]*\])*)\]\(\s*<?(?<href>[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)>?(?:\s+"(?<title>[^"]*)")?\s*\)/,
-    /<(?<auto>(?:https?:\/\/|mailto:)[^\s<>]+)>/,
-    /(?<bare>https?:\/\/[^\s<>]*[^\s<>.,;:!?'")\]*_~])/,
-    /\*\*(?<strong>[^\s*](?:[\s\S]*?[^\s*])?)\*\*/,
-    /(?<![\w\\])__(?<strong2>[^\s_](?:[\s\S]*?[^\s_])?)__(?!\w)/,
-    /~~(?<del>[^\s~](?:[\s\S]*?[^\s~])?)~~/,
-    /==(?<mark>[^\s=](?:[\s\S]*?[^\s=])?)==/,
-    /\*(?<em>[^\s*](?:[\s\S]*?[^\s*])?)\*/,
-    /(?<![\w\\])_(?<em2>[^\s_](?:[\s\S]*?[^\s_])?)_(?!\w)/,
-    /\\(?<escaped>[!-/:-@[-`{-~])/,
-  ]
-    .map((r) => r.source)
-    .join("|"),
-  "g",
-);
-
-// `linked`: inside a link's label, where a link is only its text.
-function inline(parent, text, at, linked = false) {
-  let last = 0;
-  for (const m of text.matchAll(INLINE)) {
-    if (m.index > last) plain(parent, text.slice(last, m.index));
-    parent.append(span(m, at, linked));
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) plain(parent, text.slice(last));
-  return parent;
-}
-
-// Text, with a hard break where a line ends in two spaces or a backslash.
-function plain(parent, text) {
-  text.split(/(?: {2,}|\\)\n/).forEach((part, n) => {
-    if (n) parent.append(el("br"));
-    parent.append(part);
-  });
-}
-
-function span(m, at, linked) {
-  const g = m.groups;
-  // a link's label may hold a picture (a badge), never another link
-  const linkish = g.wiki !== undefined || (g.href !== undefined && !g.bang) || g.auto !== undefined || g.bare !== undefined;
-  if (g.code !== undefined) return el("code", null, g.code.replace(/\n/g, " ").replace(/^ (.+) $/, "$1"));
-  if (linkish && linked) return document.createTextNode(m[0]);
-  if (g.wiki !== undefined) return wikilink(g.wiki, g.embed, at);
-  if (g.href !== undefined) return g.bang ? image(g.href, g.label, at) : link(g.href, g.label, g.title, at);
-  if (g.auto !== undefined || g.bare !== undefined) return link(g.auto ?? g.bare, null, null, at);
-  if (g.escaped !== undefined) return document.createTextNode(g.escaped);
-  const [tag, inner] = [
-    ["strong", g.strong ?? g.strong2],
-    ["del", g.del],
-    ["mark", g.mark],
-    ["em", g.em ?? g.em2],
-  ].find(([, v]) => v !== undefined);
-  return inline(el(tag), inner, at, linked);
-}
-
-// Where a link goes: one of this fragment's files (from the linking file's
-// folder, else the root; opened here), a heading of this one, or an http(s)
-// or mailto URL. Anything else (javascript:, data:, a path that names no
-// file here) is no link: null.
+// Where a link goes: one of this fragment's files, a heading of this one,
+// or an http(s) or mailto URL; anything else (javascript:, data:, a path
+// that names no file here) is no link: null.
 function destination(href, at) {
   // a browser drops controls and spaces from a URL: "java\tscript:" is javascript:
   const url = href.replace(/[\x00-\x20\x7f]/g, "");
-  if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(url)) return /^(?:https?:|mailto:|\/\/)/i.test(url) ? { url } : null;
+  if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(url)) return /^(?:https?:|mailto:|\/\/)/i.test(url) ? { href: url } : null;
   const [p, hash] = url.split("#");
   const anchor = hash ? decode(hash) : undefined;
-  if (!p) return anchor ? { path: current, anchor } : null;
+  if (!p) return anchor && current ? internal(current, anchor) : null;
   const path = [resolve(at, decode(p)), resolve("", decode(p))]
     .flatMap((t) => [t.toLowerCase(), `${t.toLowerCase()}.md`])
     .map((t) => lower.get(t))
     .find(Boolean);
-  return path ? { path, anchor } : null;
+  return path ? internal(path, anchor) : null;
 }
+
+// A link the viewer opens: a file here, and a heading in it.
+const internal = (path, anchor) => ({ href: route(path, anchor), path });
 
 // A relative path from `at`, the linking file's folder ("" at the root).
 function resolve(at, rel) {
@@ -685,54 +495,22 @@ function wiki(target, at) {
   return hits.find((p) => folder(p) === at) ?? hits[0] ?? null;
 }
 
-function wikilink(inner, embed, at) {
-  const [ref, label] = inner.split("|");
+// [[name#heading]]: the file it names (this one, with no name) and the heading.
+function wikiTarget(ref, at) {
   const [name, anchor] = ref.split("#");
   const path = name.trim() ? wiki(name, at) : current;
-  if (embed && path && kind(path) === "image") {
-    const img = el("img");
-    img.src = fileUrl(path);
-    img.alt = name;
-    if (/^\d+$/.test(label || "")) img.width = +label;
-    return img;
+  return path ? internal(path, anchor?.trim() || undefined) : null;
+}
+
+// A picture's URL: one of this fragment's pictures, or one on the web.
+function picture(src, how, at) {
+  if (how === "wiki") {
+    const path = wiki(src, at);
+    return path && kind(path) === "image" ? { src: fileUrl(path) } : null;
   }
-  const a = el(path ? "a" : "span", path ? "wikilink" : "wikilink missing", (label || ref).trim());
-  if (path) internal(a, path, anchor);
-  else a.title = `No file named ${name.trim()}`;
-  return a;
-}
-
-function link(href, label, title, at) {
-  const to = destination(href, at);
-  const a = el(to ? "a" : "span", to ? null : "missing");
-  if (label === null) a.textContent = href;
-  else inline(a, label, at, true);
-  if (title) a.title = title;
-  if (to?.url) {
-    a.href = to.url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-  } else if (to) {
-    internal(a, to.path, to.anchor);
-  }
-  return a;
-}
-
-// A link the viewer opens: a file here, and a heading in it.
-function internal(a, path, anchor) {
-  a.href = route(path, anchor);
-  a.dataset.path = path;
-}
-
-function image(src, alt, at) {
   const to = destination(src, at);
-  const url = to?.path ? fileUrl(to.path) : to?.url && /^(?:https?:)?\/\//i.test(to.url) ? to.url : null;
-  if (!url) return el("span", "missing", alt || src);
-  const img = el("img");
-  img.src = url;
-  img.alt = alt;
-  img.loading = "lazy";
-  return img;
+  if (to?.path) return { src: fileUrl(to.path) };
+  return to && /^(?:https?:)?\/\//i.test(to.href) ? { src: to.href } : null;
 }
 
 // ---- start ----

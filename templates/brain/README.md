@@ -80,8 +80,9 @@ heading, ancestry, snippet}], pending}`.
 `site/` is the notes template's viewer (`site/assets`, a symlink to
 `templates/notes/site/assets`, embedded once: crates/templates/build.rs),
 which reads `api/tree` and `api/file` from `app.mjs`, plus the brain's
-search box (`brain.js`, `brain.css`). The viewer's bundle is prebuilt and
-left as it is (docs/technical-debt-ledger.md). `api/tree` lists the
+search box (`brain.js`, `brain.css`). The viewer is plain source and
+renders markdown with the platform's renderer (`./__markdown.js`: DOM
+only, so a note's HTML shows as text). `api/tree` lists the
 brain's files and two it makes: `_index.md` (its wikis, the landing) and
 `AGENTS.md` (the guide), each unless the brain holds one of its own. An
 asset's bytes come from the platform's `__file`.

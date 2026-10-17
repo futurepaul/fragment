@@ -355,5 +355,18 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.click(&tab, ".brain-result .brain-title")?;
     let opened = chrome.until(&tab, "document.querySelector('#content .md')?.textContent.includes('Photovoltaic cells')", wait);
     s.ok("and a result opens its page in the viewer", opened, chrome.eval(&tab, "document.getElementById('content')?.innerText.slice(0, 200) ?? ''")?);
+
+    // a page an agent wrote is data, whatever a model put in it (audit H2:
+    // the viewer's markdown once went into innerHTML): its markup is text
+    write(&dir, "garden/raw/hostile.md", include_bytes!("../../fixtures/hostile-note.md"))?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    chrome.eval(&tab, "location.hash = '#/garden/raw/hostile.md'; true")?;
+    let shown = out.status.success() && chrome.until(&tab, "document.querySelector('#content .md h1')?.textContent === 'A hostile note'", wait);
+    std::thread::sleep(Duration::from_millis(500));
+    s.ok(
+        "a brain's page shows its <img onerror>, <script>, <svg onload> and javascript: links as their text, and runs none of it",
+        shown && chrome.eval(&tab, "(() => { const c = document.getElementById('content'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
+        chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('content')?.innerText.slice(0, 400) })")?,
+    );
     Ok(())
 }

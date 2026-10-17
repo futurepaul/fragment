@@ -167,7 +167,7 @@ mod tests {
     use serde_json::json;
 
     fn declared() -> BTreeMap<String, ChannelDecl> {
-        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false })])
+        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None })])
     }
 
     fn refusal(effects: Value) -> String {

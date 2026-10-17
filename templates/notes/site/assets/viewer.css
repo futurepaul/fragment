@@ -64,7 +64,7 @@ body {
 .note p { margin: 12px 0; }
 .note a { color: var(--wl); text-decoration: none; }
 .note a:hover { text-decoration: underline; }
-.wl.missing { color: var(--wl-missing); border-bottom: 1px dashed var(--wl-missing); }
+.note .md-missing { color: var(--wl-missing); border-bottom: 1px dashed var(--wl-missing); }
 .note code {
   font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   background: var(--code-bg); padding: 2px 5px; border-radius: 5px;
@@ -76,10 +76,16 @@ body {
 .note pre code { background: none; padding: 0; }
 .note blockquote { border-left: 3px solid var(--line); margin: 14px 0; padding: 2px 18px; color: var(--fg2); }
 .note img, .imgview { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
-.note table { border-collapse: collapse; margin: 14px 0; }
+.note .md-table { overflow-x: auto; margin: 14px 0; }
+.note table { border-collapse: collapse; }
 .note th, .note td { border: 1px solid var(--line); padding: 6px 12px; font-size: 14px; }
 .note hr { border: none; border-top: 1px solid var(--line); margin: 28px 0; }
 .note ul, .note ol { padding-left: 26px; }
+.note li.md-task { list-style: none; margin-left: -1.3em; }
+.note li.md-task input { margin: 0 .25em 0 0; vertical-align: -2px; }
+.note mark { padding: 0 .15em; border-radius: 3px; background: rgba(250, 204, 21, .35); color: inherit; }
+.note .md-callout { padding: 8px 16px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; color: var(--fg); }
+.note .md-callout-title { font-weight: 600; }
 .hint { color: var(--fg2); }
 .codefile { border-radius: 10px; overflow: hidden; }
 .plaincode {

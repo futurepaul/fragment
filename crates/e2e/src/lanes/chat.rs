@@ -582,7 +582,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &by_hand,
     );
 
-    polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
+    polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);

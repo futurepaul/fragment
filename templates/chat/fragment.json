@@ -2,7 +2,7 @@
   "kind": "chat",
   "channels": {
     "chat": { "read": "public", "post": "viewer" },
-    "work": { "read": "viewer", "post": "editor" }
+    "work": { "read": "viewer", "post": "editor", "from": "agent" }
   },
   "operations": {
     "notify_reply": { "kind": "job" }

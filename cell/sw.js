@@ -17,10 +17,13 @@ self.addEventListener("push", (event) => {
 });
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  // a relative url (a chat's "./") is the fragment's page, beside this worker
+  // a relative url (a chat's "./") is the fragment's page, beside this worker;
+  // only a page of this origin is opened: a push names its url, and a click
+  // on it must not take the person to another site (or a javascript: url)
   let url = null;
   try {
-    url = typeof event.notification.data === "string" ? new URL(event.notification.data, self.location).href : null;
+    const named = typeof event.notification.data === "string" ? new URL(event.notification.data, self.location) : null;
+    url = named && named.origin === self.location.origin ? named.href : null;
   } catch (e) {}
   event.waitUntil(
     (async () => {

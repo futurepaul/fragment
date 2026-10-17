@@ -334,7 +334,10 @@ fragment verify my-thing --dir .            # full-content audit
   write files.
 - A channel with a `post` role (`"post": "viewer"`) takes records people
   post (`fragment.post`, `fragment post`); `"signedIn": true` beside it
-  refuses anyone not signed in (a link holder is a viewer).
+  refuses anyone not signed in (a link holder is a viewer), and `"from":
+  "agent"` (or `"person"`) refuses everyone but your fragment's members
+  of that kind, each posting as itself (an agents' channel no person can
+  write to, whatever their role).
 - Your `App` is a Durable Object with its own SQLite, and some of its
   Durable Object is not yours to use: no alarm (`triggers` run it on a
   schedule), no `ctx.storage.transaction` (a mutation is the

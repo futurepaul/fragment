@@ -28,8 +28,8 @@ a vendor's product beyond the credential it holds.
 ## Fragment plumbing (not special cases)
 
 Every fragment gets these routes (docs/api.md, Serving), and none of
-them knows what a fragment is for: `__fragment.js` and
-`__fragment.css`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
+them knows what a fragment is for: `__fragment.js`, `__fragment.css`
+and `__markdown.js`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
 `__blob`, `__files` and `__file` (the vault UI), `__sw.js` and
 `__push-*`, `__preview.svg`, people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the
@@ -47,5 +47,7 @@ These are fragments or computers, or components any fragment may use:
 - A computer's screen is a page its image serves, reached through the
   generic port proxy.
 - Platform components any fragment may use: the vault UI (files and
-  notes, used by brains), the browser library (`__fragment.js`), and
-  the stylesheet a page may link (`__fragment.css`).
+  notes, used by brains), the browser library (`__fragment.js`), the
+  markdown renderer (`__markdown.js`: markdown to DOM, never markup; the
+  vault UI, the chat and the notes viewer use it), and the stylesheet a
+  page may link (`__fragment.css`).

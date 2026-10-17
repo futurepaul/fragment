@@ -1,6 +1,5 @@
 // The brain's search, beside the notes viewer (assets/: the notes
-// template's prebuilt bundle, which this file leaves as it is; see the
-// debt ledger's "The notes viewer is a prebuilt bundle"). The box asks the
+// template's, which this file leaves as it is). The box asks the
 // brain's search operation and lists its ranked sections in the reader; a
 // result opens its page through the viewer's own hash route. Text from the
 // brain becomes DOM through textContent only.

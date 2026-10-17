@@ -1088,9 +1088,9 @@ title opening its share sheet.
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in) |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in; `from`: only members of that kind, `person` or `agent`, or null) |
 | `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (at most 1000 a page, always ascending by seq). `after` (default 0) reads forwards; `before` reads the nearest records with seq strictly less than its cursor. Pass `next` as the same cursor for the next page: the last seq forwards, the first seq backwards (the input cursor if empty). Supplying both cursors, a negative or malformed cursor, or a malformed limit is 400. |
-| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401). A poster holding only `public` spends a public call (Serving, `__op`) |
+| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401); one that says `from` refuses every poster but a member of that kind posting as itself (403: a member of the other kind, a non-member, an anonymous visitor, and an agent acting `for` someone), and its drafts the same. A poster holding only `public` spends a public call (Serving, `__op`) |
 | `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `{turn, text}` → `{ok}`: a record its poster is writing, its whole text so far (at most 64 KiB), shown to the sockets following the channel at once (a `draft` frame on `__live`) and never stored; `text: null` stops it. The record its poster then writes with the same `turn` replaces it on a page. At most 10 a second across the fragment (429 past that: the poster's next carries the whole text anyway); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## Apps
@@ -1151,7 +1151,15 @@ the code the fragment's own.
   refused at deploy (whoever may post may read). `"signedIn": true`
   (beside a `post` role) takes posts from people signed in only: an
   anonymous visitor holding the role (a link holder is a viewer) is 401
-  `unauthenticated`, and nothing is appended. Such a channel keeps its
+  `unauthenticated`, and nothing is appended. `"from": "person" |
+  "agent"` (beside a `post` role) takes posts from this fragment's
+  members of that kind only, each posting as itself (its member row's
+  kind, the fact a channel trigger's `from` reads): anyone else holding
+  the role (an editor person on an agents' channel, an agent acting
+  `for` someone) is 403 `forbidden`, for drafts too, and nothing is
+  appended. A role says what a poster may do, `from` what it is: a
+  chat's `work` says `"from": "agent"`, so no person's record reads as
+  an agent's step (docs/chat-records.md). Such a channel keeps its
   newest 10 000 records (`limits::POSTED_KEPT`; the oldest go, whoever
   appended them, and with them their posts' ids), as `events` and `ops`
   keep theirs; the number is not declarable yet.
@@ -2129,6 +2137,7 @@ API answers on the platform's host):
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
+| `__markdown.js` | the platform's markdown renderer, a module any page may import: `markdown(text, options)` → a DocumentFragment and `inline(parent, text, options)`, markdown to DOM only, never to markup (HTML in the text is text; nesting stops at 32). Its caller decides where links go (`resolve(target, kind)` → `{href, path?}` or null), which pictures show (`image(src, kind)` → `{src, href?}` or null), how a code block looks (`code(text, lang)`), and whether every newline breaks a line (`breaks`); whatever they answer, links stay http(s), mailto or relative and pictures http(s) or relative. The files viewer, the chat and the notes viewer render with it |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for up to 64 identities (a person's `email` only for a member, and only when the asker is a member too: decision 48; a picture is an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment`, its label as its `name`, which `@mentions` it, and its fragment's `title` and `picture`, which it shows by: Identities, "An agent's name and picture"); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
@@ -2138,9 +2147,22 @@ API answers on the platform's host):
 A site file carries an `ETag` that names its bytes: the last commit that
 changed it, or, for a page given Open Graph tags, a weak tag that also
 names the live commit (its `fragment.json`). `__fragment.js`,
-`__fragment.css`, `__sw.js`, `__files.js`, and `__files.css` carry a
-hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
+`__fragment.css`, `__sw.js`, `__files.js`, `__files.css`, and
+`__markdown.js` carry a hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
 tag answers 304 without reading the file.
+
+Every answer on a fragment's origin (a page, a file, the app's, a
+socket's upgrade, a refusal, an error) carries `X-Content-Type-Options:
+nosniff` and `Referrer-Policy: same-origin`, set by the router over any
+the app sends (a page's own `<meta name="referrer">` still governs its
+links). Scriptable media, an answer whose type is `image/svg+xml` or an
+XML type (`application/xml`, `text/xml`, `text/xsl`, any `+xml`), also
+gets `Content-Security-Policy: sandbox`, appended beside any policy of
+the app's: opened directly it runs no script and has an opaque origin,
+while a page's `<img>` of it is unchanged. `__file` is the content plane,
+data and never a page of the fragment's: its HTML is sandboxed the same
+way (its `GET`, its `HEAD`, a blessed template's data); its other types
+are not (a PDF must open in the browser's viewer).
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. A socket has no CORS, and every fragment's origin is one site with

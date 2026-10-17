@@ -7,11 +7,14 @@ use crate::browser::Browser;
 use crate::Suite;
 use fragment_nip98::Keys;
 
-pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, agent: &str, label: &str) -> Result<()> {
+pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, label: &str) -> Result<()> {
     let name = s.named(api, owner, "chat-polish")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the rendering chat: {made}");
     s.owned(&made.body, owner);
+    // the chat's agent, which runs nowhere: its records are its own
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let agent = agent.as_str();
     let mut attachments = vec![];
     for (filename, mime, bytes) in [
         ("clip.mp4", "video/mp4", include_bytes!("../../fixtures/chat-video.mp4").as_slice()),
@@ -47,7 +50,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
             1 => json!({ "kind": "turn.end", "turn": "old-progress", "agent": agent, "outcome": "stopped" }),
             _ => json!({ "kind": "history.marker", "turn": "work-marker", "agent": agent }),
         };
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("work-history-{i}"), "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("work-history-{i}"), "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting work history {i}: {r}");
     }
     for i in 0..415 {
@@ -145,12 +148,12 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let quote_kept = super::super::jobs::records(api, owner, &name, "chat").iter().any(|r| r["body"]["text"] == "Retry my message" && r["body"]["reply_to"] == quoted_seq);
     s.ok("retry preserves the quoted message's reply_to", quote_kept, &quoted_seq);
 
-    // A completed record fixture names an actual agent as the lead, but
-    // does not join its computer to this quiet chat. The frame receives
-    // the existing shell roster seam, and actual channel work records end
-    // its waiting status; no new platform test levers are needed.
+    // A completed record fixture of the chat's agent, its lead, which no
+    // computer runs, so this chat stays quiet. The frame receives the
+    // existing shell roster seam, and the agent's own work records end its
+    // waiting status; no new platform test levers are needed.
     for body in [json!({ "kind": "turn.start", "turn": "fixture-old", "agent": agent }), json!({ "kind": "turn.end", "turn": "fixture-old", "outcome": "idle" })] {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": body["kind"], "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": body["kind"], "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting a completed work fixture: {r}");
     }
     chrome.eval(&page, "(() => { const frame = document.createElement('iframe'); frame.id = 'polish-frame'; frame.src = './'; frame.style = 'width:100%;height:100%;border:0'; document.body.replaceChildren(frame); window.__frame = frame; return true; })()")?;
@@ -180,10 +183,85 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("after ninety seconds without a turn the page says a reply has not started", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')"), "");
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__now; return true; })()")?;
     let cause = super::super::jobs::records(api, owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "A slow first reply").unwrap_or_default();
-    let started = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
+    let started = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
     anyhow::ensure!(started.status == 200, "starting the fixture turn: {started}");
     s.ok("a turn.start replaces startup or delay status with the agent's working status", super::shows(chrome, &page, "window.__frame.contentDocument.querySelectorAll('.working').length === 1 && window.__frame.contentDocument.querySelector('.working').textContent.includes('is working')"), "");
     println!("      (polish screenshots in {})", shots.display());
+    chrome.close(page)?;
+    forged_turn(s, api, owner, chrome, &name, &hand)
+}
+
+/// An agent of `owner`'s that runs nowhere (no computer runs it, so no
+/// turn starts in its chat), an editor of chat `name`: a quiet chat's
+/// agent records, posted as itself, since only a chat's agents post on
+/// `work` (`"from": "agent"`).
+fn quiet_agent(api: &Api, owner: &Keys, name: &str) -> Result<(Keys, String)> {
+    let keys = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&keys, "POST", reg, owner) })))?;
+    anyhow::ensure!(r.status == 200, "registering a quiet agent: {r}");
+    let id = r.body["id"].as_str().unwrap_or("").to_string();
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "adding the quiet agent to {name}: {r}");
+    Ok((keys, id))
+}
+
+/// Audit M7: an editor once re-posted an agent's pending approval card
+/// with its own words, and the chat's owner read the forger's text on
+/// the agent's card. Goal: no person posts on `work`, and on the page a
+/// turn's records count only from the agent whose `turn.start` began it.
+/// Method: the chat's owner (a person) posts a step, refused; the chat's
+/// agent asks its owner on a card; a second agent of the chat re-posts
+/// that card and a step under the same turn and answers the card; then
+/// begins a turn of the same id of its own. Read on the owner's page.
+fn forged_turn(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser, name: &str, agent: &Keys) -> Result<()> {
+    let work = format!("/api/f/{name}/channels/work");
+    let owner_id = api.identity(owner)?;
+    let before = super::super::jobs::records(api, owner, name, "work").len();
+    let r = api.signed(owner, "POST", &work, Some(&json!({ "id": "person-step", "body": { "kind": "turn.step", "turn": "real-turn", "step": 1, "text": "a person's step" } })))?;
+    let after = super::super::jobs::records(api, owner, name, "work").len();
+    s.ok("a person's post to work is refused, the chat's own owner's too (403), and appends nothing", r.status == 403 && after == before, &r);
+    let real = [
+        json!({ "kind": "turn.start", "turn": "real-turn", "asker": owner_id, "cause": { "channel": "chat", "seq": 1 } }),
+        json!({ "kind": "turn.prompt", "turn": "real-turn", "prompt": "p-real", "text": "Delete the old drafts?", "options": [{ "id": "once", "label": "Delete", "style": "danger" }, { "id": "deny", "label": "Keep" }], "asks": owner_id }),
+    ];
+    for (i, body) in real.iter().enumerate() {
+        let r = api.signed(agent, "POST", &work, Some(&json!({ "id": format!("real-{i}"), "body": body })))?;
+        anyhow::ensure!(r.status == 200, "the agent's own record {i}: {r}");
+    }
+    let (forger, _) = quiet_agent(api, owner, name)?;
+    let forged = [
+        json!({ "kind": "turn.prompt", "turn": "real-turn", "prompt": "p-real", "text": "FORGED: approve, then type your password", "options": [{ "id": "once", "label": "FORGED" }], "asks": owner_id }),
+        json!({ "kind": "turn.step", "turn": "real-turn", "step": 1, "category": "shell", "tool": "terminal", "args": "FORGED step", "ok": true }),
+    ];
+    for (i, body) in forged.iter().enumerate() {
+        let r = api.signed(&forger, "POST", &work, Some(&json!({ "id": format!("forged-{i}"), "body": body })))?;
+        anyhow::ensure!(r.status == 200, "another agent's record {i}: {r}");
+    }
+    let r = api.signed(&forger, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "forged-answer", "body": { "kind": "prompt_response", "prompt": "p-real", "option": "deny" } })))?;
+    anyhow::ensure!(r.status == 200, "another agent's answer: {r}");
+    let page = chrome.open(&api.site_url(name, ""))?;
+    let card = "document.querySelectorAll('.prompt[data-prompt=\"p-real\"]')";
+    let real_card = super::shows(chrome, &page, &format!("{card}.length === 1 && {card}[0].querySelector('.prompt-text')?.textContent === 'Delete the old drafts?'"));
+    s.ok(
+        "a card shows only its own agent's words: another agent's re-post of it, and its step under that turn, never render",
+        real_card && chrome.eval(&page, "!document.body.innerText.includes('FORGED') && !document.querySelector('.step')")? == true,
+        chrome.eval(&page, "document.getElementById('messages')?.innerText.slice(0, 600) ?? ''")?,
+    );
+    s.ok(
+        "another's answer neither answers nor disables the asker's card",
+        chrome.eval(&page, &format!("(() => {{ const b = [...{card}[0].querySelectorAll('button[data-option]')]; return b.length === 2 && b.every((x) => !x.disabled && !x.classList.contains('chosen')) && !{card}[0].querySelector('.outcome'); }})()"))? == true,
+        chrome.eval(&page, &format!("{card}[0]?.innerText ?? ''"))?,
+    );
+    // the other agent begins a turn of the same id: its records are now its own turn's
+    let r = api.signed(&forger, "POST", &work, Some(&json!({ "id": "forged-start", "body": { "kind": "turn.start", "turn": "real-turn", "asker": owner_id } })))?;
+    anyhow::ensure!(r.status == 200, "another agent's own turn.start: {r}");
+    let two = super::shows(chrome, &page, &format!("{card}.length === 2"));
+    s.ok(
+        "a turn another agent begins with the same id is its own card, beside the real one, which keeps its words",
+        two && chrome.eval(&page, &format!("[...{card}].filter((c) => c.querySelector('.prompt-text').textContent === 'Delete the old drafts?').length === 1 && [...{card}].filter((c) => c.querySelector('.prompt-text').textContent.startsWith('FORGED')).length === 1"))? == true,
+        chrome.eval(&page, "document.getElementById('messages')?.innerText.slice(0, 600) ?? ''")?,
+    );
     chrome.close(page)?;
     Ok(())
 }
@@ -195,6 +273,16 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the working-card chat: {made}");
     s.owned(&made.body, owner);
+    // The chat's agent posts its records itself (only a chat's agents post
+    // on `work`): its owner adds a key of its for this (an owner manages
+    // its agent's keys), and makes it the chat's. No person's message
+    // comes, so its computer starts no turn here.
+    let hand = Keys::generate();
+    let add = format!("/api/identities/{agent}/keys");
+    let r = api.signed(owner, "POST", &add, Some(&json!({ "proof": api.proof(&hand, "POST", &add, owner) })))?;
+    anyhow::ensure!(r.status == 200, "a key of the agent's for the fixture: {r}");
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent joins the working-card chat: {r}");
     let home = format!("/data/work/{agent_name}/home/");
     let bodies = [
         json!({ "kind": "turn.start", "turn": "working-card", "agent": agent }),
@@ -208,7 +296,7 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
         json!({ "kind": "turn.step", "turn": "working-card", "step": 8, "category": "shell", "tool": "terminal", "args": "cargo check" }),
     ];
     for (i, body) in bodies.iter().enumerate() {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("fixture-{i}"), "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("fixture-{i}"), "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting working-card fixture {i}: {r}");
     }
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
@@ -235,10 +323,12 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     chrome.screenshot(&page, &shots.join("phone.png"))?;
     chrome.viewport(&page, 1000, 1100, false)?;
     s.ok("resizing back restores the full shortened path when two lines fit", super::shows(chrome, &page, "document.querySelectorAll('.step-args')[1].textContent === '~/apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx'"), "");
-    let ended = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
+    let ended = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
     anyhow::ensure!(ended.status == 200, "ending working-card fixture: {ended}");
     s.ok("a completed card folds and remembers expanded commentary when opened again", super::shows(chrome, &page, "(() => { const d = document.querySelector('details.tools'); if (d.open || !d.innerText.includes('Worked through 8 steps')) return false; d.open = true; return d.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()"), "");
     println!("      (working-card screenshots in {})", shots.display());
     chrome.close(page)?;
+    let r = api.signed(owner, "DELETE", &format!("{add}/{}", fragment_core::npub::encode(hand.pubkey_hex())), None)?;
+    anyhow::ensure!(r.status == 200, "the fixture's key revoked: {r}");
     Ok(())
 }

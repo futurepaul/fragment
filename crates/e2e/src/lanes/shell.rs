@@ -398,9 +398,12 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let posted = post("m1", "chat", json!({ "text": said }))?;
     anyhow::ensure!(took && posted.body["replayed"] == true, "posting to the chat: {posted}");
     let seq = posted.body["record"]["seq"].as_i64().unwrap_or(0);
-    // a record that is no message (a page's own kind, an agent's step) is never searched
+    // a record that is no message (a page's own kind) is never searched;
+    // an agent's step is no person's to post (`work` is its agents': 403)
     let step = post("w1", "work", json!({ "kind": "turn.step", "turn": "t1", "step": 1, "text": "zucchini plans" }))?;
-    anyhow::ensure!(step.status == 200, "posting a step: {step}");
+    anyhow::ensure!(step.status == 403, "a person's step is refused: {step}");
+    let own = post("w2", "chat", json!({ "kind": "garden.note", "text": "zucchini plans" }))?;
+    anyhow::ensure!(own.status == 200, "posting a page's own record: {own}");
     let search = |q: &str| shell(api, session, "GET", &format!("/api/search?q={}", query(q)), None, &[]);
 
     // a message's words find it, newest first, with where it is and a snippet
@@ -447,7 +450,7 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let snippets: Vec<Value> = hits_in(&r, &chat).iter().map(|h| h["snippet"].clone()).collect();
     s.ok("two messages are two hits, the newest first, each with its own snippet", both && snippets == [json!("Basil wants water too"), json!(said)], &r);
     let r = search("tomatoes zucchini")?;
-    s.ok("a word the message lacks finds nothing (an agent's step is not searched)", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
+    s.ok("a word the message lacks finds nothing (a page's own record is not searched)", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
     let r = search("zucchini")?;
     s.ok("nor is a record that is no message", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
     let r = search("garden")?;
