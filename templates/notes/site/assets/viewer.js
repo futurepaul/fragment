@@ -8,9 +8,10 @@
 // #main) and draws a page again through its hashchange route.
 //
 // It reads the fragment's app: `api/tree` (the notes) and `api/file?path=`
-// (one note's bytes), carrying the page's `?view=` token when it has one,
-// and follows the room the page hands it (`window.fragment.room`), whose
-// state says which files changed.
+// (one note's bytes), as the page reads (the share link rides the page's
+// cookie; a `?view=` still in its URL is passed on), and follows the room
+// the page hands it (`window.fragment.room`), whose state says which files
+// changed.
 import { markdown, resolvePath, scheme, withoutFrontMatter } from "../__markdown.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -27,7 +28,7 @@ const showErr = (msg) => $("#tree")?.replaceChildren(el("div", "empty", `⚠ ${S
 window.addEventListener("error", (e) => showErr(e.message || e.error));
 window.addEventListener("unhandledrejection", (e) => showErr(e.reason));
 
-const qs = location.search || ""; // carries the ?view= token when present
+const qs = location.search || ""; // a ?view= token still in the URL, if any
 const withView = (url) => url + (qs ? (url.includes("?") ? "&" : "?") + qs.slice(1) : "");
 const fileUrl = (path) => withView("api/file?path=" + encodeURIComponent(path));
 const hashOf = (path) => "#/" + encodeURIComponent(path);

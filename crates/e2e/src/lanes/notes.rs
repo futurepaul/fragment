@@ -66,15 +66,26 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an open page shows a new note without a reload", chrome.until(&page, &has("third"), wait), "");
     chrome.eval(&page, "location.hash = '#/notes/third.md'; true")?;
     s.ok("and opens it", chrome.until(&page, "document.getElementById('content')?.textContent.includes('third')", wait), "");
-    hostile(s, api, &home, &name, &dir, &mut chrome, &page)?;
-    links(s, api, &home, &name, &dir, &mut chrome, &page)
+    let vault = Vault { home: &home, name: &name, dir: &dir, view: &view };
+    hostile(s, api, &vault, &mut chrome, &page)?;
+    links(s, api, &vault, &mut chrome, &page)
+}
+
+/// The notes fragment the lane made: its CLI's home, its name, the synced
+/// folder, and its share link.
+struct Vault<'a> {
+    home: &'a std::path::Path,
+    name: &'a str,
+    dir: &'a std::path::Path,
+    view: &'a str,
 }
 
 /// The viewer's own hooks into the renderer, in Chrome: a [[wikilink]]
 /// opens its note in the viewer, an ![[embed]] is the vault's picture
 /// through the app (with the page's share link), a relative link and a
 /// reference link resolve to notes, and front matter is left out.
-fn links(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std::path::Path, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+fn links(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir) = (vault.home, vault.name, vault.dir);
     let wait = Duration::from_secs(20);
     std::fs::write(dir.join("notes/linked.md"), "---\ntitle: Linked\nsecret: in the front matter\n---\n# Linked note\n\nGo [[welcome|home]], to [the second](second.md), or to [the third][3].\n\n![[pic.svg|40]]\n\n[3]: third.md\n")?;
     s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
@@ -82,10 +93,10 @@ fn links(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std
     let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'Linked note'", wait);
     let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.getAttribute('width') ?? null, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
     s.ok(
-        "the viewer leaves out front matter, shows an embed through the app with its share link, and resolves wikilinks, relative and reference links to notes",
+        "the viewer leaves out front matter, shows an embed through the app (the share link rides its cookie), and resolves wikilinks, relative and reference links to notes",
         shown
             && read["front"] == false
-            && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg") && u.contains("view="))
+            && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg"))
             && read["width"] == "40"
             && read["home"] == "#/notes%2Fwelcome.md"
             && read["second"] == "notes/second.md"
@@ -106,11 +117,11 @@ fn links(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std
 /// app is sandboxed. Method: a committed hostile note opened in the
 /// viewer; the renderer imported on the page with hooks that allow any
 /// URL; an SVG that scripts itself, read and opened directly.
-fn hostile(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &std::path::Path, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+fn hostile(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir, view) = (vault.home, vault.name, vault.dir, vault.view);
     let wait = Duration::from_secs(20);
-    // as the page reads: with its share link
-    let query = page_query(chrome, page)?;
-    let get = |path: &str| api.call(Call { method: "GET", url: format!("{}{}{query}", api.site_url(name, path), if path.contains('?') { "&" } else { "?" }), ..Call::default() });
+    // a fetch with the share link, as the lane's own reads are
+    let get = |path: &str| api.call(Call { method: "GET", url: format!("{}{}view={view}", api.site_url(name, path), if path.contains('?') { "&" } else { "?" }), ..Call::default() });
     let dir_s = dir.to_str().expect("utf-8 path");
     std::fs::write(dir.join("notes/hostile.md"), HOSTILE_NOTE)?;
     std::fs::write(dir.join("notes/pic.svg"), SCRIPTED_SVG)?;
@@ -133,17 +144,13 @@ fn hostile(s: &mut Suite, api: &Api, home: &std::path::Path, name: &str, dir: &s
         r.status == 200 && r.header("content-type").starts_with("image/svg+xml") && r.header("content-security-policy").contains("sandbox") && r.header("x-content-type-options") == "nosniff",
         &r,
     );
-    let svg = chrome.open(&api.site_url(name, &format!("api/file?path=notes/pic.svg&{query}")))?;
+    // the page's browser holds the share link's cookie
+    let svg = chrome.open(&api.site_url(name, "api/file?path=notes/pic.svg"))?;
     std::thread::sleep(Duration::from_millis(500));
     let ran = chrome.eval(&svg, "document.documentElement.getAttribute('data-ran')")?;
     s.ok("opened directly, the SVG's script does not run", ran.is_null(), &ran);
     chrome.close(svg)?;
     Ok(())
-}
-
-/// The page's own query (its `view=` token), for a URL beside it.
-fn page_query(chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<String> {
-    Ok(chrome.eval(page, "location.search.slice(1)")?.as_str().unwrap_or("").to_string())
 }
 
 const HOSTILE_NOTE: &str = include_str!("../../fixtures/hostile-note.md");
