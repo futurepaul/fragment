@@ -107,6 +107,14 @@
       <div class="rename-actions"><button id="add-agent-cancel" type="button">Cancel</button><button type="submit" id="add-agent-go" disabled>Add</button></div>
     </form>
   </dialog>
+  <!-- lifting a teammate's fence (decision 63, proposed): the person says so first -->
+  <dialog class="rename-agent" id="unfence-dialog" aria-labelledby="unfence-title" aria-describedby="unfence-text">
+    <form id="unfence-form">
+      <h2 id="unfence-title">Let it see your things?</h2>
+      <p id="unfence-text"></p>
+      <div class="rename-actions"><button id="unfence-cancel" type="button">Keep it fenced</button><button type="submit" id="unfence-go">Let it see them</button></div>
+    </form>
+  </dialog>
   <dialog class="search-dialog" id="search-dialog" aria-label="Ask anything or find a chat">
     <div class="search-panel">
       <form class="search-input-wrap" id="search-form">

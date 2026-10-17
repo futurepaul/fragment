@@ -886,6 +886,13 @@ function teamRow(a, active, open) {
     go.append(out);
     said.push(`on ${where.model} through ${where.provider}, outside the platform`);
   }
+  if (a.fenced) {
+    const lock = el("span", "team-fenced");
+    lock.innerHTML = svg("lock");
+    lock.title = FENCED_SAYS;
+    go.append(lock);
+    said.push("fenced: it sees only what it is sent and what is shared with it");
+  }
   if (working) {
     go.append(el("span", "team-working", "Working"));
     said.push("working");
@@ -942,13 +949,49 @@ function openTeamMenu(a, trigger) {
   const handoffs = handoffsTo(a);
   const by = handoffs[0] && askerOf(handoffs[0], a);
   openMenu(trigger, [
-    { heading: title, note: [isWorking(a) ? "Working now" : "", whereItRuns(a)].filter(Boolean).join(" · ") },
+    { heading: title, note: [isWorking(a) ? "Working now" : "", whereItRuns(a), a.fenced ? "Fenced" : ""].filter(Boolean).join(" · ") },
     ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
+    a.fenced
+      ? { icon: "lock", text: "Let it see your things…", onClick: () => unfence(a) }
+      : { icon: "lock", text: "Fence it", onClick: () => setFence(a, true) },
     { icon: "agent", text: "Its profile", onClick: () => openApp(a.fragment) },
   ]);
 }
+
+// ---- a teammate's fence (decision 63, proposed): fenced, it acts as
+// itself alone, seeing only what it is sent and what is shared with it;
+// its owner puts one up or lets it go, which the shell asks about first ----
+const FENCED_SAYS = "Fenced: it sees only what it's sent and what's shared with it, never your other things";
+async function setFence(a, fenced) {
+  try {
+    await api("PUT", `/api/identities/${seg(a.identity)}/fenced`, { fenced });
+    computerIs(await api("GET", `/api/computers/${seg(state.computer.computer)}`));
+    state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
+    renderChats();
+    rosterChanged();
+  } catch (e) {
+    notice(fenced ? "It was not fenced" : "It is still fenced", e.message);
+  }
+}
+const unfenceDialog = $("unfence-dialog");
+function unfence(a) {
+  const who = titleOf(a.fragment);
+  const where = runsOn.get(a.fragment);
+  $("unfence-title").textContent = `Let ${who} see your things?`;
+  $("unfence-text").textContent = `${who} would reach your chats, files and apps, and your connections, as your other agents do${where?.on === "own" ? `, and what it reads would go to ${where.provider}, outside the platform` : ""}.`;
+  unfenceDialog.dataset.identity = a.identity;
+  unfenceDialog.showModal();
+  $("unfence-cancel").focus();
+}
+$("unfence-cancel").onclick = () => unfenceDialog.close();
+$("unfence-form").onsubmit = (e) => {
+  e.preventDefault();
+  const a = state.agents.get(unfenceDialog.dataset.identity);
+  unfenceDialog.close();
+  if (a) setFence(a, false);
+};
 
 // Newest first: a chat by when its newest message was said (its row's
 // `previewAt`); one with nothing said yet (just made) above them all.

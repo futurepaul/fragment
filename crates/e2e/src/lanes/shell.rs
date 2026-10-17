@@ -976,6 +976,24 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         landed,
         b.eval(&page, "[...document.querySelectorAll('#stack iframe')].map((f) => f.dataset.src)")?,
     );
+    // its ⋯ fences it (decision 63, proposed): a lock on its row, its
+    // computer's view says so; fenced, "Let it see your things…" asks in the
+    // shell's own dialog, and Let it see them lifts it
+    let more = format!("#team .team-row[data-key={}] .team-more", js(&format!("team:{reader_id}")));
+    let lock = format!("document.querySelector({})", js(&format!("#team .team-row[data-key={}] .team-fenced", js(&format!("team:{reader_id}")))));
+    b.click(&page, &more)?;
+    let fenced = menu_item(&mut b, &page, "Fence it")? && b.until(&page, &format!("!!{lock}"), wait);
+    let view = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let viewed = view.body["computers"][0]["agents"].as_array().into_iter().flatten().any(|a| a["identity"] == reader_id.as_str() && a["fenced"] == true);
+    b.click(&page, &more)?;
+    let asked = menu_item(&mut b, &page, "Let it see your things…")? && b.until(&page, "document.getElementById('unfence-dialog').open && document.getElementById('unfence-title').textContent === 'Let Reader see your things?'", wait);
+    b.eval(&page, "(document.getElementById('unfence-go').click(), true)")?;
+    let lifted = b.until(&page, &format!("!{lock} && !document.getElementById('unfence-dialog').open"), wait);
+    s.ok(
+        "a teammate's ⋯ fences it (a lock on its row, fenced on its computer's view), and lifts the fence once its person says so in the shell's own dialog",
+        fenced && viewed && asked && lifted,
+        json!({ "fenced": fenced, "viewed": viewed, "asked": asked, "lifted": lifted }),
+    );
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &shots)?;
