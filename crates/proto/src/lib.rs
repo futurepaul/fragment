@@ -1788,8 +1788,6 @@ mod tests {
         let root = std::path::Path::new("/sync/folder");
         assert_eq!(RepoPath::parse("site/a.js").unwrap().under(root), std::path::PathBuf::from("/sync/folder/site/a.js"));
         assert_eq!(RepoPath::parse(".gitignore").unwrap().under(root), std::path::PathBuf::from("/sync/folder/.gitignore"));
-        // the join `Path` does for an absolute path is what a repo path never is
-        assert_eq!(root.join("/tmp/x"), std::path::PathBuf::from("/tmp/x"));
     }
 
     /// Goal: a label of `label_room` bytes makes a host label of exactly

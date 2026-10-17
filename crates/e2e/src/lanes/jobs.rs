@@ -489,8 +489,12 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         &as_editor,
     );
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
-    without["channels"].as_object_mut().map(|c| c.remove("alarms"));
-    without["triggers"].as_array_mut().map(|t| t.retain(|t| t["channel"] != "alarms"));
+    if let Some(channels) = without["channels"].as_object_mut() {
+        channels.remove("alarms");
+    }
+    if let Some(triggers) = without["triggers"].as_array_mut() {
+        triggers.retain(|t| t["channel"] != "alarms");
+    }
     ship(s, &c, JOBS_APP, without.to_string().as_bytes());
     let gone = run(api, &editor, &name, id)?;
     s.ok("with its channel gone, no one reads a run's record", gone.status == 200 && gone.body.get("input").is_none(), &gone);
