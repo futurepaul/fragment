@@ -51,13 +51,12 @@ fragment login --host {{platform}}
 ```
 
 Once per machine. It prints a code and opens {{platform}}/cli, where
-your person signs in and types it (the page and the terminal show the
-key's ending); it says whose account it acts as, and keeps the host.
-With no browser at hand, `--no-wait` prints the code and the page: give
-both to your person (ten minutes, once), and run `fragment login` again
-once it is typed; run again when paired, it says whose it is. From then
-on the CLI acts as them. Their account must make apps: a guest only
-edits what is shared with them.
+your person signs in and types it (both show the key's ending); it says
+whose account it acts as, and keeps the host. With no browser,
+`--no-wait` prints the code and the page: give both to your person (ten
+minutes, once), then run `fragment login` again; paired, it says whose
+it is. From then on the CLI acts as them. Their account must make apps:
+a guest only edits what is shared with them.
 
 ## Build, deploy, share
 
