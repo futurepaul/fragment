@@ -180,6 +180,13 @@ pub fn key_added(to: &str, npub: &str, platform: &str) -> Mail {
     }
 }
 
+/// Whether a subject is a `key_added` mail's: what a check counting some
+/// other kind of mail to a person (who added a key, as everyone does)
+/// leaves out.
+pub fn is_key_added(subject: &str) -> bool {
+    subject.starts_with("A key ending in ") && subject.ends_with(&format!(" was added to your {PRODUCT} account"))
+}
+
 fn truncated(s: &str) -> String {
     s.chars().take(80).collect()
 }
@@ -329,6 +336,7 @@ mod tests {
         assert_eq!(refusal(&m), None);
         assert_eq!(m.to, "bea@example.com");
         assert!(m.subject.contains(&format!("ending in {}", &npub[npub.len() - 8..])));
+        assert!(is_key_added(&m.subject) && !is_key_added(&invite("bea@example.com", "ann@example.com", "t", true, "https://x", 30).subject));
         assert!(m.text.contains("https://finite.chat") && m.text.contains(&format!("fragment keys revoke {npub}")) && m.text.contains(&npub[npub.len() - 8..]));
     }
 }
