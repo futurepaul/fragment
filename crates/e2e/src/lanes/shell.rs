@@ -861,7 +861,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let soul = shell(api, &session, "GET", &format!("/api/f/{}/file?path=SOUL.md", own_named(api, &session, &first_label)?), None, &[])?;
     s.ok(
         "its first agent's job (its SOUL.md) says what it does and never its name",
-        soul.status == 200 && soul.text.contains("default agent") && !first_name.is_empty() && !soul.text.contains(&first_name),
+        soul.status == 200 && soul.text.contains("main agent") && !first_name.is_empty() && !soul.text.contains(&first_name),
         json!({ "name": first_name, "soul": soul.text }),
     );
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
@@ -1287,7 +1287,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let named = profile
         && s.eventually(wait, || {
             seen = b.eval_in_frame(page, &its_page, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title, soul: document.getElementById('soul')?.textContent ?? '', text: document.body.innerText })").unwrap_or(Value::Null);
-            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent"))
+            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("main agent"))
         });
     let text = seen["text"].as_str().unwrap_or("");
     let _ = b.screenshot(page, &shots.join("agent-page-renamed.png"));
