@@ -39,7 +39,7 @@ A runtime gets commands and sends events, each naming its turn
 
 | Command | |
 |---|---|
-| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text (`command`: a command of the runtime's menu, said as it is; below, "Commands"), attachments as local files, the message it quotes (`quote`: its text and whether it is the agent's own, read from the chat by the driver), whether it is a routine, and its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told") |
+| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text (`command`: a command of the runtime's menu, said as it is; below, "Commands"), attachments as local files, the message it quotes (`quote`: its text and whether it is the agent's own, read from the chat by the driver), whether it is a routine, its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told"), and its owner's `browser` while it is connected, on a turn its owner asks (below, "Its owner's browser is told") |
 | `Stop {turn}` | the asker pressed Stop |
 | `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
 | `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
@@ -364,6 +364,26 @@ second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
 
+## Its owner's browser is told
+
+A computer carries its owner's browser to its guest while one is
+connected (docs/explorations/owner-browser.md, a spike), but nothing in
+an agent's own files says so. So before each turn its owner asks, the
+driver asks the computer (`$FRAGMENT_BROWSER/json/version`, which it
+answers as a browser's DevTools does: the browser's name and its
+socket), within `BROWSER_ASK_MS_MAX` (2 s, never longer than the note's
+reads, beside which it runs), and hands the runtime the answer
+(`TurnStart::browser`). Another asker's turn is never told (the browser
+is the owner's), and no turn is told while none is connected, or when
+the computer did not answer in time. Relay tells Hermes in a line of the
+inbound's `context` (`relay::browser_told`): which browser "my browser"
+means, and the agent-browser command its terminal reaches it with; the
+rest is the tool's own `--help`, and what the agent may use of it is
+what `tab` lists. The scripted agent echoes it after its reply
+(`(told: its owner's browser, <name>, at <socket>)`). Proven in
+`its_owner_is_told_their_browser_while_it_is_connected` (tests/bridge.rs)
+and the `owner-browser` lanes.
+
 ## What a rollback forgot
 
 A computer that went back to an older save (a crash, an unsaved stop, a
@@ -403,10 +423,11 @@ get_chat_info`.
   `hello` (the bridge starts just before Hermes' gateway, so the message
   that woke the computer waits for it, unclaimed); once handed, kept until
   Hermes acks it and handed again on each dial, within that life. A
-  turn's note (above, "The turn after a cut one is told") is the
-  inbound's `context`, one item with no source, never its text: Hermes
-  renders it before the message, reference only and never as the person's
-  words:
+  turn's note (above, "The turn after a cut one is told") and its owner's
+  browser (below, "Its owner's browser is told") are the inbound's
+  `context`, an item each with no source, never its text: Hermes renders
+  them before the message, a line each, reference only and never as the
+  person's words:
   `[Recent channel messages]\n<note>\n\n[New message]\n[paul] good morning`.
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`

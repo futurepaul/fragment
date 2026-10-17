@@ -35,11 +35,11 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::api::{self, Api, ApiError};
 use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
 use crate::limits;
-use crate::net::Backoff;
+use crate::net::{Backoff, Base};
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Quote, Runtime, RuntimeIo, TurnStart};
+use crate::runtime::{Agent, Command, Event, LocalFile, OwnerBrowser, Quote, Runtime, RuntimeIo, TurnStart};
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -73,6 +73,10 @@ pub struct Config {
     /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
     /// (screen.rs); none, no screen.
     pub screen: Option<ScreenConfig>,
+    /// `FRAGMENT_BROWSER`: where the computer carries its owner's browser
+    /// (docs/explorations/owner-browser.md, a spike), asked after before
+    /// each of their turns; none, never asked.
+    pub browser: Option<Base>,
 }
 
 /// Why the bridge stopped.
@@ -326,7 +330,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
-    let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
+    let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone(), cfg.browser.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
@@ -1141,7 +1145,7 @@ struct RuntimeLane {
 }
 
 impl RuntimeLane {
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf, browser: Option<Base>) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1162,10 +1166,16 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote);
+                    // its owner's browser is theirs: told on their turns alone
+                    let owners = async {
+                        let base = browser.as_ref().filter(|_| ts.asker == ts.agent.owner)?;
+                        owner_browser(base, &ts.turn).await
+                    };
+                    let (files, note, quote, owners) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note, quote, owners);
                     ts.files = files;
                     ts.note = note;
                     ts.quote = quote;
+                    ts.browser = owners;
                 }
                 if to_runtime.send(c).await.is_err() {
                     return;
@@ -1182,6 +1192,25 @@ impl RuntimeLane {
 }
 
 /// The message a turn's message quotes (`reply_to`, a seq on the chat's
+/// Its owner's browser, if one is connected now: the computer answers
+/// `/json/version` as a browser's DevTools does (its name, and where its
+/// socket is), and anything else, or nothing within `BROWSER_ASK_MS_MAX`,
+/// is none: a turn is never held back for it.
+async fn owner_browser(base: &Base, turn: &str) -> Option<OwnerBrowser> {
+    match crate::net::get(base, "/json/version", limits::BROWSER_ANSWER_MAX_BYTES, limits::BROWSER_ASK_MS_MAX).await {
+        Ok((status, body)) if status.is_success() => {
+            let v: Value = serde_json::from_slice(&body).ok()?;
+            Some(OwnerBrowser { name: v["Browser"].as_str()?.to_string(), socket: v["webSocketDebuggerUrl"].as_str()?.to_string() })
+        }
+        // none is connected: nothing to tell
+        Ok(_) => None,
+        Err(why) => {
+            crate::ev!("browser.unasked", { "turn": turn, "why": why });
+            None
+        }
+    }
+}
+
 /// `chat`), read as the agent: its text (a command as typed; a file with no
 /// words, its names), cut to `QUOTE_TEXT_MAX_BYTES`, and whether it is the
 /// agent's own. `None` when it is not there, is no message, or the chat did

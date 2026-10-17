@@ -189,6 +189,23 @@ pub struct TurnStart {
     /// `None` when it could not be read, or is no message).
     pub reply_to: Option<u64>,
     pub quote: Option<Quote>,
+    /// Its owner's browser, connected as the turn began
+    /// (docs/explorations/owner-browser.md, a spike): asked after by the
+    /// driver before a turn its owner asks, from `$FRAGMENT_BROWSER`; `None`
+    /// for another asker's, or when none is connected or the computer did
+    /// not answer in time. Each runtime tells its agent its own way: Relay
+    /// beside the note, in the inbound's `context`; the scripted agent
+    /// echoes it.
+    pub browser: Option<OwnerBrowser>,
+}
+
+/// Its owner's browser, as the computer answers for it: what its extension
+/// calls it ("Chromium on macOS"), and where a CDP client opens a socket
+/// to it (the computer carries it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnerBrowser {
+    pub name: String,
+    pub socket: String,
 }
 
 /// What the bridge asks of a runtime.

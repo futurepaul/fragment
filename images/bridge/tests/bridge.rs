@@ -7,11 +7,14 @@
 
 mod support;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use fragment_bridge::records;
+use fragment_bridge::{net, records};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use support::fake::{person, Fake, World};
 
@@ -60,6 +63,54 @@ async fn a_reply() {
     });
     fake.until(WAIT, "the keepalive held, then let go", |w| w.keepalive_log.first() == Some(&true) && w.keepalive_open == 0).await;
     bridge.stop().await;
+}
+
+/// Goal: its owner's turn is told their browser while it is connected
+/// (docs/explorations/owner-browser.md, a spike), another asker's turn
+/// never, and no turn while none is connected. Method: the computer's
+/// answer at `$FRAGMENT_BROWSER/json/version` faked, connected and then
+/// not; the scripted agent echoes what it was told.
+#[tokio::test]
+async fn its_owner_is_told_their_browser_while_it_is_connected() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let connected = Arc::new(AtomicBool::new(true));
+    let flag = connected.clone();
+    let lookup = move |req: hyper::Request<hyper::body::Incoming>, _| {
+        let on = flag.load(Ordering::SeqCst);
+        async move {
+            match (req.uri().path(), on) {
+                ("/json/version", true) => net::json_answer(StatusCode::OK, &json!({ "Browser": "Chromium on macOS", "Protocol-Version": "1.3", "webSocketDebuggerUrl": "ws://browser.fragment.internal/devtools/browser" })),
+                ("/json/version", false) => net::refusal(StatusCode::CONFLICT, "not_connected", "your owner's browser is not connected"),
+                _ => net::refusal(StatusCode::NOT_FOUND, "not_found", "only /json/version"),
+            }
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let (stop_lookup, stopped) = tokio::sync::watch::channel(false);
+    tokio::spawn(net::serve(listener, lookup, stopped));
+    let dir = support::dir("owners-browser");
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.browser = Some(net::Base::parse(&format!("http://{at}")).unwrap());
+    let bridge = support::start(cfg, support::script());
+    following(&fake, 2).await;
+
+    for (n, who, text) in [(1, "paul", "one"), (2, "skyler", "two")] {
+        fake.say(&chat, &person(who), json!({ "text": text }));
+        fake.until(WAIT, "its reply", |w| replies(w, &chat).len() == n).await;
+    }
+    connected.store(false, Ordering::SeqCst);
+    fake.say(&chat, &person("paul"), json!({ "text": "three" }));
+    fake.until(WAIT, "its reply", |w| replies(w, &chat).len() == 3).await;
+    fake.with(|w| {
+        let said: Vec<String> = replies(w, &chat).iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        let told = "\n\n(told: its owner's browser, Chromium on macOS, at ws://browser.fragment.internal/devtools/browser)";
+        assert_eq!(said, vec![format!("echo: [paul] one{told}"), "echo: [skyler] two".into(), "echo: [paul] three".into()]);
+    });
+    bridge.stop().await;
+    let _ = stop_lookup.send(true);
 }
 
 /// Goal: a first start makes the bridge's state directory, and so `/data`,

@@ -1,6 +1,6 @@
 //! The plumbing every side of the bridge shares: HTTP/1.1 serving over
-//! hyper, a WebSocket upgrade from a hyper request, a WebSocket client, and
-//! the jittered backoff every reconnect waits (lesson 5). Plain TCP only:
+//! hyper, a WebSocket upgrade from a hyper request, a WebSocket client, a
+//! one-off GET, and the jittered backoff every reconnect waits (lesson 5). Plain TCP only:
 //! the guest reaches the platform's hosts over HTTP, and the computer's
 //! intercepts do the rest (docs/computers.md).
 
@@ -166,6 +166,25 @@ pub async fn connect_ws(base: &Base, path: &str, headers: &[(&str, String)]) -> 
     match tokio::time::timeout(Duration::from_millis(limits::WS_OPEN_TIMEOUT_MS), open).await {
         Ok(r) => r,
         Err(_) => Err(format!("{url}: no answer in {} ms", limits::WS_OPEN_TIMEOUT_MS)),
+    }
+}
+
+/// One GET of `base` + `path`, on a connection of its own: its status and
+/// body (at most `max` bytes), or why not, within `ms`.
+pub async fn get(base: &Base, path: &str, max: usize, ms: u64) -> Result<(StatusCode, Bytes), String> {
+    use http_body_util::{BodyExt, Limited};
+    let url = base.url(path);
+    let call = async {
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<Body>();
+        let req = Request::get(&url).header("host", base.authority()).body(Body::default()).map_err(|e| format!("{url}: {e}"))?;
+        let res = client.request(req).await.map_err(|e| format!("{url}: {e}"))?;
+        let status = res.status();
+        let body = Limited::new(res.into_body(), max).collect().await.map_err(|e| format!("{url}: {e}"))?;
+        Ok::<_, String>((status, body.to_bytes()))
+    };
+    match tokio::time::timeout(Duration::from_millis(ms), call).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("{url}: no answer in {ms} ms")),
     }
 }
 

@@ -74,7 +74,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::limits;
 use crate::net::{self, Body};
 use crate::records::{Outcome, Step};
-use crate::runtime::{Command, Event, LocalFile, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
+use crate::runtime::{Command, Event, LocalFile, OwnerBrowser, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use wire::{Action, FromGateway};
 
 /// Files kept for Hermes (uploads and re-hosted attachments), at most; past
@@ -277,6 +277,20 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
             }
         }
     }
+}
+
+/// What our Hermes image's agent is told before its owner's message while
+/// their browser is connected (docs/explorations/owner-browser.md, a
+/// spike): which browser "my browser" means, and how its terminal reaches
+/// it, through the image's agent-browser (whose `--help` lists the rest),
+/// what it may use of it, and where it asks first: the browser is signed
+/// in as them. Hermes' own browser tools drive the browser on the agent's
+/// desktop.
+pub fn browser_told(b: &OwnerBrowser) -> String {
+    format!(
+        "Your owner's browser is connected: {}, on their own computer, signed in as them. When they say \"my browser\", or its tabs and windows, they mean this one. Drive it from your terminal with `agent-browser --session owner --cdp {} <command>` (its `--help` lists the commands). `tab` lists only the tabs they let you use, at first just the ones you open; they give you more from the Fragment extension's icon. Ask them before you pay, buy, book or type a password there.",
+        b.name, b.socket
+    )
 }
 
 fn bearer_ok(req: &Request<Incoming>, cfg: &RelayConfig) -> Result<(), wire::Refused> {
@@ -489,7 +503,7 @@ impl Loop {
                 // prompt TTL) times out with the card.
                 let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
-                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None };
+                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: &[], command: false, quote: None };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
                 // "Other" answered in words: Hermes takes the answer (and
@@ -511,7 +525,7 @@ impl Loop {
                 // running turn after its next tool call) or beside none
                 let chat = wire::chat_id(&fragment, &agent);
                 let profile = wire::profile(&agent);
-                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None };
+                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: &[], command: true, quote: None };
                 let buffer = format!("x-{id}");
                 let frame = wire::inbound(&m, &buffer);
                 crate::ev!("relay.aside", { "id": id, "turn": turn, "running": turn.as_ref().is_some_and(|t| self.inflight.contains_key(t)) });
@@ -531,7 +545,7 @@ impl Loop {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: &[], command: false, quote: None };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
         crate::ev!("relay.told", { "turn": turn, "seq": seq });
@@ -569,8 +583,10 @@ impl Loop {
         // a turn after a cut one is told so, as read-only context beside
         // the message (TurnStart::note); Hermes' own session was closed at
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
-        // its own, never folded into the cut one's
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
+        // its own, never folded into the cut one's. Its owner's turn is told
+        // their browser too, while it is connected (TurnStart::browser).
+        let told: Vec<String> = ts.note.iter().cloned().chain(ts.browser.as_ref().map(browser_told)).collect();
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: &told, command: ts.command, quote: ts.quote.as_ref() };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();
@@ -1024,5 +1040,21 @@ impl Loop {
         if let Some(f) = self.by_chat.get(chat).and_then(|t| self.inflight.get_mut(t)) {
             f.said = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line names the browser and the socket the computer answered,
+    /// what "my browser" means, and where the agent asks first.
+    #[test]
+    fn its_owner_is_told_which_browser_and_how_to_reach_it() {
+        let line = browser_told(&OwnerBrowser { name: "Chromium on macOS".into(), socket: "ws://browser.fragment.internal/devtools/browser".into() });
+        assert!(line.starts_with("Your owner's browser is connected: Chromium on macOS, "), "{line}");
+        assert!(line.contains("\"my browser\""), "{line}");
+        assert!(line.contains("`agent-browser --session owner --cdp ws://browser.fragment.internal/devtools/browser <command>`"), "{line}");
+        assert!(line.contains("Ask them before you pay"), "{line}");
     }
 }
