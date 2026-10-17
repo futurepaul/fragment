@@ -118,7 +118,9 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
 - **Coming back, or not.** `4001`, `4002` and `4003` (its owner wiped)
   tell the extension not to come back; any other end, it does
   (`fragment_core::owner_browser::comes_back`, host-tested). The
-  extension keeps the same list.
+  extension keeps the same list, and on any of the three lets its link
+  go: a replaced browser that kept it would take the slot back the next
+  time Chrome started its worker.
 - **Told.** The computer's view lists its browsers (`browsers`: id, name,
   connected, last heard). Its owner's open pages are told when that
   changes, and Settings re-reads it when this browser's extension
@@ -149,7 +151,7 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   `not_connected`: "your owner's browser is not connected: they connect it
   from Settings, with the Fragment extension". The stub's reply carries
   those words (run).
-- At most 32 guest sockets at once (`BROWSER_GUESTS_MAX`: a browser
+- At most 32 guest sockets at once (`GUESTS_MAX`: a browser
   tool's own and a supervisor's beside it, for each of 16 agents).
 - Any agent on the computer may use it. One person's agents share their
   computer and are not fenced from each other (decision 44), so a
@@ -176,7 +178,7 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
 - a content script on the platform's page (`platform.js`);
 - a popup, its settings.
 
-- **Connecting.** Settings' Computer section has a "This browser" line.
+- **Connecting.**
   - Settings' Computer section lists "Browsers": each one linked, by its
     name, connected or when it was last heard, with Forget. This browser
     is marked "(this browser)".
@@ -186,8 +188,14 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
   - The extension says which computer and which link it holds. Settings
     calls this browser connected only on the person's own computer; for
     any other it offers Connect, which replaces it.
-  - The popup says "Reconnecting to your computer…" while the extension
-    comes back with its link. Its Disconnect forgets the browser.
+  - While the extension comes back with its link, Settings says
+    "Reconnecting this browser…" and the popup "Reconnecting to your
+    computer…", from its first try. Its Disconnect forgets the browser.
+  - Not connected, both say why in a person's words: "this browser was
+    forgotten in Settings", "another browser connected in its place",
+    "your account was wiped", or, for a link the computer does not know
+    (forgotten while it was away, or a computer made again), "your
+    computer no longer knows this browser".
   - Without the extension, the line says to add it.
 - **What an agent may use: the person's choice.** The popup is the
   extension's settings ("What your agents may use"). It offers three
@@ -222,7 +230,8 @@ the guest (any CDP client)            the owner's browser (Chrome + extension)
 - **Seen and stopped (inferred: headless Chrome has no bar).** Chrome
   shows its own bar, "Fragment started debugging this browser", while a
   debugger is attached. The extension detaches once no guest socket is
-  left, and the person's closing that bar disconnects everything.
+  left. The person's closing that bar forgets the browser: they said
+  stop, so it connects again only from Settings (question 3).
 
 ## Evidence
 
@@ -272,7 +281,7 @@ its popup.
 ### The platform, end to end (run)
 
 `CHROME_BIN=<Chromium 148> cargo xtask e2e --only owner-browser`:
-36
+38
 passed, 0 failed, 0 skipped. The section takes about 11 s after the
 build (the cell, the CLI and the stub image), and no wait runs out its
 limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
@@ -316,11 +325,15 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
     told it is connected: the extension holds the first person's computer.
   - Settings lists this browser by the name its extension gave
     ("Chromium on macOS"), connected.
+  - A ticket a page hands the extension for a computer it does not trust
+    (another port than the platform's page, another zone than its
+    manifest's) is refused, and it stays connected.
   - The agent's `browse` of a `data:` page opens a tab in that Chrome
     (listed by its own DevTools) and replies with the page's title.
   - A dropped connection (a test lever, `drop-browser`, drops it as a
     network would) comes back on its own, with the extension's link, and
-    the agent uses the browser again.
+    the agent uses the browser again. Settings says "Reconnecting this
+    browser…" meanwhile, with nothing to press.
   - Its worker stopped, as Chrome stops one idle past its socket's end,
     then woken by the platform's page: it comes back with its link, and
     the tab the agent opened is still its own. Against the extension
@@ -343,14 +356,18 @@ limit. Its checks (`crates/e2e/src/lanes/owner_browser.rs`):
     says "reload this page" instead of throwing (the error a person saw
     in the extension's Errors, trying it), and that page loaded again
     shows this browser connected.
+  - Replaced by another browser, it keeps no link, so a worker started
+    again later never takes the slot back. Settings says "Not connected:
+    another browser connected in its place.", and connects it again.
   - Forget, in Settings, ends it. The extension hears it must not come
-    back (its status says "your owner forgot this browser"), and the
-    next `browse` is told the browser is not connected.
+    back (Settings says "Not connected: this browser was forgotten in
+    Settings."), and the next `browse` is told the browser is not
+    connected.
 
 The harness launches a lane's own Chrome without `--disable-extensions`
 when the lane loads one (`crates/e2e/src/browser.rs`), and finds the
 extension by the id Chrome derives from its path. A Chrome that loads no
-unpacked extension (Google Chrome from 137, CI's) makes those fourteen
+unpacked extension (Google Chrome from 137, CI's) makes those sixteen
 checks skips that say so.
 
 ### Hermes, end to end (run)
@@ -368,8 +385,9 @@ checks skips that say so.
   page's title.
 - The model's request carries the bridge's line: Hermes renders the
   inbound's `context` before its owner's message.
-- Nothing in the image changed: the agent-browser it already carries
-  (0.26.0) is the client.
+- Nothing in Hermes changed: the agent-browser the image already
+  carries (0.26.0) is the client, and the bridge's line is the inbound's
+  `context`, which Hermes already renders.
 
 Its first run failed on its page, not its path (run). The tabs opened,
 but agent-browser's `open` navigates with `Page.navigate`, and Chrome
@@ -479,10 +497,14 @@ computers on our Hermes image.
 
 - **The platforms it trusts.** The content script runs only on
   `127.0.0.1` and `localhost` (the dev stack and the e2e), and the
-  extension reaches computers' origins only under `*.fragment.localhost`. A hosted
-  platform's origin would be listed per deployment. Fragments share a
-  branch preview's zone, so the extension must trust the platform's
-  exact origin, never its zone.
+  extension takes a ticket only for a computer under its manifest's host
+  permissions (`*.fragment.localhost`), on the port of the platform's
+  page that handed it over (run: a ticket for another port, or another
+  zone, is refused). A hosted platform's origin would be listed per
+  deployment. Fragments share a branch preview's zone, so the extension
+  must trust the platform's exact origin, never its zone. The cell takes
+  any extension's origin: which one is the platform's own is question
+  7's.
 - **A page's own targets.** Cross-origin frames and workers (CDP's child
   sessions) are not offered: `Target.setAutoAttach` on a page answers
   `{}`.
@@ -503,8 +525,11 @@ computers on our Hermes image.
 1. **May an agent use its owner's own browser at all?** It carries the
    person's whole web identity (mail, bank, accounts), far beyond the
    agent's role on the platform (R17, decision 36).
-2. **Whose agents.** Every agent on the computer, as built (decision 44
-   makes a per-agent list no boundary), or only agents the owner names?
+2. **Whose agents, and whose turns.** Every agent on the computer, as
+   built (decision 44 makes a per-agent list no boundary), or only agents
+   the owner names? And any turn: only the owner's turns are told of the
+   browser, but a turn another chat member asks can still reach it, as
+   can a later turn of a session the owner's line was in.
 3. **The consent.** As built: the person connects the browser in
    Settings, and Chrome's own bar and the "Agent" tab group show it in
    use. Should the agent also ask, as a card, before its first use in a
@@ -561,7 +586,7 @@ computers on our Hermes image.
 2. In Chromium (or Chrome for Testing; Google Chrome loads no unpacked
    extension from 137), open `chrome://extensions`, turn on Developer
    mode, and Load unpacked: `extension/`.
-3. Settings → Computer → This browser → Connect this browser.
+3. Settings → Computer → Browsers → Connect this browser.
 4. In the agent's chat: `browse https://example.com`. A tab opens in the
    "Agent" group, and the agent replies with its title, then what it was
    told: `(told: its owner's browser, …)`.
