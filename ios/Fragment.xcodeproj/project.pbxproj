@@ -1,0 +1,430 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0891E14C0D3DD0876D0C138F /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */; };
+		1FA3D11FABC00DC40F41A041 /* FragmentWebSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */; };
+		2245C93502274850A29D08C3 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD99E857900FD0F65CD6B108 /* ChatView.swift */; };
+		2A5C821580EECE3D7D8C7F3D /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */; };
+		4024A3397E46CADB1EC9D344 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = D48A78B0A3D4F8A90EEBD8DB /* Models.swift */; };
+		73EE483533F3A6306B65148C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D261EC9048255D1B31FED623 /* HomeView.swift */; };
+		78F77F1984EC48618CA7801A /* FragmentUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E480260C706AE0F972CA37 /* FragmentUITests.swift */; };
+		7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */; };
+		9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */; };
+		9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */; };
+		A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0814CDF8824F8A8657129D /* MarkdownTests.swift */; };
+		A8391B829C662A475899B98C /* TimelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C75B4172B10109A56753F7A /* TimelineTests.swift */; };
+		B00F01210DFD198F6F1180C9 /* FragmentAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F7C65701872682E560E008F /* FragmentAPI.swift */; };
+		CC7761F962CB619DD2A5BB51 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 934BF3B3E3B9A45CF6843505 /* Assets.xcassets */; };
+		ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A00A083525D87C2EA533CDDC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 03B62A6F44730F69CF29B303 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A7A7E910E323B68F306752CC;
+			remoteInfo = Fragment;
+		};
+		F1A7D59A573F9AE091A5072B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 03B62A6F44730F69CF29B303 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A7A7E910E323B68F306752CC;
+			remoteInfo = Fragment;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentWebSheet.swift; sourceTree = "<group>"; };
+		214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
+		2C75B4172B10109A56753F7A /* TimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTests.swift; sourceTree = "<group>"; };
+		2F7C65701872682E560E008F /* FragmentAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentAPI.swift; sourceTree = "<group>"; };
+		3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchTests.swift; sourceTree = "<group>"; };
+		463D517A458071F0CD419B80 /* Fragment.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Fragment.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4AE675325F3A8ED7EAE13267 /* FragmentTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FragmentTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
+		58A68F1B6233D7E206EC07A8 /* FragmentUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FragmentUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		74E480260C706AE0F972CA37 /* FragmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentUITests.swift; sourceTree = "<group>"; };
+		934BF3B3E3B9A45CF6843505 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		AB0814CDF8824F8A8657129D /* MarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTests.swift; sourceTree = "<group>"; };
+		AD99E857900FD0F65CD6B108 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		D261EC9048255D1B31FED623 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		D48A78B0A3D4F8A90EEBD8DB /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportTests.swift; sourceTree = "<group>"; };
+		EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		24C24A92D6AB3222BA612400 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				74E480260C706AE0F972CA37 /* FragmentUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+		57B3D4FF633D4590AED50E36 = {
+			isa = PBXGroup;
+			children = (
+				CD982D4FA51CD976EE122B12 /* Sources */,
+				DE9A26D5B2874890535BB2B5 /* Tests */,
+				24C24A92D6AB3222BA612400 /* UITests */,
+				904A365FDF599B8D2EE5FAF7 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		904A365FDF599B8D2EE5FAF7 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				463D517A458071F0CD419B80 /* Fragment.app */,
+				4AE675325F3A8ED7EAE13267 /* FragmentTests.xctest */,
+				58A68F1B6233D7E206EC07A8 /* FragmentUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CD982D4FA51CD976EE122B12 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				934BF3B3E3B9A45CF6843505 /* Assets.xcassets */,
+				4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */,
+				AD99E857900FD0F65CD6B108 /* ChatView.swift */,
+				2F7C65701872682E560E008F /* FragmentAPI.swift */,
+				EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */,
+				014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */,
+				D261EC9048255D1B31FED623 /* HomeView.swift */,
+				214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */,
+				D48A78B0A3D4F8A90EEBD8DB /* Models.swift */,
+				98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		DE9A26D5B2874890535BB2B5 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				AB0814CDF8824F8A8657129D /* MarkdownTests.swift */,
+				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
+				2C75B4172B10109A56753F7A /* TimelineTests.swift */,
+				DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2938405DCF0BB5C112A3CCBC /* FragmentTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 06E292003E7442D1D8B9D829 /* Build configuration list for PBXNativeTarget "FragmentTests" */;
+			buildPhases = (
+				080E6F0D2D8AA2215A48F2BD /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				84230630DAFCC3A085FC53F3 /* PBXTargetDependency */,
+			);
+			name = FragmentTests;
+			productName = FragmentTests;
+			productReference = 4AE675325F3A8ED7EAE13267 /* FragmentTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		8C52024F3CFAFD685787A04E /* FragmentUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FD9D6F862081CA8A2E8B54E2 /* Build configuration list for PBXNativeTarget "FragmentUITests" */;
+			buildPhases = (
+				632EE043D767158F99D6998A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				059CA4C243EC9281F90C4DA0 /* PBXTargetDependency */,
+			);
+			name = FragmentUITests;
+			productName = FragmentUITests;
+			productReference = 58A68F1B6233D7E206EC07A8 /* FragmentUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		A7A7E910E323B68F306752CC /* Fragment */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 90E614231237E44BB37C8991 /* Build configuration list for PBXNativeTarget "Fragment" */;
+			buildPhases = (
+				EC4D398A1EE8D1812A34893E /* Sources */,
+				10FAF92375959704DAF502C2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Fragment;
+			productName = Fragment;
+			productReference = 463D517A458071F0CD419B80 /* Fragment.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		03B62A6F44730F69CF29B303 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					2938405DCF0BB5C112A3CCBC = {
+						ProvisioningStyle = Automatic;
+					};
+					8C52024F3CFAFD685787A04E = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = A7A7E910E323B68F306752CC;
+					};
+					A7A7E910E323B68F306752CC = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = CD4001B831A37D88BA3B41F6 /* Build configuration list for PBXProject "Fragment" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 57B3D4FF633D4590AED50E36;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A7A7E910E323B68F306752CC /* Fragment */,
+				2938405DCF0BB5C112A3CCBC /* FragmentTests */,
+				8C52024F3CFAFD685787A04E /* FragmentUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		10FAF92375959704DAF502C2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC7761F962CB619DD2A5BB51 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		080E6F0D2D8AA2215A48F2BD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */,
+				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
+				A8391B829C662A475899B98C /* TimelineTests.swift in Sources */,
+				9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		632EE043D767158F99D6998A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				78F77F1984EC48618CA7801A /* FragmentUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EC4D398A1EE8D1812A34893E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0891E14C0D3DD0876D0C138F /* ChatSession.swift in Sources */,
+				2245C93502274850A29D08C3 /* ChatView.swift in Sources */,
+				B00F01210DFD198F6F1180C9 /* FragmentAPI.swift in Sources */,
+				9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */,
+				1FA3D11FABC00DC40F41A041 /* FragmentWebSheet.swift in Sources */,
+				73EE483533F3A6306B65148C /* HomeView.swift in Sources */,
+				2A5C821580EECE3D7D8C7F3D /* MarkdownText.swift in Sources */,
+				4024A3397E46CADB1EC9D344 /* Models.swift in Sources */,
+				ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		059CA4C243EC9281F90C4DA0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A7A7E910E323B68F306752CC /* Fragment */;
+			targetProxy = F1A7D59A573F9AE091A5072B /* PBXContainerItemProxy */;
+		};
+		84230630DAFCC3A085FC53F3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A7A7E910E323B68F306752CC /* Fragment */;
+			targetProxy = A00A083525D87C2EA533CDDC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		11AABB6FF516E863920DE831 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Fragment;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to your local Fragment development server.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.fragment;
+			};
+			name = Debug;
+		};
+		39043B6B29F74B1CD6D7B46D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		46F94C0327E16DB510D0325F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.FragmentTests;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fragment.app/Fragment";
+			};
+			name = Debug;
+		};
+		85070E8A2550D2985A5F1D51 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Fragment;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.fragment;
+			};
+			name = Release;
+		};
+		90798D034C4F2238C203CAB0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.FragmentUITests;
+				TEST_TARGET_NAME = Fragment;
+			};
+			name = Release;
+		};
+		993DEAAD33886E4311D22B12 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.FragmentUITests;
+				TEST_TARGET_NAME = Fragment;
+			};
+			name = Debug;
+		};
+		C87C160775B2F59D7B9C4EAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = build.finite.FragmentTests;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fragment.app/Fragment";
+			};
+			name = Release;
+		};
+		F16EC6677DE2791A6CE83756 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		06E292003E7442D1D8B9D829 /* Build configuration list for PBXNativeTarget "FragmentTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				46F94C0327E16DB510D0325F /* Debug */,
+				C87C160775B2F59D7B9C4EAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		90E614231237E44BB37C8991 /* Build configuration list for PBXNativeTarget "Fragment" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				11AABB6FF516E863920DE831 /* Debug */,
+				85070E8A2550D2985A5F1D51 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CD4001B831A37D88BA3B41F6 /* Build configuration list for PBXProject "Fragment" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F16EC6677DE2791A6CE83756 /* Debug */,
+				39043B6B29F74B1CD6D7B46D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FD9D6F862081CA8A2E8B54E2 /* Build configuration list for PBXNativeTarget "FragmentUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				993DEAAD33886E4311D22B12 /* Debug */,
+				90798D034C4F2238C203CAB0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 03B62A6F44730F69CF29B303 /* Project object */;
+}
