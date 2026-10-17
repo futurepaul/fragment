@@ -32,14 +32,7 @@ pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -
 /// (`GET /api/identities/me` with the session: lib.rs `shell_session`):
 /// their identity, or 401's `Null`.
 pub(super) fn who(api: &Api, session: &str) -> Result<Value> {
-    let r = api.call(Call {
-        method: "GET",
-        url: format!("{}/api/identities/me", api.base),
-        cookie: Some(format!("fragment_session={session}")),
-        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
-        ..Call::default()
-    })?;
-    Ok(if r.status == 200 { r.body } else { Value::Null })
+    api.who(session)
 }
 
 /// The shell's page, which `/` and `/settings` are for everyone.

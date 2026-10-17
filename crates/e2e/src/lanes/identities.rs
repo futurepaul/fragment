@@ -188,6 +188,26 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
         out.status.success() && !logged_as.is_empty() && String::from_utf8_lossy(&out.stdout).contains(&format!("logged in as {logged_as} on ")),
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
     );
+    // Goal: a coding agent runs `fragment login` again on a machine already
+    // paired: it says whose the key is and succeeds, asking for no code.
+    // Method: login again, waiting and with --no-wait, counting the
+    // registry's CLI codes (the levers) before and after.
+    let codes = || api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": "count" }))).map(|r| r.body["cli_codes"].clone());
+    let before = codes()?;
+    let again = s.cli(api, &home, &["login", "--no-browser"]);
+    let quick = s.cli_json(api, &home, &["login", "--no-wait", "--json"])?;
+    let after = codes()?;
+    s.ok(
+        "fragment login again with a key already paired succeeds at once, says whose it is by email, and asks for no code",
+        again.status.success()
+            && String::from_utf8_lossy(&again.stdout).contains(&format!("logged in as {logged_as} on "))
+            && quick["existing"] == true
+            && quick["email"] == logged_as.as_str()
+            && quick["pending"].is_null()
+            && before.is_u64()
+            && after == before,
+        json!({ "again": String::from_utf8_lossy(&again.stdout), "noWait": quick, "codes": [before, after] }),
+    );
     let me = s.cli_json(api, &home, &["whoami", "--json"])?;
     let cli_id = me["identity"]["id"].as_str().unwrap_or("").to_string();
     let first = s.cli_keys(&home).expect("the CLI logged in");

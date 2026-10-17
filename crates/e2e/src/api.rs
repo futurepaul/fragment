@@ -632,10 +632,32 @@ impl Api {
         self.cli_form(session, "/cli/approve", &[("form", &Api::cli_token(session, &format!("cli-approve:{kept}"))), ("code", &kept)])
     }
 
-    /// The signed-in browser adds `keys` as `fragment login` does (the
-    /// key's code, typed, then the press), and it works: the answer is the
-    /// key's `GET /api/identities/me`.
+    /// Whom a browser's platform session names, as the shell asks it
+    /// (`GET /api/identities/me` with the session: lib.rs `shell_session`):
+    /// their identity, or 401's `Null`.
+    pub fn who(&self, session: &str) -> Result<Value> {
+        let r = self.call(Call {
+            method: "GET",
+            url: format!("{}/api/identities/me", self.base),
+            cookie: Some(format!("fragment_session={session}")),
+            extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
+            ..Call::default()
+        })?;
+        Ok(if r.status == 200 { r.body } else { Value::Null })
+    }
+
+    /// The signed-in browser adds `keys` as `fragment login` does, and it
+    /// works: the answer is the key's `GET /api/identities/me`. As the CLI
+    /// does, it asks that first: a key paired already needs no code (it
+    /// must be the session's person's, as adding one someone else holds is
+    /// refused); else the key's code, typed, then the press.
     pub fn approve(&self, session: &str, keys: &Keys) -> Result<Reply> {
+        let paired = self.signed(keys, "GET", "/api/identities/me", None)?;
+        if paired.status == 200 {
+            let person = self.who(session)?;
+            anyhow::ensure!(paired.body["id"] == person["id"], "the key is someone else's ({}), not the session's person's ({})", paired.body["id"], person["id"]);
+            return Ok(paired);
+        }
         let begun = self.cli_begin(keys)?;
         anyhow::ensure!(begun.status == 200, "asking for a CLI code: {begun}");
         let code = begun.body["code"].as_str().context("a CLI code")?.to_string();
