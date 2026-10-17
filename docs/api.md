@@ -2097,7 +2097,8 @@ pending records are its runs that have not succeeded; at 1000 a post is
 
 CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 <name>`, `fragment replay <name> <run>`, `fragment pause|unpause <name>
-<op>`, `fragment inbox <name> --token T --payload JSON`.
+<op>`, `fragment inbox <name> --payload JSON` (the token from
+`FRAGMENT_INBOX_TOKEN`, else stdin, sent in `x-fragment-inbox-token`).
 
 ## Serving
 

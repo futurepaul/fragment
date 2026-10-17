@@ -228,26 +228,6 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let everything = format!("{done}{}{}", json!(feed), json!(events(api, &owner, &name)));
     s.ok("the secret appears in no run, record, or event", !everything.contains(SECRET), "the secret leaked");
-    // a secret goes only to the hosts it names, over https (a local fleet's
-    // fakes over http): the same fake by another name is another host,
-    // and a public host over http is refused before anything is sent
-    let other = upstream.url("/data").replace("127.0.0.1", "localhost");
-    let r = api.op(&owner, &name, "digest", "d-other-host", json!({ "url": other }))?;
-    let elsewhere = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
-    s.ok(
-        "a fetch toward a host the secret does not name fills nothing, and fails its step",
-        elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("may go to 127.0.0.1, not localhost")) && upstream.hits("/data").len() == 1,
-        &elsewhere,
-    );
-    let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1", "example.com"])?;
-    anyhow::ensure!(r.status == 200, "secret hosts: {r}");
-    let r = api.op(&owner, &name, "digest", "d-cleartext", json!({ "url": "http://example.com/data" }))?;
-    let cleartext = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
-    s.ok(
-        "a fetch toward a host it names, over http, fills nothing, and fails its step",
-        cleartext["status"] == "held" && cleartext["error"].as_str().is_some_and(|e| e.contains("https only")),
-        &cleartext,
-    );
     let ops = records(api, &owner, &name, "ops");
     s.ok("the step's mutation is ledgered under the run's step id", ops.iter().any(|o| o["body"] == json!({ "op": "save", "id": format!("job:{id}:1") })), json!(ops));
 
@@ -453,7 +433,40 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         arrived && texts.contains(&"hello from the cli") && texts.contains(&"A page to title (200)"),
         &list,
     );
+    secret_hosts(s, api, &owner, &upstream)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a secret goes only to the hosts it names, over https (a local
+/// fleet's fakes over http: the audit's M3). Method: a fragment of its
+/// own, whose secret names the fake's host; a fetch to the same fake by
+/// another name, and to a host it names over http; neither reaches
+/// anything, and each fails its step saying why.
+fn secret_hosts(s: &mut Suite, api: &Api, owner: &Keys, upstream: &Upstream) -> Result<()> {
+    let long = Duration::from_secs(40);
+    let (name, _) = jobs_fragment(s, api, owner, "secret-hosts", |_| {})?;
+    let r = set_secret(api, owner, &name, SECRET, &["127.0.0.1"])?;
+    anyhow::ensure!(r.status == 200, "secret setup: {r}");
+    let reached = upstream.hits("/data").len();
+    let other = upstream.url("/data").replace("127.0.0.1", "localhost");
+    let r = api.op(owner, &name, "digest", "other-host", json!({ "url": other }))?;
+    let elsewhere = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host the secret does not name fills nothing, and fails its step",
+        elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("may go to 127.0.0.1, not localhost")),
+        &elsewhere,
+    );
+    let r = set_secret(api, owner, &name, SECRET, &["127.0.0.1", "example.com"])?;
+    anyhow::ensure!(r.status == 200, "secret hosts: {r}");
+    let r = api.op(owner, &name, "digest", "cleartext", json!({ "url": "http://example.com/data" }))?;
+    let cleartext = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host it names, over http, fills nothing, and fails its step",
+        cleartext["status"] == "held" && cleartext["error"].as_str().is_some_and(|e| e.contains("https only")),
+        &cleartext,
+    );
+    s.ok("and neither reached anything", upstream.hits("/data").len() == reached, upstream.hits("/data").len() - reached);
+    Ok(())
 }
 
 /// Goal: a channel's run shows the record that started it only to a role

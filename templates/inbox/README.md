@@ -15,8 +15,8 @@ result live.
 - `add` is the mutation the job calls; it publishes each line to `feed`.
 - `site/index.html` re-runs `list` live as lines arrive.
 
-Post to it: `fragment inbox <name> --token <inbox token> --payload
-'{"text":"hello"}'` (the token is in `fragment status <name>`), or any
+Post to it: `FRAGMENT_INBOX_TOKEN=<inbox token> fragment inbox <name>
+--payload '{"text":"hello"}'` (the token is in `fragment status <name>`), or any
 webhook sender: `POST /api/f/<name>/inbox` with the token in
 `x-fragment-inbox-token` and a JSON body (`{"source", "payload"}`, or
 any JSON as the payload).
