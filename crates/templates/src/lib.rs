@@ -222,6 +222,8 @@ pub(crate) mod tests {
             assert!(t.files.windows(2).all(|w| w[0].path < w[1].path), "{}'s files are in path order", t.name);
             assert!(t.files.iter().all(|f| t.file(f.path) == Some(f)), "{}'s files are found by path", t.name);
             assert!(!t.files.iter().any(|f| f.path.starts_with("src/") || f.path.ends_with(".DS_Store")), "{} carries no sources", t.name);
+            // the cell commits each at its path (publish.rs `stamped`)
+            assert!(t.files.iter().all(|f| fragment_proto::RepoPath::parse(f.path).is_ok()), "{}'s files are at repo paths", t.name);
         }
         for f in SHELL {
             check(&format!("cell/shell/{}", f.path), f, &std::fs::read(repo().join("cell/shell").join(f.path)).unwrap());

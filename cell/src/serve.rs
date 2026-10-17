@@ -5,7 +5,8 @@
 //! see what follows the fragment's visibility:
 //! members always; on a `link` or `public` fragment, whoever holds the
 //! share link counts as a viewer (a `?view=` token sets a cookie on the
-//! fragment's origin); on a `public` fragment, everyone else holds the
+//! fragment's origin, and a page's navigation goes on without it); on a
+//! `public` fragment, everyone else holds the
 //! `public` floor. An unsigned browser calling an operation gets an
 //! anonymous principal: a random cookie whose hash names it. A browser
 //! signed in on this origin (`__signin`, the router's) is its person.
@@ -19,6 +20,7 @@
 //! and the app's own routes).
 
 use fragment_core::access::Purpose;
+use fragment_core::site::VIEW_COOKIE;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
 use fragment_templates::{blessed, File};
@@ -52,7 +54,6 @@ const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
 /// app that sent it would only get its own fragment's refusal page, which
 /// a redirect of its own gets it anyway.
 pub(crate) const REFUSAL: &str = "x-fragment-refusal";
-const VIEW_COOKIE: &str = "fragview";
 const ANON_COOKIE: &str = "fragment_anon";
 const VIEW_COOKIE_AGE_S: i64 = 7 * 24 * 3600;
 const ANON_COOKIE_AGE_S: i64 = 365 * 24 * 3600;
@@ -119,6 +120,28 @@ fn answers_someone(path: &str) -> bool {
     path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live")
 }
 
+/// A browser's navigation to a page: a GET or HEAD that its Fetch
+/// Metadata names one (`Sec-Fetch-Mode: navigate`, which no page's script
+/// sets) and whose `Accept` names HTML. A link unfurler sends no Fetch
+/// Metadata, so it reads the page, and its Open Graph tags, where it asked.
+fn page_navigation(req: &Request) -> CellResult<bool> {
+    let get = matches!(req.method(), Method::Get | Method::Head);
+    let navigate = req.headers().get("sec-fetch-mode")?.as_deref() == Some("navigate");
+    Ok(get && navigate && req.headers().get("accept")?.is_some_and(|a| a.contains("text/html")))
+}
+
+/// The answer to a navigation that brought the share link: its cookie, and
+/// on to the same path and query without `view` (`302`, never cached),
+/// on this origin (`site::way_on`).
+fn without_view(url: &url::Url, cookies: &[String]) -> CellResult<Response> {
+    let location = site::way_on(url.path(), url.query());
+    let mut resp = Response::empty()?.with_status(302);
+    let h = resp.headers_mut();
+    h.set("location", &location)?;
+    h.set("cache-control", "no-store")?;
+    with_cookies(resp, cookies)
+}
+
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
     for c in cookies {
         resp.headers_mut().append("set-cookie", c)?;
@@ -140,6 +163,13 @@ impl FragmentCell {
     }
 
     async fn answer(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
+        // A fragment's one service worker is the platform's: an app's
+        // would see every navigation on its scope before this origin does,
+        // a share link's `?view=` among them. A worker's script is asked
+        // for with `Service-Worker: script` (no page's code sets it).
+        if req.headers().get("service-worker")?.is_some() && rest != "__sw.js" {
+            return Err(CellError::new(ErrorCode::NotFound, "no service worker but the platform's (__sw.js) is served on a fragment's origin"));
+        }
         // the fragment's facts, read once for the whole request
         let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)
@@ -152,6 +182,15 @@ impl FragmentCell {
         let mut set = vec![];
         if via_query {
             set.push(origin.cookie(VIEW_COOKIE, &facts.view_token, VIEW_COOKIE_AGE_S));
+            // A page's navigation keeps the token in the cookie alone: it
+            // goes on to its URL without `view`, so the page's code never
+            // reads the token from its address, nor reports it (a card's
+            // errors; the audit's M2). A frame's goes on too, and opens
+            // nothing: no cookie of this origin counts in a frame (lib.rs
+            // `fetched`), so a share link is never framed.
+            if page_navigation(&req)? {
+                return without_view(&url, &set);
+            }
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
@@ -315,7 +354,8 @@ impl FragmentCell {
                 init.with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
             }
         }
-        let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+        // the share link's token is the platform's, never the app's to read
+        let query = url.query().and_then(site::query_without_view).map(|q| format!("?{q}")).unwrap_or_default();
         let target = format!("{}{path}{query}", self.cfg.canonical(&caller.url, &facts.name));
         facet.fetch(Request::new_with_init(&target, &init)?).await
     }

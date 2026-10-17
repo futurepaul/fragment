@@ -276,20 +276,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
 
-## A secret can go anywhere its fragment's code sends it
-
-- **Observed:** phase 2 slice D. `{{NAME}}` in a job's fetch header is
-  opened for any URL the job names. An editor cannot read a secret's
-  value, but can write a job that sends it to their own server.
-- **Risk:** editors are trusted with the fragment's code, so this is the
-  code's authority, not an escalation; it matters once people share
-  editing with others they trust less than their keys.
-- **First proof:** a fragment with a secret and an editor who is not its
-  owner.
-- **Delete when:** a secret can name the hosts it may be sent to
-  (`fragment secret set NAME --host api.example.com`), checked at the
-  egress point.
-
 ## Running runs are checked a few at a time
 
 - **Observed:** phase 2 slice D. A run whose Workflow ended without

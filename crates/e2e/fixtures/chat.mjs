@@ -75,6 +75,10 @@ export class App extends DurableObject {
       const role = request.headers.get("x-fragment-role");
       return new Response(`<p>${shout("hello")} ${who} as ${role} at ${url.pathname}</p>`, { headers: { "content-type": "text/html" } });
     }
+    // what the app is handed of its query (never the share link's token)
+    if (url.pathname.endsWith("/query")) {
+      return new Response(`query: ${url.search}`);
+    }
     if (url.pathname.endsWith("/echo") && request.method === "POST") {
       return new Response(`echo: ${await request.text()}`);
     }

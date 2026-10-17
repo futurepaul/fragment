@@ -8,6 +8,7 @@ use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
+use fragment_proto::{NotRepoPath, RepoPath};
 use serde_json::{json, Value};
 
 /// The fleet's code.storage org key (PKCS#8 PEM, P-256).
@@ -123,16 +124,29 @@ pub fn branch_head(v: &Value) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
-    pub path: String,
+    pub path: RepoPath,
     pub size: u64,
     pub mode: String,
     pub last_commit_sha: String,
 }
 
+/// One page of a tree listing: the blobs at repo paths, the paths that
+/// are not repo paths (refused, never an entry), and the next cursor.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TreePage {
+    pub entries: Vec<TreeEntry>,
+    /// A path the platform never writes (`valid_repo_path`): someone wrote
+    /// it to code.storage past the cell (a storage token's commit), and
+    /// nothing reads, indexes, or writes a file for it. Each reader says
+    /// so its own way.
+    pub refused: Vec<NotRepoPath>,
+    pub next: Option<String>,
+}
+
 /// `GET /api/repos/{repo}/files/metadata` → one page of blobs and the next cursor.
-pub fn tree_page(v: &Value) -> Result<(Vec<TreeEntry>, Option<String>), String> {
+pub fn tree_page(v: &Value) -> Result<TreePage, String> {
     let files = v["files"].as_array().ok_or("a tree listing has no files array")?;
-    let mut out = Vec::with_capacity(files.len());
+    let mut page = TreePage { entries: Vec::with_capacity(files.len()), ..TreePage::default() };
     for f in files {
         if f["type"].as_str().is_some_and(|t| t != "blob") {
             continue;
@@ -140,21 +154,25 @@ pub fn tree_page(v: &Value) -> Result<(Vec<TreeEntry>, Option<String>), String> 
         let (Some(path), Some(size), Some(last)) = (f["path"].as_str(), f["size"].as_u64(), f["last_commit_sha"].as_str()) else {
             return Err(format!("a tree entry is missing path, size, or last_commit_sha: {f}"));
         };
-        out.push(TreeEntry {
-            path: path.to_string(),
-            size,
-            mode: f["mode"].as_str().unwrap_or("100644").to_string(),
-            last_commit_sha: last.to_string(),
-        });
+        match RepoPath::parse(path) {
+            Ok(path) => page.entries.push(TreeEntry {
+                path,
+                size,
+                mode: f["mode"].as_str().unwrap_or("100644").to_string(),
+                last_commit_sha: last.to_string(),
+            }),
+            Err(refused) => page.refused.push(refused),
+        }
     }
     // A page that has more but names no cursor would end the listing
     // early, and a missing file reads as a deleted one: fail instead.
-    let next = match (v["has_more"].as_bool(), v["next_cursor"].as_str()) {
+    page.next = match (v["has_more"].as_bool(), v["next_cursor"].as_str()) {
         (Some(true), Some(c)) if !c.is_empty() => Some(c.to_string()),
         (Some(true), _) => return Err(format!("a tree listing has more pages but names no cursor: {}", v["next_cursor"])),
         _ => None,
     };
-    Ok((out, next))
+    assert!(page.entries.len() + page.refused.len() <= files.len(), "a page answers at most what it listed");
+    Ok(page)
 }
 
 /// Hex digits of the owner's digest a repo's name carries: 48 bits, so two
@@ -427,16 +445,25 @@ mod tests {
             {"path": "a.md", "size": 3, "mode": "100644", "type": "blob", "last_commit_sha": sha},
             {"path": "dir", "size": 0, "type": "tree", "last_commit_sha": sha}
         ], "has_more": true, "next_cursor": "c2"});
-        let (entries, next) = tree_page(&page).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "a.md");
-        assert_eq!(next.as_deref(), Some("c2"));
+        let listed = tree_page(&page).unwrap();
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(listed.entries[0].path.as_str(), "a.md");
+        assert_eq!(listed.next.as_deref(), Some("c2"));
+        // a path the platform never writes is refused, never an entry
+        let planted = json!({"files": [
+            {"path": "/Users/x/Library/LaunchAgents/a.plist", "size": 3, "type": "blob", "last_commit_sha": sha},
+            {"path": "../up.txt", "size": 3, "type": "blob", "last_commit_sha": sha},
+            {"path": "ok.txt", "size": 3, "type": "blob", "last_commit_sha": sha}
+        ]});
+        let listed = tree_page(&planted).unwrap();
+        assert_eq!(listed.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["ok.txt"]);
+        assert_eq!(listed.refused, [NotRepoPath("/Users/x/Library/LaunchAgents/a.plist".into()), NotRepoPath("../up.txt".into())]);
         assert!(tree_page(&json!({"files": [{"path": "x"}]})).is_err());
         // a size or last commit that is missing is refused, never read as 0 or ""
         assert!(tree_page(&json!({"files": [{"path": "x", "size": 1, "type": "blob"}]})).is_err());
         assert!(tree_page(&json!({"files": [{"path": "x", "last_commit_sha": sha, "type": "blob"}]})).is_err());
         // the last page ends the listing; a page with more and no cursor fails
-        assert_eq!(tree_page(&json!({"files": [], "has_more": false})).unwrap().1, None);
+        assert_eq!(tree_page(&json!({"files": [], "has_more": false})).unwrap().next, None);
         assert!(tree_page(&json!({"files": [], "has_more": true})).is_err());
         assert!(tree_page(&json!({"files": [], "has_more": true, "next_cursor": ""})).is_err());
         let repos = json!({"repos": [{"repo_name": "a", "url": "u-a"}, {"repo_name": "b", "url": "u-b"}], "has_more": true, "next_cursor": "c2"});

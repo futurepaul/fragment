@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use fragment_proto::{limits, valid_kind, valid_repo_path, ChannelDecl, BUILTIN_CHANNELS};
+use fragment_proto::{limits, valid_kind, ChannelDecl, RepoPath, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -59,7 +59,7 @@ pub enum Effect {
     /// A record appended to one of the app's declared channels.
     Record { channel: String, kind: String, body: Value },
     /// A file written to `main` (`None` removes it); a mutation's files are one commit.
-    File { path: String, bytes: Option<Vec<u8>> },
+    File { path: RepoPath, bytes: Option<Vec<u8>> },
     /// A web push to the subscriptions tagged `who` (`*`: all).
     Push { who: String, payload: Value },
 }
@@ -109,15 +109,13 @@ fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Eff
         Ok(Effect::Record { channel: channel.to_string(), kind: kind.to_string(), body: body.clone() })
     } else if obj.contains_key("file") {
         only(obj, &["file", "text", "base64"])?;
-        let path = string(obj, "file")?;
-        if !valid_repo_path(path) {
-            return Err(format!("{path:?} is not a file path (relative, no . or .. segments, at most {} bytes)", limits::PATH_MAX_BYTES));
-        }
+        let given = string(obj, "file")?;
+        let path = RepoPath::parse(given).map_err(|_| format!("{given:?} is not a file path (relative, no . or .. segments, at most {} bytes)", limits::PATH_MAX_BYTES))?;
         let bytes = FileContent::from_fields(obj)?.map(FileContent::into_bytes).transpose()?;
         if bytes.as_deref().is_some_and(|b| blob::parse(b).is_some()) {
             return Err(format!("{path}: an app does not write blob pointers"));
         }
-        Ok(Effect::File { path: path.to_string(), bytes })
+        Ok(Effect::File { path, bytes })
     } else if obj.contains_key("push") {
         only(obj, &["push", "payload"])?;
         let who = string(obj, "push")?;
@@ -192,9 +190,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got[0], Effect::Record { channel: "room".into(), kind: "said".into(), body: json!({ "text": "hi" }) });
-        assert_eq!(got[1], Effect::File { path: "notes/a.md".into(), bytes: Some(b"# A\n".to_vec()) });
-        assert_eq!(got[2], Effect::File { path: "b.bin".into(), bytes: Some(vec![0, 159, 146, 150]) });
-        assert_eq!(got[3], Effect::File { path: "gone.txt".into(), bytes: None });
+        let at = |p: &str| RepoPath::parse(p).unwrap();
+        assert_eq!(got[1], Effect::File { path: at("notes/a.md"), bytes: Some(b"# A\n".to_vec()) });
+        assert_eq!(got[2], Effect::File { path: at("b.bin"), bytes: Some(vec![0, 159, 146, 150]) });
+        assert_eq!(got[3], Effect::File { path: at("gone.txt"), bytes: None });
         assert_eq!(got[4], Effect::Push { who: "*".into(), payload: json!({ "title": "t" }) });
         assert!(decode(&json!([]), &declared()).unwrap().is_empty());
     }

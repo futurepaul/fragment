@@ -126,6 +126,37 @@ pub fn not_modified(if_none_match: &str, etag: &str) -> bool {
     if_none_match.trim() == "*" || if_none_match.split(',').any(|tag| opaque(tag) == wanted)
 }
 
+/// The share link's cookie on a fragment's origin: HttpOnly, so it is the
+/// one place a page's token is (`?view=` sets it and goes on without it).
+pub const VIEW_COOKIE: &str = "fragview";
+
+/// A query without its `view` pairs, each other pair as it came (not
+/// encoded again), or `None` when nothing is left: where a navigation that
+/// brought the share link goes on to, and what an app's `fetch` is handed,
+/// so no page's code reads the token from its address.
+pub fn query_without_view(query: &str) -> Option<String> {
+    // bounded by the query's length: one turn per `&`
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && url::form_urlencoded::parse(pair.as_bytes()).next().is_none_or(|(k, _)| k != "view"))
+        .collect();
+    let out = kept.join("&");
+    assert!(out.len() <= query.len(), "a query loses pairs, never gains them");
+    (!out.is_empty()).then_some(out)
+}
+
+/// Where a navigation that brought the share link goes on to (its
+/// `Location`): its path with one leading `/`, however many it came with
+/// (`//evil.example/` or `/\evil.example/` names another host to a
+/// browser), and its query without `view`.
+pub fn way_on(path: &str, query: Option<&str>) -> String {
+    let query = query.and_then(query_without_view).map(|q| format!("?{q}")).unwrap_or_default();
+    let location = format!("/{}{query}", path.trim_start_matches(['/', '\\']));
+    assert!(!location.starts_with("//") && !location.starts_with("/\\"), "the way on is a path on this origin, never another host");
+    assert!(location.split_once('?').is_none_or(|(_, q)| query_without_view(q).as_deref() == Some(q)), "the way on names no `view`");
+    location
+}
+
 /// One cookie's value from a `Cookie` header.
 pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     header.split(';').find_map(|pair| {
@@ -255,6 +286,34 @@ pub fn preview_svg(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a query keeps every pair but the share link's, as it came.
+    /// Method: `view` alone, among others, encoded, repeated, and names
+    /// that only look like it.
+    #[test]
+    fn the_share_links_token_leaves_a_query() {
+        assert_eq!(query_without_view("view=t0k3n"), None);
+        assert_eq!(query_without_view("view"), None);
+        assert_eq!(query_without_view("a=1&view=t0k3n&b=x%20y+z"), Some("a=1&b=x%20y+z".into()));
+        assert_eq!(query_without_view("vi%65w=t0k3n&q=1"), Some("q=1".into()), "a key is read decoded");
+        assert_eq!(query_without_view("view=a&view=b&x="), Some("x=".into()));
+        assert_eq!(query_without_view("views=1&preview=2&view_=3"), Some("views=1&preview=2&view_=3".into()));
+        assert_eq!(query_without_view("&&a=1&"), Some("a=1".into()));
+        assert_eq!(query_without_view(""), None);
+    }
+
+    /// Goal: the way on from a share link is a path on this origin, never
+    /// another host (an open redirect). Method: paths that a browser reads
+    /// as another host, kept as paths here.
+    #[test]
+    fn the_way_on_stays_on_its_origin() {
+        assert_eq!(way_on("/docs/", Some("q=1&view=t&b=2")), "/docs/?q=1&b=2");
+        assert_eq!(way_on("/", Some("view=t")), "/");
+        assert_eq!(way_on("//evil.example/", Some("view=t")), "/evil.example/");
+        assert_eq!(way_on("/\\evil.example/x", Some("view=t&a=1")), "/evil.example/x?a=1");
+        assert_eq!(way_on("///\\//x", None), "/x");
+        assert_eq!(way_on("", None), "/");
+    }
+
     use super::*;
 
     #[test]

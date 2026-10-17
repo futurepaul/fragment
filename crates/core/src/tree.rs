@@ -28,7 +28,7 @@ impl TreeDiff<'_> {
     /// Every path the move changed, as the change feed and file triggers
     /// see them: the upserts, then the removals.
     pub fn paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.upserts.iter().map(|e| e.path.clone()).collect();
+        let mut out: Vec<String> = self.upserts.iter().map(|e| e.path.to_string()).collect();
         out.extend(self.removed.iter().map(|p| p.to_string()));
         out
     }
@@ -40,7 +40,7 @@ impl TreeDiff<'_> {
 pub fn diff<'a>(prior: &'a BTreeMap<String, Indexed>, listing: &'a [TreeEntry]) -> TreeDiff<'a> {
     let upserts: Vec<&TreeEntry> = listing
         .iter()
-        .filter(|e| match prior.get(&e.path) {
+        .filter(|e| match prior.get(e.path.as_str()) {
             Some(held) => held.size != e.size || held.mode != e.mode || held.last_commit != e.last_commit_sha,
             None => true,
         })
@@ -57,11 +57,11 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, last_commit: &str) -> TreeEntry {
-        TreeEntry { path: path.into(), size: 10, mode: "100644".into(), last_commit_sha: last_commit.into() }
+        TreeEntry { path: fragment_proto::RepoPath::parse(path).unwrap(), size: 10, mode: "100644".into(), last_commit_sha: last_commit.into() }
     }
 
     fn held(listing: &[TreeEntry]) -> BTreeMap<String, Indexed> {
-        listing.iter().map(|e| (e.path.clone(), Indexed { size: e.size, mode: e.mode.clone(), last_commit: e.last_commit_sha.clone() })).collect()
+        listing.iter().map(|e| (e.path.to_string(), Indexed { size: e.size, mode: e.mode.clone(), last_commit: e.last_commit_sha.clone() })).collect()
     }
 
     /// Goal: a one-file commit on a large tree writes one row (the audit's
@@ -84,7 +84,7 @@ mod tests {
         let d = diff(&prior, &added);
         assert_eq!((d.upserts.len(), d.removed.len(), d.paths()), (1, 0, vec!["new.md".to_string()]));
 
-        let removed: Vec<TreeEntry> = before.iter().filter(|e| e.path != "data/4999.txt").cloned().collect();
+        let removed: Vec<TreeEntry> = before.iter().filter(|e| e.path.as_str() != "data/4999.txt").cloned().collect();
         let d = diff(&prior, &removed);
         assert_eq!((d.upserts.len(), d.removed), (0, vec!["data/4999.txt"]));
 

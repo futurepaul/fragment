@@ -189,8 +189,28 @@ role is their membership. Otherwise visibility decides: on a `public`
 fragment everyone holds `public`; on a `public` or `link` fragment the
 share link (`?view=<token>`, which sets an HttpOnly cookie on the
 fragment's origin) counts as `viewer`; a `members` fragment gives
-non-members nothing. A refusal is 401 for an unsigned caller and 403 for
-a signed one.
+non-members nothing. A page's navigation that brings the share link (a
+GET or HEAD that its Fetch Metadata names one, `Sec-Fetch-Mode:
+navigate`, whose `Accept` names HTML) is answered `302` (`no-store`)
+with the cookie, on to the same path (with one leading `/`, so never
+another host: `site::way_on`) and query without `view`
+(`site::query_without_view`), so the token is never in a URL a page's
+code reads (`location`, a card's error report): an editor's page code
+cannot capture it. Nor can an app's service worker, which would see a
+navigation before the origin does: a fragment's origin serves no worker
+script but the platform's `__sw.js` (a request with `Service-Worker:
+script` for any other path is 404), so an app registers none. A fetch,
+an image, or a socket that names `?view=` still counts, as its sender
+holds the token; an app's `fetch` is never handed `view`. A request with
+no Fetch Metadata (a link unfurler, a browser from before 2023) reads
+the page where it asked, so a share link's preview unfurls with its Open
+Graph tags; in such a browser alone the token stays in the page's URL. A
+frame's navigation goes on too and opens nothing, since `fragview` does
+not count in a frame (Which cookies count): a share link is never framed
+(no page but the platform's and the fragment's own may frame one anyway:
+`frame-ancestors`). A `?view=` that opens nothing goes nowhere: its page
+says the link has changed. A refusal is 401 for an unsigned caller and
+403 for a signed one.
 
 An agent's owner reads what the agent reads (FIN-11): someone who is not
 a member but owns an agent that is reads the fragment as a `viewer`
@@ -1044,8 +1064,8 @@ title opening its share sheet.
 | `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}`. Leaving `members` (for `link` or `public`) makes a new share link: one that stopped working when it was restricted stays dead (the event's `newLink`) |
 | `POST /api/f/{name}/rotate` | owner, or their agent for them | `{scopes?: [inbox, view]}` → `{inboxToken, viewToken, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md) |
-| `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts (on any port), over https (`fragment_core::secrets::may_fill`), in a request that sets no `Host`, `Forwarded`, or `X-Forwarded-Host` header (`ROUTING_HEADERS`). Its hosts change only with its value, so no editor widens where a value goes without holding it. They are its editors' to know: the `secret.set` event (every viewer reads the event log) and a refused fetch's error name no host. A secret set before secrets named hosts fills nowhere until set again |
+| `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
@@ -1059,7 +1079,7 @@ title opening its share sheet.
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
-| `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output` |
+| `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output`. A channel's run (`via: channel`) holds the record that started it, so for a role that may not read that channel (`channel_read_role`), and for everyone once the channel is no longer declared, its `input` and `error` (a job's thrown message may quote its input) are absent and it says `withheld: true`, in `GET runs` too; its `run.held` event and an auto-pause's reason, which every viewer reads, then say its error is withheld. Its `output` is the app's own answer, a viewer's to see: an app that copies a record into it (or into a child run's input) shows it to them |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
@@ -1307,9 +1327,10 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   given up: one `card.failed` event, and the card before stays.
 - **As a visitor without an account sees it.** The renderer has no
   session of anyone's: a `public` fragment is shot as anyone sees it, a
-  `link` fragment as anyone holding its share link sees it (the page's
-  URL carries `?view=`, as a link holder's does; the card goes only to
-  members, who already see that page), and a `members` fragment is not
+  `link` fragment as anyone holding its share link sees it (its token
+  set as the origin's HttpOnly `fragview` cookie over CDP before the page
+  opens, at its URL without `?view=`, as a link holder's page goes on to;
+  the card goes only to members, who already see that page), and a `members` fragment is not
   shot at all (`card.skipped`): a visitor would see only its refusal.
 - **What the page reports.** The shot enables CDP's `Runtime` and `Log`
   on the page and hears, as it loads and in the second after (no
@@ -1320,7 +1341,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   whether or not the page names one), and loads refused for security, a
   Content Security Policy's above all (`security`). It keeps the first
   10 and counts the rest (`dropped`), each `text` and `source` (the URL,
-  with its line and column when Chrome gives them) cut to 1 KiB. The try that
+  with its line and column when Chrome gives them) cut to 1 KiB, the
+  share link's token replaced by `[share link]` before the cut wherever a
+  page wrote it (`card::Heard::hiding`): every viewer reads the report. The try that
   ends a live's tries (its card made, or given up) having opened the page
   makes what it heard the page's report: status's `page`, `{live, at,
   errors, dropped}`, its `errors` empty when the page reported none. A
@@ -2002,7 +2025,10 @@ and the AI steps (`job.ai.*`), all above:
 - `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
   text(), json()}`: the app's one way out. `{{NAME}}` in a header value
   is the fragment's secret `NAME`, added by the platform at the egress
-  point; the app never holds it. http(s) only; loopback, private, and
+  point; the app never holds it. It is filled only toward one of the
+  hosts the secret names, over https (a dev fleet's local fakes over
+  http too); a fetch elsewhere fails its step, naming the secret and
+  the host. http(s) only; loopback, private, and
   `.internal` addresses are refused (and a Worker's fetch reaches only
   the public internet: a name with no public address fails the step); redirects are answered, not
   followed; a body of at most 256 KiB, a response of at most 1 MiB, 120
@@ -2080,7 +2106,8 @@ pending records are its runs that have not succeeded; at 1000 a post is
 
 CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 <name>`, `fragment replay <name> <run>`, `fragment pause|unpause <name>
-<op>`, `fragment inbox <name> --token T --payload JSON`.
+<op>`, `fragment inbox <name> --payload JSON` (the token from
+`FRAGMENT_INBOX_TOKEN`, else stdin, sent in `x-fragment-inbox-token`).
 
 ## Serving
 

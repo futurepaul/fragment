@@ -70,6 +70,10 @@ pub mod limits {
     pub const APP_DB_MAX_BYTES: u64 = 16 * 1024 * 1024;
     /// Secrets per fragment.
     pub const SECRETS_MAX: usize = 100;
+    /// Hosts one secret may go to (`fragment_core::secrets::may_fill`).
+    pub const SECRET_HOSTS_MAX: usize = 8;
+    /// A host a secret names: a DNS name's most.
+    pub const SECRET_HOST_MAX_BYTES: usize = 253;
     /// Members per fragment.
     pub const MEMBERS_MAX: usize = 1000;
     /// Invites waiting per fragment.
@@ -257,14 +261,107 @@ pub fn valid_secret_name(name: &str) -> bool {
 }
 
 /// A repo path the platform reads: relative, no `.` or `..` segments, no
-/// empty segments, no control bytes or backslashes, at most
+/// empty segments, no control bytes or backslashes, not beginning with a
+/// drive (`C:`, which Windows joins as another root), at most
 /// `PATH_MAX_BYTES` bytes of UTF-8.
 pub fn valid_repo_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
     !path.is_empty()
         && path.len() <= limits::PATH_MAX_BYTES
         && !path.starts_with('/')
+        && !drive
         && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
         && !path.bytes().any(|b| b < 0x20 || b == b'\\')
+}
+
+/// A repo path that passed `valid_repo_path`: `RepoPath::parse` is the
+/// only way to make one, so holding one is the proof. A path from outside
+/// (a listing, a request, a folder's scan) becomes one before anything
+/// reads, writes, or joins it, and `under` is the one join onto a local
+/// folder.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RepoPath(String);
+
+/// A path refused as a repo path (`valid_repo_path`), named as it came.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotRepoPath(pub String);
+
+impl std::fmt::Display for NotRepoPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} is not a repo path (relative; no `.`, `..`, or empty segments; no control bytes or backslashes; at most {} bytes)",
+            self.0,
+            limits::PATH_MAX_BYTES
+        )
+    }
+}
+
+impl std::error::Error for NotRepoPath {}
+
+impl RepoPath {
+    pub fn parse(path: &str) -> Result<RepoPath, NotRepoPath> {
+        if valid_repo_path(path) {
+            Ok(RepoPath(path.to_string()))
+        } else {
+            Err(NotRepoPath(path.to_string()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The path under `root`. A repo path is relative and every segment
+    /// is a name, so the join never replaces `root` (as an absolute path
+    /// would) or climbs out of it (as `..` would); both are asserted.
+    pub fn under(&self, root: &std::path::Path) -> std::path::PathBuf {
+        let joined = root.join(&self.0);
+        let rest = joined.strip_prefix(root).expect("a repo path joined onto a root stays under it");
+        assert!(rest.components().all(|c| matches!(c, std::path::Component::Normal(_))), "a repo path's segments are names");
+        joined
+    }
+}
+
+impl TryFrom<String> for RepoPath {
+    type Error = NotRepoPath;
+    fn try_from(path: String) -> Result<RepoPath, NotRepoPath> {
+        RepoPath::parse(&path)
+    }
+}
+
+impl From<RepoPath> for String {
+    fn from(path: RepoPath) -> String {
+        path.0
+    }
+}
+
+impl std::fmt::Display for RepoPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for RepoPath {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for RepoPath {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+// A map keyed by repo paths is read with a `&str`: the newtype hashes and
+// orders as its string does.
+impl std::borrow::Borrow<str> for RepoPath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
 }
 
 /// `valid_repo_path` for the app facet's in-app check (its `limits.js`,
@@ -273,6 +370,7 @@ pub fn valid_repo_path(path: &str) -> bool {
 /// unit of UTF-16.
 pub const VALID_REPO_PATH_JS: &str = r#"export function validRepoPath(path) {
   if (typeof path !== "string" || path.length === 0 || utf8Bytes(path) > PATH_MAX_BYTES || path.startsWith("/")) return false;
+  if (/^[A-Za-z]:/.test(path)) return false;
   if (!path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..")) return false;
   return !/[\x00-\x1f\\]/.test(path);
 }"#;
@@ -1182,6 +1280,33 @@ pub struct Rotated {
     pub rotated: Vec<String>,
 }
 
+/// `PUT /api/f/<name>/secrets/<KEY>` (editor): a secret's value and the
+/// hosts it may go to, always together. Its hosts change only with its
+/// value, so no editor widens where a value goes without holding it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutSecret {
+    pub value: String,
+    /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
+    /// (`fragment_core::secrets::secret_host`).
+    pub hosts: Vec<String>,
+}
+
+/// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
+/// where it may go. Values never leave.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretInfo {
+    pub name: String,
+    /// Empty for one set before secrets named hosts: it fills nowhere.
+    pub hosts: Vec<String>,
+}
+
+/// `GET /api/f/<name>/secrets` (editor), by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretList {
+    pub secrets: Vec<SecretInfo>,
+}
+
 /// `PUT /api/f/<name>/visibility` (owner)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1486,6 +1611,11 @@ pub struct Run {
     /// What its paid steps were charged on the ledger that paid (micro-dollars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
+    /// Its input and error are withheld from this reader: they may hold
+    /// the record that started it (`via: channel`), of a channel the
+    /// reader's role may not read, or one no longer declared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withheld: bool,
 }
 
 /// `GET /api/f/<name>/runs` (viewer): newest first, how many runs are in
@@ -1645,6 +1775,29 @@ mod tests {
         assert!(!valid_repo_path("/abs"));
         assert!(!valid_repo_path("a//b"));
         assert!(!valid_repo_path("a/./b"));
+    }
+
+    /// Goal: a `RepoPath` is made only of a valid repo path, from a string
+    /// or from JSON, and joining one never leaves its root. Method: each
+    /// refused shape by `parse` and by serde, then `under` for good paths.
+    #[test]
+    fn repo_path_is_made_only_of_a_valid_path() {
+        for good in ["site/index.html", "a", ".gitignore", "notes/2026/x y.md", "ünï/çode.txt", "a/C:x", "ab:c", "1:x"] {
+            let p = RepoPath::parse(good).expect(good);
+            assert_eq!(p.as_str(), good);
+            assert_eq!(serde_json::from_value::<RepoPath>(serde_json::json!(good)).unwrap(), p);
+            assert_eq!(serde_json::to_value(&p).unwrap(), serde_json::json!(good));
+        }
+        let long = "a".repeat(limits::PATH_MAX_BYTES + 1);
+        for bad in ["", "/tmp/x", "/", "../x", "a/../../x", "..", ".", "a/./b", "a//b", "a/", "a\\b", "..\\x", "a\nb", "a\0b", "C:/x", "c:x", "Z:", long.as_str()] {
+            assert_eq!(RepoPath::parse(bad), Err(NotRepoPath(bad.to_string())), "{bad:?}");
+            assert!(serde_json::from_value::<RepoPath>(serde_json::json!(bad)).is_err(), "{bad:?} from JSON");
+        }
+        assert!(RepoPath::parse(&"a".repeat(limits::PATH_MAX_BYTES)).is_ok(), "the longest is a path");
+
+        let root = std::path::Path::new("/sync/folder");
+        assert_eq!(RepoPath::parse("site/a.js").unwrap().under(root), std::path::PathBuf::from("/sync/folder/site/a.js"));
+        assert_eq!(RepoPath::parse(".gitignore").unwrap().under(root), std::path::PathBuf::from("/sync/folder/.gitignore"));
     }
 
     /// Goal: a label of `label_room` bytes makes a host label of exactly

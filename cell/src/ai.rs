@@ -251,6 +251,8 @@ impl FragmentCell {
     /// commit, past an app's write limit (256 KiB), so the two limits meet
     /// and an image between them is kept (bug 1).
     async fn store_media(&self, run: &RunRow, index: u32, path: &str, bytes: Vec<u8>) -> Result<Value, StepFail> {
+        // refused before any blob is stored for it
+        let target = fragment_proto::RepoPath::parse(path).map_err(|not| permanent(not.to_string()))?;
         let sha = blob::sha256_hex(&bytes);
         let size = bytes.len() as u64;
         let content = if bytes.len() >= blob::BLOB_MIN_BYTES {
@@ -262,7 +264,7 @@ impl FragmentCell {
         assert!(content.len() < blob::BLOB_MIN_BYTES, "what goes to git is under a blob's size");
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: generated {path}", run.op, run.id);
-        let writes = [FileWrite { path: path.to_string(), bytes: Some(content) }];
+        let writes = [FileWrite { path: target, bytes: Some(content) }];
         self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
         Ok(json!({ "path": path, "size": size, "sha256": sha }))
     }

@@ -652,6 +652,11 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a signed member is named to the app", r.text.contains(&api.identity(&owner)?) && r.text.contains("as owner"), &r);
     let r = api.call(Call { method: "POST", url: api.site_url(&name, "echo"), body: Some(b"ping".to_vec()), content_type: Some("text/plain"), ..Call::default() })?;
     s.ok("the app's routes take other methods", r.status == 200 && r.text == "echo: ping", &r);
+    let view = api.status(&owner, &name)?.body["viewToken"].as_str().unwrap_or("").to_string();
+    let r = api.page(&name, &format!("query?a=1&view={view}&b=2"), None)?;
+    s.ok("the app's fetch is handed its query without the share link's token", r.status == 200 && r.text == "query: ?a=1&b=2" && !view.is_empty(), &r);
+    let r = api.page(&name, &format!("query?view={view}"), None)?;
+    s.ok("and no query at all when the token was all of it", r.status == 200 && r.text == "query: ", &r);
     let r = api.page(&name, "missing", None)?;
     s.ok("the app answers its own 404s", r.status == 404 && r.text.contains("no such route"), &r);
     let r = api.page(&name, "__nothing", None)?;
@@ -942,7 +947,10 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let name = s.named(api, &owner, "todo-cap")?;
     let c = s.create(api, &owner, &name)?;
-    let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    let mut changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    // a worker the app would register: it would see every navigation on
+    // its scope, a share link's `?view=` among them, before the origin does
+    changes.push(("site/sw.js", Some(b"self.addEventListener('fetch', (e) => e.respondWith(fetch(e.request)));\n")));
     s.commit(&c, &changes);
     s.deploy(&c);
     for i in 1..=501 {
@@ -970,6 +978,21 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
 
     let a = chrome.open(&url)?;
     s.ok("the todo page loads and connects", chrome.until(&a, "document.getElementById('here')?.textContent === 'just you here'", wait), "");
+    let token = c["viewToken"].as_str().unwrap_or("-");
+    let seen = chrome.eval(&a, "JSON.stringify({ href: location.href, cookie: document.cookie, history: history.length })")?;
+    s.ok(
+        "the share link's page cannot read its token: its URL went on without `view`, and the cookie is HttpOnly",
+        seen.as_str().is_some_and(|v| !v.contains(token) && !v.contains("view=") && v.contains(&api.site_url(&name, ""))),
+        &seen,
+    );
+    let worker = |script: &str| format!("navigator.serviceWorker.register({script:?}, {{ scope: '/' }}).then(() => 'registered', (e) => 'refused: ' + e.name)");
+    let app = chrome.eval(&a, &worker("sw.js"))?;
+    let platform = chrome.eval(&a, &worker("__sw.js"))?;
+    s.ok(
+        "an app cannot register a service worker of its own (it would see a share link's navigation first); the platform's still registers",
+        app.as_str().is_some_and(|v| v.starts_with("refused")) && platform == "registered",
+        format!("app: {app}, platform: {platform}"),
+    );
     let b = chrome.open(&url)?;
     s.ok("a second page sees the first", chrome.until(&b, "document.getElementById('here').textContent === 'you and 1 other here'", wait), "");
     s.ok("and the first sees the second", chrome.until(&a, "document.getElementById('here').textContent === 'you and 1 other here'", wait), "");

@@ -15,13 +15,15 @@ result live.
 - `add` is the mutation the job calls; it publishes each line to `feed`.
 - `site/index.html` re-runs `list` live as lines arrive.
 
-Post to it: `fragment inbox <name> --token <inbox token> --payload
-'{"text":"hello"}'` (the token is in `fragment status <name>`), or any
+Post to it: `FRAGMENT_INBOX_TOKEN=<inbox token> fragment inbox <name>
+--payload '{"text":"hello"}'` (the token is in `fragment status <name>`), or any
 webhook sender: `POST /api/f/<name>/inbox` with the token in
 `x-fragment-inbox-token` and a JSON body (`{"source", "payload"}`, or
 any JSON as the payload).
 
 A job reaches the network only through `job.fetch`; to call an API with
-a key, store it (`fragment secret set <name> API_KEY`) and write
+a key, store it with the host it may go to (`fragment secret set <name>
+API_KEY --to api.example.com`) and write
 `headers: { authorization: "Bearer {{API_KEY}}" }`: the platform adds
-it on the way out, and the app never holds it.
+it on the way out, toward that host over https alone, and the app never
+holds it.

@@ -92,6 +92,11 @@ pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit
     Ok((name, c))
 }
 
+/// Sets the fixture's `API_KEY` to `value`, for `hosts`.
+pub(super) fn set_secret(api: &Api, keys: &Keys, name: &str, value: &str, hosts: &[&str]) -> Result<Reply> {
+    api.signed(keys, "PUT", &format!("/api/f/{name}/secrets/API_KEY"), Some(&json!({ "value": value, "hosts": hosts })))
+}
+
 fn run(api: &Api, keys: &Keys, name: &str, id: i64) -> Result<Reply> {
     api.signed(keys, "GET", &format!("/api/f/{name}/runs/{id}"), None)
 }
@@ -189,13 +194,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
-    api.call(Call {
-        method: "PUT",
-        url: format!("{}/api/f/{name}/secrets/API_KEY", api.base),
-        body: Some(SECRET.as_bytes().to_vec()),
-        keys: Some(&owner),
-        ..Call::default()
-    })?;
+    let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
+    anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
 
     // a job is started by a call, and a second call with its id is the same run
@@ -419,7 +419,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &files);
     s.deploy(&c);
     let token = c["inboxToken"].as_str().unwrap_or("").to_string();
-    s.cli(api, &home, &["inbox", &tpl, "--token", &token, "--payload", r#"{"text":"hello from the cli"}"#]);
+    let sent = s.cli_with_env(api, &home, &["inbox", &tpl, "--payload", r#"{"text":"hello from the cli"}"#], &[("FRAGMENT_INBOX_TOKEN", &token)]);
+    s.ok("fragment inbox takes its token from the environment", sent.status.success(), String::from_utf8_lossy(&sent.stderr));
     inbox(api, &tpl, &token, &json!({ "source": "e2e", "payload": { "url": upstream.url("/page") } }), None)?;
     let mut list = Value::Null;
     let arrived = s.eventually(long, || {
@@ -432,6 +433,115 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         arrived && texts.contains(&"hello from the cli") && texts.contains(&"A page to title (200)"),
         &list,
     );
+    secret_hosts(s, api, &owner, &upstream)?;
+    channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a secret goes only to the hosts it names, over https (a local
+/// fleet's fakes over http: the audit's M3). Method: a fragment of its
+/// own, whose secret names the fake's host; a fetch to the same fake by
+/// another name, and to a host it names over http; neither reaches
+/// anything, and each fails its step saying why.
+fn secret_hosts(s: &mut Suite, api: &Api, owner: &Keys, upstream: &Upstream) -> Result<()> {
+    let long = Duration::from_secs(40);
+    let (name, _) = jobs_fragment(s, api, owner, "secret-hosts", |_| {})?;
+    let r = set_secret(api, owner, &name, SECRET, &["127.0.0.1"])?;
+    anyhow::ensure!(r.status == 200, "secret setup: {r}");
+    let reached = upstream.hits("/data").len();
+    let other = upstream.url("/data").replace("127.0.0.1", "localhost");
+    let r = api.op(owner, &name, "digest", "other-host", json!({ "url": other }))?;
+    let elsewhere = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host the secret does not name fills nothing, and fails its step, naming no host (a viewer reads it)",
+        elsewhere["status"] == "held"
+            && elsewhere["error"].as_str().is_some_and(|e| e.contains("may not go to this request's host") && !e.contains("127.0.0.1") && !e.contains("localhost")),
+        &elsewhere,
+    );
+    let r = api.op(owner, &name, "digest", "host-header", json!({ "url": upstream.url("/data"), "headers": { "Host": "evil.example" } }))?;
+    let rerouted = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch that carries a secret and names another host in a header fills nothing, and fails its step",
+        rerouted["status"] == "held" && rerouted["error"].as_str().is_some_and(|e| e.to_ascii_lowercase().contains("sets no host header")),
+        &rerouted,
+    );
+    let r = set_secret(api, owner, &name, SECRET, &["127.0.0.1", "example.com"])?;
+    anyhow::ensure!(r.status == 200, "secret hosts: {r}");
+    let r = api.op(owner, &name, "digest", "cleartext", json!({ "url": "http://example.com/data" }))?;
+    let cleartext = settle(api, owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch toward a host it names, over http, fills nothing, and fails its step",
+        cleartext["status"] == "held" && cleartext["error"].as_str().is_some_and(|e| e.contains("https only")),
+        &cleartext,
+    );
+    s.ok("and neither reached anything", upstream.hits("/data").len() == reached, upstream.hits("/data").len() - reached);
+    Ok(())
+}
+
+/// Goal: a channel's run shows the record that started it only to a role
+/// that may read the channel (the audit's M1: the runs ledger showed an
+/// editor-read channel's records to every viewer). Method: `alarms` read
+/// by editors, its trigger's run read by a viewer and by an editor; then
+/// the app deployed without the channel, when it shows to no one.
+fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let viewer = api.person()?;
+    let editor = api.person()?;
+    let (name, c) = jobs_fragment(s, api, owner, "gated", |m| m["channels"]["alarms"] = json!({ "read": "editor" }))?;
+    for (who, role) in [(&viewer, "viewer"), (&editor, "editor")] {
+        api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+    }
+    api.op(owner, &name, "raise", "gated-1", json!({}))?;
+    let mut id = 0;
+    s.eventually(Duration::from_secs(40), || {
+        id = runs(api, owner, &name, "&op=boom").first().and_then(|r| r["id"].as_i64()).unwrap_or(0);
+        id > 0
+    });
+    // `boom` throws: its error, as its input, may hold what the record said
+    let held = settle(api, owner, &name, id, &["held"], Duration::from_secs(40));
+    let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/channels/alarms"), None)?;
+    s.ok("a viewer may not read the editors' channel", r.status == 403, &r);
+    let as_viewer = run(api, &viewer, &name, id)?;
+    s.ok(
+        "a viewer reads that channel's run without its record or its error, marked withheld",
+        as_viewer.status == 200
+            && as_viewer.body["via"] == "channel"
+            && as_viewer.body["trigger"] == "alarms"
+            && as_viewer.body.get("input").is_none()
+            && as_viewer.body.get("error").is_none()
+            && as_viewer.body["withheld"] == true
+            && held["status"] == "held",
+        format!("{as_viewer} | {held}"),
+    );
+    let listed = runs(api, &viewer, &name, "&op=boom");
+    s.ok(
+        "and the runs list withholds its error from a viewer too",
+        listed.first().is_some_and(|r| r["id"] == id && r.get("error").is_none() && r["withheld"] == true),
+        json!(listed),
+    );
+    let said: Vec<Value> = events(api, &viewer, &name).into_iter().filter(|e| e["kind"] == "run.held" && e["data"]["run"] == id).collect();
+    s.ok(
+        "the event log, a viewer's, says it was held, not why",
+        said.len() == 1 && said[0]["summary"].as_str().is_some_and(|t| t.contains("withheld") && !t.contains("boom\"") && !t.contains("Error: boom")),
+        json!(said),
+    );
+    let as_editor = run(api, &editor, &name, id)?;
+    s.ok(
+        "an editor reads it with the record and its error",
+        as_editor.body["input"]["channel"] == "alarms"
+            && as_editor.body["input"]["record"]["body"] == json!({ "raised": true })
+            && as_editor.body["error"].as_str().is_some_and(|e| e.contains("boom"))
+            && as_editor.body.get("withheld").is_none(),
+        &as_editor,
+    );
+    let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
+    if let Some(channels) = without["channels"].as_object_mut() {
+        channels.remove("alarms");
+    }
+    if let Some(triggers) = without["triggers"].as_array_mut() {
+        triggers.retain(|t| t["channel"] != "alarms");
+    }
+    ship(s, &c, JOBS_APP, without.to_string().as_bytes());
+    let gone = run(api, &editor, &name, id)?;
+    s.ok("with its channel gone, no one reads a run's record", gone.status == 200 && gone.body.get("input").is_none() && gone.body["withheld"] == true, &gone);
     Ok(())
 }
 

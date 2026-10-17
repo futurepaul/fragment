@@ -301,7 +301,12 @@ the wipe never removes it, as it removes the keys of whom it wipes.
   adds the credential on the way out: a job's `job.fetch` names a secret
   as `{{NAME}}` in a header, and the supervisor opens it only as the
   request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
-  point). `job.ai.*` steps name no key: text goes through the model route
+  point), and only toward a host the secret names, over https
+  (`fragment_core::secrets::may_fill`; `secret_hosts`, beside
+  `secrets`). Its hosts are set with its value and only with it, so an
+  editor, who may set and list secrets but never read one, cannot send
+  a value someone else set anywhere they did not mean it to go: the
+  code's authority ends at the secret's hosts. `job.ai.*` steps name no key: text goes through the model route
   and images through the Worker's AI binding (cell/src/ai.rs, models.rs),
   and the platform adds a model's key where one is needed (below).
 - **Agents in cells** call models through the platform's model route

@@ -28,6 +28,20 @@ fn private_v6(ip: Ipv6Addr) -> bool {
 
 const LOCAL_SUFFIXES: [&str; 5] = ["localhost", "internal", "local", "flycast", "localdomain"];
 
+/// Whether a URL's host is on the fleet's own networks, or names none.
+pub fn local(url: &Url) -> bool {
+    match url.host() {
+        None => true,
+        Some(Host::Ipv4(ip)) => private_v4(ip),
+        Some(Host::Ipv6(ip)) => private_v6(ip),
+        Some(Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            // a bare name (no dot) resolves inside whatever network the node is on
+            !d.contains('.') || LOCAL_SUFFIXES.iter().any(|s| d == *s || d.ends_with(&format!(".{s}"))) || d.parse::<IpAddr>().is_ok()
+        }
+    }
+}
+
 /// The URL a job may fetch, or why not.
 pub fn check(raw: &str, allow_local: bool) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
@@ -37,17 +51,10 @@ pub fn check(raw: &str, allow_local: bool) -> Result<Url, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("credentials in the URL are refused; send them in a header".into());
     }
-    let local = match url.host() {
-        None => return Err("the URL has no host".into()),
-        Some(Host::Ipv4(ip)) => private_v4(ip),
-        Some(Host::Ipv6(ip)) => private_v6(ip),
-        Some(Host::Domain(d)) => {
-            let d = d.trim_end_matches('.').to_ascii_lowercase();
-            // a bare name (no dot) resolves inside whatever network the node is on
-            !d.contains('.') || LOCAL_SUFFIXES.iter().any(|s| d == *s || d.ends_with(&format!(".{s}"))) || d.parse::<IpAddr>().is_ok()
-        }
-    };
-    if local && !allow_local {
+    if url.host().is_none() {
+        return Err("the URL has no host".into());
+    }
+    if local(&url) && !allow_local {
         return Err(format!("{} is on a private network; jobs reach public addresses only", url.host_str().unwrap_or("")));
     }
     Ok(url)

@@ -12,8 +12,8 @@ use fragment_core::ended::{kept_error, Failure};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
-use serde_json::Value;
-use worker::{AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response, ResponseBody};
+use serde_json::{json, Value};
+use worker::{console_warn, AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response, ResponseBody};
 
 use crate::config::CodeStorageConfig;
 use crate::error::{CellError, CellResult};
@@ -315,9 +315,14 @@ impl<'a> Cs<'a> {
             if status != 200 {
                 return Err(upstream("tree", status, v.to_string().as_bytes()));
             }
-            let (entries, next) = core_cs::tree_page(&v).map_err(|e| upstream("tree", status, e.as_bytes()))?;
-            out.extend(entries);
-            match next {
+            let page = core_cs::tree_page(&v).map_err(|e| upstream("tree", status, e.as_bytes()))?;
+            // a path the cell never writes, committed past it with a storage
+            // token: nothing indexes, serves, or triggers on it
+            for refused in &page.refused {
+                console_warn!("{}", json!({ "event": "tree.refused", "repo": repo, "at": sha, "message": refused.to_string() }));
+            }
+            out.extend(page.entries);
+            match page.next {
                 Some(c) => cursor = Some(c),
                 None => return Ok(out),
             }

@@ -88,9 +88,17 @@ impl FragmentCell {
     }
 
     /// The channels its people search, as installed now: those every
-    /// member may read. Every list's row names them (members.rs `flush_index`).
+    /// member may read (`channel_read_role`). Every list's row names them
+    /// (members.rs `flush_index`).
     pub(crate) fn searched_channels(&self) -> CellResult<Vec<String>> {
-        Ok(self.declared_channels()?.into_iter().filter(|(_, d)| searched(d.read)).map(|(c, _)| c).collect())
+        let mut out = vec![];
+        // bounded by the manifest's channels
+        for (channel, _) in self.declared_channels()? {
+            if searched(self.channel_read_role(&channel)?) {
+                out.push(channel);
+            }
+        }
+        Ok(out)
     }
 
     /// Fences search to the channels searched now, when they changed since

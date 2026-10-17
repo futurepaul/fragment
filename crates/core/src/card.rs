@@ -117,15 +117,25 @@ pub fn visitor(kind: FragmentKind, visibility: Visibility) -> Result<Visitor, Sk
     }
 }
 
-/// The page the renderer opens: the fragment's front page on its own
-/// origin (`scheme://host[:port]`), with its share link for a link holder.
-pub fn page_url(origin: &str, visitor: Visitor, view_token: &str) -> String {
+/// What the renderer opens: the fragment's front page on its own origin,
+/// and for a link holder the share link's token, which it sets as that
+/// origin's `fragview` cookie first (`site::VIEW_COOKIE`). Never
+/// `?view=`, which the page's code could read, and report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Visit {
+    pub url: String,
+    pub view_token: Option<String>,
+}
+
+/// The visit a shot of `visitor` makes to `origin` (`scheme://host[:port]`).
+pub fn visit(origin: &str, visitor: Visitor, view_token: &str) -> Visit {
     assert!(!origin.ends_with('/'), "an origin has no path: {origin}");
+    let url = format!("{origin}/");
     match visitor {
-        Visitor::Anyone => format!("{origin}/"),
+        Visitor::Anyone => Visit { url, view_token: None },
         Visitor::LinkHolder => {
-            assert!(!view_token.is_empty() && view_token.bytes().all(|b| b.is_ascii_alphanumeric()), "a view token is URL-safe");
-            format!("{origin}/?view={view_token}")
+            assert!(!view_token.is_empty() && view_token.bytes().all(|b| b.is_ascii_alphanumeric()), "a view token is a cookie's value as it is");
+            Visit { url, view_token: Some(view_token.to_string()) }
         }
     }
 }
@@ -192,9 +202,25 @@ pub fn valid_live(s: &str) -> bool {
 pub struct Heard {
     pub errors: Vec<PageError>,
     pub dropped: u32,
+    /// The share link's token, when the shot holds it: taken out of all
+    /// it keeps (`hiding`).
+    hidden: Option<String>,
 }
 
+/// What a report says where the share link's token was.
+pub const HIDDEN_TOKEN: &str = "[share link]";
+
 impl Heard {
+    /// What a shot that holds `view_token` (a link holder's) hears: the
+    /// token taken out of every text and source it keeps, whatever the
+    /// page logs, since every viewer reads the report (`status.page`, the
+    /// `page.errors` event) and the token is its owner's alone. The shot
+    /// never puts it in the page's URL; this is the second guard.
+    pub fn hiding(view_token: Option<&str>) -> Heard {
+        assert!(view_token.is_none_or(|t| !t.is_empty()), "a token hidden is a token");
+        Heard { hidden: view_token.map(str::to_string), ..Heard::default() }
+    }
+
     /// A message from the page's target, kept if it is one of the page's
     /// errors: `Runtime.exceptionThrown`, `Runtime.consoleAPICalled` of an
     /// error or a failed assert, `Log.entryAdded` of an error from the
@@ -227,13 +253,22 @@ impl Heard {
         self.keep(kind, &text, source.as_deref());
     }
 
-    /// One error, cut to size; past `ERRORS_MAX`, only counted.
+    /// One error, the token taken out and then cut to size (so no cut
+    /// leaves part of it); past `ERRORS_MAX`, only counted.
     pub fn keep(&mut self, kind: PageErrorKind, text: &str, source: Option<&str>) {
         if self.errors.len() >= ERRORS_MAX {
             self.dropped = self.dropped.saturating_add(1);
             return;
         }
-        self.errors.push(PageError { kind, text: cut(text), source: source.map(cut) });
+        let hide = |s: &str| match &self.hidden {
+            Some(token) => s.replace(token.as_str(), HIDDEN_TOKEN),
+            None => s.to_string(),
+        };
+        let error = PageError { kind, text: cut(&hide(text)), source: source.map(|s| cut(&hide(s))) };
+        if let Some(token) = &self.hidden {
+            assert!(!error.text.contains(token.as_str()) && !error.source.as_deref().is_some_and(|s| s.contains(token.as_str())), "a kept error holds no token");
+        }
+        self.errors.push(error);
     }
 }
 
@@ -745,8 +780,12 @@ mod tests {
             assert_eq!(visitor(kind, Link), Ok(Visitor::LinkHolder));
             assert_eq!(visitor(kind, Members), Err(Skip::MembersOnly));
         }
-        assert_eq!(page_url("https://todo--ann.fragment.boats", Visitor::Anyone, "t0k"), "https://todo--ann.fragment.boats/");
-        assert_eq!(page_url("http://todo--ann.fragment.localhost:8790", Visitor::LinkHolder, "t0k3n"), "http://todo--ann.fragment.localhost:8790/?view=t0k3n");
+        assert_eq!(visit("https://todo--ann.fragment.boats", Visitor::Anyone, "t0k"), Visit { url: "https://todo--ann.fragment.boats/".into(), view_token: None });
+        // a link holder's token goes in the cookie, never the URL the page reads
+        assert_eq!(
+            visit("http://todo--ann.fragment.localhost:8790", Visitor::LinkHolder, "t0k3n"),
+            Visit { url: "http://todo--ann.fragment.localhost:8790/".into(), view_token: Some("t0k3n".into()) }
+        );
     }
 
     /// A JPEG header of `w` × `h`: SOI, then SOF0.
@@ -836,6 +875,35 @@ mod tests {
         assert_eq!(quiet, Heard::default(), "only errors are heard");
     }
 
+    /// Goal: a link holder's shot reports no token, whatever the page logs
+    /// or throws (the audit's M2: `console.error(location.href)`, or an
+    /// uncaught error whose source is the page's URL). Method: the token
+    /// in a console error's text, an exception's source, a network
+    /// error's URL, and one long enough to be cut where the token is.
+    #[test]
+    fn a_link_holders_report_holds_no_token() {
+        use serde_json::json;
+        let token = "a1b2c3d4e5f6a7b8c9d0e1f2";
+        let page = format!("http://a--ann.fragment.localhost:8790/?view={token}");
+        let mut h = Heard::hiding(Some(token));
+        h.hear(&json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": page }],
+            "stackTrace": { "callFrames": [{ "url": page, "lineNumber": 0, "columnNumber": 0 }] } } }));
+        h.hear(&json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "url": page, "lineNumber": 1, "columnNumber": 2,
+            "exception": { "type": "object", "description": format!("Error: at {page}") } } } }));
+        h.hear(&json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "network", "level": "error", "text": format!("GET {page} 500"), "url": page } } }));
+        h.keep(PageErrorKind::Console, &format!("{}{token}", "x".repeat(ERROR_BYTES_MAX - 4)), None);
+        assert_eq!(h.errors.len(), 4);
+        for e in &h.errors {
+            assert!(!e.text.contains(token) && !e.source.as_deref().unwrap_or("").contains(token), "{e:?}");
+            assert!(!e.text.contains(&token[..12]), "no part of it: {e:?}");
+        }
+        assert_eq!(h.errors[0].text, format!("http://a--ann.fragment.localhost:8790/?view={HIDDEN_TOKEN}"));
+        assert_eq!(h.errors[1].source.as_deref(), Some(format!("http://a--ann.fragment.localhost:8790/?view={HIDDEN_TOKEN}:2:3").as_str()));
+        let mut anyone = Heard::hiding(None);
+        anyone.keep(PageErrorKind::Console, &page, None);
+        assert_eq!(anyone.errors[0].text, page, "a shot that holds no token hides nothing");
+    }
+
     /// Goal: what a shot keeps of the page's errors is bounded: the first
     /// `ERRORS_MAX` (the rest counted), each text and source cut to
     /// `ERROR_BYTES_MAX` on a character, no control character but a
@@ -878,7 +946,7 @@ mod tests {
     /// heard.
     #[test]
     fn the_report_is_the_ending_tries() {
-        let boom = || Heard { errors: vec![error(PageErrorKind::Exception, "Error: boom", None)], dropped: 0 };
+        let boom = || Heard { errors: vec![error(PageErrorKind::Exception, "Error: boom", None)], ..Heard::default() };
         let mut c = Cards::default();
         c.want(A, T0).unwrap();
         let s = shoot(&mut c, T0);

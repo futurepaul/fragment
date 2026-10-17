@@ -13,6 +13,7 @@ use crate::api::CodedError;
 use crate::codestorage::{Author, Change, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
 use fragment_core::blob::sha256_hex;
 use fragment_core::codestorage::TreeEntry;
+use fragment_proto::{NotRepoPath, RepoPath};
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -115,8 +116,10 @@ pub struct SyncState {
     #[serde(default)]
     pub repo: Option<String>,
     /// by path, in order: the journal serializes the same for the same
-    /// state, so an unchanged one is recognized and not written again
-    pub files: BTreeMap<String, FileState>,
+    /// state, so an unchanged one is recognized and not written again. A
+    /// key that is not a repo path makes the journal unreadable, so it
+    /// starts fresh.
+    pub files: BTreeMap<RepoPath, FileState>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -137,6 +140,11 @@ pub struct Report {
     pub deleted_local: Vec<String>,
     pub withheld_deletions: Vec<String>,
     pub conflicts: Vec<String>,
+    /// paths in the folder or the repo that are not repo paths
+    /// (`valid_repo_path`): never pushed, pulled, or deleted. One in the
+    /// repo was written past the cell (a storage token's commit); its
+    /// absolute or `..` path would have landed outside the folder.
+    pub refused: Vec<String>,
     pub mass_delete_guard: Option<usize>,
     pub scan: ScanStats,
     pub mode: String,
@@ -181,6 +189,12 @@ impl Report {
         p("deleted locally", &self.deleted_local);
         if !self.withheld_deletions.is_empty() {
             println!("  deletions withheld (pull mode; --prune to apply): {})", self.withheld_deletions.len());
+        }
+        if !self.refused.is_empty() {
+            println!("  REFUSED ({}): not repo paths, so nothing was written, pushed, or deleted for them", self.refused.len());
+            for f in &self.refused {
+                println!("    {f}");
+            }
         }
         if !self.conflicts.is_empty() {
             println!("  CONFLICTS ({}): local keeps yours; the remote copy is saved beside it (.conflict-…)", self.conflicts.len());
@@ -280,8 +294,9 @@ fn save_state(dir: &Path, state: &SyncState, before: Option<&[u8]>) -> Result<()
 pub struct Local {
     state: SyncState,
     journal: Option<Vec<u8>>,
-    files: BTreeMap<String, LocalFile>,
+    files: BTreeMap<RepoPath, LocalFile>,
     stats: ScanStats,
+    refused: Vec<NotRepoPath>,
 }
 
 impl Local {
@@ -298,8 +313,8 @@ impl Local {
 /// network.
 pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let (files, stats) = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
-    Ok(Local { state, journal, files, stats })
+    let Scan { files, stats, refused } = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
+    Ok(Local { state, journal, files, stats, refused })
 }
 
 pub(crate) struct LocalFile {
@@ -334,17 +349,31 @@ pub fn syncable(rel: &str) -> bool {
     true
 }
 
-/// `path` relative to `root`, `/`-separated ("" for the root itself).
+/// `path` relative to `root`, its segments joined by `/` ("" for the root
+/// itself). A segment keeps its name whole: a Unix file named `a\b` is
+/// one segment with a backslash (no repo path), never `a/b`.
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).map(|rel| rel.to_string_lossy().replace('\\', "/")).unwrap_or_default()
+    let Ok(rel) = path.strip_prefix(root) else { return String::new() };
+    let segments: Vec<std::borrow::Cow<'_, str>> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    segments.join("/")
+}
+
+/// A folder's scan: its files by repo path, and the names in it that are
+/// not repo paths (a backslash, a control byte, too long), which sync
+/// refuses rather than commit a path the platform never reads.
+pub struct Scan {
+    pub(crate) files: BTreeMap<RepoPath, LocalFile>,
+    pub stats: ScanStats,
+    pub refused: Vec<NotRepoPath>,
 }
 
 /// Walk the folder. With state, a size+mtime match adopts the cached hash
 /// (O(changes)); with verify, everything is read and hashed. Takes the
 /// `syncable` paths, never following symlinks, and honors .gitignore
 /// exactly when git would (only inside a repo).
-pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<(BTreeMap<String, LocalFile>, ScanStats)> {
+pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<Scan> {
     let mut out = BTreeMap::new();
+    let mut refused = Vec::new();
     let mut stats = ScanStats::default();
     let root = dir.to_path_buf();
     let walker = ignore::WalkBuilder::new(dir)
@@ -362,7 +391,16 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let rel = relative(dir, entry.path());
+        // a name that is not UTF-8 reads lossily, as no file is named
+        let lossy = relative(dir, entry.path());
+        let parsed = if entry.path().to_str().is_some() { RepoPath::parse(&lossy) } else { Err(NotRepoPath(lossy)) };
+        let rel = match parsed {
+            Ok(rel) => rel,
+            Err(not) => {
+                refused.push(not);
+                continue;
+            }
+        };
         let md = fs::metadata(entry.path())?;
         let size = md.len();
         let mtime_ns = md
@@ -380,24 +418,24 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         stats.files += 1;
         out.insert(rel, LocalFile { sha256: sha, size, mtime_ns });
     }
-    Ok((out, stats))
+    Ok(Scan { files: out, stats, refused })
 }
 
 /// What one push pass wants to do, computed purely from (local, remote,
 /// state) so CAS retries can rebuild it against a fresh listing.
 struct PushPlan {
-    upserts: Vec<String>,
-    deletes: Vec<String>, // paths to delete remotely (deleted locally)
-    conflicts: Vec<String>,
+    upserts: Vec<RepoPath>,
+    deletes: Vec<RepoPath>, // paths to delete remotely (deleted locally)
+    conflicts: Vec<RepoPath>,
 }
 
 fn push_plan(
-    local: &BTreeMap<String, LocalFile>,
-    remote: &HashMap<String, TreeEntry>,
+    local: &BTreeMap<RepoPath, LocalFile>,
+    remote: &HashMap<RepoPath, TreeEntry>,
     state: &SyncState,
 ) -> PushPlan {
     let mut plan = PushPlan { upserts: Vec::new(), deletes: Vec::new(), conflicts: Vec::new() };
-    let mut paths: Vec<&String> = local.keys().chain(remote.keys()).collect();
+    let mut paths: Vec<&RepoPath> = local.keys().chain(remote.keys()).collect();
     paths.sort();
     paths.dedup();
     for path in paths {
@@ -492,7 +530,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
 /// `storage`: a command's own, or a watcher's held one. It does not nudge
 /// the cell's pins: a caller whose pass `landed` calls `refresh_pins`.
 pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
-    let Local { mut state, journal, files: local, stats } = local;
+    let Local { mut state, journal, files: local, stats, refused } = local;
     // World binding (`SyncState::host`): refuse before any read or write.
     let bound_host = client.host.trim_end_matches('/').to_string();
     match (&state.host, &state.repo) {
@@ -510,17 +548,21 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     let author = Author::writer(&opts.writer_id);
     let blobs = crate::blobs::Blobs::new(client, name);
     let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
-    let mut recorded: HashSet<String> = HashSet::new();
+    let mut recorded: HashSet<RepoPath> = HashSet::new();
 
     // main as this pass sees it: read once, reused by the push's first
     // attempt and by the pull, and after our own commit derived rather than
     // listed again
     assert!(!opts.live || opts.mode == Mode::Pull, "live is only pulled");
     let mut listing = list_branch(storage, if opts.live { LIVE } else { MAIN })?;
+    report.refused = refused.iter().chain(&listing.refused).map(|not| not.to_string()).collect();
+    for not in &listing.refused {
+        eprintln!("warning: refusing the repo's {not}: nothing is written for it");
+    }
     adopt_identical(storage, &local, &listing, &mut state)?;
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
-    let local_delete_candidates: Vec<String> = state
+    let local_delete_candidates: Vec<RepoPath> = state
         .files
         .iter()
         .filter(|(p, st)| {
@@ -568,8 +610,8 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
             }
             let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
             for p in &plan.upserts {
-                let bytes = fs::read(dir.join(p)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
-                let bytes = blobs.store(bytes).map_err(|e| SyncError::blob(p, e))?;
+                let bytes = fs::read(p.under(dir)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
+                let bytes = blobs.store(bytes).map_err(|e| SyncError::blob(p.as_str(), e))?;
                 changes.push(Change::Upsert { path: p.clone(), bytes });
             }
             for p in &plan.deletes {
@@ -590,11 +632,11 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                                 FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: tip.clone() },
                             );
                         }
-                        report.pushed.push(p.clone());
+                        report.pushed.push(p.to_string());
                     }
                     for p in &plan.deletes {
                         state.files.remove(p);
-                        report.deleted_remote.push(p.clone());
+                        report.deleted_remote.push(p.to_string());
                     }
                     listing = listing.landed(tip, &changes);
                     report.landed = true;
@@ -654,7 +696,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
             }
         }
         // remote deletions: known before, gone now, local copy untouched
-        let mut paths: Vec<String> = state.files.keys().cloned().collect();
+        let mut paths: Vec<RepoPath> = state.files.keys().cloned().collect();
         paths.sort();
         for p in paths {
             if listing.files.contains_key(&p) {
@@ -668,12 +710,16 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 // keep the state row: dropping it here made the deletion
                 // unknowable, so a later --prune pass could never apply it.
                 // Re-reporting each pass is honest — it is still pending.
-                report.withheld_deletions.push(p.clone());
+                report.withheld_deletions.push(p.to_string());
                 continue;
             }
-            fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
+            let Some(target) = place(dir, &p)? else {
+                report.refused.push(through_link(&p));
+                continue;
+            };
+            fs::remove_file(target).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
             state.files.remove(&p);
-            report.deleted_local.push(p.clone());
+            report.deleted_local.push(p.to_string());
         }
     }
 
@@ -696,7 +742,9 @@ pub fn refresh_pins(client: &Client, name: &str) {
 /// at the head's commit, not at `main`, so the two always agree).
 struct Listing {
     head: Option<String>,
-    files: HashMap<String, TreeEntry>,
+    files: HashMap<RepoPath, TreeEntry>,
+    /// the paths at the head that are not repo paths: never pulled
+    refused: Vec<NotRepoPath>,
 }
 
 impl Listing {
@@ -723,7 +771,7 @@ impl Listing {
             }
         }
         assert!(self.files.values().all(|f| !f.last_commit_sha.is_empty()), "every entry names its commit");
-        Listing { head: Some(tip), files: self.files }
+        Listing { head: Some(tip), files: self.files, refused: self.refused }
     }
 }
 
@@ -736,10 +784,11 @@ fn list_main(storage: &CodeStorage) -> Result<Listing, SyncError> {
 
 fn list_branch(storage: &CodeStorage, branch: &str) -> Result<Listing, SyncError> {
     let Some(head) = storage.branch_head(branch)? else {
-        return Ok(Listing { head: None, files: HashMap::new() }); // empty repo: everything local is new
+        return Ok(Listing { head: None, files: HashMap::new(), refused: vec![] }); // empty repo: everything local is new
     };
-    let files = storage.list_files(&head)?.into_iter().filter(|f| syncable(&f.path)).map(|f| (f.path.clone(), f)).collect();
-    Ok(Listing { head: Some(head), files })
+    let listed = storage.list_files(&head)?;
+    let files = listed.entries.into_iter().filter(|f| syncable(f.path.as_str())).map(|f| (f.path.clone(), f)).collect();
+    Ok(Listing { head: Some(head), files, refused: listed.refused })
 }
 
 /// Brings the journal up to what both sides already agree on, before any
@@ -756,7 +805,7 @@ fn list_branch(storage: &CodeStorage, branch: &str) -> Result<Listing, SyncError
 ///   the mass-deletion guard's known files forever.
 fn adopt_identical(
     storage: &CodeStorage,
-    local: &BTreeMap<String, LocalFile>,
+    local: &BTreeMap<RepoPath, LocalFile>,
     listing: &Listing,
     state: &mut SyncState,
 ) -> Result<(), SyncError> {
@@ -768,7 +817,7 @@ fn adopt_identical(
         if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
             continue;
         }
-        let bytes = storage.read_file(p, listing.rev())?;
+        let bytes = storage.read_file(p.as_str(), listing.rev())?;
         if crate::blobs::content_sha(&bytes) == lf.sha256 {
             state.files.insert(
                 p.clone(),
@@ -789,7 +838,7 @@ fn adopt_identical(
 /// that adopts silently.
 fn record_conflicts(
     ctx: ConflictCtx<'_>,
-    conflicts: &[String],
+    conflicts: &[RepoPath],
 ) -> Result<(), SyncError> {
     for path in conflicts {
         // by path, not by report line: `a.md`'s line starts with "a", so
@@ -800,23 +849,36 @@ fn record_conflicts(
         }
         let rf_commit = ctx.listing.files.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let (stem, ext) = match path.rfind('.') {
-            Some(i) if !path[i..].contains('/') => (&path[..i], &path[i..]),
-            _ => (path.as_str(), ""),
+        let text = path.as_str();
+        let (stem, ext) = match text.rfind('.') {
+            Some(i) if !text[i..].contains('/') => (&text[..i], &text[i..]),
+            _ => (text, ""),
         };
-        let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id);
-        let git_bytes = ctx.storage.read_file(path, ctx.listing.rev());
+        // a path near the limit has no room for the copy's mark: then the
+        // remote bytes stay in git history, and the report says so
+        let conflict_path = RepoPath::parse(&format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id));
+        let git_bytes = ctx.storage.read_file(text, ctx.listing.rev());
         let same = match (&git_bytes, ctx.local.get(path)) {
             (Ok(bytes), Some(lf)) => crate::blobs::content_sha(bytes) == lf.sha256,
             _ => false,
         };
         if !same {
-            match git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b)) {
-                Ok(bytes) => {
-                    atomic_write(&ctx.dir.join(&conflict_path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-                    ctx.report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
+            let place = match &conflict_path {
+                Ok(copy) => place(ctx.dir, copy)?,
+                Err(_) => None,
+            };
+            match (conflict_path, place, git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b))) {
+                (Ok(copy), Some(target), Ok(bytes)) => {
+                    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+                    ctx.report.conflicts.push(format!("{path} (remote copy: {copy})"));
                 }
-                Err(e) => {
+                (Ok(copy), None, _) => {
+                    ctx.report.conflicts.push(format!("{path} (remote copy not saved: {})", through_link(&copy)));
+                }
+                (Err(not), _, _) => {
+                    ctx.report.conflicts.push(format!("{path} (remote copy not saved, its name {not}; it is in git history)"));
+                }
+                (_, _, Err(e)) => {
                     ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
                 }
             }
@@ -838,26 +900,63 @@ struct ConflictCtx<'a> {
     storage: &'a CodeStorage,
     blobs: &'a crate::blobs::Blobs<'a>,
     dir: &'a Path,
-    local: &'a BTreeMap<String, LocalFile>,
+    local: &'a BTreeMap<RepoPath, LocalFile>,
     listing: &'a Listing,
     state: &'a mut SyncState,
     report: &'a mut Report,
     /// the paths recorded as conflicts this pass (the push plan and the
     /// pull can both name one)
-    recorded: &'a mut HashSet<String>,
+    recorded: &'a mut HashSet<RepoPath>,
     writer_id: &'a str,
+}
+
+/// Where a repo path is in the folder, for a write or a delete, or `None`
+/// when a folder on its way is a symlink. `RepoPath::under` keeps the path
+/// under `dir` as a string; a symlinked folder (`cfg` linked to
+/// `~/.config`) would carry a write outside all the same. The scan never
+/// follows one, so sync never writes or deletes through one either. `dir`
+/// itself may be a link: it is the person's to choose.
+fn place(dir: &Path, path: &RepoPath) -> Result<Option<PathBuf>, SyncError> {
+    let segments: Vec<&str> = path.as_str().split('/').collect();
+    let mut at = dir.to_path_buf();
+    // the folders on the way, every segment but the file's own: a repo
+    // path's few (at most PATH_MAX_BYTES / 2)
+    for seg in &segments[..segments.len() - 1] {
+        at.push(seg);
+        match fs::symlink_metadata(&at) {
+            Ok(md) if md.file_type().is_symlink() => return Ok(None),
+            Ok(_) => {}
+            // the rest of the way is made fresh, as folders
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(SyncError::Io(format!("{}: {e}", at.display()))),
+        }
+    }
+    let target = path.under(dir);
+    assert!(target.starts_with(&at), "the way checked leads to the target");
+    Ok(Some(target))
+}
+
+/// What sync says of a path it would write or delete through a symlink.
+fn through_link(path: &RepoPath) -> String {
+    format!("{path}: a folder on its way in this folder is a symlink, and sync writes and deletes nothing through one")
 }
 
 /// Fetches one file at `rev` (the listing's commit) into the folder.
 fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path, rev: &str, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
-    let (path, commit) = (entry.path.as_str(), entry.last_commit_sha.as_str());
-    let bytes = blobs.resolve(storage.read_file(path, rev)?).map_err(|e| SyncError::blob(path, e))?;
+    let (path, commit) = (&entry.path, entry.last_commit_sha.as_str());
+    // the one join of a listing's path onto the folder, checked before
+    // anything is fetched for it
+    let Some(target) = place(dir, path)? else {
+        report.refused.push(through_link(path));
+        return Ok(());
+    };
+    let bytes = blobs.resolve(storage.read_file(path.as_str(), rev)?).map_err(|e| SyncError::blob(path.as_str(), e))?;
     let sha = sha256_hex(&bytes);
-    atomic_write(&dir.join(path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-    let md = fs::metadata(dir.join(path)).map_err(|e| SyncError::Io(e.to_string()))?;
+    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+    let md = fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))?;
     let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
     state.files.insert(
-        path.to_string(),
+        path.clone(),
         FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() },
     );
     report.pulled.push(path.to_string());
@@ -868,15 +967,16 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path,
 /// (no shortcuts — every remote file is fetched and hashed).
 pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let (local, stats) = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
+    let Scan { files: local, stats, refused } = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;
+    drift.refused = refused.iter().chain(&listing.refused).map(|not| not.to_string()).collect();
     for p in listing.files.keys() {
         match local.get(p) {
             None => drift.conflicts.push(format!("{p}: in the repo, missing locally")),
             Some(lf) => {
-                let bytes = storage.read_file(p, listing.rev())?;
+                let bytes = storage.read_file(p.as_str(), listing.rev())?;
                 if crate::blobs::content_sha(&bytes) != lf.sha256 {
                     drift.conflicts.push(format!("{p}: content differs from the repo"));
                 }
@@ -905,6 +1005,10 @@ mod tests {
         SyncOptions { mode, writer_id: "deadbeef".into(), ..Default::default() }
     }
 
+    fn rp(path: &str) -> RepoPath {
+        RepoPath::parse(path).unwrap()
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("fragment-sync3-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
@@ -917,12 +1021,12 @@ mod tests {
         let dir = tmpdir("scan");
         fs::create_dir_all(dir.join("site")).unwrap();
         fs::write(dir.join("site/index.html"), b"hi").unwrap();
-        let (l1, s1) = scan_local(&dir, None, false).unwrap();
+        let Scan { files: l1, stats: s1, .. } = scan_local(&dir, None, false).unwrap();
         assert_eq!(s1.hashed, 1);
         let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: BTreeMap::new() };
         let lf = l1.get("site/index.html").unwrap();
-        st.files.insert("site/index.html".into(), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
-        let (_, s2) = scan_local(&dir, Some(&st), false).unwrap();
+        st.files.insert(rp("site/index.html"), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
+        let s2 = scan_local(&dir, Some(&st), false).unwrap().stats;
         assert_eq!(s2.hashed, 0);
         fs::remove_dir_all(&dir).ok();
     }
@@ -963,7 +1067,7 @@ mod tests {
             fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
             fs::write(src.join(rel), bytes).unwrap();
         }
-        let (scanned, _) = scan_local(&src, None, true).unwrap();
+        let scanned = scan_local(&src, None, true).unwrap().files;
         assert_eq!(scanned.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
         fs::remove_dir_all(&src).ok();
     }
@@ -984,6 +1088,69 @@ mod tests {
         assert!(second.deleted_remote.is_empty() && second.pushed.is_empty(), "{second:?}");
         assert_eq!(mock.paths("t--k3x9", "main"), [".env.example", "a.md", "node_modules/x.js"]);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a listing's path that is not a repo path writes nothing,
+    /// anywhere (the audit's M5: an absolute path joined onto the folder
+    /// replaced it). Method: a repo seeded past the cell, as a storage
+    /// token's commit is, with an absolute path to a file outside the
+    /// folder, a `..` path, and a good file; a mirror pass, then another.
+    /// A file in the folder whose name is no repo path is not pushed.
+    #[test]
+    fn a_listing_path_that_is_not_a_repo_path_writes_nothing() {
+        let mock = crate::mockcs::start();
+        let outside = tmpdir("escape-target");
+        let planted = outside.join("planted.txt");
+        let planted_path = planted.to_string_lossy().to_string();
+        assert!(planted_path.starts_with('/'));
+        mock.seed_repo("t--k3x9", &[("a.md", b"a"), (planted_path.as_str(), b"owned"), ("../escaped.txt", b"owned"), ("sub/../../up.txt", b"owned")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("escape");
+        fs::write(dir.join("back\\slash.md"), b"local").unwrap();
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(first.pulled, ["a.md"]);
+        assert!(first.pushed.is_empty(), "a name that is no repo path is not pushed: {first:?}");
+        assert!(!planted.exists(), "nothing is written at an absolute path");
+        assert!(!dir.join("../escaped.txt").exists() && !dir.join("../up.txt").exists(), "nothing is written above the folder");
+        let mut refused = first.refused.clone();
+        refused.sort();
+        assert_eq!(refused.len(), 4, "{refused:?}");
+        for (named, path) in refused.iter().zip(["\"../escaped.txt\"", &format!("{planted_path:?}"), "\"back\\\\slash.md\"", "\"sub/../../up.txt\""]) {
+            assert!(named.starts_with(path), "{named} names {path}");
+        }
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(second.pulled.is_empty() && second.pushed.is_empty() && second.deleted_remote.is_empty(), "{second:?}");
+        assert_eq!(second.refused.len(), 4, "refused again, each pass");
+        assert_eq!(mock.paths("t--k3x9", "main").len(), 4, "the repo is left as it was");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    /// Goal: a repo path is never written through a symlinked folder in
+    /// the sync folder (a folder `cfg` linked to `~/.config`: the path is
+    /// under the folder as a string, its bytes would not be). Method: a
+    /// link to a folder outside, a repo file beneath it and one beside it;
+    /// a mirror pass, then another.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_through_a_symlinked_folder() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"a"), ("cfg/fish/config.fish", b"owned"), ("cfg/top.txt", b"owned")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("through-link");
+        let outside = tmpdir("through-link-target");
+        std::os::unix::fs::symlink(&outside, dir.join("cfg")).unwrap();
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(first.pulled, ["a.md"], "{first:?}");
+        assert!(!outside.join("fish/config.fish").exists() && !outside.join("top.txt").exists(), "nothing is written through the link");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0, "the folder outside is left as it was");
+        assert_eq!(first.refused.len(), 2, "{:?}", first.refused);
+        assert!(first.refused.iter().all(|r| r.contains("is a symlink")), "{:?}", first.refused);
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(second.pushed.is_empty() && second.deleted_remote.is_empty() && second.pulled.is_empty(), "the repo's files are left alone: {second:?}");
+        assert_eq!(mock.paths("t--k3x9", "main").len(), 3);
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 
     #[test]
@@ -1151,14 +1318,14 @@ mod tests {
         let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
         let before = list_main(&storage).unwrap();
         let changes = [
-            Change::Upsert { path: "a.txt".into(), bytes: b"a, longer now".to_vec() },
-            Change::Upsert { path: "c/new.txt".into(), bytes: b"new".to_vec() },
-            Change::Delete { path: "b.txt".into() },
+            Change::Upsert { path: rp("a.txt"), bytes: b"a, longer now".to_vec() },
+            Change::Upsert { path: rp("c/new.txt"), bytes: b"new".to_vec() },
+            Change::Delete { path: rp("b.txt") },
         ];
         let tip = storage.commit(before.head.as_deref(), "edit", &Author::writer("deadbeef"), &changes).unwrap();
         let derived = before.landed(tip, &changes);
         let listed = list_main(&storage).unwrap();
-        let entries = |l: &Listing| -> BTreeMap<String, (u64, String, String)> {
+        let entries = |l: &Listing| -> BTreeMap<RepoPath, (u64, String, String)> {
             l.files.values().map(|f| (f.path.clone(), (f.size, f.mode.clone(), f.last_commit_sha.clone()))).collect()
         };
         assert_eq!(derived.head, listed.head);
@@ -1421,13 +1588,13 @@ mod tests {
         let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t--k3x9");
         let listing = list_main(&storage).unwrap();
-        let (local, _) = scan_local(&dir, None, true).unwrap();
+        let local = scan_local(&dir, None, true).unwrap().files;
         let mut state = SyncState { schema_version: 3, name: "t--k3x9".into(), host: None, repo: None, files: BTreeMap::new() };
         let mut report = Report::default();
         let mut recorded = HashSet::new();
         for path in ["a.md", "a", "a.md", "a"] {
             let ctx = ConflictCtx { storage: &storage, blobs: &blobs, dir: &dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: "deadbeef" };
-            record_conflicts(ctx, &[path.to_string()]).unwrap();
+            record_conflicts(ctx, &[rp(path)]).unwrap();
         }
         assert_eq!(report.conflicts.len(), 2, "each path once: {:?}", report.conflicts);
         assert!(report.conflicts[0].starts_with("a.md (remote copy: a.conflict-"), "{:?}", report.conflicts);

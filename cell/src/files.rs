@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use fragment_core::codestorage::{commit_pack, FileChange};
 use fragment_core::effects::FileContent;
 use fragment_core::{blob, npub};
-use fragment_proto::{limits, valid_repo_path, ErrorCode};
+use fragment_proto::{limits, ErrorCode, RepoPath};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -33,7 +33,9 @@ const WRITE_ATTEMPTS: usize = 5;
 pub(crate) const WRITES_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
 
 pub(crate) struct FileWrite {
-    pub path: String,
+    /// A repo path (`RepoPath`): each source of a write parses its own,
+    /// so no commit is handed a path the platform never reads.
+    pub path: RepoPath,
     /// `None` removes the file.
     pub bytes: Option<Vec<u8>>,
 }
@@ -107,11 +109,6 @@ impl FragmentCell {
         if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
             return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
         }
-        for w in writes {
-            if !valid_repo_path(&w.path) {
-                return Err(CellError::invalid(format!("{:?} is not a file path (relative, no . or .. segments)", w.path)));
-            }
-        }
         let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let (author, email) = author(principal);
@@ -129,8 +126,8 @@ impl FragmentCell {
             let changes: Vec<FileChange> = writes
                 .iter()
                 .map(|w| match &w.bytes {
-                    Some(b) => FileChange::Upsert { path: &w.path, bytes: b },
-                    None => FileChange::Delete { path: &w.path },
+                    Some(b) => FileChange::Upsert { path: w.path.as_str(), bytes: b },
+                    None => FileChange::Delete { path: w.path.as_str() },
                 })
                 .collect();
             let pack = commit_pack("main", head.as_deref(), message, (&author, &email), &changes);

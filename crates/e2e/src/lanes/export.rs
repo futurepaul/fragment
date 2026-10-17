@@ -131,7 +131,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let member = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/members/{bob_id}"), Some(&json!({ "role": "viewer" })))?;
     let invitee = format!("export-invitee-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(&paul, "POST", &format!("/api/f/{app_name}/invites"), Some(&json!({ "email": invitee, "role": "editor" })))?;
-    let secret = api.call(Call { method: "PUT", url: format!("{}/api/f/{app_name}/secrets/API_KEY", api.base), body: Some(SECRET.as_bytes().to_vec()), keys: Some(&paul), ..Call::default() })?;
+    let secret = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/secrets/API_KEY"), Some(&json!({ "value": SECRET, "hosts": ["api.example.com"] })))?;
     let status = api.status(&paul, &app_name)?;
     let tokens = [status.body["viewToken"].as_str().unwrap_or("").to_string(), status.body["inboxToken"].as_str().unwrap_or("").to_string()];
     s.ok(
