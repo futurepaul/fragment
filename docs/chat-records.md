@@ -589,7 +589,8 @@ Standalone chats leave the shortcut to the browser.
 another of the owner's agents (`fragment ask <agent> …` in a terminal,
 or Hermes' `message_agent`) is its own card, out of its turn's steps
 card: "Asked <name>", where its model runs when the shell's roster says
-(`runsOn`: "<model> · outside the platform", or "On the platform"),
+(`runsOn`: "<model> · <provider>", its title saying that is outside
+the platform and what it is sent goes there, or "On the platform"),
 what the step says it was sent (cut where its arguments were; each
 `[PLACEHOLDER]` marked), and how it goes: working while the step runs,
 or while the roster says that agent works and this is the chat's newest
@@ -603,9 +604,10 @@ word's edge, so `[SISTER_NAME]` and `snake_case` read as written.
 
 **A chat led outside the platform says so.** When the shell's roster
 says the chat's lead runs on its owner's own provider (`runsOn: {on:
-"own", model}`), the composer's note reads "<model> · outside the
-platform", its title saying what goes there: what the person sends in
-this chat goes to that provider, with no agent of theirs taking their
+"own", model, provider}`), the composer's note reads "<model> ·
+<provider>", its title saying what goes there: what the person sends in
+this chat goes to that provider, outside the platform, with no agent of
+theirs taking their
 private things out first (decision 62, proposed). Only on a note no
 other line holds (signing in, read-only, setup).
 

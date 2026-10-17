@@ -710,13 +710,16 @@ const otherChatsOf = (a) => {
 
 // Where each agent's model calls go, as its agent.json says (the
 // agents-finite skill's convention: a `model` of its owner's own provider
-// runs outside the platform), read at most once a RUNS_ON_EVERY_MS per
-// agent: the team's menu and the chats' roster say it.
+// runs outside the platform, through that provider), read at most once a
+// RUNS_ON_EVERY_MS per agent: the team's rows and menus and the chats'
+// roster say it, the provider by its name for people.
 const RUNS_ON_EVERY_MS = 60_000;
 const runsOn = new Map(); // fragment -> { on: "platform" } | { on: "own", provider, model }
 const runsOnAt = new Map(); // fragment -> when it was last read
-// `anthropic/claude-sonnet-5.5` as a person reads it: "Claude Sonnet 5.5"
-const modelName = (id) => id.split("/").pop().split("-").map((w) => /^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+// `anthropic/claude-sonnet-5.5` as a person reads it: "Claude Sonnet 5.5";
+// `deepseek/deepseek-v4.1-flash`, "DeepSeek V4.1 Flash"
+const MODEL_WORDS = { deepseek: "DeepSeek", gpt: "GPT", glm: "GLM", oss: "OSS", ai: "AI" };
+const modelName = (id) => id.split("/").pop().split("-").map((w) => MODEL_WORDS[w.toLowerCase()] ?? (/^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(" ");
 async function readRunsOn() {
   const due = [...state.agents.values()].filter((a) => !(Date.now() - (runsOnAt.get(a.fragment) ?? 0) < RUNS_ON_EVERY_MS));
   if (!due.length) return;
@@ -724,14 +727,14 @@ async function readRunsOn() {
   const read = await Promise.all(due.map((a) => api("GET", `/api/f/${seg(a.fragment)}/file?path=agent.json`).catch(() => null)));
   due.forEach((a, i) => {
     const m = read[i]?.model;
-    runsOn.set(a.fragment, typeof m?.provider === "string" && typeof m?.id === "string" ? { on: "own", provider: m.provider, model: modelName(m.id) } : { on: "platform" });
+    runsOn.set(a.fragment, typeof m?.provider === "string" && typeof m?.id === "string" ? { on: "own", provider: providerName(m.provider), model: modelName(m.id) } : { on: "platform" });
   });
   renderChats();
   rosterChanged();
 }
 const whereItRuns = (a) => {
   const r = runsOn.get(a.fragment);
-  return r?.on === "own" ? `${r.model} · outside the platform` : r ? "On the platform's models" : "";
+  return r?.on === "own" ? `${r.model} · ${r.provider}, outside the platform` : r ? "On the platform's models" : "";
 };
 
 // Who of the team is working: a turn it started on one of its chats'
@@ -879,9 +882,9 @@ function teamRow(a, active, open) {
   if (where?.on === "own") {
     const out = el("span", "team-outside");
     out.innerHTML = svg("globe");
-    out.title = `${where.model} · outside the platform`;
+    out.title = `${where.model} · ${where.provider}, outside the platform`;
     go.append(out);
-    said.push(`on ${where.model}, outside the platform`);
+    said.push(`on ${where.model} through ${where.provider}, outside the platform`);
   }
   if (working) {
     go.append(el("span", "team-working", "Working"));

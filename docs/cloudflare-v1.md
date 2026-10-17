@@ -1228,8 +1228,10 @@ these other providers."
       Their own chats and the hand-offs among the person's agents leave
       the person's list. Talking to a teammate directly skips the default
       agent's care, so a chat whose lead runs outside the platform says
-      so by its composer ("<model> · outside the platform"). In a chat, each hand-off is a card: who was asked,
-      "<model> · outside the platform" when it is, what it was sent with
+      so by its composer ("<model> · <provider>", the provider its calls
+      go through: "DeepSeek V4.1 Flash · OpenRouter"). In a chat, each
+      hand-off is a card: who was asked, "<model> · <provider>" when it
+      is outside the platform, what it was sent with
       its placeholders marked, working or done, and "See the hand-off",
       which opens the chat it went to beside it (docs/api.md, The shell;
       docs/chat-records.md, The page). A hand-off the default agent only

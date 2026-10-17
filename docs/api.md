@@ -2489,7 +2489,7 @@ alone), then its hand-offs (`fragment ask`'s pairs, "Hand-offs from
 hand-offs count none: its agents' talk, which the one agent reports),
 and a globe
 when its model runs outside the platform (its `agent.json`: the
-platform's models, or "<model> · outside the platform"); its ⋯ says
+platform's models, or "<model> · <provider>, outside the platform"); its ⋯ says
 where, and offers its hand-offs, "Ask <agent> to change it" (put in the
 one agent's chat's composer, not sent), its screen, and its profile. Their chats (a
 teammate's own chat, `<label>-chat`, any other of the person's with it
@@ -2579,8 +2579,10 @@ each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
 `starting`, `awake`, `sleeping` or `wont_wake`; absent before the shell
 has read it); `runsOn` where its model calls go, `{on: "platform"}` or
-`{on: "own", model}` (a model of its owner's own provider, outside the
-platform, as its `agent.json` says), and `working: true` while it works
+`{on: "own", model, provider}` (a model of its owner's own provider,
+outside the platform, as its `agent.json` says; `model` and `provider`
+by their names for people: "DeepSeek V4.1 Flash", "OpenRouter"), and
+`working: true` while it works
 (decision 62, proposed). A frame may ask `{fragment: "open-handoff",
 identity, via}` for one of them: the shell opens the chat a hand-off to
 it went to beside the frame, and answers nothing. `via: "ask"` (`fragment

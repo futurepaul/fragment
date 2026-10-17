@@ -248,12 +248,17 @@ const time = (at) => new Date(at).toLocaleTimeString([], { hour: "numeric", minu
 const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 /// Where an agent's model calls go, as the shell's roster says it
 /// (decision 62, proposed): the platform's models, or a model of its
-/// owner's own provider, outside the platform; none when it says neither.
+/// owner's own provider (by its name for people), outside the platform;
+/// none when it says neither.
 function runsOnOf(v) {
   if (v?.on === "platform") return { on: "platform" };
-  if (v?.on === "own" && typeof v.model === "string" && v.model.length <= 80) return { on: "own", model: v.model };
+  if (v?.on === "own" && typeof v.model === "string" && v.model.length <= 80 && typeof v.provider === "string" && v.provider.length <= 40) return { on: "own", model: v.model, provider: v.provider };
   return null;
 }
+// what a person reads of a model outside the platform: the model, and the
+// provider its calls go through
+const ownTag = (r) => `${r.model} · ${r.provider}`;
+const ownSays = (who, r) => `${who} runs on ${r.model} through ${r.provider}, outside the platform: what it is sent goes to ${r.provider}.`;
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 function size(bytes) {
@@ -1031,7 +1036,7 @@ export function mount(root) {
     }
     if (note.childNodes.length && !ours) return;
     const r = first ? state.roster.find((x) => x.identity === first)?.runsOn : null;
-    const text = canPost() && !setupHolds() && r?.on === "own" ? `${r.model} · outside the platform` : "";
+    const text = canPost() && !setupHolds() && r?.on === "own" ? ownTag(r) : "";
     if (ours && shown === text) return;
     if (!text) {
       delete note.dataset.outside;
@@ -1039,7 +1044,7 @@ export function mount(root) {
       return note.replaceChildren();
     }
     note.dataset.outside = text;
-    note.title = `${who(first).name} runs on ${r.model}, outside the platform: what you send in this chat goes to that provider.`;
+    note.title = ownSays(who(first).name, r);
     note.innerHTML = svg("globe", "outside-mark");
     note.append(text);
   }
@@ -1327,7 +1332,11 @@ export function mount(root) {
         const title = el("span", "handoff-title");
         title.append("Asked ", el("strong", null, h.name));
         head.append(title);
-        if (where) head.append(el("span", `handoff-where${where.on === "own" ? " own" : ""}`, where.on === "own" ? `${where.model} · outside the platform` : "On the platform"));
+        if (where) {
+          const tag = el("span", `handoff-where${where.on === "own" ? " own" : ""}`, where.on === "own" ? ownTag(where) : "On the platform");
+          if (where.on === "own") tag.title = ownSays(h.name, where);
+          head.append(tag);
+        }
         const said = el("span", "handoff-state");
         said.innerHTML = svg(how === "failed" ? "x" : how === "done" ? "check" : "loader", how === "running" ? "spin" : "");
         said.append(how === "failed" ? "Didn't go through" : how === "done" ? "Done" : "Working on it…");
