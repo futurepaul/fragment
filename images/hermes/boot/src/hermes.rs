@@ -431,8 +431,10 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     // Always OpenAI's shape, the high tier's agents' too.
     // Memory and skill reviews are on. The image plugin forks our external
     // skills into the active profile before writes; Hermes retains its guards.
+    // Its other ends a session's kept terminal that its profile no longer
+    // names (a fence put up or let go while awake: fence.rs).
     y.push_str(&format!(
-        "plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        "plugins:\n  enabled: [fragment-skill-fork, fragment-terminal-follows]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
     ));
@@ -1179,7 +1181,7 @@ mod tests {
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
         for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds, None))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
-            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
+            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-terminal-follows]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");

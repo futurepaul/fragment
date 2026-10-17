@@ -1770,6 +1770,64 @@ async fn a_fenced_agent_runs_in_its_sandbox() {
     assert!(unfenced.contains("uid-10000"), "{unfenced}");
 }
 
+/// Goal (decision 63, proposed): a fence put up while the computer is awake
+/// moves the agent's next command into its sandbox, and one let go moves it
+/// back, with nothing restarted. Hermes keeps a session's terminal, and the
+/// background processes it started, for the session's life; the image's
+/// `fragment-terminal-follows` plugin ends the one its profile no longer
+/// names before the next tool call. Juniper runs a command and starts a
+/// background process as the hermes user; fenced, its next command runs as
+/// its fence user and that process is gone; let go, its commands are the
+/// hermes user's again.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_fence_follows_an_awake_agent() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("follow", &["juniper"]);
+    let c = Container::run_as(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &[], &["--cap-add", "SYS_ADMIN", "--security-opt", "apparmor=unconfined"]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let fence_lines = |c: &Container| c.logs().lines().filter(|l| l.contains("fence") || l.contains("terminal-follows")).collect::<Vec<_>>().join("\n");
+    let before = tool_said(&fake, &chat, &c, "run: id -u | sed 's/^/uid-/'").await;
+    assert!(before.contains("uid-10000"), "unfenced, it runs as the hermes user: {before}");
+    let started = tool_said(&fake, &chat, &c, "start: sleep 6000").await;
+    // as root, who sees every process (hidepid exempts root's group)
+    let pid: String = started.split("\"pid\": ").nth(1).unwrap_or_default().chars().take_while(char::is_ascii_digit).collect();
+    assert!(!pid.is_empty(), "Hermes says its background process' pid: {started}");
+    let sleeping = || c.exec_out(&["sh", "-c", &format!("ps -o user= -p {pid} | grep -c '^hermes' || true")]).trim().to_string();
+    let ps = || c.exec_out(&["ps", "-eo", "pid,ppid,user,args"]);
+    assert_eq!(sleeping(), "1", "its background process runs, as the hermes user: {started}\n{}", ps());
+    // a kept terminal its profile still names is kept, its processes with it
+    let again = tool_said(&fake, &chat, &c, "run: echo again-1").await;
+    assert!(again.contains("again-1") && sleeping() == "1", "unfenced, its next command keeps its terminal and its process: {again}\n{}", ps());
+
+    // the boot reads its agents every 3 s and writes its profile again;
+    // bounded: ten tries
+    fake.fence("juniper", true);
+    let mut map = String::new();
+    for _ in 0..10 {
+        map = tool_said(&fake, &chat, &c, "run: awk '{print \"map-\" $2}' /proc/self/uid_map").await;
+        if map.contains("map-2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(map.contains("map-2"), "fenced while awake, its next command runs in its sandbox: {map}\n{}", fence_lines(&c));
+    assert_eq!(sleeping(), "0", "the background process it started unfenced is gone\n{}\n{}", ps(), fence_lines(&c));
+
+    fake.fence("juniper", false);
+    let mut uid = String::new();
+    for _ in 0..10 {
+        uid = tool_said(&fake, &chat, &c, "run: id -u | sed 's/^/uid-/'").await;
+        if uid.contains("uid-10000") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(uid.contains("uid-10000"), "let go while awake, its commands are the hermes user's again: {uid}\n{}", fence_lines(&c));
+}
+
 /// Goal (Paul on preview, 2026-10-16: asked its version, an agent read
 /// "0.0.0" from Hermes' package metadata, and found `hermes` only by its
 /// full path): an agent runs Hermes' own CLI by name, each way its tools

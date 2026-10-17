@@ -1369,7 +1369,12 @@ fragment.club until cutover (decisions 34–35).
 - **Risk:** a tool that reads files or reaches services in the gateway's
   own process, turned on for it by a Hermes update or a fault in one
   turned off, reaches what the `hermes` user does: every agent's work and
-  Hermes' home. A kernel fault reaches the rest.
+  Hermes' home. A kernel fault reaches the rest. A fence changed while
+  awake reaches a session's kept terminal through
+  `fragment-terminal-follows`, which reads Hermes' terminal internals
+  (`_active_environments`, `_resolve_container_task_id`,
+  `_get_env_config`, `cleanup_vm`, `process_registry.kill_all`: v0.21.7's);
+  an upgrade needs the Docker lane's `a_fence_follows_an_awake_agent`.
 - **First proof:** a fenced agent's turn that reads another agent's file
   or a profile's `.env` (the hermes lane tries).
 - **Delete when:** a fenced agent's model runs in a process of its own

@@ -2142,6 +2142,18 @@ no second computer.
 - **The bridge.** What a person attaches for a fenced agent lands in its
   work directory as its user's and the `hermes` group's; an attachment
   it sends is read from its work directory alone.
+- **Fenced or let go while awake.** The boot reads the change with its
+  agents (every 3 s) and writes the profile again; nothing restarts.
+  Hermes rebuilds a session's agent when `agent.disabled_toolsets`
+  changes, but keeps a session's terminal, and the background processes
+  it started, for the session's life. The image's
+  `fragment-terminal-follows` plugin (a `pre_tool_call` hook, as
+  `fragment-skill-fork` is) ends a session's kept terminal that is not
+  the one its profile now names (local, or ssh to which user), with its
+  background processes, before the next tool that runs in it; a call it
+  cannot check is blocked. So a fence put up while a turn runs holds from
+  that turn's next command, and a process started before it never runs
+  on as the `hermes` user.
 
 ### Hermes' container guesses
 

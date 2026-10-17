@@ -1,0 +1,4 @@
+name: fragment-terminal-follows
+version: 1.0.0
+description: End a session's kept terminal when its profile now names another, before the next tool call.
+provides_hooks: [pre_tool_call]
