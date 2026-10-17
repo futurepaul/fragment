@@ -540,8 +540,12 @@ Visitors without a key call as an anonymous principal (a cookie), so
 browser to web push; `call.push(who, payload)` or `job.push(...)` reaches
 every browser registered with that `who` (`*` for all).
 
-The share link's `?view=` token is a secret. If your app renders links
-into its own pages, don't leak it into places the page doesn't need.
+The share link's `?view=` token is a secret, its owner's to give. A
+browser that opens the link keeps the token in an HttpOnly cookie and
+goes on to the page's URL without it, so your page's code never sees it
+(`location`, `document.cookie`, an app's `fetch`, and the preview card's
+error report all lack it): an editor's code cannot capture it. Never
+build links that carry it.
 
 ## Notes on a page
 

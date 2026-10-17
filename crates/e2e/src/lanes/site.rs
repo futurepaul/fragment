@@ -111,6 +111,30 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the share link opens it", r.status == 200 && r.text.contains("front"), &r);
     s.ok("and sets a cookie for the fragment's origin", set.starts_with(&format!("fragview={view}; Path=/;")) && set.contains("HttpOnly"), &set);
     let cookie = format!("fragview={view}");
+    // a page's navigation keeps the token in the cookie alone (the audit's
+    // M2): on to its URL without `view`, where no page's code reads it
+    let navigate = |path: &str, cookie: Option<&str>| {
+        let extra = vec![
+            ("accept", "text/html,application/xhtml+xml,*/*;q=0.8".to_string()),
+            ("sec-fetch-dest", "document".to_string()),
+            ("sec-fetch-mode", "navigate".to_string()),
+            ("sec-fetch-site", "none".to_string()),
+        ];
+        api.call(Call { method: "GET", url: api.site_url(&name, path), cookie: cookie.map(str::to_string), extra, ..Call::default() })
+    };
+    let r = navigate(&format!("docs/?q=1&view={view}&b=x%20y"), None)?;
+    let set = r.header("set-cookie");
+    s.ok(
+        "a navigation with the share link sets its cookie and goes on to its URL without it, uncached",
+        r.status == 302 && r.header("location") == "/docs/?q=1&b=x%20y" && set.starts_with(&format!("fragview={view}; Path=/;")) && set.contains("HttpOnly") && r.header("cache-control") == "no-store",
+        format!("{r} {set}"),
+    );
+    let r = navigate(&format!("?view={view}"), None)?;
+    s.ok("one whose query was the token alone goes on to its path", r.status == 302 && r.header("location") == "/", &r);
+    let r = navigate("docs/?q=1&b=x%20y", Some(&cookie))?;
+    s.ok("where the cookie opens it", r.status == 200 && r.text.contains("docs"), &r);
+    let r = navigate("?view=0123456789abcdef01234567", None)?;
+    s.ok("a token that opens nothing is not followed on: its page says the link changed", r.status == 401 && r.header("location").is_empty() && r.header("set-cookie").is_empty(), &r);
     let r = api.page(&name, "docs/", Some(&cookie))?;
     s.ok("the cookie opens other pages", r.status == 200 && r.text.contains("docs"), &r);
     s.ok("a link fragment's pages are private to caches", r.header("cache-control") == "private, no-cache", r.header("cache-control"));
@@ -352,9 +376,12 @@ fn page_errors(s: &mut Suite, api: &Api, owner: &Keys, clean: &[u8]) -> Result<(
     let status = || api.signed(owner, "GET", &format!("/api/f/{name}/status"), None).map(|r| r.body).unwrap_or(Value::Null);
     let before = status();
     s.ok("before its first shot, a fragment's status has no page report", before["name"] == name.as_str() && before.get("page").is_none(), &before);
+    let view = c["viewToken"].as_str().unwrap_or("-").to_string();
+    // its shot is a link holder's: what it reports must hold no token,
+    // whatever the page logs (`location.href`) or throws from (its URL)
     let throws: &[u8] = b"<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'none'\"><title>throws</title>\
         <script src=\"missing.js\"></script><img src=\"blocked.png\">\
-        <script>console.error(\"e2e console\", 7); throw new Error(\"e2e boom\")</script>";
+        <script>console.error(\"e2e console\", 7, location.href, document.cookie); throw new Error(\"e2e boom at \" + location.href)</script>";
     s.commit(&c, &[("site/index.html", Some(throws))]);
     let live = s.deploy(&c);
     let mut page = Value::Null;
@@ -382,6 +409,14 @@ fn page_errors(s: &mut Suite, api: &Api, owner: &Keys, clean: &[u8]) -> Result<(
         "and as one page.errors event, saying the first",
         said.len() == 1 && said[0]["data"] == page && said[0]["summary"].as_str().is_some_and(|t| t.contains("4 errors") && t.contains(&live[..12])),
         json!({ "said": said, "page": page }),
+    );
+    s.ok(
+        "a link holder's shot reports no token: it set the cookie and opened the page at a URL without it",
+        has("console", &|e| text(e, "e2e console 7 http"))
+            && !page.to_string().contains(&view)
+            && !json!(said).to_string().contains(&view)
+            && !page.to_string().contains("view="),
+        json!({ "page": page, "said": said }),
     );
     s.commit(&c, &[("site/index.html", Some(clean))]);
     let fixed = s.deploy(&c);

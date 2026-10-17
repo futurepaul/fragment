@@ -189,7 +189,18 @@ role is their membership. Otherwise visibility decides: on a `public`
 fragment everyone holds `public`; on a `public` or `link` fragment the
 share link (`?view=<token>`, which sets an HttpOnly cookie on the
 fragment's origin) counts as `viewer`; a `members` fragment gives
-non-members nothing. A refusal is 401 for an unsigned caller and 403 for
+non-members nothing. A page's navigation that brings the share link (a
+GET or HEAD whose `Accept` names HTML) is answered `302` (`no-store`)
+with the cookie, on to the same path and query without `view`
+(`fragment_core::site::query_without_view`), so the token is never in a
+URL a page's code reads (`location`, a card's error report): an editor's
+page code cannot capture it. A fetch, an image, or a socket that names
+`?view=` still counts, as its sender holds the token; an app's `fetch`
+is never handed `view`. A frame's navigation goes on too and opens
+nothing, since `fragview` does not count in a frame (Which cookies
+count): a share link is never framed (no page but the platform's and the
+fragment's own may frame one anyway: `frame-ancestors`). A `?view=` that
+opens nothing goes nowhere: its page says the link has changed. A refusal is 401 for an unsigned caller and 403 for
 a signed one.
 
 An agent's owner reads what the agent reads (FIN-11): someone who is not
@@ -1307,9 +1318,10 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   given up: one `card.failed` event, and the card before stays.
 - **As a visitor without an account sees it.** The renderer has no
   session of anyone's: a `public` fragment is shot as anyone sees it, a
-  `link` fragment as anyone holding its share link sees it (the page's
-  URL carries `?view=`, as a link holder's does; the card goes only to
-  members, who already see that page), and a `members` fragment is not
+  `link` fragment as anyone holding its share link sees it (its token
+  set as the origin's HttpOnly `fragview` cookie over CDP before the page
+  opens, at its URL without `?view=`, as a link holder's page goes on to;
+  the card goes only to members, who already see that page), and a `members` fragment is not
   shot at all (`card.skipped`): a visitor would see only its refusal.
 - **What the page reports.** The shot enables CDP's `Runtime` and `Log`
   on the page and hears, as it loads and in the second after (no
@@ -1320,7 +1332,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   whether or not the page names one), and loads refused for security, a
   Content Security Policy's above all (`security`). It keeps the first
   10 and counts the rest (`dropped`), each `text` and `source` (the URL,
-  with its line and column when Chrome gives them) cut to 1 KiB. The try that
+  with its line and column when Chrome gives them) cut to 1 KiB, the
+  share link's token replaced by `[share link]` before the cut wherever a
+  page wrote it (`card::Heard::hiding`): every viewer reads the report. The try that
   ends a live's tries (its card made, or given up) having opened the page
   makes what it heard the page's report: status's `page`, `{live, at,
   errors, dropped}`, its `errors` empty when the page reported none. A

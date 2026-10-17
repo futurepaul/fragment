@@ -10,7 +10,8 @@
 //!   an owner who pays), then takes it with the `BROWSER` binding: a
 //!   Browser Rendering session driven over CDP, the page opened as a
 //!   visitor without an account sees it (a link fragment's with its share
-//!   link), at 1280×800, as a JPEG; the session closed whatever happens.
+//!   link, set as the origin's cookie, never in the URL the page reads),
+//!   at 1280×800, as a JPEG; the session closed whatever happens.
 //!   As it loads the page and in the second after, it hears the page's
 //!   errors (`card::Heard`).
 //!   One shot is out per fragment at a time (a Durable Object runs one
@@ -32,6 +33,7 @@
 use std::time::Duration;
 
 use fragment_core::card::{self, Cards, Heard, Next, Outcome, Pace, Skip, Verdict};
+use fragment_core::site::VIEW_COOKIE;
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
 use fragment_proto::{ErrorCode, FragmentKind, PageErrorKind, Role};
@@ -106,7 +108,7 @@ impl FragmentCell {
             return Ok(());
         }
         let page = match page {
-            Ok(_) if self.test_countdown(MetaKey::TestFailCards, "a card's shot").is_err() => TEST_UNREACHABLE.to_string(),
+            Ok(page) if self.test_countdown(MetaKey::TestFailCards, "a card's shot").is_err() => card::Visit { url: TEST_UNREACHABLE.to_string(), ..page },
             Ok(page) => page,
             Err(skip) => {
                 cards.skip();
@@ -175,7 +177,7 @@ impl FragmentCell {
     /// owner's ledger, asked as a create is (a guest makes nothing; past the
     /// overdraft, nothing new is made). A ledger that does not answer
     /// refuses none, as for writes.
-    async fn card_page(&self) -> CellResult<Result<String, Skip>> {
+    async fn card_page(&self) -> CellResult<Result<card::Visit, Skip>> {
         let kind = self
             .meta(MetaKey::Face)?
             .and_then(|f| serde_json::from_str::<Value>(&f).ok())
@@ -192,7 +194,7 @@ impl FragmentCell {
             Err(e) if matches!(e.refused, Some(Refused::GuestCreates | Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),
             Err(e) => console_error!("{}", json!({ "event": "card.standing-unknown", "message": e.message })),
         }
-        Ok(Ok(card::page_url(&origin, visitor, &self.must(MetaKey::ViewToken)?)))
+        Ok(Ok(card::visit(&origin, visitor, &self.must(MetaKey::ViewToken)?)))
     }
 
     /// A live given up, said once in the fragment's event log.
@@ -239,7 +241,7 @@ impl Failure {
 /// binding. Answers whether a session was acquired and then closed
 /// (`None`: none was), the image or why there is none, and what the page
 /// reported (`None` unless it was opened).
-async fn take(env: &Env, page: &str) -> (Option<bool>, Result<Vec<u8>, Failure>, Option<Heard>) {
+async fn take(env: &Env, page: &card::Visit) -> (Option<bool>, Result<Vec<u8>, Failure>, Option<Heard>) {
     let deadline = js::now_ms() + card::SHOT_TIMEOUT_MS as i64;
     let session = match within(deadline, acquire(env)).await {
         Some(Ok(s)) => s,
@@ -301,7 +303,7 @@ async fn release(env: &Env, session: &str) -> bool {
 /// waited for (at most `LOAD_TIMEOUT_MS`), `SETTLE_MS` more, then a JPEG
 /// at each of `QUALITIES` until one fits; and what the page reported
 /// meanwhile, once it was opened.
-async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> (Result<Vec<u8>, Failure>, Option<Heard>) {
+async fn drive(env: &Env, session: &str, page: &card::Visit, deadline: i64) -> (Result<Vec<u8>, Failure>, Option<Heard>) {
     let ws = match socket(env, session).await {
         Ok(ws) => ws,
         Err(f) => return (Err(f), None),
@@ -310,7 +312,8 @@ async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> (Result<V
         Ok(events) => events,
         Err(e) => return (Err(Failure::retry(e.to_string())), None),
     };
-    let mut cdp = Cdp { ws: &ws, events, next_id: 0, target_session: None, loaded: false, opened: false, heard: Heard::default() };
+    let heard = Heard::hiding(page.view_token.as_deref());
+    let mut cdp = Cdp { ws: &ws, events, next_id: 0, target_session: None, loaded: false, opened: false, heard };
     let out = shoot(&mut cdp, page, deadline).await;
     let heard = cdp.opened.then(|| std::mem::take(&mut cdp.heard));
     drop(cdp);
@@ -332,20 +335,33 @@ async fn socket(env: &Env, session: &str) -> Result<WebSocket, Failure> {
     Ok(ws)
 }
 
-async fn shoot(cdp: &mut Cdp<'_>, page: &str, deadline: i64) -> Result<Vec<u8>, Failure> {
+async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<Vec<u8>, Failure> {
     let target = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), deadline).await?;
     let target = target["targetId"].as_str().ok_or_else(|| Failure::retry("no page target"))?.to_string();
     let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), deadline).await?;
     cdp.target_session = Some(attached["sessionId"].as_str().ok_or_else(|| Failure::retry("no target session"))?.to_string());
     let viewport = json!({ "width": card::WIDTH, "height": card::HEIGHT, "deviceScaleFactor": card::SCALE, "mobile": false });
     cdp.call("Emulation.setDeviceMetricsOverride", viewport, deadline).await?;
-    for domain in ["Page", "Runtime", "Log"] {
+    for domain in ["Page", "Runtime", "Log", "Network"] {
         cdp.call(&format!("{domain}.enable"), json!({}), deadline).await?;
     }
-    let opened = cdp.call("Page.navigate", json!({ "url": page }), deadline).await?;
+    // a link holder's share link, as its `?view=` would have left it: the
+    // origin's HttpOnly cookie, so the page opens at a URL with no token
+    if let Some(token) = &page.view_token {
+        let cookie = json!({
+            "name": VIEW_COOKIE, "value": token, "url": page.url,
+            "httpOnly": true, "secure": page.url.starts_with("https://"), "sameSite": "Lax",
+        });
+        let set = cdp.call("Network.setCookie", cookie, deadline).await?;
+        if set["success"] == false {
+            return Err(Failure::retry("the browser refused the share link's cookie"));
+        }
+    }
+    assert!(!page.url.contains("view="), "a shot opens no URL with the share link in it");
+    let opened = cdp.call("Page.navigate", json!({ "url": page.url }), deadline).await?;
     cdp.opened = true;
     if let Some(e) = opened["errorText"].as_str() {
-        // Chrome's net error names no URL (the page's may hold the share link)
+        // Chrome's net error names no URL
         let why = format!("the page did not open: {e}");
         cdp.heard.keep(PageErrorKind::Network, &why, None);
         return Err(Failure::retry(why));
