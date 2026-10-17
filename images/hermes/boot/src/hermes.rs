@@ -265,9 +265,7 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // Hermes' own cron is off: an agent's routines are its fragment's cron
     // (decision 38). A clarify's card waits as long as the bridge's prompt
     // does, as an approval's (Hermes' default is an hour, the bridge's too).
-    // Each profile turns its own tools off (`profile_config`: cron for every
-    // agent, more for a fenced one), which an overlay's list would replace.
-    y.push_str(&format!("agent:\n  clarify_timeout: {card_timeout_s}\n"));
+    y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n"));
     // The agent asks its people about outcomes alone, in plain words
     // (`ASKING`).
     y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(ASKING)));
@@ -348,7 +346,7 @@ pub fn told_name(name: &str) -> String {
 /// (`PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY`, …: its
 /// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
 /// profile's credentials file (`credentials_sh`) as its shell starts.
-pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route, credential_env: &[String], credentials_file: &Path, fence: Option<&crate::fence::Fence>) -> String {
+pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route, credential_env: &[String], credentials_file: &Path) -> String {
     let base = route.base.trim_end_matches('/');
     let mut y = String::new();
     y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model or its name changes.\n", agent.fragment, main.name()));
@@ -375,16 +373,6 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
             y.push_str("  api_max_retries: 1\n");
         }
     }
-    // the tools off: Hermes' cron for every agent (decision 38); for a
-    // fenced one (decision 63, proposed) every tool that reads in the
-    // gateway's own process, and, with no sandbox to run them in, its
-    // terminal's too: it answers, and runs nothing as the `hermes` user
-    let off: Vec<&str> = match (agent.fenced, fence) {
-        (false, _) => vec!["cronjob"],
-        (true, Some(_)) => crate::fence::DISABLED_TOOLSETS.to_vec(),
-        (true, None) => crate::fence::DISABLED_TOOLSETS.iter().copied().chain(["terminal", "file", "code_execution"]).collect(),
-    };
-    y.push_str(&format!("  disabled_toolsets: [{}]\n", off.iter().map(|t| q(t)).collect::<Vec<_>>().join(", ")));
     match main {
         MainModel::Tier(tier) => {
             let (provider, url) = match tier {
@@ -431,10 +419,8 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     // Always OpenAI's shape, the high tier's agents' too.
     // Memory and skill reviews are on. The image plugin forks our external
     // skills into the active profile before writes; Hermes retains its guards.
-    // Its other ends a session's kept terminal that its profile no longer
-    // names (a fence put up or let go while awake: fence.rs).
     y.push_str(&format!(
-        "plugins:\n  enabled: [fragment-skill-fork, fragment-terminal-follows]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        "plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: {{ enabled: true }}\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
     ));
@@ -511,25 +497,6 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
     // only to the commands of this profile's turns. Its shell's start files are
     // Hermes' own three, then the agent's credentials.
-    let work = work_dir(&agent.fragment).display().to_string();
-    if let Some(f) = fence.filter(|_| agent.fenced) {
-        // A fenced agent's commands, file tools and code run as its own user
-        // in its sandbox (fence.rs): Hermes' `ssh` backend to the computer's
-        // loopback sshd. Its shell has no network, so nothing of the
-        // platform's is passed to it, nor its credentials file, which is
-        // Hermes' home's and closed to it. A file of its reply is delivered
-        // from its own work alone (Hermes' strict media policy, read from the
-        // profile's own `gateway` for its turns), never one it only names.
-        y.push_str(&format!(
-            "terminal:\n  backend: \"ssh\"\n  ssh_host: \"127.0.0.1\"\n  ssh_port: {}\n  ssh_user: {}\n  ssh_key: {}\n  env_passthrough: []\n  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\"]\n  cwd: {}\n",
-            f.port,
-            q(&f.user),
-            q(&f.key.display().to_string()),
-            q(&work)
-        ));
-        y.push_str(&format!("gateway:\n  strict: true\n  trust_recent_files: false\n  media_delivery_allow_dirs: [{}]\n", q(&work)));
-        return y;
-    }
     let mut passed: Vec<String> = PROFILE_ENV.iter().map(|s| s.to_string()).collect();
     for e in credential_env.iter().filter(|e| env_name_ok(e) && !provider_env_blocked(e)) {
         if !passed.contains(e) {
@@ -542,7 +509,7 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     // Its commands run in the agent's work directory, which the computer
     // saves on its own (the seam: step 2 of docs/durable-computers.md), never
     // in Hermes' home (left unset, the gateway's own home, /data/hermes)
-    y.push_str(&format!("  cwd: {}\n", q(&work)));
+    y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
 }
 
@@ -788,7 +755,8 @@ pub fn profile_env(agent: &Agent) -> String {
     let line_safe = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\'' && b != b'\\' && b != b'#');
     assert!(line_safe(&agent.fragment) && line_safe(&agent.owner), "an agent's fragment and owner are names: {agent:?}");
     let mut e = format!("# The profile of {}; the computer holds no credential, only placeholders.\n{}={}\n", agent.fragment, PROFILE_ENV[0], agent.fragment);
-    // a fenced agent acts for no one (decision 63, proposed): it names no one
+    // a fenced agent acts for no one (decision 63, proposed): its terminal
+    // names no one, and the platform refuses it a `for` either way
     if !agent.fenced {
         e.push_str(&format!("{}={}\n", PROFILE_ENV[1], agent.owner));
     }
@@ -1014,11 +982,11 @@ mod tests {
     fn its_config_tells_the_agent_its_name() {
         let creds = Path::new("/c.sh");
         for main in [Tier::Cheap.into(), Tier::Medium.into(), Tier::High.into()] {
-            let c = profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds, None);
+            let c = profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds);
             assert!(c.contains("\nagent:\n  system_prompt: \"Your name is Juniper: your agent fragment's title, as it is now. "), "{c}");
             assert_eq!(c.matches("\nagent:\n").count(), 1, "one `agent` mapping: {c}");
         }
-        let named = |name: &str| profile_config(&agent(), name, &Tier::Medium.into(), &route("http://m"), &[], creds, None);
+        let named = |name: &str| profile_config(&agent(), name, &Tier::Medium.into(), &route("http://m"), &[], creds);
         let renamed = named("Frank");
         assert!(renamed.contains("Your name is Frank: ") && renamed.contains("and Frank is your name.") && !renamed.contains("Juniper"), "{renamed}");
         assert_ne!(renamed, named("Juniper"));
@@ -1057,43 +1025,28 @@ mod tests {
     #[test]
     fn a_new_agents_profile_defaults_to_cheap() {
         let tier = Tier::of(None, false);
-        let config = profile_config(&agent(), "Juniper", &tier.into(), &route("http://model.fragment.internal"), &[], Path::new("/c.sh"), None);
+        let config = profile_config(&agent(), "Juniper", &tier.into(), &route("http://model.fragment.internal"), &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"z-ai/glm-5.3-flash\"\n"), "{config}");
         assert!(config.contains("  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n    x-fragment-tier: \"cheap\"\n"), "{config}");
         let named = Route::new("http://model.fragment.internal", None);
-        let config = profile_config(&agent(), "Juniper", &tier.into(), &named, &[], Path::new("/c.sh"), None);
+        let config = profile_config(&agent(), "Juniper", &tier.into(), &named, &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
     }
 
-    /// Decision 63 (proposed): a fenced agent's terminal is Hermes' `ssh`
-    /// backend to its user in its sandbox, carrying nothing of the platform's
-    /// and naming no one to act for; its replies' files come from its own
-    /// work alone; the tools that read in the gateway's process are off. With
-    /// no sandbox it fails closed: no terminal, file or code tools. An
-    /// unfenced agent's profile is as it was.
+    /// Decision 63 (proposed): a fenced agent's fence is the platform's. On
+    /// its computer its profile is any agent's (its tools, its terminal, the
+    /// internet), but its terminal names no one to act for; let go, it names
+    /// its owner again.
     #[test]
-    fn a_fenced_agents_profile_runs_its_commands_as_its_own_user() {
-        let creds = Path::new("/c.sh");
+    fn a_fenced_agents_terminal_names_no_one_to_act_for() {
         let fenced = Agent { fenced: true, ..agent() };
-        let f = crate::fence::Fence { user: "fence-1".into(), uid: 20_001, key: PathBuf::from(crate::fence::CLIENT_KEY), port: crate::fence::SSH_PORT };
-        let p = profile_config(&fenced, "Juniper", &Tier::Cheap.into(), &route("http://m"), &["GOOGLE_OAUTH_ACCESS_TOKEN".into()], creds, Some(&f));
-        let work = work_dir("juniper--k3x9").display().to_string();
-        assert!(p.contains("terminal:\n  backend: \"ssh\"\n  ssh_host: \"127.0.0.1\"\n  ssh_port: 2222\n  ssh_user: \"fence-1\"\n  ssh_key: \"/var/lib/fragment-run/ssh/client\"\n  env_passthrough: []\n"), "{p}");
-        assert!(p.contains(&format!("  cwd: {}\n", q(&work))) && !p.contains("/c.sh"), "its work, and no credentials file: {p}");
-        assert!(p.contains(&format!("gateway:\n  strict: true\n  trust_recent_files: false\n  media_delivery_allow_dirs: [{}]\n", q(&work))), "{p}");
-        assert!(p.contains("  disabled_toolsets: [\"cronjob\", \"browser\", \"vision\", \"video\", \"computer_use\", \"desktop_ui\", \"project\", \"kanban\", \"connections\", \"catalog\"]\n"), "{p}");
-        assert_eq!(p.matches("\nagent:\n").count(), 1, "one `agent` mapping: {p}");
         let e = profile_env(&fenced);
         assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper--k3x9\n") && !e.contains("FRAGMENT_FOR"), "it names no one to act for: {e}");
-        // invalid: fenced with no sandbox, it runs nothing
-        let closed = profile_config(&fenced, "Juniper", &Tier::Cheap.into(), &route("http://m"), &[], creds, None);
-        assert!(closed.contains("\"terminal\", \"file\", \"code_execution\"]\n") && !closed.contains("backend: \"ssh\""), "{closed}");
-        // an unfenced agent, a sandbox or not: its local terminal, its own `for`
-        for given in [None, Some(&f)] {
-            let open = profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://m"), &[], creds, given);
-            assert!(open.contains("  disabled_toolsets: [\"cronjob\"]\n") && !open.contains("backend: \"ssh\"") && !open.contains("strict: true"), "{open}");
+        assert!(profile_env(&agent()).contains("\nFRAGMENT_FOR=npub1paul\n"), "let go, its owner");
+        let creds = Path::new("/c.sh");
+        for main in [Tier::Cheap.into(), Tier::Medium.into(), Tier::High.into()] {
+            assert_eq!(profile_config(&fenced, "Juniper", &main, &route("http://m"), &[], creds), profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds), "its tools and terminal are any agent's");
         }
-        assert!(profile_env(&agent()).contains("\nFRAGMENT_FOR=npub1paul\n"));
     }
 
     /// Goal: naming a tier's model by its id changes what Hermes says the
@@ -1109,14 +1062,14 @@ mod tests {
         let creds = Path::new("/c.sh");
         let off = format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n", q(&told_name("Juniper")));
         for tier in [Tier::Cheap, Tier::Medium, Tier::High] {
-            let p = profile_config(&agent(), "Juniper", &tier.into(), &route("http://model.fragment.internal"), &[], creds, None);
+            let p = profile_config(&agent(), "Juniper", &tier.into(), &route("http://model.fragment.internal"), &[], creds);
             assert!(p.contains(&off), "the {} tier's guidance is its tier's, beside its name: {p}", tier.name());
             assert_eq!(p.matches("\nagent:\n").count(), 1, "one `agent` mapping: {p}");
         }
         let mut own = agent();
         own.credentials.push(fragment_bridge::runtime::Credential { model_base: Some("https://openrouter.ai/api/v1".into()), ..credential("openrouter", &[], "fcx_openrouter_a1") });
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "z-ai/glm-5.3".into() }));
-        let p = profile_config(&own, "Juniper", &own_main, &route("http://model.fragment.internal"), &[], creds, None);
+        let p = profile_config(&own, "Juniper", &own_main, &route("http://model.fragment.internal"), &[], creds);
         assert!(matches!(own_main, MainModel::Own { .. }) && p.contains("  default: \"z-ai/glm-5.3\"\n"), "{p}");
         assert!(p.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&told_name("Juniper")))) && p.matches("\nagent:\n").count() == 1, "its name alone in its `agent` mapping: {p}");
         assert!(!p.contains("tool_use_enforcement") && !p.contains("execution_guidance"), "an owner's own model's guidance is Hermes' to choose: {p}");
@@ -1146,6 +1099,7 @@ mod tests {
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
             "group_sessions_per_user: false",
+            "disabled_toolsets: [\"cronjob\"]",
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
             "\nmodel_catalog:\n  enabled: false\n",
@@ -1168,20 +1122,20 @@ mod tests {
         assert_eq!(card_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
         assert_eq!(card_timeout_s(Some("not a number")), CARD_TIMEOUT_S);
         let short = managed_config(&[], 20, crate::desktop::IDLE_STOP_MS);
-        assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  clarify_timeout: 20\n"), "{short}");
+        assert!(short.contains("\napprovals:\n  mode: \"off\"\n  timeout: 20\n") && short.contains("\nagent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: 20\n"), "{short}");
         assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let p = profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal/"), &[], creds, None);
+        let p = profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal/"), &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
         assert!(p.contains("default: \"@cf/zai-org/glm-5.3\"") && p.contains("    x-fragment-tier: \"medium\"\n"), "its tier's model by its id, its tier said: {p}");
         assert!(p.contains("x-fragment-agent: \"juniper--k3x9\""), "every model call names its agent");
-        let h = profile_config(&agent(), "Juniper", &Tier::High.into(), &route("http://model.fragment.internal"), &[], creds, None);
+        let h = profile_config(&agent(), "Juniper", &Tier::High.into(), &route("http://model.fragment.internal"), &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\"") && h.contains("default: \"high\""), "{h}");
         // its eyes: the route's vision model, OpenAI's shape, whatever its tier
         let vision = "  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
-        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds, None))] {
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds))] {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
-            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork, fragment-terminal-follows]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
+            assert!(config.contains("plugins:\n  enabled: [fragment-skill-fork]\nauxiliary:\n  background_review: { enabled: true }\n"), "the {tier} tier reviews memory and forks external skills before writes: {config}");
             assert!(!config.contains("curator:"), "the separate periodic curator keeps Hermes' defaults: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
@@ -1192,7 +1146,7 @@ mod tests {
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
         let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/zai-org/glm-5.3-flash\"\n    api_key: \"agent:juniper--k3x9\"\n";
-        let c = profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds, None);
+        let c = profile_config(&agent(), "Juniper", &Tier::Cheap.into(), &route("http://model.fragment.internal"), &[], creds);
         for (tier, id, config) in [("cheap", CHEAP_ID, &c), ("medium", MEDIUM_ID, &p)] {
             assert!(config.contains(fallback), "the {tier} tier falls back to the route's fallback model, by its id: {config}");
             assert!(config.contains(&format!("providers:\n  custom:\n    models:\n      \"{id}\":\n        stale_timeout_seconds: 20\n")), "its own model's stale timeout alone: {config}");
@@ -1250,7 +1204,7 @@ mod tests {
         let (own_main, _) = MainModel::of(&own, Tier::Cheap, Some(&OwnModel { provider: "openrouter".into(), id: "anthropic/claude-sonnet-5.5".into() }));
         assert!(matches!(own_main, MainModel::Own { .. }));
         for (main, a) in [(Tier::Cheap.into(), agent()), (Tier::Medium.into(), agent()), (Tier::High.into(), agent()), (own_main, own)] {
-            let p = profile_config(&a, "Juniper", &main, &route("http://model.fragment.internal"), &[], creds, None);
+            let p = profile_config(&a, "Juniper", &main, &route("http://model.fragment.internal"), &[], creds);
             for overlaid in ["command_allowlist", "approvals:", "security:", "platform_hints:", "clarify_timeout"] {
                 assert!(!p.contains(overlaid), "the overlay's alone, never the {} profile's: {p}", main.name());
             }
@@ -1302,7 +1256,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper--k3x9/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://m"), &[], creds, None), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://m"), &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
@@ -1390,7 +1344,7 @@ mod tests {
             ("perplexity", "PERPLEXITY_API_KEY", "web:\n  search_backend: \"perplexity\"\n"),
         ] {
             let mut a = agent();
-            let write = |a: &Agent| profile_config(a, "Juniper", &Tier::Cheap.into(), &route("http://m"), &[env.into()], Path::new("/c.sh"), None);
+            let write = |a: &Agent| profile_config(a, "Juniper", &Tier::Cheap.into(), &route("http://m"), &[env.into()], Path::new("/c.sh"));
             let absent = write(&a);
             assert!(!absent.contains(selection), "catalog alone never selects {provider}");
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
@@ -1404,7 +1358,7 @@ mod tests {
         for (provider, env) in [("perplexity", "PERPLEXITY_API_KEY"), ("firecrawl", "FIRECRAWL_API_KEY"), ("xai", "XAI_API_KEY")] {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
         }
-        let config = profile_config(&a, "Juniper", &Tier::Cheap.into(), &route("http://m"), &[], Path::new("/c.sh"), None);
+        let config = profile_config(&a, "Juniper", &Tier::Cheap.into(), &route("http://m"), &[], Path::new("/c.sh"));
         assert!(config.contains("  search_backend: \"firecrawl\"\n"), "Firecrawl wins over Perplexity");
         assert!(!config.contains("\"xai\""), "X search is a separate native tool, never a web backend");
         assert!(profile_env(&a).contains("XAI_API_KEY=fck_xai_"));
@@ -1440,7 +1394,7 @@ mod tests {
         assert_eq!(why, None);
         assert_eq!(main.name(), "openrouter:anthropic/claude-sonnet-5.5");
         assert_eq!(MainModel::of(&a, Tier::Medium, None), (MainModel::Tier(Tier::Medium), None), "none named: its tier");
-        let p = profile_config(&a, "Juniper", &main, &route("http://model.fragment.internal"), &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"), None);
+        let p = profile_config(&a, "Juniper", &main, &route("http://model.fragment.internal"), &["OPENROUTER_API_KEY".into()], Path::new("/c.sh"));
         let want = format!("model:\n  provider: \"custom\"\n  base_url: \"https://openrouter.ai/api/v1\"\n  default: \"anthropic/claude-sonnet-5.5\"\n  api_key: \"fck_openrouter_{tag}\"\n  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n");
         assert!(p.contains(&want), "{p}");
         assert!(!p.contains("context_length"), "its provider says its context: {p}");
@@ -1465,7 +1419,7 @@ mod tests {
         let s = credentials_sh(&a);
         assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
         let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
-        let p = profile_config(&a, "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"), None);
+        let p = profile_config(&a, "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\"]"), "{p}");
     }
 
@@ -1476,7 +1430,7 @@ mod tests {
         let mut env: Vec<String> = PROVIDER_ENV_BLOCKLIST.lines().map(str::to_string).collect();
         assert!(env.len() > 300, "the full pinned policy, not just today's offered providers");
         env.extend(["AUXILIARY_TEST_API_KEY", "AUXILIARY_TEST_BASE_URL", "GATEWAY_RELAY_TEST_TOKEN", "GATEWAY_RELAY_TEST_SECRET", "GATEWAY_RELAY_TEST_KEY", "GOOGLE_OAUTH_ACCESS_TOKEN", "X_API_BEARER_TOKEN"].map(str::to_string));
-        let p = profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"), None);
+        let p = profile_config(&agent(), "Juniper", &Tier::Medium.into(), &route("http://model.fragment.internal"), &env, Path::new("/c.sh"));
         let passed = p.lines().find(|l| l.starts_with("  env_passthrough:")).unwrap();
         assert_eq!(passed, "  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"X_API_BEARER_TOKEN\"]");
     }
@@ -1495,7 +1449,7 @@ mod tests {
             credential("d", &["A_KEY"], &format!("fck_d_{tag}")),
         ];
         assert_eq!(credential_vars(&a), vec![("A_KEY".to_string(), format!("fck_a_{tag}"))]);
-        let p = profile_config(&a, "Juniper", &Tier::Medium.into(), &route("http://m"), &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"), None);
+        let p = profile_config(&a, "Juniper", &Tier::Medium.into(), &route("http://m"), &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
         assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"A_KEY\"]"), "{p}");
         assert!(!credentials_sh(&a).contains("rm -rf"));
     }

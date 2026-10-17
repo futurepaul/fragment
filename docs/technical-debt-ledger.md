@@ -1359,36 +1359,21 @@ fragment.club until cutover (decisions 34–35).
   chat's fragment names its kind of chat (own, hand-off, group) instead
   of its label saying it.
 
-## A fenced agent shares its computer's kernel and Hermes' process
+## A fenced agent's fence is the platform's alone
 
-- **Observed:** decision 63 (proposed; branch `claude/orchestrator`). A
-  fenced agent's commands and file tools run as a user of its own in a
-  sandbox of its own, but its model runs in the one Hermes gateway, as the
-  `hermes` user, beside every other agent's, and its sandbox is
-  namespaces on the one kernel.
-- **Risk:** a tool that reads files or reaches services in the gateway's
-  own process, turned on for it by a Hermes update or a fault in one
-  turned off, reaches what the `hermes` user does: every agent's work and
-  Hermes' home. A kernel fault reaches the rest. A fence changed while
-  awake reaches a session's kept terminal through
-  `fragment-terminal-follows`, which reads Hermes' terminal internals
-  (`_active_environments`, `_resolve_container_task_id`,
-  `_get_env_config`, `cleanup_vm`, `process_registry.kill_all`: v0.21.7's);
-  an upgrade needs the Docker lane's `a_fence_follows_an_awake_agent`.
-- **First proof:** a fenced agent's turn that reads another agent's file
-  or a profile's `.env` (the hermes lane tries).
-- **Delete when:** a fenced agent's model runs in a process of its own
-  user's, or on a computer of its own.
-
-## A fenced agent's sandbox needs unprivileged user namespaces
-
-- **Observed:** decision 63's spike ran under `wrangler dev`, which gives a
-  computer `CAP_SYS_ADMIN` and AppArmor unconfined; a container without
-  them refuses `unshare` (seen in a plain `docker run`).
-- **Risk:** where a computer may not make one, its fenced agents' commands
-  have no sandbox, so `hermes-boot` refuses to run them (their sessions
-  are refused), and they answer without a terminal.
-- **First proof:** a preview's fenced agent whose terminal is refused.
-- **Delete when:** a preview shows Cloudflare's containers make them, or
-  the sandbox is something they allow.
-
+- **Observed:** decision 63 (proposed). The platform refuses a fenced
+  agent's `for` and gives it no connection, and its computer names no
+  one for it, but its commands run as the `hermes` user beside every
+  other agent's (Austin chose this over a sandbox per agent with no
+  internet, 2026-10-17).
+- **Risk:** a fenced agent's commands can read the other agents' work and
+  Hermes' home, and call the computer's egress, which signs as whichever
+  of its agents a request names: as its owner's default agent, it acts
+  for its owner. A fenced agent that tries, or a page that talks it
+  into trying, reaches what the fence keeps from it.
+- **First proof:** a fenced agent's command that reads another agent's
+  work, or calls the platform naming another agent.
+- **Delete when:** the computer enforces the fence: the agent's commands
+  as a user of its own with the internet through a filter (decision 63's
+  box, in git history, with a filter added), or an egress that tells its
+  agents apart.

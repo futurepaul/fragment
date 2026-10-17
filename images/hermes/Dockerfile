@@ -161,16 +161,6 @@ RUN apt-get -o Acquire::Retries=3 update \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 
-# A fenced agent's way in (decision 63, proposed; docs/computers.md, "A
-# fenced agent in our Hermes image"): sshd, which hermes-boot runs on
-# loopback alone for its users, and `ip`, with which its sandbox brings up
-# its own loopback. No host key is baked in: each boot makes its own, under
-# its runtime files.
-RUN apt-get -o Acquire::Retries=3 update \
- && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends openssh-server iproute2 \
- && rm -f /etc/ssh/ssh_host_* \
- && test -x /usr/sbin/sshd && test -x /usr/lib/openssh/sftp-server && command -v ip >/dev/null
-
 # Every agent reads the pinned Hermes skills through the boot's read-only
 # view, beside the platform skill. Move them out of Hermes' sync source:
 # stage2 and the gateway must not copy them into the default profile or an
@@ -245,11 +235,10 @@ RUN mkdir -p /tmp/rh \
  && install -d -m 1777 /tmp/node-compile-cache \
  && test "$(stat -c '%a %u:%g' / /opt /opt/fragment /opt/hermes /opt/hermes/plugins /usr /usr/local /usr/local/bin | sort -u)" = '755 0:0'
 
-# Our Hermes plugins, compiled as the base's bytecode is; they go in layer 2.
+# Our Hermes plugin, compiled as the base's bytecode is; it goes in layer 2.
 FROM hermes AS plugin
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
-COPY images/hermes/plugins/fragment-terminal-follows /opt/hermes/plugins/fragment-terminal-follows
-RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-terminal-follows > /dev/null
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork > /dev/null
 
 # Ours (layer 2): each of our files at its place in the image, root's, as
 # the base's directories they land in are.
@@ -280,7 +269,6 @@ COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
-COPY --from=plugin /opt/hermes/plugins/fragment-terminal-follows /opt/hermes/plugins/fragment-terminal-follows
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core

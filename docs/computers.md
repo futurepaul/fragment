@@ -2057,8 +2057,8 @@ persisted)".
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
   opens nothing of anyone else's. A fenced agent (decision 63, proposed)
-  is the exception: its commands run as a user of its own, with no sudo
-  ("A fenced agent in our Hermes image", below).
+  runs as the `hermes` user too: its fence is the platform's ("A fenced
+  agent in our Hermes image", below).
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot
@@ -2088,72 +2088,31 @@ persisted)".
 ### A fenced agent in our Hermes image
 
 Decision 63 (proposed): an agent its owner, or their agent, fences acts
-as itself alone. The platform refuses its `for` (docs/api.md), and its
-computer's guest view says `fenced` and gives it no connection. On the
-computer it is the same profile under the same gateway, walled off by
-Hermes' own per-profile terminal and the kernel's users and namespaces;
-no second computer.
+as itself alone. The fence is the platform's: it refuses the agent's
+`for` (docs/api.md), and its computer's guest view says `fenced` and
+gives it no connection. On the computer it is any agent's profile under
+the same gateway, as the `hermes` user, with the same tools and the
+internet; its computer only names no one for it.
 
-- **Its user.** `hermes-boot` (root) makes it a Linux user of its own,
-  `fence-<n>`, its uid kept for the agent in `/data` (root's), never the
-  `hermes` user, never in its group, with no sudo and no password (`*`,
-  so sshd takes its key). Its work directory (`/data/work/<agent>`: its
-  home, its `tmp`) is its user's and the `hermes` group's (2770, so the
-  gateway still reads and writes it: attachments, generated images);
-  every other agent's work directory is `hermes`' alone (0700), and so
-  are Hermes' home (`/data/hermes`, with every profile's `.env` and
-  their desktops' sockets) and the boot's runtime files. `/data/work`
-  itself is 0711: no one lists it. Fenced again after it ran unfenced,
-  its work becomes its user's; let go, the `hermes` user's again.
-- **Its sandbox.** One process of its user's holds a user, network and
-  mount namespace open for it while it runs (`unshare -r -n -m`, its
-  loopback up, its `tmp` bound on `/tmp`): its own loopback and no
-  other interface, so its commands reach no network at all (not the
-  platform's intercepts, not the internet, not the computer's own
-  services: the relay, Hermes' API, the screen, another agent's
-  browser), and its background servers answer its later commands.
-  `/proc` is mounted `hidepid=invisible` with root's group exempt (the
-  boot watches every process, and a container's root has no
-  `CAP_SYS_PTRACE` to see past it), so a fenced user sees only its own
-  processes, never another agent's command lines, and the `hermes` user
-  sees only its own.
-- **How its commands get there.** The computer's sshd listens on
-  loopback alone (`127.0.0.1:2222`), lets in only fence users by a key
-  the gateway's user holds (made at each boot, under the boot's runtime
-  files), forwards nothing, and runs every session through its
-  `ForceCommand`, which joins the session to its user's sandbox
-  (`nsenter --preserve-credentials -U -n -m`), found by its uid, never a
-  name it is told, or refuses it when there is none. Its host key is the
-  computer's, root's, under `/data`: Hermes' `ssh` backend remembers the
-  first key it meets, so it never meets another. The profile's terminal
-  is Hermes' own `ssh` backend (`terminal.backend: ssh` to that user),
-  which also carries its file tools and `execute_code` (Hermes runs them
-  through the terminal's environment), so every tool that reads or
-  writes files runs as the fenced user, in the sandbox.
-- **What is off for it.** In its profile: the browser, vision of a local
-  path, video, the desktop and computer use, projects, kanban, catalog
-  and connections management (`agent.disabled_toolsets`), each of which
-  reads files or reaches services in the gateway's own process; Bot Mode
-  (it is in no Bot Mode roster: `message_agent` acts for its owner, which
-  the platform refuses it), so it is reached by its chats; and
-  `FRAGMENT_FOR` (its terminal names no one to act for). Its web is
-  Hermes' `web_search` and `web_extract`, which refuse private and
-  internal addresses.
-- **The bridge.** What a person attaches for a fenced agent lands in its
-  work directory as its user's and the `hermes` group's; an attachment
-  it sends is read from its work directory alone.
+- **Its terminal names no one to act for.** Its profile's `.env` has
+  no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
+  agent alone; told its owner by hand, the platform refuses it (403).
+- **No Bot Mode.** It is in no Bot Mode roster (bots.rs), whose
+  `message_agent` acts for its owner, and the boot looks up no Bot Chat
+  for it: it is reached by its chats.
 - **Fenced or let go while awake.** The boot reads the change with its
   agents (every 3 s) and writes the profile again; nothing restarts.
-  Hermes rebuilds a session's agent when `agent.disabled_toolsets`
-  changes, but keeps a session's terminal, and the background processes
-  it started, for the session's life. The image's
-  `fragment-terminal-follows` plugin (a `pre_tool_call` hook, as
-  `fragment-skill-fork` is) ends a session's kept terminal that is not
-  the one its profile now names (local, or ssh to which user), with its
-  background processes, before the next tool that runs in it; a call it
-  cannot check is blocked. So a fence put up while a turn runs holds from
-  that turn's next command, and a process started before it never runs
-  on as the `hermes` user.
+  Hermes reads a profile's `.env` at each turn and passes it to each
+  command (`terminal.env_passthrough`), so its next command names no one,
+  or its owner again; the Docker lane's
+  `a_fenced_agent_names_no_one_to_act_for` checks it.
+- **What the computer does not enforce.** Its commands run as the
+  `hermes` user, so they can read the other agents' work and Hermes' home
+  (each profile's `.env`: placeholders, never a credential), reach the
+  computer's own services (another agent's browser, Hermes' API), and
+  call the computer's egress, which signs as whichever of its agents a
+  request names (docs/technical-debt-ledger.md, "A fenced agent's fence
+  is the platform's alone").
 
 ### Hermes' container guesses
 
