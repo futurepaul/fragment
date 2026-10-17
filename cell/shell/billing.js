@@ -247,15 +247,16 @@ export async function billingSections(helpers, ledger, mine, back) {
     const topUp = seat?.good ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
     billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`, topUp));
   }
-  if (!alone) return org ? [billing, orgSection(org, offer)] : [billing];
+  if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
   const more = el("div", "settings-actions");
   const others = el("button", "quiet", "Add seats for others");
   others.type = "button";
   others.onclick = () => {
     more.closest(".settings-action-line")?.remove();
-    billing.after(orgSection(org, offer));
+    billing.after(orgSection(org, offer, mine.pays));
   };
-  more.append(...(seat?.comped ? [] : [portal()]), others);
+  // only who pays opens its billing (Stripe's portal renews it, and changes its card)
+  more.append(...(mine.pays ? [portal()] : []), others);
   billing.append(actionLine("Organization", more));
   return [billing];
 }
@@ -265,8 +266,13 @@ function portal() {
   return button("Payment and invoices", async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url));
 }
 
-/** An admin's org (`GET /api/org`'s): its seats and admins, and Stripe's portal; `offer`, what a seat added costs. */
-function orgSection(org, offer) {
+/**
+ * An admin's org (`GET /api/org`'s): its seats and admins, and, to who pays
+ * (`pays`), Stripe's portal; `offer`, what a seat added costs. Who pays's
+ * own seat and place are theirs alone to give up, and their stepping down
+ * cancels its subscription at once.
+ */
+function orgSection(org, offer, pays) {
   const { el, section, actionLine } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
@@ -277,18 +283,20 @@ function orgSection(org, offer) {
   for (const m of org.members) {
     const tr = el("tr");
     const who = el("td", null, m.email + (m.person ? "" : " (invited)"));
-    // who pays steps down as its admin only themselves, once their card bills no more
-    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : "", m.person && m.person === org.payer ? "pays" : ""].filter(Boolean).join(", "));
+    // who pays's seat and place are theirs alone; offers (no person) are withdrawn
+    const payer = !!m.person && m.person === org.payer;
+    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : "", payer ? "pays" : ""].filter(Boolean).join(", "));
     const actions = el("td");
-    if (m.seat && !m.comped) {
+    if (m.seat && !m.comped && (!payer || pays)) {
       actions.append(button("Remove seat", async () => {
         if (!confirm(`Remove ${m.email}'s seat? Their agents stop.`)) return;
         await h.api("DELETE", `/api/org/seats/${encodeURIComponent(m.id)}`);
         await h.reopen();
       }));
     }
-    if (m.admin && org.members.filter((x) => x.admin).length > 1) {
+    if (m.admin && org.members.filter((x) => x.admin && x.person).length > 1 && (!payer || pays)) {
       actions.append(button("Not admin", async () => {
+        if (payer && !confirm("You pay for this org: stepping down cancels its subscription now, and its paid seats stop. Go on?")) return;
         await h.api("DELETE", `/api/org/admins/${encodeURIComponent(m.id)}`);
         await h.reopen();
       }));
@@ -331,13 +339,15 @@ function orgSection(org, offer) {
       note(box, err.message);
     }
   };
-  const pay = el("div", "settings-actions");
-  pay.append(portal());
   box.append(
     actionLine("Add a seat", add),
     actionLine("Add an admin", admin),
-    el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org has it at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. Cancel in Payment and invoices.`),
-    actionLine("Payment", pay),
+    el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
   );
+  if (pays) {
+    const pay = el("div", "settings-actions");
+    pay.append(portal());
+    box.append(actionLine("Payment", pay));
+  }
   return box;
 }

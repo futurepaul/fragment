@@ -903,7 +903,9 @@ Paul's (its slice 10).
     kept, and nobody joins an org without accepting. An org is made only
     once its first Checkout is paid; an org's seats and admins' places
     are offers, theirs once they accept them; who pays is no other
-    admin's to remove (docs/billing.md, "The model").
+    admin's to remove, only they open its billing (a default from the
+    review of #367, Paul's to reverse), and their going cancels its
+    subscription at once (docs/billing.md, "The model").
 52. **Seats are paid or comped, held or pending.** A seat is `seat`
     ($100) or `seat_always_on` ($200; since 2026-10-15 the only one
     sold, decision 25's status), held by an npub or pending on an

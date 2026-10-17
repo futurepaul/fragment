@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS wiped_orgs (
 
 /// The names a `billing` step's note lists of those whose seats end.
 const LAPSES_NAMED_MAX: usize = 10;
+/// The orgs a wiped person may pay for at once (their own, and those whose
+/// cancel has not landed yet).
+const PAID_ORGS_MAX: usize = 50;
 
 /// Whose rows a wipe's statements take: the person, every agent they own,
 /// and every agent a wipe of theirs recorded (each bound to the person:
@@ -314,6 +317,7 @@ impl RegistryCell {
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;
         self.wipe_orgs(identity)?;
         self.exec("DELETE FROM wiped_orgs WHERE identity = ?", vec![identity.into()])?;
+        self.exec("DELETE FROM offer_answers WHERE person = ?", vec![identity.into()])?;
         self.exec("DELETE FROM identities WHERE id IN (SELECT agent FROM wiped_agents WHERE identity = ?) OR id = ?", twice())?;
         let left = self.count(
             "SELECT (SELECT COUNT(*) FROM identities WHERE id = ? OR owner = ?) + (SELECT COUNT(*) FROM subjects WHERE identity = ?) AS n",
@@ -325,9 +329,9 @@ impl RegistryCell {
 
     /// The orgs a wipe of `person` settles, and what it does to each
     /// (`fragment_core::org::wiped`): theirs, and any other whose
-    /// subscription their card pays and that bills on (they stepped down,
-    /// or left, once it billed on no more, and it came back). The dry run
-    /// shows these; the `billing` step does them.
+    /// subscription their card pays and that has not ended (one they left
+    /// whose cancel has not landed yet). The dry run shows these; the
+    /// `billing` step does them.
     fn orgs_found(&self, person: &str) -> CellResult<Vec<OrgFound>> {
         let mut found = vec![];
         let mine = self.member_of(person)?;
@@ -342,14 +346,18 @@ impl RegistryCell {
             };
             found.push(OrgFound { org: o.id, name: o.name, ends: w.ends, cancels, lapses });
         }
-        // bounded: a person pays for an org only by its Checkout, and for
-        // a second only once the first bills on no more
+        // bounded: a payer who goes stops paying at once, so a person pays
+        // for their own org and those whose cancel is still on its way; past
+        // PAID_ORGS_MAX the wipe fails, saying so, rather than skip one
         let paid = self.rows::<OrgIdRow>(
-            "SELECT p.org FROM org_payers p JOIN orgs o ON o.id = p.org AND o.subscription = p.subscription WHERE p.person = ? ORDER BY p.org LIMIT 10",
-            vec![person.into()],
+            "SELECT p.org FROM org_payers p JOIN orgs o ON o.id = p.org AND o.subscription = p.subscription WHERE p.person = ? ORDER BY p.org LIMIT ?",
+            vec![person.into(), SqlStorageValue::Integer(PAID_ORGS_MAX as i64 + 1)],
         )?;
+        if paid.len() > PAID_ORGS_MAX {
+            return Err(CellError::host(format!("{person} pays for more than {PAID_ORGS_MAX} orgs: settle them by hand")));
+        }
         for p in paid {
-            if mine.as_ref().is_some_and(|m| m.org == p.org) || !self.bills(&p.org, person)? {
+            if mine.as_ref().is_some_and(|m| m.org == p.org) || !self.pays_for(&p.org, person)? {
                 continue;
             }
             let o = self.stored_org(&p.org)?;
@@ -409,7 +417,7 @@ impl RegistryCell {
             }
             if f.cancels {
                 let sub = self.org_sub(&f.org)?.and_then(|s| s.subscription).ok_or_else(|| CellError::host(format!("{} cancels a subscription it lacks", f.org)))?;
-                self.queue_cancel(&sub, &f.org, if f.ends { "its org ended with a wipe" } else { "its payer was wiped" })?;
+                self.queue_cancel(&sub, &f.org, if f.ends { super::seats::WHY_ENDED } else { super::seats::WHY_PAYER })?;
             }
             // an org ended is dropped once its cancel lands; one they left
             // has its count pushed; one canceled for them is left as it is

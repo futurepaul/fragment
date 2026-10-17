@@ -298,7 +298,10 @@ impl RegistryCell {
             struct Paid {
                 subscription: Option<String>,
             }
-            if self.row::<Paid>("SELECT subscription FROM orgs WHERE id = ?", vec![o.into()])?.and_then(|p| p.subscription).is_some() {
+            // a subscription it has, or one a Checkout of its bought (an org
+            // forgets one its payer left: seats.rs `forget_payer`)
+            let bought = self.count("SELECT COUNT(*) AS n FROM checkouts WHERE org = ?", vec![o.into()])? > 0;
+            if bought || self.row::<Paid>("SELECT subscription FROM orgs WHERE id = ?", vec![o.into()])?.and_then(|p| p.subscription).is_some() {
                 return Err(conflict("a trial is for an org that never paid"));
             }
         }

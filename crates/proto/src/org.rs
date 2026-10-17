@@ -111,6 +111,10 @@ pub struct MySeat {
     /// The org they are in without a seat (an admin who holds none).
     pub org: Option<OrgRef>,
     pub admin: bool,
+    /// They pay for their org (their Checkout made its subscription): only
+    /// they open its billing (Stripe's portal).
+    #[serde(default)]
+    pub pays: bool,
     pub offered: Vec<OfferedSeat>,
 }
 

@@ -165,12 +165,36 @@ pub(crate) struct ApplySubscription {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Applied {
     pub applied: bool,
+    /// A subscription naming an org the registry has no row of (its
+    /// Checkout never applied: the router looks it up, else cancels it).
+    #[serde(default)]
+    pub orphan: bool,
 }
 
 impl Call for ApplySubscription {
     const PATH: &'static str = "/billing/subscription";
     type Answer = Applied;
 }
+
+/// `POST /billing/orphan`: a live subscription of this deployment's names
+/// an org the registry has no row of, and no Checkout of its applies (its
+/// completion never reached the platform, and Stripe has none to look
+/// up): it is canceled after a grace (`ORPHAN_GRACE_MS`), unless an org
+/// takes it meanwhile, so no card pays for an org that is not there.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CancelOrphan {
+    pub subscription: String,
+    pub org: String,
+}
+
+impl Call for CancelOrphan {
+    const PATH: &'static str = "/billing/orphan";
+    type Answer = Applied;
+}
+
+/// How long an orphan subscription's cancel waits: its Checkout's
+/// completion, or the return, may still make its org.
+pub(super) const ORPHAN_GRACE_MS: i64 = 3600 * 1000;
 
 /// `POST /billing/customer-of`: the customer of the org a person admins
 /// (the portal's).
@@ -222,14 +246,36 @@ impl RegistryCell {
         Ok(self.row::<Row>(q, vec![org.into()])?.map(|r| r.person))
     }
 
-    /// Whether `person` pays for `org` and its subscription bills on: good,
-    /// and not set to cancel at its period's end.
-    pub(super) fn bills(&self, org: &str, person: &str) -> CellResult<bool> {
+    /// Whether `person` pays for `org`: their Checkout made its
+    /// subscription, and that has not ended, so their card may still be
+    /// charged (one set to cancel at its period's end may be renewed in the
+    /// portal: it counts).
+    pub(super) fn pays_for(&self, org: &str, person: &str) -> CellResult<bool> {
         if self.payer_of(org)?.as_deref() != Some(person) {
             return Ok(false);
         }
         let sub = self.org_sub(org)?.ok_or_else(|| CellError::host(format!("{person} pays for an org that is gone: {org}")))?;
-        Ok(good(sub.status.as_deref()) && sub.cancel_at_end == 0)
+        let status = sub.status.as_deref().and_then(Status::parse).ok_or_else(|| CellError::host(format!("orgs.status of {org} is {:?}", sub.status)))?;
+        Ok(!status.is_ended())
+    }
+
+    /// The person whose Checkout bought `org`'s last subscription, whether
+    /// or not it still has one (`None`: never, or forgotten once its payer
+    /// went: seats.rs `forget_payer`). Only they buy again on its customer.
+    fn last_payer(&self, org: &str) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            person: String,
+        }
+        Ok(self.row::<Row>("SELECT person FROM org_payers WHERE org = ?", vec![org.into()])?.map(|r| r.person))
+    }
+
+    /// `org`'s payer goes (steps down, leaves, moves, or is wiped): their
+    /// card stops at once. Its subscription's cancel is queued, and once it
+    /// lands the org forgets their customer (seats.rs `run_cancels`).
+    pub(super) fn cancel_for_payer(&self, org: &str) -> CellResult<()> {
+        let sub = self.org_sub(org)?.and_then(|s| s.subscription).ok_or_else(|| CellError::host(format!("{org}'s payer goes, and it has no subscription")))?;
+        self.queue_cancel(&sub, org, super::seats::WHY_PAYER)
     }
 
     /// `person`'s Checkout made `org`'s subscription: they pay for it.
@@ -286,7 +332,12 @@ impl RegistryCell {
                 if trial.is_some() && quantity != 1 {
                     return Err(conflict("a trial is for a seat of one"));
                 }
-                let customer = self.billing_row(&o.id)?.and_then(|r| r.customer);
+                // the org's customer is its last payer's: anyone else buys on
+                // one of their own, which the org then keeps
+                let customer = match self.last_payer(&o.id)?.as_deref() == Some(who.id.as_str()) {
+                    true => self.billing_row(&o.id)?.and_then(|r| r.customer),
+                    false => None,
+                };
                 CheckoutPlan { person: who.id.clone(), email, org: o.id, org_name: o.name, customer, kind, quantity, trial }
             }
         };
@@ -319,10 +370,17 @@ impl RegistryCell {
         Ok(PackPlan { buyer: who.id, person, email, org, org_name: o.name, customer })
     }
 
+    /// The customer whose portal the asker opens: only who pays for their
+    /// org opens its billing (Paul's to reverse: the review of #367), since
+    /// the portal renews a subscription and changes its card and email.
+    /// Its other admins manage its seats in the shell, never its billing.
     fn customer_of(&self, b: CustomerOf) -> CellResult<Customer> {
         let who = self.person_by(&b.by)?;
-        let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins manage its payment"))?;
-        let customer = self.billing_row(&m.org)?.and_then(|r| r.customer).ok_or_else(|| CellError::invalid("your org has never paid: buy a seat first"))?;
+        let m = self.member_of(&who.id)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only who pays for an org opens its billing"))?;
+        if self.payer_of(&m.org)?.as_deref() != Some(who.id.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only who pays for your org opens its billing: its admins manage its seats here"));
+        }
+        let customer = self.billing_row(&m.org)?.and_then(|r| r.customer).ok_or_else(|| CellError::host(format!("{} pays for {} and it has no customer", who.id, m.org)))?;
         Ok(Customer { customer })
     }
 
@@ -334,17 +392,23 @@ impl RegistryCell {
         let Some(row) = self.billing_row(org)? else { return Ok(false) };
         let status = Status::parse(&s.status).ok_or_else(|| CellError::invalid(format!("a subscription's status is Stripe's, not {:?}", s.status)))?;
         match row.subscription.as_deref() {
+            // an org with none takes only one that pays: a late event of one
+            // canceled and forgotten (its payer went) never comes back
+            None if !status.is_good() => return Ok(false),
+            None => {}
+            // a newer subscription replaces one that ended, never one that
+            // pays; its customer (its buyer's) becomes the org's
             Some(current) if current != s.id => {
-                // a newer subscription replaces one that ended, never one that pays
                 if good(row.status.as_deref()) || !status.is_good() {
                     return Ok(false);
                 }
             }
             Some(_) if at.zip(row.event_at).is_some_and(|(at, last)| at < last) => return Ok(false),
-            _ => {}
-        }
-        if row.customer.as_deref().is_some_and(|c| c != s.customer) {
-            return Err(CellError::host(format!("{org}'s subscription {} is another customer's ({})", s.id, s.customer)));
+            // its own subscription: of the customer it has, or a contradiction
+            Some(_) if row.customer.as_deref().is_some_and(|c| c != s.customer) => {
+                return Err(CellError::host(format!("{org}'s subscription {} is another customer's ({})", s.id, s.customer)));
+            }
+            Some(_) => {}
         }
         let was = good(row.status.as_deref());
         let items = serde_json::to_string(&s.items).map_err(|e| CellError::host(e.to_string()))?;
@@ -383,8 +447,22 @@ impl RegistryCell {
         Ok(true)
     }
 
+    /// An orphan subscription's cancel, after its grace (`CancelOrphan`).
+    fn cancel_orphan(&self, b: CancelOrphan) -> CellResult<Applied> {
+        if !org::valid_org_id(&b.org) || !b.subscription.starts_with("sub_") {
+            return Err(CellError::invalid("an orphan is a subscription naming an org"));
+        }
+        // an org took it meanwhile: it is that org's
+        if self.billing_row(&b.org)?.and_then(|r| r.subscription).as_deref() == Some(b.subscription.as_str()) {
+            return Ok(Applied { applied: false, orphan: false });
+        }
+        self.queue_cancel_after(&b.subscription, &b.org, super::seats::WHY_ORPHAN, ORPHAN_GRACE_MS)?;
+        Ok(Applied { applied: true, orphan: true })
+    }
+
     fn apply_subscription(&self, b: ApplySubscription) -> CellResult<Applied> {
-        Ok(Applied { applied: self.apply_subscription_copy(&b.org, &b.subscription, b.at)? })
+        let orphan = org::valid_org_id(&b.org) && self.org_row(&b.org)?.is_none();
+        Ok(Applied { applied: self.apply_subscription_copy(&b.org, &b.subscription, b.at)?, orphan })
     }
 
     /// The seat a completed Checkout bought its buyer, once by its session:
@@ -396,7 +474,7 @@ impl RegistryCell {
     /// subscription is canceled at once.
     fn apply_checkout(&self, b: ApplyCheckout) -> CellResult<Applied> {
         if self.count("SELECT COUNT(*) AS n FROM checkouts WHERE session = ?", vec![b.session.as_str().into()])? > 0 {
-            return Ok(Applied { applied: false });
+            return Ok(Applied { applied: false, orphan: false });
         }
         if !org::valid_org_id(&b.org) {
             return Err(not_found(format!("no org {}", b.org)));
@@ -410,7 +488,7 @@ impl RegistryCell {
             }
             false => {
                 console_log!("{}", json!({ "checkout-stray": b.session, "org": b.org, "subscription": b.subscription.id }));
-                self.queue_cancel(&b.subscription.id, &b.org, "a paid Checkout whose buyer could not take its seat")?;
+                self.queue_cancel(&b.subscription.id, &b.org, super::seats::WHY_STRAY)?;
                 false
             }
         };
@@ -418,7 +496,7 @@ impl RegistryCell {
             "INSERT INTO checkouts (session, org, person, kind, at) VALUES (?, ?, ?, ?, ?)",
             vec![b.session.as_str().into(), b.org.as_str().into(), b.person.as_str().into(), b.kind.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        Ok(Applied { applied })
+        Ok(Applied { applied, orphan: false })
     }
 
     /// `b`'s seat, its buyer's, when they can take it: answers whether they did.
@@ -508,6 +586,7 @@ impl RegistryCell {
             CustomerOf::PATH => reply::<CustomerOf>(body(bytes).and_then(|b| self.customer_of(b))),
             ApplyCheckout::PATH => reply::<ApplyCheckout>(self.armed_billing(|| self.apply_checkout(body(bytes)?)).await),
             ApplySubscription::PATH => reply::<ApplySubscription>(self.armed_billing(|| self.apply_subscription(body(bytes)?)).await),
+            CancelOrphan::PATH => reply::<CancelOrphan>(self.armed_billing(|| self.cancel_orphan(body(bytes)?)).await),
             _ => return None,
         })
     }

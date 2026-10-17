@@ -15,7 +15,8 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::registry::billing::{ApplyCheckout, ApplySubscription, CheckoutBegin, CustomerOf, PackBegin, SubscriptionCopy};
+use crate::registry::billing::{ApplyCheckout, ApplySubscription, CancelOrphan, CheckoutBegin, CustomerOf, PackBegin, SubscriptionCopy};
+use fragment_core::org::Status;
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
 use crate::stripe::Stripe;
@@ -228,6 +229,23 @@ async fn checked_out(env: &Env, cfg: &Config, stripe: &Stripe, session: &Checkou
     Ok(ask_registry(env, &ApplyCheckout { session: session.id.clone(), org, person, kind, subscription: copy, trial }).await?.applied)
 }
 
+/// A live subscription of this deployment's names an org the registry has
+/// no row of: its Checkout's completion never reached the platform (its
+/// webhook lost, its return never made). The Checkout that made it is
+/// looked up and applied as its completion would be; with none to find, it
+/// is canceled after a grace (registry/billing.rs `CancelOrphan`), so no
+/// card pays for an org that is not there.
+async fn orphaned(env: &Env, cfg: &Config, stripe: &Stripe, org: &str, subscription: &str) -> CellResult<bool> {
+    let found: List<CheckoutSession> = stripe.get(&format!("/v1/checkout/sessions?subscription={subscription}&limit=1")).await?;
+    match found.data.into_iter().next() {
+        Some(session) => checked_out(env, cfg, stripe, &session).await,
+        None => {
+            console_log!("{}", json!({ "stripe-orphan": subscription, "org": org }));
+            Ok(ask_registry(env, &CancelOrphan { subscription: subscription.to_string(), org: org.to_string() }).await?.applied)
+        }
+    }
+}
+
 /// `POST /api/billing/sessions/<id>`: the Checkout's return. The buyer
 /// has their seat as they land, whatever the webhook's timing.
 async fn returned(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8], id: &str) -> CellResult<MySeat> {
@@ -332,7 +350,12 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
                 (true, Some(org)) => {
                     let stripe = crate::stripe::client(env, cfg).await?;
                     let (_, copy) = fetched(&stripe, &named.id).await?;
-                    ask_registry(env, &ApplySubscription { org: org.clone(), subscription: copy, at: Some(event.created) }).await?.applied
+                    let live = Status::parse(&copy.status).is_some_and(|s| !s.is_ended());
+                    let a = ask_registry(env, &ApplySubscription { org: org.clone(), subscription: copy, at: Some(event.created) }).await?;
+                    match a.orphan && live {
+                        true => orphaned(env, cfg, &stripe, org, &named.id).await?,
+                        false => a.applied,
+                    }
                 }
                 _ => false,
             }

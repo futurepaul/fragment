@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS org_members (
   id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL,
   seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS org_members_org ON org_members (org);
-CREATE UNIQUE INDEX IF NOT EXISTS org_members_org_email ON org_members (org, email);
+-- an org offers an email once; a member's own row may share the email of
+-- an offer to them (an admin's place offered to someone in it, 2026-10-17)
+DROP INDEX IF EXISTS org_members_org_email;
+CREATE UNIQUE INDEX IF NOT EXISTS org_members_offer_email ON org_members (org, email) WHERE person IS NULL;
 CREATE INDEX IF NOT EXISTS org_members_offers ON org_members (email, added_at) WHERE person IS NULL;
 CREATE TABLE IF NOT EXISTS plan_syncs (
   person TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL);
@@ -468,9 +471,13 @@ impl RegistryCell {
                 (seat, Some(o.reference()), m.admin != 0)
             }
         };
+        let pays = match &m {
+            Some(m) => self.payer_of(&m.org)?.as_deref() == Some(person),
+            None => false,
+        };
         // every offer to an email of theirs, an admin's place alone too:
         // nothing of one is theirs until they accept it
-        Ok(MySeat { seat, org: org_ref, admin, offered: self.offers_to(person)? })
+        Ok(MySeat { seat, org: org_ref, admin, pays, offered: self.offers_to(person)? })
     }
 
     fn sleeps(&self, b: Sleeps) -> CellResult<MySeat> {
@@ -640,10 +647,12 @@ impl RegistryCell {
         })
     }
 
-    /// A change in one turn, then the alarm armed for what it queued.
+    /// A change in one turn, then the alarm armed for what it queued: its
+    /// plan pushes, and its seats' counts (a comp ended may empty an org).
     async fn armed<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
         let answer = change()?;
         self.arm_syncs().await?;
+        self.arm_quantities().await?;
         Ok(answer)
     }
 

@@ -85,17 +85,19 @@ impl Status {
 }
 
 /// A person's place in their org, as they go from it (accepting another
-/// org's offer, or wiped): what the registry counts of its rows.
+/// org's offer, leaving, stepping down, or wiped): what the registry
+/// counts of its rows. Offers are no one yet: only people count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Place {
     /// They admin it.
     pub admin: bool,
-    /// Its admins who said yes (members, not offers), them included.
+    /// Its admins who said yes (people, not offers), them included.
     pub admins: u64,
-    /// Its rows besides theirs: other members, and offers waiting.
+    /// Its other people (members who said yes); offers waiting are not.
     pub others: u64,
-    /// They pay for it (their Checkout made its subscription) and it bills
-    /// on: good, and not set to cancel at its period's end.
+    /// They pay for it (their Checkout made its subscription) and that has
+    /// not ended: their card may still be charged (one set to cancel at its
+    /// period's end may be renewed, so it counts).
     pub pays: bool,
 }
 
@@ -104,46 +106,50 @@ pub struct Place {
 pub enum Going {
     /// Their row goes; the org stays, its seats' count pushed.
     Leaves,
-    /// No one else is in it, or offered it: it ends with them, its
-    /// subscription canceled at once.
+    /// No one else is in it: it ends with them, every offer it made
+    /// withdrawn, its subscription canceled at once.
     Ends,
 }
 
-/// Why a person may not go from their org to another's offer (H1's other
-/// half: going never leaves someone else stranded, or a card paying).
+/// A person's going, and whether it cancels their org's subscription at
+/// once: it ends, or their card pays for it. A card's owner who goes
+/// stops paying as they go, so no card pays for an org its owner no longer
+/// manages (the audit's H1, and the review of #367).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gone {
+    pub going: Going,
+    pub cancels: bool,
+}
+
+/// Why a person may not go from their org to another's offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stuck {
-    /// They are the last admin of an org others are in or offered: no one
+    /// They are the last admin of an org other people are in: no one
     /// would manage it.
     LastAdmin,
-    /// Their card pays for an org others are in: it would go on paying
-    /// for an org they no longer manage.
-    Pays,
 }
 
 impl Stuck {
     pub fn message(self, org: &str) -> String {
         match self {
             Stuck::LastAdmin => format!("you are the last admin of {org}: make someone else its admin first"),
-            Stuck::Pays => format!("you pay for {org}: cancel its subscription in Payment and invoices first (it ends with the period)"),
         }
     }
 }
 
 /// A person leaving their org by their own yes to another's offer: alone
-/// in it, it ends with them; else they go, unless that strands it.
-pub fn moving(p: Place) -> Result<Going, Stuck> {
+/// in it (offers aside), it ends with them; else they go, unless they are
+/// its last admin. Their card stops paying for it either way.
+pub fn moving(p: Place) -> Result<Gone, Stuck> {
     assert!(!p.admin || p.admins >= 1, "an admin is counted among its admins");
-    if p.others == 0 {
-        return Ok(Going::Ends);
-    }
-    if p.pays {
-        return Err(Stuck::Pays);
-    }
-    if p.admin && p.admins == 1 {
-        return Err(Stuck::LastAdmin);
-    }
-    Ok(Going::Leaves)
+    let going = match (p.others, p.admin && p.admins == 1) {
+        (0, _) => Going::Ends,
+        (_, true) => return Err(Stuck::LastAdmin),
+        (_, false) => Going::Leaves,
+    };
+    let gone = Gone { going, cancels: going == Going::Ends || p.pays };
+    assert!(!p.pays || gone.cancels, "a payer who goes stops paying");
+    Ok(gone)
 }
 
 /// What a wipe of a person does to their org: never refused. It ends when
@@ -333,21 +339,22 @@ mod tests {
         Place { admin, admins, others, pays }
     }
 
-    /// Goal: accepting another org's offer moves a person only when their
-    /// going strands no one: alone, their org ends (its subscription
-    /// canceled); a seat holder or one of several admins goes; the last
-    /// admin of an org others are in, or whoever pays for it while it
-    /// bills on, is refused. Method: each shape of place.
+    /// Goal: accepting another org's offer moves a person unless it
+    /// strands people with no admin; alone (offers aside), their org ends,
+    /// its offers withdrawn and its subscription canceled; and a card's
+    /// owner who goes stops paying at once, so no card pays for an org its
+    /// owner left. Method: each shape of place, offers counting for nothing.
     #[test]
-    fn a_move_strands_no_one() {
-        assert_eq!(moving(place(true, 1, 0, true)), Ok(Going::Ends), "alone, paying for themselves: it ends");
-        assert_eq!(moving(place(false, 0, 0, false)), Ok(Going::Ends), "the last row of an org with no admin");
-        assert_eq!(moving(place(false, 1, 3, false)), Ok(Going::Leaves), "a seat holder goes");
-        assert_eq!(moving(place(true, 2, 2, false)), Ok(Going::Leaves), "one of two admins goes");
-        assert_eq!(moving(place(true, 1, 1, false)), Err(Stuck::LastAdmin), "an offer waiting is someone too");
-        assert_eq!(moving(place(true, 2, 2, true)), Err(Stuck::Pays), "their card pays for the others");
-        assert_eq!(moving(place(true, 1, 4, true)), Err(Stuck::Pays), "paying is said first: cancelling is what frees them");
-        assert!(Stuck::Pays.message("Acme").contains("cancel its subscription"));
+    fn a_move_strands_no_one_and_a_payer_stops_paying() {
+        let gone = |going, cancels| Ok(Gone { going, cancels });
+        assert_eq!(moving(place(true, 1, 0, true)), gone(Going::Ends, true), "alone, paying for themselves: it ends");
+        assert_eq!(moving(place(true, 1, 0, false)), gone(Going::Ends, true), "alone with only offers waiting: it ends, they withdrawn");
+        assert_eq!(moving(place(false, 1, 3, false)), gone(Going::Leaves, false), "a seat holder goes");
+        assert_eq!(moving(place(true, 2, 2, false)), gone(Going::Leaves, false), "one of two admins goes");
+        assert_eq!(moving(place(true, 2, 2, true)), gone(Going::Leaves, true), "who pays goes: its subscription canceled at once");
+        assert_eq!(moving(place(false, 1, 2, true)), gone(Going::Leaves, true), "who pays, no admin now, goes: the same");
+        assert_eq!(moving(place(true, 1, 1, false)), Err(Stuck::LastAdmin), "the last admin of someone else");
+        assert_eq!(moving(place(true, 1, 4, true)), Err(Stuck::LastAdmin), "paying frees no one from managing it");
         assert!(Stuck::LastAdmin.message("Acme").contains("Acme"));
     }
 

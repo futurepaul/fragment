@@ -256,6 +256,44 @@ pub struct CheckoutSession {
     pub url: Option<String>,
 }
 
+/// A pending invoice item: a quantity change's proration, waiting for its
+/// customer's next invoice. A canceled subscription's are deleted, so its
+/// card is charged nothing more (Paul, 2026-10-17).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvoiceItem {
+    pub id: String,
+    #[serde(default)]
+    pub parent: Option<InvoiceItemParent>,
+}
+
+/// Where an invoice item came from (API versions since 2025-03-31.basil:
+/// `parent.subscription_details.subscription`, its `type` saying so).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvoiceItemParent {
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub subscription_details: Option<SubscriptionDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubscriptionDetails {
+    #[serde(default)]
+    pub subscription: Option<String>,
+}
+
+impl InvoiceItem {
+    /// The subscription it is a proration of, when it is one.
+    pub fn subscription(&self) -> Option<&str> {
+        let parent = self.parent.as_ref().filter(|p| p.kind.as_deref() == Some("subscription_details"))?;
+        parent.subscription_details.as_ref()?.subscription.as_deref()
+    }
+}
+
+/// Invoice items one cancel deletes at most (each page is 100; a
+/// subscription's prorations are a few a seat change).
+pub const PENDING_ITEMS_MAX: usize = 1_000;
+
 /// An event: its object is read by its type.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
@@ -448,6 +486,20 @@ mod tests {
     fn the_last_seat_never_goes_through_a_quantity_form() {
         let snap = subscription("active", json!([item("si_a", SEAT_LOOKUP_KEY, 1, 10)])).snapshot().unwrap();
         quantity_form(&snap, 0);
+    }
+
+    /// Goal: a pending invoice item names the subscription it prorates only
+    /// through its parent of that type; anything else is no subscription's.
+    /// Method: the shape Stripe answers, another parent, and none.
+    #[test]
+    fn a_pending_item_names_its_subscription_through_its_parent() {
+        let item = |v: serde_json::Value| serde_json::from_value::<InvoiceItem>(v).unwrap();
+        let proration = item(json!({ "id": "ii_1", "object": "invoiceitem", "parent": { "type": "subscription_details", "subscription_details": { "subscription": "sub_1", "subscription_item": "si_1" } }, "proration": true }));
+        assert_eq!(proration.subscription(), Some("sub_1"));
+        let other = item(json!({ "id": "ii_2", "parent": { "type": "quote_details", "subscription_details": { "subscription": "sub_1" } } }));
+        assert_eq!(other.subscription(), None, "only a parent of the subscription's type names one");
+        assert_eq!(item(json!({ "id": "ii_3", "parent": null })).subscription(), None);
+        assert_eq!(item(json!({ "id": "ii_4" })).subscription(), None);
     }
 
     /// Goal: an org's seats bring its subscription to their count while it
